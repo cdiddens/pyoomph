@@ -49,6 +49,54 @@ STABILITY_INFERRED="inferred"
 STABILITY_UNKNOWN="unknown"
 
 
+#: What a branch is. "solution" is an ordinary branch of stationary states; "locus" a curve of
+#: bifurcation points, varying two parameters; "orbit" a branch of periodic orbits, whose points
+#: carry a period and a whole cycle's worth of each observable rather than one value.
+BRANCH_SOLUTION="solution"
+BRANCH_LOCUS="locus"
+BRANCH_ORBIT="orbit"
+
+
+#: An orbit point records a whole cycle of each observable, not one value. The cycle's AVERAGE is
+#: stored under the observable's own name, so that every axis, tangent, export and selection path
+#: keeps working and an orbit branch continues the stationary line straight through its Hopf; the
+#: extremes go under these derived names. Two spaces, like the ExtremumObservables tags, so the axis
+#: menus leave them alone.
+ORBIT_MIN_TAG="  [orbit min]"
+ORBIT_MAX_TAG="  [orbit max]"
+
+#: The period, offered as an ordinary observable rather than a third kind of axis: everything that
+#: already carries observables - the menus, value_of, the export, state.json - then carries it too.
+#: A stationary point does not have it, which is exactly why a period-vs-parameter plot shows the
+#: orbit branches alone.
+ORBIT_T_KEY="orbit/T"
+
+
+def orbit_min_name(name:str)->str:
+    return name+ORBIT_MIN_TAG
+
+
+def orbit_max_name(name:str)->str:
+    return name+ORBIT_MAX_TAG
+
+
+def orbit_band_names(name:str)->"tuple[str,str]":
+    """The (min, max) observable names belonging to one observable's band."""
+    return name+ORBIT_MIN_TAG,name+ORBIT_MAX_TAG
+
+
+def is_orbit_band_name(name:str)->bool:
+    return name.endswith(ORBIT_MIN_TAG) or name.endswith(ORBIT_MAX_TAG)
+
+
+def orbit_band_base(name:str)->"str | None":
+    """The observable a band name belongs to, or None when it is not one."""
+    for tag in (ORBIT_MIN_TAG,ORBIT_MAX_TAG):
+        if name.endswith(tag):
+            return name[:-len(tag)]
+    return None
+
+
 #: What a plot axis shows: ``("observable", name)`` or ``("parameter", name)``. Having parameters and
 #: observables on the same footing is what lets one drawing path produce both an ordinary diagram
 #: (parameter vs observable) and the locus of a bifurcation in a plane of two parameters.
@@ -139,7 +187,7 @@ class BifurcationGUISolutionPoint:
     def __init__(self,param_value,obs_values,eig_value,statefile,outstep,param_values:dict[str,float] | None=None,
                  eig_values:"Sequence[complex] | None"=None,det_sign:int | None=None,
                  dparam_ds:float | None=None,eig_modes:"Sequence[float] | None"=None,
-                 eig_settings:"tuple | None"=None) -> None:
+                 eig_settings:"tuple | None"=None,tracked_eigenindex:int | None=None) -> None:
         self.param_value=param_value
         #: Every global parameter at this point, not just the continued one. The state dump restores
         #: all of them, so without this the diagram could not say which slice of parameter space it
@@ -172,6 +220,11 @@ class BifurcationGUISolutionPoint:
         #: (neigen, shift, modes) the spectrum was computed with, so a point can be recognised as stale
         #: after the eigenvalue count is raised. None for points from before this was recorded.
         self.eig_settings:tuple | None=tuple(eig_settings) if eig_settings is not None else None
+        #: Which entry of :py:attr:`eig_values` is the eigenvalue a bifurcation tracker was holding on
+        #: the axis here, so the list can mark it. Set only where a tracker was installed AND the base
+        #: state's own spectrum was solved for alongside it, which is what distinguishes a point whose
+        #: whole spectrum is known from one carrying the tracker's synthetic value alone.
+        self.tracked_eigenindex:int | None=int(tracked_eigenindex) if tracked_eigenindex is not None else None
         self.statefile=statefile
         self.outstep=outstep
         self.scoord:float=0
@@ -196,6 +249,17 @@ class BifurcationGUISolutionPoint:
         self.stability_source=STABILITY_EIGEN if eig_value is not None else STABILITY_UNKNOWN
         #: Number of eigenvalues with a positive real part: measured, or propagated in quick mode.
         self.unstable_count:int | None=None
+        #: What makes this a point of a PERIODIC ORBIT rather than a stationary state: the period and
+        #: the discretization it was computed with, plus where the orbit's own degrees of freedom were
+        #: stored (a state dump holds only the base state, i.e. one phase of the cycle). None on a
+        #: stationary point, which is also how "is this an orbit" is answered everywhere.
+        self.orbit_info:dict | None=None
+        #: Floquet multipliers, kept alongside the exponents in :py:attr:`eig_values`. The exponents
+        #: drive the stability machinery (Re > 0 is ``|mu| > 1``); the multipliers say what KIND of
+        #: bifurcation is approaching, which the exponents cannot - a multiplier leaving through -1 is
+        #: a period doubling and a complex pair on the unit circle a torus, and both have the same
+        #: exponent real part.
+        self.floquet:list[complex]=[]
 
     @staticmethod
     def from_dict(res):
@@ -220,11 +284,18 @@ class BifurcationGUISolutionPoint:
             inst.eig_values=[complex(r,i) for r,i in zip(re_list,im_list)]
         modes=res.get("eig_modes")
         inst.eig_modes=[float(m) for m in modes] if modes is not None else None
+        tracked=res.get("tracked_eigenindex")
+        inst.tracked_eigenindex=int(tracked) if tracked is not None else None
         settings=res.get("eig_settings")
         # Rebuilt through the canonicaliser, since json gives the nested modes back as a list and a
         # stale check compares these for equality.
         inst.eig_settings=(eigen_settings(settings[0],complex(settings[1],settings[2]),settings[3])
                            if settings is not None else None)
+        orbit=res.get("orbit_info")
+        inst.orbit_info=dict(orbit) if orbit else None
+        fre,fim=res.get("floquet_Re"),res.get("floquet_Im")
+        if fre is not None and fim is not None:
+            inst.floquet=[complex(r,i) for r,i in zip(fre,fim)]
         for k,v in res["tangs"].items():
             inst._tangs[k]=numpy.array(v)
         return inst
@@ -262,9 +333,17 @@ class BifurcationGUISolutionPoint:
             res["eig_values_Im"]=[float(numpy.imag(v)) for v in self.eig_values]
             if self.eig_modes is not None:
                 res["eig_modes"]=[float(m) for m in self.eig_modes]
+            if self.tracked_eigenindex is not None:
+                res["tracked_eigenindex"]=int(self.tracked_eigenindex)
         if self.eig_settings is not None:
             n,sr,si,modes=self.eig_settings
             res["eig_settings"]=[n,sr,si,list(modes)]
+        if self.orbit_info:
+            res["orbit_info"]=dict(self.orbit_info)
+        if self.floquet:
+            # Two flat lists, like the spectrum above and for the same reason: json has no complex.
+            res["floquet_Re"]=[float(numpy.real(v)) for v in self.floquet]
+            res["floquet_Im"]=[float(numpy.imag(v)) for v in self.floquet]
         res["tangs"]={}
         for k,v in self._tangs.items():
             res["tangs"][k]=list(v)
@@ -395,7 +474,7 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
     published - once the problem has more than one global parameter.
     """
 
-    def __init__(self,initlist=None,*,kind:str="solution",continuation_parameter:str | None=None,
+    def __init__(self,initlist=None,*,kind:str=BRANCH_SOLUTION,continuation_parameter:str | None=None,
                  tracked_parameter:str | None=None,bifurcation_type:str | None=None) -> None:
         super().__init__(initlist or [])
         #: What this branch is. "solution" is an ordinary branch of stationary states, continued in
@@ -466,10 +545,23 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
         a curve of bifurcations, which is the information actually needed when several are on screen.
         """
         parts=["{:d} point{:s}".format(len(self),"" if len(self)==1 else "s")]
-        if self.kind=="locus":
+        if self.kind==BRANCH_LOCUS:
             parts.append("{:s} locus: {:s} tracked, continued in {:s}".format(
                 self.bifurcation_type or "bifurcation",
                 str(self.tracked_parameter),str(self.continuation_parameter)))
+        elif self.kind==BRANCH_ORBIT:
+            info=next((p.orbit_info for p in self if p.orbit_info),None) or {}
+            what="periodic orbits"
+            if info.get("nT"):
+                what+=", {:d} time steps".format(int(info["nT"]))
+            if info.get("mode"):
+                what+=" ({:s}".format(str(info["mode"]))
+                if info.get("order"):
+                    what+=" order {:d}".format(int(info["order"]))
+                what+=")"
+            parts.append(what)
+            if self.continuation_parameter is not None:
+                parts.append("continued in "+self.continuation_parameter)
         elif self.continuation_parameter is not None:
             parts.append("continued in "+self.continuation_parameter)
         if not self.slice_is_known():
@@ -493,7 +585,7 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
     @staticmethod
     def from_dict(res,default_continuation_parameter:str | None=None):
         inst=BifurcationGUISolutionBranch(
-            kind=res.get("kind","solution"),
+            kind=res.get("kind",BRANCH_SOLUTION),
             # A file written before the slice was recorded has only ever been continued in the
             # parameter the GUI was constructed with, so that is the honest default here.
             continuation_parameter=res.get("continuation_parameter",default_continuation_parameter),
@@ -516,6 +608,48 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
         for p in self:
             res.append(p.get_coordinate(yspec,xspec=xspec))
         return numpy.array(res)
+
+    def smooth_point_list(self,yspecs,subsampling=10,xspec=None):
+        """One splined polyline over the WHOLE branch, with no stability segmentation.
+
+        The segmented version cannot be used for the orbit min/max band: its segments overlap by one
+        point at every change of stability (each transition piece repeats the point before it), and a
+        shaded band built per segment therefore double-covers every join and darkens visibly there.
+        The band is one polygon over the whole branch; the LINE carries the stability.
+        """
+        specs=yspecs if isinstance(yspecs,list) else [yspecs]
+        if len(self)<=1:
+            return self.to_point_list(specs,xspec=xspec)
+        s=[p.scoord for p in self]
+        k=min(3,len(s)-1)
+        ss=numpy.linspace(s[0],s[-1],subsampling*(len(s)-1)+1)
+        xs=[p.param_value if xspec is None else p.value_of(xspec) for p in self]
+        cols=[UnivariateSpline(s,xs,s=0,k=k)(ss)]
+        cols+=[UnivariateSpline(s,[p.value_of(sp) for p in self],s=0,k=k)(ss) for sp in specs]
+        return numpy.column_stack(cols)
+
+    def orbit_band(self,yspec,xspec=None,smooth:bool=False,subsampling=10):
+        """``(x, lo, hi)`` of this branch's min/max band, or None when it has none.
+
+        None rather than an exception for every ordinary reason a branch has no band: it is not an
+        orbit branch, the vertical axis is a parameter or the period, or the branch was recorded
+        before the extremes were being kept.
+        """
+        if self.kind!=BRANCH_ORBIT or len(self)<2:
+            return None
+        kind,name=as_axis(yspec)
+        if kind!=AXIS_OBSERVABLE:
+            return None
+        lo,hi=orbit_band_names(name)
+        if any(lo not in p.obs_values or hi not in p.obs_values for p in self):
+            return None
+        specs=[observable_axis(lo),observable_axis(hi)]
+        try:
+            pts=(self.smooth_point_list(specs,subsampling=subsampling,xspec=xspec) if smooth
+                 else self.to_point_list(specs,xspec=xspec))
+        except KeyError:
+            return None
+        return pts[:,0],pts[:,1],pts[:,2]
 
     def smooth_branch_stab_list(self,yspec,subsampling=10,xspec=None,trust_inferred:bool=True,
                                 include_modes:bool=True):
@@ -576,8 +710,8 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
             return p.stability_indicator(trust_inferred,include_modes)
         def unknown(v):
             return v!=v          # NaN
-        res=[]
-        stabs=[]
+        res:list[NPFloatArray]=[]
+        stabs:list[bool | None]=[]
         if len(self)==0:
             return res,[]
         if len(self)==1:
@@ -596,7 +730,7 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
                     return bool(v<0)
             return None
 
-        currseg=[]
+        currseg:list[NPFloatArray]=[]
         currstab=stability_from(0)
         for ip,(p1,p2) in enumerate(zip(self,self[1:])):
             s1,s2=svs[ip],svs[ip+1]

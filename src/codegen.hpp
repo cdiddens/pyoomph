@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -262,6 +262,7 @@ namespace pyoomph
    bool operator<(const TestFunction &lhs, const TestFunction &rhs);
 
    class FiniteElementCodeSubExpression;
+   class SubExpressionsToStructs; // defined in codegen.cpp; FiniteElementCode owns one per Hessian pass
    // Lightweight GiNaC-wrapped handle to a common-subexpression-eliminated (CSE) expression: just
    // pairs the owning code with the underlying GiNaC expression. The actual bookkeeping (substitution
    // symbol, required fields, etc.) lives in FiniteElementCodeSubExpression, looked up via resolve_subexpression().
@@ -402,7 +403,6 @@ namespace pyoomph
    // Output is deterministic across separate process runs regardless of mode - see GiNaC's own
    // canonical term/factor ordering, made reproducible via citools/patches/*.patch (branch
    // deterministic_codegen) - so no special-cased sorting pass is needed here any more.
-   // Also archives expr (for later inspection/serialization) via for_code->archive.
    void print_simplest_form(GiNaC::ex expr, std::ostream &os, GiNaC::print_FEM_options &csrc_opts);
 
 
@@ -574,6 +574,23 @@ namespace pyoomph
       virtual std::string get_dx_str() const { return "d0x"; } // Suffix identifying which (if any) derivative table this basis function reads from in the generated code
       virtual std::string get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const; // C++ expression for this basis function's shape value/derivative at the given nodal index
       virtual std::string get_c_varname(FiniteElementCode *forcode, std::string test_index);
+
+      // ---- Buffer aliasing -------------------------------------------------------------------
+      // get_shape_string() is get_shape_buffer_base() + "[node]" + get_shape_index_suffix(). The
+      // split exists so the generator can bind the buffer to a local pointer once per integration
+      // point and index THAT in the trial loop, instead of walking shapeinfo->...->... on every
+      // iteration. It has to: the jacobian[] store in the same loop may alias shapeinfo as far as
+      // the C compiler knows (PYOOMPH_RESTRICT is empty, and defining it changes nothing - see
+      // jitbridge.h), so every shapeinfo-> read in there is reloaded after every scatter. This is
+      // exactly what write_generic_RJM_contribution has always done for the TEST side
+      // (testfunction, dx_testfunction, ...); these three let the trial side do the same.
+      virtual std::string get_shape_buffer_base() const;                    // e.g. "shapes[SPACE_INDEX_C2]", "dx_shape_DL"
+      virtual std::string get_shape_index_suffix() const { return ""; }     // "" / "[dir]" / "[slot]"
+      virtual std::string get_shape_alias_stem() const { return "psi"; }    // name fragment, must be stable across runs
+      // How a hoisted alias of get_shape_buffer_base() is declared. The DX_/D2X_ macros are used so
+      // that the FIXED_SIZE_SHAPE_BUFFER variant keeps working, and so the emitted C stays valid
+      // under tcc (no __auto_type).
+      virtual std::string get_shape_alias_decl(const std::string &name) const { return "double const * " + name; }
    };
 
    // First Eulerian spatial derivative of a basis function, d(phi)/dx_direction
@@ -591,8 +608,11 @@ namespace pyoomph
       bool is_eulerian_deriv() const override { return true; }
       std::string to_string() override;
       std::string get_dx_str() const override { return "d1x" + std::to_string(direction); }
-      std::string get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const override;
       std::string get_c_varname(FiniteElementCode *forcode, std::string test_index) override;
+      std::string get_shape_buffer_base() const override;
+      std::string get_shape_index_suffix() const override { return "[" + std::to_string(direction) + "]"; }
+      std::string get_shape_alias_stem() const override { return "dxpsi"; }
+      std::string get_shape_alias_decl(const std::string &name) const override { return "DX_SHAPE_FUNCTION_DECL(" + name + ")"; }
       virtual unsigned get_direction() const { return direction; }
    };
 
@@ -609,8 +629,9 @@ namespace pyoomph
       bool is_eulerian_deriv() const override { return false; }
       std::string to_string() override;
       std::string get_dx_str() const override { return "d1X" + std::to_string(direction); }
-      std::string get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const override;
       std::string get_c_varname(FiniteElementCode *forcode, std::string test_index) override;
+      std::string get_shape_buffer_base() const override;
+      std::string get_shape_alias_stem() const override { return "dXpsi"; }
    };
 
    // First local/reference-element-coordinate derivative of a basis function, d(phi)/dS_direction
@@ -621,8 +642,9 @@ namespace pyoomph
       BasisFunction *get_diff_S(unsigned direction) override;
       std::string to_string() override;
       std::string get_dx_str() const override { return "d1S" + std::to_string(direction); }
-      std::string get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const override;
       std::string get_c_varname(FiniteElementCode *forcode, std::string test_index) override;
+      std::string get_shape_buffer_base() const override;
+      std::string get_shape_alias_stem() const override { return "dSpsi"; }
    };
 
    // Second Eulerian spatial derivative of a basis function, d2(phi)/(dx_direction dx_direction2).
@@ -646,8 +668,11 @@ namespace pyoomph
       unsigned get_slot() const { return PYOOMPH_D2_SLOT(direction, direction2); }
       std::string to_string() override;
       std::string get_dx_str() const override { return "d2x" + std::to_string(direction) + std::to_string(direction2); }
-      std::string get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const override;
       std::string get_c_varname(FiniteElementCode *forcode, std::string test_index) override;
+      std::string get_shape_buffer_base() const override;
+      std::string get_shape_index_suffix() const override { return "[" + std::to_string(get_slot()) + "]"; }
+      std::string get_shape_alias_stem() const override { return "d2xpsi"; }
+      std::string get_shape_alias_decl(const std::string &name) const override { return "D2X_SHAPE_FUNCTION_DECL(" + name + ")"; }
    };
 
    // Second local/reference-element-coordinate derivative, d2(phi)/(dS_direction dS_direction2).
@@ -659,8 +684,9 @@ namespace pyoomph
       bool is_eulerian_deriv() const override { return false; }
       std::string to_string() override;
       std::string get_dx_str() const override { return "d2S" + std::to_string(direction) + std::to_string(direction2); }
-      std::string get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const override;
       std::string get_c_varname(FiniteElementCode *forcode, std::string test_index) override;
+      std::string get_shape_buffer_base() const override;
+      std::string get_shape_alias_stem() const override { return "d2Spsi"; }
    };
 
    class FiniteElementCode;
@@ -706,6 +732,11 @@ namespace pyoomph
       std::string get_name() const { return name; }
       virtual std::string get_shape_name() const { return name; } // Name used to look up the shape-function table in the generated code
       virtual bool can_have_hanging_nodes() { return false; }
+      // What to print as the HANGON argument of the hanging-node macros when emitting code for
+      // `for_code`, or "" to use the non-hanging macro family instead. Exists once rather than at
+      // each of the two emission sites because the rule has a correctness trap in it (see the
+      // definition in codegen.cpp).
+      std::string get_hang_on_str(FiniteElementCode *for_code);
       virtual bool need_interpolation_loop() { return true; } // False for spaces (e.g. D0) where a single value replaces the usual per-node interpolation loop
       FiniteElementCode *get_code() const { return code; }
       // Monotonically increasing, construction-order-assigned id - see FiniteElementField::get_creation_index()
@@ -857,6 +888,9 @@ namespace pyoomph
       virtual std::string get_equation_str(FiniteElementCode *forcode, std::string index) const;
       FiniteElementSpace *get_space() { return space; }
       FiniteElementField(const std::string &_name, FiniteElementSpace *_space) : name(_name), space(_space), symb(_name), creation_index(next_creation_index++), no_jacobian_at_all(false), temporal_error_factor(0) {}
+      // The class has virtual members and ~FiniteElementCode deletes its fields through this type, so
+      // the destructor must be virtual before anyone derives from it (-Wdelete-non-virtual-dtor).
+      virtual ~FiniteElementField() = default;
       // Symbolic sum_i u_i(t)*phi_i(x) representing this field's FE interpolation (see ShapeExpansion)
       GiNaC::ex get_shape_expansion(bool no_jacobian = false, bool no_hessian = false)
       {
@@ -1058,11 +1092,6 @@ namespace pyoomph
          reference_pos_for_IC_and_DBC[5] = ny;
          reference_pos_for_IC_and_DBC[6] = nz;
       }
-      // Every expression passed through print_simplest_form(), for later inspection. Nothing reads
-      // it - the only consumer, the .gar dump in generate_and_compile_bulk_element_code(), is
-      // commented out - yet archiving recursively walks every residual/Jacobian/Hessian expression
-      // and retains it (~14% of emission time). Opt-in via PYOOMPH_ARCHIVE_EXPRESSIONS.
-      GiNaC::archive archive;
       std::map<std::string, GiNaC::ex> expanded_scales;
       GiNaC::ex expand_placeholders(GiNaC::ex inp, std::string where, bool raise_error = true);
       // To prevent tons of Python callbacks in e.g. UNIFAC to substitute molefraction by subexpressions, we cache the expanded callbacks
@@ -1085,6 +1114,13 @@ namespace pyoomph
       int element_dim;
       bool analytical_jacobian; // If true, differentiate the residual symbolically for the Jacobian; otherwise the Jacobian is obtained by finite differences at runtime
       bool analytical_position_jacobian; // Same, but specifically for the moving-mesh (nodal position) Jacobian entries
+      // Per-element overrides for the two emission choices of dev_docs/code_generation.md 9.4. Both
+      // default to "follow the global setting", which is what the PYOOMPH_* environment switches set;
+      // an element only needs its own value when it differs from the rest of the problem, e.g. to bisect
+      // a regression or to keep one enormous element from paying compile time the others do not need.
+      int jacobian_hoist_min_cost = -1;   // -1: use the global default (PYOOMPH_JACOBIAN_HOIST_MIN, else 1)
+      bool split_rjm_by_flag = true;      // false: emit one Residual/Jacobian/Mass body with a runtime flag
+      bool split_rjm_by_hang = true;      // false: emit no hanging-node-free twin of the Residual/Jacobian/Mass body (see 9.4.14). Requires split_rjm_by_flag, since the twin rides on the same _impl trick
       double debug_jacobian_epsilon; // Step size used when numerically cross-checking the analytical Jacobian against finite differences
       bool with_adaptivity;
       bool coordinates_as_dofs; // If true, the nodal positions are themselves unknowns with residual/Jacobian entries (moving-mesh/ALE elements)
@@ -1097,6 +1133,63 @@ namespace pyoomph
       std::vector<std::vector<bool>> local_parameter_has_deriv; // Per residual, per local parameter: whether a derivative w.r.t. that parameter is required
       std::vector<GiNaC::ex> local_parameter_symbols;
       std::set<unsigned> params_declared_in_current_function; // Local parameter indices hoisted into const double locals of the generated function currently being written (managed by GlobalParameterFunctionScope, read by GiNaCGlobalParameterWrapper::print)
+      // What the Hessian pass currently being written has encountered so far: the shape expansions and
+      // test functions its body dereferences, and the fields that need a Hessian index. Cleared at the
+      // start of the pass and consumed at its end (see write_generic_Hessian), so their lifetime was
+      // always per pass - only their scope was the whole process. Every reader has the code in hand.
+      //
+      // The "_for_shapeflags" twin is the same set WITHOUT the "derived" filter, and exists for one
+      // purpose: deciding which shape families the Hessian body needs at runtime. A derived shape
+      // expansion is the bare basis function phi_i of a Jacobian/Hessian COLUMN; it must not enter the
+      // set above, because that one drives the emission of interpolated_* variables and a derived
+      // expansion carries the same variable name as its undifferentiated twin, so two entries produce
+      // two identical `double intrp_..._u=0.0;` declarations, i.e. C that does not compile. But the
+      // emitted Hessian entry DOES dereference phi_i / dphi_i/dx, so the flags have to include them.
+      std::set<ShapeExpansion> all_Hessian_shapeexps;
+      std::set<ShapeExpansion> all_Hessian_shapeexps_for_shapeflags;
+      std::set<TestFunction> all_Hessian_testfuncs;
+      std::set<FiniteElementField *, FiniteElementFieldPtrLess> all_Hessian_indices_required;
+
+      // The subexpression->struct mapper of the Hessian pass currently being written, owned here and
+      // replaced at the start of each pass by write_generic_Hessian. It used to be a file-scope
+      // pointer that was new'ed per pass, deleted only by the NEXT pass and never at teardown, and
+      // read from GiNaCSubExpression::derivative - which has the code in hand anyway, so there was
+      // never a reason for it to be ambient.
+      SubExpressionsToStructs *se_to_struct_hessian = NULL;
+
+      // Names the hoisted Jacobian/Hessian coefficient locals of this code's generated C, _hc<N> and
+      // _jc<N>. Per code and reset by write_code(): as a process-wide counter it carried over from
+      // every code generated earlier in the process, so the SAME element definition produced
+      // different C text depending on how many domains happened to be compiled before it - different
+      // text is a different JIT cache key, so the cache missed on nothing but a reordering.
+      unsigned hoist_coeff_counter = 0;
+
+      // --- Buffer aliases ------------------------------------------------------------------------
+      // Loop-invariant shapeinfo->/eleminfo-> accesses bound to a local pointer at the top of the
+      // generated function, so that the innermost trial loop indexes a local instead of re-walking the
+      // struct. It has to be re-walked otherwise: the jacobian[] store in that loop may alias
+      // shapeinfo as far as the C compiler is concerned, and PYOOMPH_RESTRICT does not help (see
+      // jitbridge.h for the measurement). Worth -12% of an elemental Jacobian and -20% of the emitted
+      // instructions; the residual-only path, which has no such store, is unaffected.
+      //
+      // Function scope is safe because prepare_shape_buffer_for_integration() (elements_shapeinfo.cpp)
+      // runs once per assembly and calls set_remaining_shapes_appropriately() before the generated
+      // function is entered; fill_shape_buffer_for_point() only writes INTO the buffers, it never
+      // re-points them.
+      //
+      // Filled as a side effect of printing, so every emitter buffers its body into an ostringstream
+      // and writes the declarations ahead of it. Keyed name -> declaration line and emitted in map
+      // (i.e. sorted) order, for the same reason the nodalind_ constants are sorted: the generated text
+      // is the JIT cache key and the Tier-2 shadow mode compares it byte for byte.
+      std::map<std::string, std::string> buffer_alias_by_access; // access string -> alias name
+      std::map<std::string, std::string> buffer_alias_decls;     // alias name -> full declaration line
+      bool buffer_aliases_active = false;
+      // Returns the alias for `access`, registering `decl` on first use. When no scope is collecting
+      // declarations (or the feature is switched off) it returns `access` unchanged, so callers can use
+      // it unconditionally.
+      std::string alias_buffer_access(const std::string &access, const std::string &name, const std::string &decl);
+      std::string alias_nodal_data(const FiniteElementSpace *sp); // alias for eleminfo->nodal_data / ->nodal_coords of sp's owner
+      std::string write_buffer_alias_declarations(const std::string &indent, const std::string &body) const; // only the aliases `body` mentions
       void register_global_parameters_in(const GiNaC::ex &e, std::set<unsigned> &used_local_indices); // Print-free registration pre-pass over an expression (descends into subexpressions and multi-ret invocations); fills used_local_indices with the local slots occurring in e
       std::vector<FiniteElementCodeSubExpression> subexpressions; // All CSE'd subexpressions registered for this code, in creation order (indices referenced by GiNaCSubExpression)
       std::vector<GiNaC::ex> multi_return_calls; // All distinct multi-return callback invocations registered for this code, in creation order
@@ -1175,7 +1268,14 @@ namespace pyoomph
       virtual void write_generic_spatial_integration_footer(std::ostream &os, std::string indent);
       virtual void write_generic_nodal_delta_header(std::ostream &os, std::string indent);
       virtual void write_generic_nodal_delta_footer(std::ostream &os, std::string indent);
-      virtual void write_generic_RJM(std::ostream &os, std::string funcname, GiNaC::ex resi, bool with_hang);     // Generic Residual/Jacobian/Mass matrix (also for parameter derivatives)
+      // Set while a Residual/Jacobian/Mass routine is being written, whenever a non-zero mass-matrix
+      // entry is actually emitted. Read only by write_generic_RJM, to decide whether the routine needs a
+      // flag==2 specialisation of its own at all.
+      bool emitted_mass_matrix_contribution = false;
+      // `may_be_asked_for_mass_matrix` false means: a mass matrix is not IMPOSSIBLE here, only unusual,
+      // so the flag!=0 branch keeps a runtime flag instead of getting a third specialised body. It must
+      // never be used to mean "cannot happen" - see write_generic_RJM.
+      virtual void write_generic_RJM(std::ostream &os, std::string funcname, GiNaC::ex resi, bool with_hang, bool may_be_asked_for_mass_matrix = true, bool allow_hang_split = false);     // Generic Residual/Jacobian/Mass matrix (also for parameter derivatives). allow_hang_split: this routine is hot enough to be worth a hanging-node-free twin (only the two ResidualAndJacobian ones are)
       virtual bool write_generic_Hessian(std::ostream &os, std::string funcname, GiNaC::ex resi, bool with_hang); // Generic Hessian vector product
       virtual void write_code(std::ostream &os); // Top-level driver: writes the full generated C++ source for this element (calls the write_code_*()/write_generic_*() methods for every residual)
       virtual std::string get_precodegen_fingerprint_text(); // Tier-2 JIT cache (shadow mode): canonical text capturing every residual/expression and setting write_code() will read, computed BEFORE the (expensive) symbolic differentiation/CSE/printing write_code() performs. Cheap to compute since it only walks/prints the already-built expression trees once, with no derivation. See pyoomph/generic/jit_cache.py.
@@ -1243,7 +1343,7 @@ namespace pyoomph
          else return this->get_domain_name();
       }
       virtual void set_discontinuous_refinement_exponent(std::string field, double exponent);
-      double warn_on_large_numerical_factor = 0.0; // If nonzero, warn (or, if negative, only warn without further action) when a generated numerical coefficient exceeds this magnitude, which often indicates a nondimensionalization issue
+      double warn_on_large_numerical_factor = 0.0; // If nonzero, report a generated numerical coefficient exceeding this magnitude, which often indicates a nondimensionalization issue. Positive: warn only, negative: throw. 0 disables the check
       bool use_shared_shape_buffer_during_multi_assemble = false; // If true, elements sharing the same shape-function buffer during a multi-assemble pass reuse it instead of recomputing it (performance optimization, see elements.cpp)
       LaTeXPrinter *latex_printer;
       virtual void set_latex_printer(LaTeXPrinter *lp) { latex_printer = lp; }
@@ -1256,16 +1356,39 @@ namespace pyoomph
       // produces the block expressions the JACOBIAN_BLOCK_* flags describe; accumulating the others on
       // top would mix in blocks that are not the ones the runtime assembles.
       bool record_jacobian_blocks_for_flags = false;
+
+      // Only true while write_generic_RJM is writing a routine whose body is emitted as a
+      // PYOOMPH_RJM_IMPL taking the extra constant `pyoomph_hang_on` parameter. Routine-scoped state
+      // on the code (like record_jacobian_blocks_for_flags above) rather than another bool threaded
+      // through write_generic_RJM_contribution: those signatures already carry a `hanging_eqns` flag
+      // with a different meaning, and a second one next to it would invite confusing the two.
+      bool emitting_hang_parameter = false;
+      // Set by get_hang_on_str whenever it actually printed pyoomph_hang_on. A routine that never did
+      // (e.g. an interface code all of whose spaces live on the bulk, where the hang buffers are the
+      // equation remap and must stay unconditional) would get two identical entry points, so its
+      // _NoHang twin is not emitted at all and the function table aliases the slots as before.
+      bool hang_parameter_was_used = false;
+      // Which contribution's shape flags are currently being collected ("ResJac[0]", "Hessian[2]", ""
+      // for none). Routine-scoped for the same reason as the two above. Every site that EMITS a read of
+      // d_dx_shape_dcoord marks dx_psi_dcoord through this - there is more than one such site (the
+      // interpolation loop and the Jacobian expression printer), and a flag derived from only one of
+      // them under-requests, which for this family means silently dropped Jacobian columns. That is the
+      // same trap as the Hessian shape flags of dev_docs/code_generation.md 9.4.15.
+      std::string current_shapeflag_func_type;
       // residual index -> (row test field, column unknown field) -> (Jacobian half, mass-matrix half),
       // summed over every emitted contribution. Lives on the code rather than on the field (unlike
       // jacobian_contribution_for_code) because proving block (i,j) = +-transpose(block (j,i)) needs
       // both halves side by side, and they come from different FiniteElementSpaces. Cleared once
       // write_code_info() has turned it into the flag tables.
+      // Names of the RJM routines for which a <name>_NoHang entry point was actually emitted, read by
+      // the function-table registration to keep the invariant "a _NoHang slot is non-NULL whenever its
+      // twin is" without having to re-derive the decision.
+      std::set<std::string> emitted_nohang_entry_points;
       std::map<unsigned, std::map<std::pair<FiniteElementField *, FiniteElementField *>, std::pair<GiNaC::ex, GiNaC::ex>, FiniteElementFieldPairPtrLess>> jacobian_block_exprs;
       void record_jacobian_block_expr(FiniteElementField *rowf, FiniteElementField *colf, const GiNaC::ex &jac_part, const GiNaC::ex &mass_part);
 
    };
 
-   extern FiniteElementCode *__current_code; // The FiniteElementCode currently being defined/assembled (set while running Python-side _define_fields()/_define_element() callbacks); used as an implicit context by free functions that need "the current code"
+   extern thread_local FiniteElementCode *__current_code; // The FiniteElementCode currently being defined/assembled (set while running Python-side _define_fields()/_define_element() callbacks); used as an implicit context by free functions that need "the current code"
 
 }

@@ -1,6 +1,6 @@
 /*================================================================================
 pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
-Copyright (C) 2021-2026  Christian Diddens & Duarte Rocha
+Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -16,6 +16,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
+
 ================================================================================*/
 
 // Split-scheme ("refinement pattern") abstraction for adaptive mesh refinement.
@@ -84,7 +85,7 @@ namespace pyoomph
   // (son 6..9). This is the driving case for the whole RefinementPattern abstraction (pyramid refinement is
   // not shape-closed). construct_son reads each child's shape from its index and builds the matching element
   // type -- a pyramid via create_son_instance(), a tet via create_tet_son_instance() -- both bound to the
-  // parent's physics (codeinst). The son geometry/vertices live in RefineablePyramidElement::
+  // parent's physics (jitcode). The son geometry/vertices live in RefineablePyramidElement::
   // son_vertices_in_father; this class only decides count and per-son element type. Stateless singleton.
   class PyramidMixedRefinementPattern : public RefinementPattern
   {

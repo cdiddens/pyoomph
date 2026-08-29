@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -167,12 +167,20 @@ class PETSCSolver(GenericLinearSystemSolver):
         self._structure_nnz:int=-1
         self._structure_nrow_local:int=-1
         self._structure_digest:bytes | None=None   # Fingerprint of the pattern the Mat was built for
+        #: First global row of this rank's block, as of the last distributed factorise. oomph passes
+        #: it only there, never on the back-substitution, so it has to be remembered.
+        self._solve_first_row:int=0
 
         # Whether a factorisation that has failed twice (see _ksp_solve_checked) raises, rather than
         # letting the untouched solution vector travel on as if it were an answer. Only ever consulted
         # for a genuine factorisation failure -- an iterative KSP that merely stops on its iteration
         # limit is never affected by this, whichever way it is set.
         self.raise_on_failed_solve=True
+
+        # Whether the CURRENT KSP/PC were configured for a proven-symmetric matrix (see
+        # _use_symmetric_factorisation_now). Tracked so a flip - a bifurcation tracker toggled -
+        # rebuilds the KSP even when the sparsity pattern itself is reusable.
+        self._symmetric_engaged:bool=False
 
     #		opts=PETSc.Options().getAll()
     #		if "add_zero_diagonal" in opts.keys():
@@ -475,6 +483,28 @@ class PETSCSolver(GenericLinearSystemSolver):
             raise RuntimeError("Requested field split "+splitname+" not found. Available splits: "+str(self._dofs_to_field_info[2].keys()))
         return self._dofs_to_field_info[2][splitname]
 
+    def _update_symmetry_engagement(self)->None:
+        """Re-take the symmetry decision for the matrix about to be factorised.
+
+        A flip (a bifurcation tracker was toggled) invalidates the KSP: the PC type chosen in
+        setup_solver depends on the decision, and the in-place value-reuse path never rebuilds the
+        KSP on its own.
+        """
+        sym=self._use_symmetric_factorisation_now()
+        if sym!=self._symmetric_engaged:
+            self._symmetric_engaged=sym
+            if self.ksp is not None:
+                self.ksp.destroy() #type:ignore
+                self.ksp=None
+
+    def _apply_mat_symmetry_option(self,mat:Any)->None:
+        # Only ever ASSERT symmetry, never assert its absence: setOption(SYMMETRIC, False) would claim
+        # "known nonsymmetric", which an unproven-but-symmetric matrix is not. Re-applied after every
+        # assembly because new values reset PETSc's symmetry-known state (SYMMETRY_ETERNAL would
+        # instead survive a flip to an augmented matrix, which is exactly the wrong direction).
+        if self._symmetric_engaged and mat is not None:
+            mat.setOption(PETSc.Mat.Option.SYMMETRIC, True) #type:ignore
+
     def _setup_solver_if_needed(self):
         # setup_solver() builds a brand new KSP (and PC) on every call, which throws away any
         # factorisation or preconditioner PETSc has already computed. When the matrix structure is being
@@ -606,6 +636,23 @@ class PETSCSolver(GenericLinearSystemSolver):
                     pc.setFactorSolverPackage(opts["pc_factor_mat_solver_type"]) #type:ignore
 
         pc.setFromOptions() #type:ignore
+        # Proven-symmetric matrix + MUMPS factorisation: switch the PC to Cholesky, which MUMPS
+        # implements as SYM=2 (an LDLT with pivoting - safe for the indefinite matrices the symmetry
+        # proofs typically cover, e.g. Stokes saddle points). PETSc's NATIVE cholesky is deliberately
+        # not used: it has no off-diagonal pivoting. A pc_type the user chose explicitly (i.e. one not
+        # recorded in _own_petsc_options) always wins, and pc.setType is programmatic like the 'lu'
+        # above, so the options database stays clean.
+        if self._symmetric_engaged and not self._do_not_set_any_args:
+            opts = PETSc.Options().getAll() #type:ignore
+            user_set_pc = ("pc_type" in opts) and ("pc_type" not in _own_petsc_options)
+            if str(opts.get("pc_factor_mat_solver_type","")).lower()=="mumps" and not user_set_pc:
+                pc.setType('cholesky') #type:ignore
+                # A PC type change resets the factor package, so re-point it at MUMPS explicitly
+                # (petsc4py renamed the setter at some point, hence the two spellings).
+                if hasattr(pc,"setFactorSolverType"):
+                    pc.setFactorSolverType("mumps") #type:ignore
+                elif hasattr(pc,"setFactorSolverPackage"):
+                    pc.setFactorSolverPackage("mumps") #type:ignore
         if self._dofs_to_field_info is not None:
             field_is=self._dofs_to_field_info[2]
             splt=[(str(a),b) for a,b in field_is.items()]
@@ -615,11 +662,13 @@ class PETSCSolver(GenericLinearSystemSolver):
 
     def solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPIntArray,colptr:NPIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
         if op_flag == 1:
+            self._update_symmetry_engagement()
             if self._can_reuse_structure(n,nnz,colptr,rowind):
                 # Same nonzero pattern, new values. Overwriting them in place (rather than destroying
                 # and rebuilding the Mat) keeps the KSP's factorisation/preconditioner reusable.
                 self.petsc_mat.setValuesCSR(colptr.astype(PETSc.IntType, copy=False), rowind.astype(PETSc.IntType, copy=False), values.astype(PETSc.ScalarType, copy=False)) #type:ignore
                 self.petsc_mat.assemble() #type:ignore
+                self._apply_mat_symmetry_option(self.petsc_mat)
                 return 0
             if self.petsc_mat is not None:
                 self.petsc_mat.destroy()
@@ -662,6 +711,7 @@ class PETSCSolver(GenericLinearSystemSolver):
             self._force_zero_diagonal(self.petsc_mat)
 
             self.petsc_mat.assemble()
+            self._apply_mat_symmetry_option(self.petsc_mat)
             self._structure_id = self.problem.jacobian_structure_id
             self._structure_nnz = nnz
             # Never let solve_distributed() adopt this COMM_SELF matrix as its own: -1 is the "no
@@ -683,8 +733,11 @@ class PETSCSolver(GenericLinearSystemSolver):
             self.petsc_rhs=bv
             self._setup_solver_if_needed()
 
-            if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine():
-                raise RuntimeError("Cannot use custom solve routine with PETSc yet. Also, iterative solving might require different handling here")
+            # An augmented handler wants to drive the solve itself (several re-solves of one
+            # factorisation), which the KSP path does not offer. Deflation is not in that class -- it
+            # only rescales the increment, applied below -- so it is no longer refused here.
+            if self._custom_solve_routine_active():
+                raise RuntimeError("Cannot use an augmented assembly handler's custom solve routine with PETSc yet. Also, iterative solving might require different handling here")
             else:
                 import time
                 start_time = time.time()
@@ -696,7 +749,8 @@ class PETSCSolver(GenericLinearSystemSolver):
             # On a complex PETSc build (the one the eigensolvers need) the solution vector is complex
             # even though this system is real, so the imaginary part is pure roundoff -- drop it
             # explicitly instead of letting numpy discard it with a ComplexWarning.
-            b[:] = xv.real if xv.dtype.kind == "c" and b.dtype.kind != "c" else xv #type:ignore
+            # Serial entry point: b is the whole system, so no row offset and no reduction.
+            b[:] = self._postprocess_newton_step(xv.real if xv.dtype.kind == "c" and b.dtype.kind != "c" else xv) #type:ignore
 
             #print('Converged in', self.ksp.getIterationNumber(), 'iterations.') #type:ignore
 
@@ -711,6 +765,15 @@ class PETSCSolver(GenericLinearSystemSolver):
     def solve_distributed(self, op_flag: int, allow_permutations: int, n: int, nnz_local: int, nrow_local: int, first_row: int, values: NPFloatArray, col_index: NPIntArray, row_start: NPIntArray, b: NPFloatArray, nprow: int, npcol: int, doc: int, data: NPUInt64Array, info: NPIntArray)->None:
         #print("solve distributed with flag ",op_flag)
         if op_flag == 1:
+            # oomph passes a meaningful first_row only on the FACTORISE call; on the
+            # back-substitution below it is 0 on every rank. Anything that needs to know which rows of
+            # the global system this block is has to remember it here -- see the deflation rescale at
+            # the end of op_flag==2, which dots a dof-length vector against b and silently used the
+            # wrong slice on every rank but the first while it trusted the argument.
+            self._solve_first_row = int(first_row)
+            # Rank-deterministic (all its inputs are replicated), so no collective agreement is needed
+            # for the symmetry decision itself.
+            self._update_symmetry_engagement()
             # Same reuse logic as solve_serial, but taken collectively: rebuilding the Mat is itself
             # collective, so a split decision deadlocks rather than just losing the reuse. The inputs
             # (jacobian_structure_id, local row count, local nnz, pattern digest) are all meant to
@@ -718,6 +781,7 @@ class PETSCSolver(GenericLinearSystemSolver):
             if self._agree_on_reuse_structure_distributed(nrow_local,nnz_local,row_start,col_index):
                 self.petsc_mat.setValuesCSR(row_start.astype(PETSc.IntType, copy=False), col_index.astype(PETSc.IntType, copy=False), values.astype(PETSc.ScalarType, copy=False)) #type:ignore
                 self.petsc_mat.assemble() #type:ignore
+                self._apply_mat_symmetry_option(self.petsc_mat)
                 return
             if self.petsc_mat is not None:
                 self.petsc_mat.destroy()
@@ -749,6 +813,7 @@ class PETSCSolver(GenericLinearSystemSolver):
             self._force_zero_diagonal(self.petsc_mat)
 
             self.petsc_mat.assemble()
+            self._apply_mat_symmetry_option(self.petsc_mat)
             self._structure_id = self.problem.jacobian_structure_id
             self._structure_nnz = nnz_local
             self._structure_nrow_local = nrow_local
@@ -773,8 +838,11 @@ class PETSCSolver(GenericLinearSystemSolver):
 
             self._setup_solver_if_needed()
 
-            if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine():
-                raise RuntimeError("Cannot use custom solve routine with PETSc yet. Also, iterative solving might require different handling here")
+            # An augmented handler wants to drive the solve itself (several re-solves of one
+            # factorisation), which the KSP path does not offer. Deflation is not in that class -- it
+            # only rescales the increment, applied below -- so it is no longer refused here.
+            if self._custom_solve_routine_active():
+                raise RuntimeError("Cannot use an augmented assembly handler's custom solve routine with PETSc yet. Also, iterative solving might require different handling here")
             else:
                 import time
                 start_time = time.time()
@@ -786,7 +854,10 @@ class PETSCSolver(GenericLinearSystemSolver):
             # On a complex PETSc build (the one the eigensolvers need) the solution vector is complex
             # even though this system is real, so the imaginary part is pure roundoff -- drop it
             # explicitly instead of letting numpy discard it with a ComplexWarning.
-            b[:] = xv.real if xv.dtype.kind == "c" and b.dtype.kind != "c" else xv #type:ignore
+            # Distributed entry point: b is this rank's row block, so the deflation dot product is
+            # an allreduce over the same split. first_row comes from the caller, never from len(b).
+            b[:] = self._postprocess_newton_step(xv.real if xv.dtype.kind == "c" and b.dtype.kind != "c" else xv,
+                                                 first_row=self._solve_first_row, reduce_dot=True) #type:ignore
 
             #print('Converged in', self.ksp.getIterationNumber(), 'iterations.') #type:ignore
 
@@ -880,6 +951,27 @@ def _account_for_own_petsc_options()->None:
 atexit.register(_account_for_own_petsc_options)
 
 
+def _require_complex_petsc_for_region()->None:
+    """Refuse a region (CISS) solve on a real-scalar PETSc, where it cannot work.
+
+    CISS answers "which eigenvalues are inside this rectangle" by integrating along its boundary,
+    which is a contour in the COMPLEX plane; SLEPc therefore has no implementation of it for real
+    scalars and EPSSolve comes back with PETSc error 56, PETSC_ERR_SUP, "no support for requested
+    operation". That number on its own tells a user nothing - and it is the same number a stale
+    ``eps_type`` in the options database produces (see _apply_eigenvalue_region), so it cannot even be
+    looked up unambiguously after the fact. Checked before the solve instead, where the build can be
+    named.
+    """
+    if not numpy.issubdtype(numpy.dtype(PETSc.ScalarType),numpy.complexfloating): #type:ignore
+        raise RuntimeError(
+            "Scanning a region of the complex plane for eigenvalues needs a COMPLEX PETSc/SLEPc "
+            "build, and this one is real (PETSc.ScalarType is "+numpy.dtype(PETSc.ScalarType).name+ #type:ignore
+            "). The contour-integral solver it uses integrates around the region's boundary, which "
+            "SLEPc does not implement for real scalars - it fails with PETSc error 56 (no support for "
+            "requested operation). Put the complex build's petsc4py on PYTHONPATH "
+            "($PETSC_DIR/$PETSC_ARCH_COMPLEX/lib), or use an ordinary shift-invert eigensolve instead.")
+
+
 @GenericEigenSolver.register_solver()
 class SlepcEigenSolver(GenericEigenSolver):
     idname = "slepc"
@@ -906,6 +998,10 @@ class SlepcEigenSolver(GenericEigenSolver):
 
     def supports_target(self):
         return True
+
+    def supports_complex_target(self):
+        # Only a complex build: EPS.setTarget on a real one truncates the target to its real part.
+        return bool(numpy.issubdtype(numpy.dtype(PETSc.ScalarType),numpy.complexfloating)) #type:ignore
 
     def _eigen_parallel_layout(self,n:int)->tuple[int,int,bool]:
         """``(nrow_local, first_row, parallel)`` for the PETSc matrices of an n-row eigenproblem.
@@ -1045,12 +1141,16 @@ class SlepcEigenSolver(GenericEigenSolver):
         if not (re_min<re_max and im_min<im_max):
             raise ValueError("An eigenvalue region needs re_min<re_max and im_min<im_max, got "
                              "({:g},{:g},{:g},{:g})".format(re_min,re_max,im_min,im_max))
+        _require_complex_petsc_for_region()
         self.eigenvalue_region=(float(re_min),float(re_max),float(im_min),float(im_max))
 
     def _apply_eigenvalue_region(self,E)->bool: #type:ignore
         """Configure CISS over self.eigenvalue_region. Returns whether it was applied."""
         if self.eigenvalue_region is None:
             return False
+        # Again here, not only in set_eigenvalue_region(): the attribute is public and scripts do
+        # assign it directly.
+        _require_complex_petsc_for_region()
         re_min,re_max,im_min,im_max=self.eigenvalue_region
         # The PETSc options database is global and sticky, and setFromOptions applies it AFTER
         # setType, so whatever an earlier ordinary solve left there wins:
@@ -1191,11 +1291,40 @@ class SlepcEigenSolver(GenericEigenSolver):
                 for manip in self.matrix_manipulators:
                     J,M=manip.apply_on_distributed_J_and_M(self,J,M)
 
+        # Proven-symmetric pencil: solve as GHEP instead of GNHEP. GHEP uses M as an inner product, so
+        # M must also be positive semi-definite - symmetry alone does not give that (a cross-coupled
+        # partial_t, as in the pendulum ODE, yields a symmetric indefinite M and SLEPc aborts with
+        # "The inner product is not well defined"), hence the numeric screen. Singular-but-PSD M is
+        # fine with the shift-invert ST, SLEPc's supported route for it (eigenvector purification is
+        # on by default). Region (CISS) solves stay GNHEP: nothing gained there and Which.ALL on a
+        # Hermitian problem is a different code path. All decision inputs are rank-replicated (the
+        # screen reduces its own verdict), so the branches below cannot split across ranks.
+        use_sym=(self._use_symmetric_eigensolver_now()
+                 and Jin.dtype.kind!="c" and Min.dtype.kind!="c"
+                 and self.eigenvalue_region is None)
+        if use_sym and not self._mass_matrix_can_be_positive_semidefinite(Min,first_row if rows_are_local else 0):
+            use_sym=False
+            self.last_symmetry_decision_reason="mass matrix is symmetric but not positive semi-definite"
+        self.last_symmetry_decision=use_sym
+        if use_sym:
+            J.setOption(PETSc.Mat.Option.SYMMETRIC,True) #type:ignore
+            M.setOption(PETSc.Mat.Option.SYMMETRIC,True) #type:ignore
+        # With MUMPS as the ST's factorisation package, Cholesky means SYM=2 - an LDLT with pivoting,
+        # safe for the indefinite J-sigma*M. Set through the options database (pyoomph's own default
+        # machinery) rather than programmatically on the ST's PC: SLEPc applies the st_-prefixed
+        # options when the ST's KSP is set up, which would override a programmatic choice made here.
+        # An st_pc_type the user chose explicitly (not recorded in _own_petsc_options) always wins,
+        # and a flip back to a nonsymmetric solve restores pyoomph's own "lu".
+        _opts_all=PETSc.Options().getAll() #type:ignore
+        _st_pc_is_own=("st_pc_type" not in _opts_all) or ("st_pc_type" in _own_petsc_options)
+        if str(_opts_all.get("st_pc_factor_mat_solver_type","")).lower()=="mumps" and _st_pc_is_own:
+            _SetDefaultPetscOption("st_pc_type","cholesky" if use_sym else "lu",force=True)
+
         # TODO: Working example
         ##--petsc -st_pc_type lu -st_pc_factor_mat_solver_type umfpack
         # print(dir(PETSc.Options.hasName))
         # exit()
-        
+
         _SetDefaultPetscOption("eps_type", "krylovschur") # krylovschur
         target_set=target is not None
         if target is None:
@@ -1239,7 +1368,10 @@ class SlepcEigenSolver(GenericEigenSolver):
                 #print(trgt)
                 #E.setTarget(trgt)
             E.setOperators(J, M) #type:ignore
-            E.setProblemType(SLEPc.EPS.ProblemType.GNHEP) #type:ignore
+            # GHEP for the proven-symmetric pencil (see use_sym above); a GHEP failure raises through
+            # the workspace-retry wrapper like any other EPS failure - the matrices ARE symmetric when
+            # the proof holds, so there is nothing to fall back to.
+            E.setProblemType(SLEPc.EPS.ProblemType.GHEP if use_sym else SLEPc.EPS.ProblemType.GNHEP) #type:ignore
 
             E.setDimensions(neval,ncv,mdp) #type:ignore
 

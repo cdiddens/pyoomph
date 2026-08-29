@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -1155,7 +1155,7 @@ class MatplotLibInterfaceCmap(MatplotLibInterfaceLine):
         super().__init__(plotter)
         self.field=""
         self.colorbar:MatplotLibColorbar | None=None
-        self._coordinates=None
+        self._coordinates:NPFloatArray | None=None
         self._data:NPFloatArray | None=None
         self._lsegs:list[list[int]] | None=None
         self._ninter=None
@@ -2209,8 +2209,8 @@ class MatplotLibLinePlot(MatplotLibPartWithMeshData):
     def __init__(self, plotter:"MatplotlibPlotter"):
         super(MatplotLibLinePlot, self).__init__(plotter)
         self.axes:MatplotLibAxes | None = None
-        self._coordinates=None
-        self._data=None
+        self._coordinates:NPFloatArray | None=None
+        self._data:NPFloatArray | None=None
         self._plotdata=None
         self._segments:list[tuple[NPFloatArray,NPFloatArray]]=[]
         self._external_xdata:NPFloatArray | None=None
@@ -3122,6 +3122,13 @@ class MatplotlibPlotter(BasePlotter):
 
     def _reset_before_plot(self):
         self._added_parts=[]
+        if not self._embedded:
+            # A file output takes a FRESH figure instead of whatever plt.gcf() happens to be. It used
+            # to inherit the current one, which is fine in a script (_after_plot closes it again) but
+            # not next to an embedded plot: the bifurcation GUI's panes aim pyplot at their own figure
+            # and leave it current, so an output() from the GUI drew on top of a pane - putting the
+            # primary y-label on the graph's secondary axis as well - and then closed the pane's figure.
+            plt.figure()
         if self.aspect_ratio:
             if self.aspect_ratio is True:
                 plt.gca().set_aspect('equal') #type:ignore
@@ -3278,4 +3285,4 @@ def __getattr__(name:str):
 from ..typings import _set_public_api
 _set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"
 # The lazy names are not in globals() yet, so _set_public_api cannot see them.
-__all__ = sorted(set(__all__) | set(_REEXPORTED_FROM_1D))
+__all__ = sorted(set(globals()["__all__"]) | set(_REEXPORTED_FROM_1D)) #type:ignore[misc] # __all__ is written by _set_public_api, which no type checker can follow

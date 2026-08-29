@@ -46,8 +46,10 @@ user can trigger goes through :py:meth:`BifurcationTkApp._invoke`, which refuses
 task while one is running; that guard is what makes pumping the event loop mid-solve safe.
 """
 
+import math
 import os
 import traceback
+from functools import partial
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
@@ -55,10 +57,14 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk #type:ignore[attr-defined]
 
 from .actions import Action, KeyMap, event_to_accelerator, format_accelerator
-from .model import AXIS_PARAMETER
+from .model import AXIS_PARAMETER, BRANCH_LOCUS, BRANCH_ORBIT, ORBIT_T_KEY, orbit_band_names
 from .panes import PlotterPaneSet
 
 from ...typings import *
+
+if TYPE_CHECKING:
+    from .controller import BifurcationController
+    from .plotter import BifurcationDiagramPlotter
 
 
 #: Widget classes that swallow key presses, so accelerators must not fire while they have focus.
@@ -68,54 +74,68 @@ _TEXT_INPUT_CLASSES={"Entry","TEntry","Text","TSpinbox","Spinbox","TCombobox","L
 class BifurcationTkApp:
     """The main window: menu bar, toolbar, embedded plot, side panels, log and status bar."""
 
-    def __init__(self,controller,plotter,facade=None,title:str | None=None) -> None:
+    def __init__(self,controller:"BifurcationController",plotter:"BifurcationDiagramPlotter",facade:Any=None,title:str | None=None) -> None:
         self.controller=controller
         self.plotter=plotter
         self.facade=facade if facade is not None else controller
         self.keymap=KeyMap()
 
         self._busy=False
+        self._torn_down=False
         self._suspend_tree_callback=False
         self._tree_signature=None
         self._actions:dict[str,Action]={}
         self._menu_entries:dict[str,list[tuple[tk.Menu,int]]]={}
         self._toolbar_buttons:dict[str,ttk.Button]={}
         self._check_vars:dict[str,tk.BooleanVar]={}
+        #: One StringVar per radio group, plus the getter that says which member is in force.
+        self._radio_vars:dict[str,tk.StringVar]={}
+        self._radio_getters:dict[str,Callable[[],Any]]={}
         self._tree_items:dict[str,tuple[Any,Any]]={}
         self._tree_index:dict[int,str]={}
         self._branch_index:dict[int,str]={}
         self._eigen_vars:dict[tuple[int,int,str],Any]={}
 
         self.root=tk.Tk()
-        self.root.title(title if title is not None else "pyoomph bifurcation diagram")
-        self.root.geometry("1250x820")
-        self._observable_var=tk.StringVar()
-        self._xaxis_var=tk.StringVar()
-        #: Display string -> axis spec, so the combo boxes and the View submenus never have to parse
-        #: a label back into a (kind, name) pair.
-        self._axis_choices:dict[str,Any]={}
-        self._param_var=tk.StringVar()
-        self._graphs_pane=None
-        self._plot_panes_attached=False
-        #: Re-plot the fields when the current point has moved. A mesh plot is not free, so a
-        #: multistep sweep marks this once and re-plots when it finishes rather than per step.
-        self._plots_dirty=True
-        self.auto_update_plots=True
+        try:
+            self.root.title(title if title is not None else "pyoomph bifurcation diagram")
+            self.root.geometry("1250x820")
+            self._observable_var=tk.StringVar()
+            self._xaxis_var=tk.StringVar()
+            #: Display string -> axis spec, so the combo boxes and the View submenus never have to parse
+            #: a label back into a (kind, name) pair.
+            self._axis_choices:dict[str,Any]={}
+            self._param_var=tk.StringVar()
+            self._graphs_pane=None
+            self._plot_panes_attached=False
+            #: Re-plot the fields when the current point has moved. A mesh plot is not free, so a
+            #: multistep sweep marks this once and re-plots when it finishes rather than per step.
+            self._plots_dirty=True
+            self.auto_update_plots=True
 
-        self._build_actions()
-        self._build_menus()
-        self._build_toolbar()
-        # The status bar has to be packed before the body: pack hands out space in call order, and
-        # the body expands, so a status bar added afterwards would get zero height.
-        self._build_statusbar()
-        self._build_body()
+            self._build_actions()
+            self._build_menus()
+            self._build_toolbar()
+            # The status bar has to be packed before the body: pack hands out space in call order, and
+            # the body expands, so a status bar added afterwards would get zero height.
+            self._build_statusbar()
+            self._build_body()
 
-        self.root.bind_all("<Key>",self._on_key)
-        self.root.protocol("WM_DELETE_WINDOW",self._on_close)
+            self.root.bind_all("<Key>",self._on_key)
+            self.root.protocol("WM_DELETE_WINDOW",self._on_close)
 
-        self.controller.set_observer(on_changed=self.refresh,on_status=self._on_status,
-                                     on_log=self.log,on_busy=self._on_busy)
-        self.plotter.on_drawn=self._blit
+            self.controller.set_observer(on_changed=self.refresh,on_status=self._on_status,
+                                         on_log=self.log,on_busy=self._on_busy)
+            self.plotter.on_drawn=self._blit
+        except BaseException:
+            # A half-built window is still a window, and one that is never destroyed is never freed
+            # either (see teardown()), so the failure would take the controller, the plotter and the
+            # whole problem with it to the end of the process.
+            try:
+                self.root.destroy()
+            except Exception:
+                pass
+            raise
 
     # ================================================================== actions
 
@@ -179,6 +199,42 @@ class BifurcationTkApp:
                   "its spectra filled in afterwards")
         A("refine_detected","Refine the detected bifurcation",self._refine_detected,is_solver_task=True,
           enabled_when=lambda: self._nearest_detected() is not None)
+        # --- deflation
+        A("deflated_solve","Deflated solve",c.deflated_solve,is_solver_task=True,
+          enabled_when=lambda: c.current_point is not None or c.current_branch is not None,
+          tooltip="Look for ANOTHER solution at this parameter value by deflating away the ones "
+                  "already known. A solution that is genuinely new opens a new branch.")
+        A("deflated_continuation","Deflated continuation",c.deflated_continuation,is_solver_task=True,
+          enabled_when=lambda: isinstance(c._paramname,str),
+          tooltip="Scan the continuation parameter, deflating at every value. Finds branches that are "
+                  "not connected to this one, which arclength cannot; Abort stops it between steps.")
+        # --- periodic orbits
+        A("switch_to_orbit","Switch onto the periodic orbit",c.switch_to_orbit,is_solver_task=True,
+          enabled_when=lambda: (c.current_point is not None and c.current_point.eig_value_Re==0
+                                and not c.on_locus() and not c.on_orbit()),
+          tooltip="At a Hopf bifurcation, step onto the periodic orbit it sheds and continue that "
+                  "instead. The step off the Hopf is the one the current ds buys.")
+        A("orbit_change_mode","Re-discretize this orbit",c.change_orbit_discretisation,
+          is_solver_task=True,enabled_when=lambda: c.on_orbit(),
+          tooltip="Re-sample the orbit that is installed with the discretization set below, keeping "
+                  "the orbit itself. The way to switch off a Hopf with bsplines - which converge "
+                  "more readily - and then convert to collocation, which is the one that has Floquet "
+                  "multipliers.")
+        A("orbit_floquet_here","Floquet multipliers here",c.orbit_floquet_here,is_solver_task=True,
+          enabled_when=lambda: c.on_orbit(),
+          tooltip="Recompute the Floquet multipliers of this orbit - its stability, the way an "
+                  "eigenvalue is a stationary solution's")
+        A("orbit_floquet_branch","Floquet multipliers along this branch",c.orbit_floquet_for_branch,
+          is_solver_task=True,enabled_when=lambda: c.on_orbit(),
+          tooltip="Fill in the multipliers at every point of this orbit branch; Abort stops it "
+                  "between points")
+        A("orbit_output","Write the orbit's cycle",c.output_orbit_cycle,is_solver_task=True,
+          enabled_when=lambda: c.on_orbit(),
+          tooltip="Run the problem's own output along the whole period, rather than at the single "
+                  "phase the solution is sitting at")
+        A("deflation_forget","Forget the deflated solutions",c.clear_deflation_known_solutions,
+          tooltip="Start the deflated search here over, instead of continuing to avoid what it has "
+                  "already found at this parameter value")
         A("refresh_plots","Refresh field plots",self._refresh_plots,
           enabled_when=lambda: self.plot_panes.has_any(),
           tooltip="Re-render the problem's plotters from the current solution")
@@ -192,11 +248,14 @@ class BifurcationTkApp:
         # The metric the arclength measures the solution in. The dof-sum default is mesh-dependent:
         # it is a sum over unknowns, so refining the mesh changes what a given ds buys.
         A("arclength_metric_dofsum","Arclength metric: dof sum (oomph default)",
-          lambda: c.set_arclength_inner_product(None))
+          lambda: c.set_arclength_inner_product(None),kind="radio",
+          radio_group="arclength_metric",radio_value="dofsum",getter=c.arclength_metric)
         A("arclength_metric_ndof","Arclength metric: per dof (mesh-independent)",
-          lambda: c.set_arclength_inner_product("ndof"))
+          lambda: c.set_arclength_inner_product("ndof"),kind="radio",
+          radio_group="arclength_metric",radio_value="ndof",getter=c.arclength_metric)
         A("arclength_metric_l2","Arclength metric: L2 / mass matrix (mesh-independent)",
-          lambda: c.set_arclength_inner_product("l2"))
+          lambda: c.set_arclength_inner_product("l2"),kind="radio",
+          radio_group="arclength_metric",radio_value="l2",getter=c.arclength_metric)
 
         # --- bifurcations
         A("locate_bifurcation","Locate bifurcation / leave it",c.locate_bifurcation_or_switch,
@@ -244,6 +303,15 @@ class BifurcationTkApp:
         A("merge_branches","Merge selected branch into current",self._merge_branches,
           enabled_when=lambda: c.selected_branch is not None and c.selected_branch is not c.current_branch,
           tooltip="Join two branches that are one curve, ordered by which of their ends meet")
+        A("disentangle_branch","Disentangle branch",c.disentangle_branch,
+          enabled_when=lambda: len(c.selected_branch or c.current_branch or ())>3,
+          tooltip="Reorder the points of this branch so that the curve drawn through them is the "
+                  "shortest one, measured in the visible box. For a branch that moving points by hand "
+                  "has left doubling back on itself; nothing is recomputed.")
+        A("delete_branch","Delete branch...",self._delete_branch,
+          enabled_when=lambda: len(c.branches)>1,
+          tooltip="Remove a whole branch and every state dump it owns. Asks first - unlike splitting "
+                  "or merging, this cannot be undone by reloading the diagram.")
 
         # --- view
         A("toggle_splines","Interpolated splines",self._toggle_splines,kind="check",
@@ -303,10 +371,21 @@ class BifurcationTkApp:
                 var=tk.BooleanVar(value=bool(act.getter()) if act.getter else False)
                 self._check_vars[action_id]=var
             menu.add_checkbutton(label=act.label,accelerator=self._accel(action_id),
-                                 variable=var,command=lambda a=act: self._invoke(a))
+                                 variable=var,command=partial(self._invoke,act))
+        elif act.kind=="radio":
+            group=str(act.radio_group)
+            rvar=self._radio_vars.get(group)
+            if rvar is None:
+                rvar=tk.StringVar(value=str(act.getter()) if act.getter else "")
+                self._radio_vars[group]=rvar
+                if act.getter is not None:
+                    self._radio_getters[group]=act.getter
+            menu.add_radiobutton(label=act.label,accelerator=self._accel(action_id),
+                                 variable=rvar,value=act.radio_value,
+                                 command=partial(self._invoke,act))
         else:
             menu.add_command(label=act.label,accelerator=self._accel(action_id),
-                             command=lambda a=act: self._invoke(a))
+                             command=partial(self._invoke,act))
         self._menu_entries.setdefault(action_id,[]).append((menu,int(menu.index("end") or 0)))
 
     def _rebuild_menu_accelerators(self):
@@ -381,6 +460,16 @@ class BifurcationTkApp:
         self._add_menu_item(m,"scan_stripe_branch")
         self._add_menu_item(m,"toggle_stripe_merge")
         m.add_separator()
+        self._add_menu_item(m,"deflated_solve")
+        self._add_menu_item(m,"deflated_continuation")
+        self._add_menu_item(m,"deflation_forget")
+        m.add_separator()
+        self._add_menu_item(m,"switch_to_orbit")
+        self._add_menu_item(m,"orbit_change_mode")
+        self._add_menu_item(m,"orbit_floquet_here")
+        self._add_menu_item(m,"orbit_floquet_branch")
+        self._add_menu_item(m,"orbit_output")
+        m.add_separator()
         self._add_menu_item(m,"start_locus")
         self._add_menu_item(m,"leave_locus")
         m.add_separator()
@@ -407,6 +496,8 @@ class BifurcationTkApp:
         m.add_separator()
         self._add_menu_item(m,"split_branch")
         self._add_menu_item(m,"merge_branches")
+        self._add_menu_item(m,"disentangle_branch")
+        self._add_menu_item(m,"delete_branch")
         m.add_separator()
         self._add_menu_item(m,"toggle_mode")
         self._add_menu_item(m,"toggle_move_point")
@@ -560,7 +651,7 @@ class BifurcationTkApp:
     def _toolbar_button(self,parent,action_id:str):
         act=self._actions[action_id]
         btn=ttk.Button(parent,text=act.toolbar or act.label,width=max(6,len(act.toolbar or act.label)+1),
-                       command=lambda a=act: self._invoke(a))
+                       command=partial(self._invoke,act))
         btn.pack(side=tk.LEFT,padx=2)
         if act.tooltip:
             _Tooltip(btn,act.tooltip+("  ["+self._accel(action_id)+"]" if self._accel(action_id) else ""))
@@ -586,6 +677,11 @@ class BifurcationTkApp:
         self.nav.update()
         self.nav.pack(side=tk.BOTTOM,fill=tk.X)
         self.canvas.mpl_connect("button_press_event",self._on_canvas_click)
+        # Zooming or panning changes what the deflated scan will cover, and nothing else would tell
+        # the tab: a navigation-toolbar zoom repaints the canvas without going through refresh().
+        # draw_event fires after every repaint and this handler only assigns StringVars, so it cannot
+        # draw again and cannot recurse.
+        self.canvas.mpl_connect("draw_event",lambda *_: self._on_canvas_drawn())
 
         # The problem's own plotters, rendered live. Nothing is added when the problem has none, so a
         # script without a plotter gets exactly the window it got before.
@@ -599,6 +695,8 @@ class BifurcationTkApp:
         self._build_parameters_tab()
         self._build_pointinfo_tab()
         self._build_branches_tab()
+        self._build_deflation_tab()
+        self._build_orbit_tab()
 
         logframe=ttk.Frame(outer)
         outer.add(logframe,weight=1)
@@ -801,7 +899,8 @@ class BifurcationTkApp:
         self.eigen_tree.heading("mode",text="m/k")
         self.eigen_tree.heading("re",text="Re")
         self.eigen_tree.heading("im",text="Im")
-        self.eigen_tree.column("#0",width=34,minwidth=28,stretch=False,anchor=tk.E)
+        # Wide enough for the index plus the "*" that marks the tracked eigenvalue at a bifurcation.
+        self.eigen_tree.column("#0",width=42,minwidth=34,stretch=False,anchor=tk.E)
         self.eigen_tree.column("mode",width=40,minwidth=30,stretch=False,anchor=tk.E)
         self.eigen_tree.column("re",width=100,minwidth=70,anchor=tk.E)
         self.eigen_tree.column("im",width=100,minwidth=70,anchor=tk.E)
@@ -827,6 +926,16 @@ class BifurcationTkApp:
     def _build_branches_tab(self):
         tab=ttk.Frame(self.side,padding=4)
         self.side.add(tab,text="Branches")
+        # The commands that act on a WHOLE branch, next to the tree that selects one. They are in the
+        # Branches menu as well, but that is not where anyone looks after clicking a branch here.
+        buttons=ttk.Frame(tab)
+        buttons.pack(side=tk.BOTTOM,fill=tk.X,pady=(4,0))
+        ttk.Button(buttons,text="Split",width=7,
+                   command=lambda: self._invoke(self._actions["split_branch"])).pack(side=tk.LEFT)
+        ttk.Button(buttons,text="Merge",width=7,
+                   command=lambda: self._invoke(self._actions["merge_branches"])).pack(side=tk.LEFT,padx=3)
+        ttk.Button(buttons,text="Delete branch...",
+                   command=lambda: self._invoke(self._actions["delete_branch"])).pack(side=tk.LEFT)
         self.tree=ttk.Treeview(tab,columns=("info",),show="tree headings",selectmode="browse")
         self.tree.heading("#0",text="Branch / point")
         self.tree.heading("info",text="Details")
@@ -838,6 +947,431 @@ class BifurcationTkApp:
         self.tree.pack(side=tk.LEFT,fill=tk.BOTH,expand=True)
         self.tree.bind("<<TreeviewSelect>>",self._on_tree_select)
         self.tree.bind("<Double-1>",lambda *_: self._invoke(self._actions["goto_selected"]))
+
+    def _build_deflation_tab(self):
+        """Deflation: look for solutions the diagram does not have yet.
+
+        Two commands and the settings behind them. The commands are the interesting part -- everything
+        else on this tab feeds them -- so they sit at the top rather than after a screen of entries.
+        """
+        tab=ttk.Frame(self.side,padding=8)
+        self.side.add(tab,text="Deflation")
+
+        row=0
+        buttons=ttk.Frame(tab)
+        buttons.grid(row=row,column=0,columnspan=2,sticky=tk.EW,pady=(0,4))
+        ttk.Button(buttons,text="Deflated solve",width=15,
+                   command=lambda: self._invoke(self._actions["deflated_solve"])).pack(side=tk.LEFT)
+        ttk.Button(buttons,text="Deflated continuation",width=20,
+                   command=lambda: self._invoke(self._actions["deflated_continuation"])).pack(side=tk.LEFT,padx=(4,0))
+        row+=1
+
+        # What a deflated solve is avoiding right now. Without this the button looks stateless and the
+        # second click, which deliberately behaves differently from the first, is a surprise.
+        self.defl_known_var=tk.StringVar(value="")
+        ttk.Label(tab,textvariable=self.defl_known_var,wraplength=300,
+                  foreground="#555555").grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=(0,2))
+        row+=1
+        ttk.Button(tab,text="Forget known solutions",
+                   command=lambda: self._invoke(self._actions["deflation_forget"])).grid(
+                   row=row,column=0,columnspan=2,sticky=tk.W,pady=(0,6))
+        row+=1
+
+        ttk.Separator(tab,orient=tk.HORIZONTAL).grid(row=row,column=0,columnspan=2,sticky=tk.EW,pady=4)
+        row+=1
+        ttk.Label(tab,text="Deflation operator",font=("TkDefaultFont",9,"bold")).grid(
+                  row=row,column=0,columnspan=2,sticky=tk.W,pady=(0,2))
+        row+=1
+
+        ttk.Label(tab,text="Shift alpha").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.defl_alpha_var=tk.StringVar()
+        self.defl_alpha_entry=ttk.Entry(tab,textvariable=self.defl_alpha_var,width=14)
+        self.defl_alpha_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.defl_alpha_entry.bind("<Return>",lambda *_: self._commit_deflation())
+        self.defl_alpha_entry.bind("<FocusOut>",lambda *_: self._commit_deflation())
+        row+=1
+
+        ttk.Label(tab,text="Power p").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.defl_p_var=tk.StringVar()
+        self.defl_p_entry=ttk.Entry(tab,textvariable=self.defl_p_var,width=14)
+        self.defl_p_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.defl_p_entry.bind("<Return>",lambda *_: self._commit_deflation())
+        self.defl_p_entry.bind("<FocusOut>",lambda *_: self._commit_deflation())
+        row+=1
+
+        ttk.Label(tab,text="Perturbation").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.defl_pert_var=tk.StringVar()
+        self.defl_pert_entry=ttk.Entry(tab,textvariable=self.defl_pert_var,width=14)
+        self.defl_pert_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.defl_pert_entry.bind("<Return>",lambda *_: self._commit_deflation())
+        self.defl_pert_entry.bind("<FocusOut>",lambda *_: self._commit_deflation())
+        row+=1
+        # This one number sets the scale the deflation is measured in (alpha is dimensionless in units
+        # of it), so what "auto" came out as belongs on the screen rather than only in the log.
+        self.defl_pert_hint_var=tk.StringVar(value="")
+        ttk.Label(tab,textvariable=self.defl_pert_hint_var,wraplength=300,
+                  foreground="#555555").grid(row=row,column=0,columnspan=2,sticky=tk.W)
+        row+=1
+
+        ttk.Label(tab,text="Random tries").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.defl_tries_var=tk.StringVar()
+        self.defl_tries_entry=ttk.Entry(tab,textvariable=self.defl_tries_var,width=14)
+        self.defl_tries_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.defl_tries_entry.bind("<Return>",lambda *_: self._commit_deflation())
+        self.defl_tries_entry.bind("<FocusOut>",lambda *_: self._commit_deflation())
+        row+=1
+
+        ttk.Label(tab,text="Random seed").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.defl_seed_var=tk.StringVar()
+        self.defl_seed_entry=ttk.Entry(tab,textvariable=self.defl_seed_var,width=14)
+        self.defl_seed_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.defl_seed_entry.bind("<Return>",lambda *_: self._commit_deflation())
+        self.defl_seed_entry.bind("<FocusOut>",lambda *_: self._commit_deflation())
+        row+=1
+
+        ttk.Label(tab,text="Max Newton it.").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.defl_newton_var=tk.StringVar()
+        self.defl_newton_entry=ttk.Entry(tab,textvariable=self.defl_newton_var,width=14)
+        self.defl_newton_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.defl_newton_entry.bind("<Return>",lambda *_: self._commit_deflation())
+        self.defl_newton_entry.bind("<FocusOut>",lambda *_: self._commit_deflation())
+        row+=1
+
+        self.defl_eigpert_var=tk.BooleanVar()
+        ttk.Checkbutton(tab,text="Perturb along the eigenvector",variable=self.defl_eigpert_var,
+                        command=self._commit_deflation).grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=2)
+        row+=1
+
+        ttk.Separator(tab,orient=tk.HORIZONTAL).grid(row=row,column=0,columnspan=2,sticky=tk.EW,pady=4)
+        row+=1
+        ttk.Label(tab,text="Deflated continuation",font=("TkDefaultFont",9,"bold")).grid(
+                  row=row,column=0,columnspan=2,sticky=tk.W,pady=(0,2))
+        row+=1
+
+        # The scan stops where the diagram does, the way Multistep does: it is truncated to the part of
+        # the parameter axis that is visible, and it gives up early if a whole parameter step produced
+        # nothing inside the axes at all.
+        ttk.Label(tab,text="Steps").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.defl_steps_var=tk.StringVar()
+        self.defl_steps_entry=ttk.Entry(tab,textvariable=self.defl_steps_var,width=14)
+        self.defl_steps_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.defl_steps_entry.bind("<Return>",lambda *_: self._commit_deflated_scan())
+        self.defl_steps_entry.bind("<FocusOut>",lambda *_: self._commit_deflated_scan())
+        row+=1
+
+        ttk.Label(tab,text="d(parameter)").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.defl_dparam_var=tk.StringVar()
+        self.defl_dparam_entry=ttk.Entry(tab,textvariable=self.defl_dparam_var,width=14)
+        self.defl_dparam_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.defl_dparam_entry.bind("<Return>",lambda *_: self._commit_deflated_scan())
+        self.defl_dparam_entry.bind("<FocusOut>",lambda *_: self._commit_deflated_scan())
+        row+=1
+
+        self.defl_scan_eig_var=tk.BooleanVar()
+        ttk.Checkbutton(tab,text="Solve eigenproblems during the scan",variable=self.defl_scan_eig_var,
+                        command=self._commit_deflated_scan).grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=2)
+        row+=1
+
+        # The range the scan will actually cover, recomputed on every refresh. "auto" for d(parameter)
+        # IS ds, so Reverse direction reverses the scan too and the default scan is exactly the window
+        # a fresh diagram opens on; there is no other place that would say so.
+        self.defl_range_var=tk.StringVar(value="")
+        ttk.Label(tab,textvariable=self.defl_range_var,wraplength=300,
+                  foreground="#555555").grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=(4,0))
+        row+=1
+
+        tab.columnconfigure(1,weight=1)
+
+    def _build_orbit_tab(self):
+        """Periodic orbits: what a Hopf sheds, and how far the diagram follows it.
+
+        Same shape as the Deflation tab - the commands first, the settings that feed them below.
+        """
+        tab=ttk.Frame(self.side,padding=8)
+        self.side.add(tab,text="Orbit")
+
+        row=0
+        buttons=ttk.Frame(tab)
+        buttons.grid(row=row,column=0,columnspan=2,sticky=tk.EW,pady=(0,4))
+        ttk.Button(buttons,text="Switch onto orbit",width=18,
+                   command=lambda: self._invoke(self._actions["switch_to_orbit"])).pack(side=tk.LEFT)
+        ttk.Button(buttons,text="Write the cycle",width=16,
+                   command=lambda: self._invoke(self._actions["orbit_output"])).pack(side=tk.LEFT,padx=(4,0))
+        row+=1
+
+        # What this point is, and - when it cannot become an orbit - why not. The Hessian reason in
+        # particular cannot be fixed from inside the session, so it is worth saying before the button
+        # is pressed rather than after.
+        self.orbit_state_var=tk.StringVar(value="")
+        ttk.Label(tab,textvariable=self.orbit_state_var,wraplength=300,
+                  foreground="#555555").grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=(0,4))
+        row+=1
+
+        ttk.Separator(tab,orient=tk.HORIZONTAL).grid(row=row,column=0,columnspan=2,sticky=tk.EW,pady=4)
+        row+=1
+        ttk.Label(tab,text="Starting the orbit",font=("TkDefaultFont",9,"bold")).grid(
+                  row=row,column=0,columnspan=2,sticky=tk.W,pady=(0,2))
+        row+=1
+
+        ttk.Label(tab,text="Parameter step").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.orbit_eps_var=tk.StringVar()
+        self.orbit_eps_entry=ttk.Entry(tab,textvariable=self.orbit_eps_var,width=14)
+        self.orbit_eps_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.orbit_eps_entry.bind("<Return>",lambda *_: self._commit_orbit())
+        self.orbit_eps_entry.bind("<FocusOut>",lambda *_: self._commit_orbit())
+        row+=1
+        # The offset IS eps**2, so "what ds buys in the parameter" is the whole story of the default
+        # and there is nowhere else it would be said.
+        self.orbit_eps_hint_var=tk.StringVar(value="")
+        ttk.Label(tab,textvariable=self.orbit_eps_hint_var,wraplength=300,
+                  foreground="#555555").grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=(0,2))
+        row+=1
+
+        ttk.Label(tab,text="Amplitude factor").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.orbit_ampl_var=tk.StringVar()
+        self.orbit_ampl_entry=ttk.Entry(tab,textvariable=self.orbit_ampl_var,width=14)
+        self.orbit_ampl_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.orbit_ampl_entry.bind("<Return>",lambda *_: self._commit_orbit())
+        self.orbit_ampl_entry.bind("<FocusOut>",lambda *_: self._commit_orbit())
+        row+=1
+
+        self.orbit_collapse_var=tk.BooleanVar()
+        ttk.Checkbutton(tab,text="Check it did not collapse",variable=self.orbit_collapse_var,
+                        command=self._commit_orbit).grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=2)
+        row+=1
+
+        ttk.Separator(tab,orient=tk.HORIZONTAL).grid(row=row,column=0,columnspan=2,sticky=tk.EW,pady=4)
+        row+=1
+        ttk.Label(tab,text="Discretization",font=("TkDefaultFont",9,"bold")).grid(
+                  row=row,column=0,columnspan=2,sticky=tk.W,pady=(0,2))
+        row+=1
+
+        ttk.Label(tab,text="Time steps").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.orbit_nt_var=tk.StringVar()
+        self.orbit_nt_entry=ttk.Entry(tab,textvariable=self.orbit_nt_var,width=14)
+        self.orbit_nt_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.orbit_nt_entry.bind("<Return>",lambda *_: self._commit_orbit())
+        self.orbit_nt_entry.bind("<FocusOut>",lambda *_: self._commit_orbit())
+        row+=1
+
+        ttk.Label(tab,text="Mode").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.orbit_mode_var=tk.StringVar()
+        self.orbit_mode_combo=ttk.Combobox(tab,state="readonly",width=12,textvariable=self.orbit_mode_var,
+                                           values=("collocation","floquet","central","BDF2","bspline"))
+        self.orbit_mode_combo.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.orbit_mode_combo.bind("<<ComboboxSelected>>",lambda *_: self._commit_orbit())
+        row+=1
+
+        ttk.Label(tab,text="Order").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.orbit_order_var=tk.StringVar()
+        self.orbit_order_entry=ttk.Entry(tab,textvariable=self.orbit_order_var,width=14)
+        self.orbit_order_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.orbit_order_entry.bind("<Return>",lambda *_: self._commit_orbit())
+        self.orbit_order_entry.bind("<FocusOut>",lambda *_: self._commit_orbit())
+        row+=1
+
+        ttk.Label(tab,text="Phase constraint").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.orbit_tconstr_var=tk.StringVar()
+        self.orbit_tconstr_combo=ttk.Combobox(tab,state="readonly",width=12,
+                                              textvariable=self.orbit_tconstr_var,
+                                              values=("phase","plane"))
+        self.orbit_tconstr_combo.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.orbit_tconstr_combo.bind("<<ComboboxSelected>>",lambda *_: self._commit_orbit())
+        row+=1
+
+        ttk.Label(tab,text="Observable samples").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.orbit_samples_var=tk.StringVar()
+        self.orbit_samples_entry=ttk.Entry(tab,textvariable=self.orbit_samples_var,width=14)
+        self.orbit_samples_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.orbit_samples_entry.bind("<Return>",lambda *_: self._commit_orbit())
+        self.orbit_samples_entry.bind("<FocusOut>",lambda *_: self._commit_orbit())
+        row+=1
+
+        self.orbit_portable_var=tk.BooleanVar()
+        ttk.Checkbutton(tab,text="Portable orbit files",variable=self.orbit_portable_var,
+                        command=self._commit_orbit).grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=2)
+        row+=1
+
+        # These settings otherwise only take effect on the NEXT switch onto an orbit. This applies
+        # them to the one already installed, which is what makes "find it with bsplines, read its
+        # stability off in collocation" a two-button operation.
+        ttk.Button(tab,text="Apply to this orbit",
+                   command=lambda: self._invoke(self._actions["orbit_change_mode"])).grid(
+                   row=row,column=0,columnspan=2,sticky=tk.W,pady=(2,0))
+        row+=1
+
+        ttk.Separator(tab,orient=tk.HORIZONTAL).grid(row=row,column=0,columnspan=2,sticky=tk.EW,pady=4)
+        row+=1
+        ttk.Label(tab,text="Floquet multipliers",font=("TkDefaultFont",9,"bold")).grid(
+                  row=row,column=0,columnspan=2,sticky=tk.W,pady=(0,2))
+        row+=1
+
+        self.floquet_enabled_var=tk.BooleanVar()
+        ttk.Checkbutton(tab,text="Compute at every step",variable=self.floquet_enabled_var,
+                        command=self._commit_orbit).grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=2)
+        row+=1
+
+        ttk.Label(tab,text="Method").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.floquet_method_var=tk.StringVar()
+        self.floquet_method_combo=ttk.Combobox(tab,state="readonly",width=14,
+                                               textvariable=self.floquet_method_var,
+                                               values=("condensed","periodic_schur","eigenproblem"))
+        self.floquet_method_combo.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.floquet_method_combo.bind("<<ComboboxSelected>>",lambda *_: self._commit_orbit())
+        row+=1
+
+        ttk.Label(tab,text="How many").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.floquet_n_var=tk.StringVar()
+        self.floquet_n_entry=ttk.Entry(tab,textvariable=self.floquet_n_var,width=14)
+        self.floquet_n_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.floquet_n_entry.bind("<Return>",lambda *_: self._commit_orbit())
+        self.floquet_n_entry.bind("<FocusOut>",lambda *_: self._commit_orbit())
+        row+=1
+
+        self.floquet_shift_var=tk.BooleanVar()
+        ttk.Checkbutton(tab,text="Shift-invert",variable=self.floquet_shift_var,
+                        command=self._commit_orbit).grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=2)
+        row+=1
+
+        ttk.Button(tab,text="Compute here",
+                   command=lambda: self._invoke(self._actions["orbit_floquet_here"])).grid(
+                   row=row,column=0,sticky=tk.W,pady=(2,0))
+        ttk.Button(tab,text="Along this branch",
+                   command=lambda: self._invoke(self._actions["orbit_floquet_branch"])).grid(
+                   row=row,column=1,sticky=tk.EW,pady=(2,0))
+        row+=1
+
+        self.floquet_info_var=tk.StringVar(value="")
+        ttk.Label(tab,textvariable=self.floquet_info_var,wraplength=300,
+                  foreground="#555555").grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=(4,0))
+        row+=1
+
+        tab.columnconfigure(1,weight=1)
+
+    def _commit_orbit(self):
+        """Read the orbit and Floquet settings back off the tab."""
+        c=self.controller
+        try:
+            c.orbit_NT=max(2,int(float(self.orbit_nt_var.get())))
+        except ValueError:
+            c.log("The number of time steps must be an integer of at least 2")
+        try:
+            c.orbit_order=max(1,int(float(self.orbit_order_var.get())))
+        except ValueError:
+            c.log("The discretization order must be an integer of at least 1")
+        eps=self.orbit_eps_var.get().strip()
+        if eps.lower() in ("","auto","none","-"):
+            c.orbit_eps=None
+        else:
+            try:
+                c.orbit_eps=abs(float(eps))
+            except ValueError:
+                c.log("The parameter step must be a number, or 'auto' to take what ds buys")
+        try:
+            c.orbit_amplitude_factor=float(self.orbit_ampl_var.get())
+        except ValueError:
+            c.log("The amplitude factor must be a number")
+        samples=self.orbit_samples_var.get().strip()
+        if samples.lower() in ("","auto","none","-"):
+            c.orbit_observable_samples=None
+        else:
+            try:
+                c.orbit_observable_samples=max(2,int(float(samples)))
+            except ValueError:
+                c.log("The number of observable samples must be an integer, or 'auto' for one per "
+                      "time step of the orbit")
+        n=self.floquet_n_var.get().strip()
+        if n.lower() in ("","all","auto","none","-"):
+            c.floquet_n=None
+        else:
+            try:
+                c.floquet_n=max(1,int(float(n)))
+            except ValueError:
+                c.log("The number of Floquet multipliers must be an integer, or 'all'")
+        mode=self.orbit_mode_var.get().strip()
+        if mode:
+            c.orbit_mode=mode
+        tconstr=self.orbit_tconstr_var.get().strip()
+        if tconstr:
+            c.orbit_T_constraint=tconstr
+        method=self.floquet_method_var.get().strip()
+        if method:
+            c.floquet_method=method
+        c.orbit_check_collapse=bool(self.orbit_collapse_var.get())
+        c.orbit_portable=bool(self.orbit_portable_var.get())
+        c.floquet_enabled=bool(self.floquet_enabled_var.get())
+        c.floquet_shift_invert=bool(self.floquet_shift_var.get())
+        self._update_panels()
+
+    def _commit_deflation(self):
+        """Read the deflation operator settings back off the tab."""
+        c=self.controller
+        try:
+            alpha=float(self.defl_alpha_var.get())
+            if not alpha>0:
+                raise ValueError("alpha must be positive")
+            c.deflation_alpha=alpha
+        except ValueError:
+            c.log("The deflation shift alpha must be a positive number")
+        try:
+            p=int(float(self.defl_p_var.get()))
+            if p<1:
+                raise ValueError("p must be at least 1")
+            c.deflation_p=p
+        except ValueError:
+            c.log("The deflation power p must be an integer of at least 1")
+        pert=self.defl_pert_var.get().strip()
+        if pert.lower() in ("","auto","none","-"):
+            c.deflation_perturbation=None
+        else:
+            try:
+                c.deflation_perturbation=abs(float(pert))
+            except ValueError:
+                c.log("The perturbation amplitude must be a number, or 'auto' to read one off the "
+                      "current solution")
+        try:
+            c.deflation_random_tries=max(1,int(float(self.defl_tries_var.get())))
+        except ValueError:
+            c.log("The number of random tries must be an integer of at least 1")
+        seed=self.defl_seed_var.get().strip()
+        if seed.lower() in ("","none","-"):
+            # A different sequence every run, which is what you want once a seeded search has stopped
+            # finding anything new.
+            c.deflation_random_seed=None
+        else:
+            try:
+                c.deflation_random_seed=int(float(seed))
+            except ValueError:
+                c.log("The random seed must be an integer, or empty for an unseeded search")
+        newton=self.defl_newton_var.get().strip()
+        if newton.lower() in ("","none","-","auto"):
+            c.deflation_max_newton_iterations=None
+        else:
+            try:
+                c.deflation_max_newton_iterations=max(1,int(float(newton)))
+            except ValueError:
+                c.log("The Newton iteration cap must be an integer, or empty for the problem's own")
+        c.deflation_use_eigenperturbation=bool(self.defl_eigpert_var.get())
+        self._update_panels()
+
+    def _commit_deflated_scan(self):
+        """Read the deflated continuation settings back off the tab."""
+        c=self.controller
+        try:
+            c.deflated_scan_steps=max(1,int(float(self.defl_steps_var.get())))
+        except ValueError:
+            c.log("The number of scan steps must be an integer of at least 1")
+        dp=self.defl_dparam_var.get().strip()
+        if dp.lower() in ("","auto","none","-"):
+            c.deflated_scan_dparam=None
+        else:
+            try:
+                c.deflated_scan_dparam=float(dp)
+            except ValueError:
+                c.log("The parameter increment must be a number, or 'auto' to follow ds and the "
+                      "parameter's own magnitude")
+        c.deflated_scan_eigensolve=bool(self.defl_scan_eig_var.get())
+        self._update_panels()
 
     def _build_statusbar(self):
         bar=ttk.Frame(self.root,relief=tk.SUNKEN,padding=(6,3))
@@ -866,7 +1400,7 @@ class BifurcationTkApp:
                 # the solution ended up. Reconstructing that from the plot alone is guesswork.
                 self.log("> "+action.label)
                 self.controller.run_task(action.label,action.callback)
-                if self.controller.current_point is not None:
+                if not self._torn_down and self.controller.current_point is not None:
                     self.log("  now at "+self.controller.current_point.describe(
                         self.controller._current_observable,self._y_unit(),self.controller.eigen_unit))
             else:
@@ -874,14 +1408,16 @@ class BifurcationTkApp:
         except Exception as e:
             self._report_error(action.label,e)
         finally:
-            if action.is_solver_task:
-                self._plots_dirty=True
-            self.refresh()
-            self._autosave()
-            # Deliberately AFTER refresh/autosave and only once the task is over: a multistep sweep
-            # marks the plots dirty on every step but must re-render the mesh only when it finishes.
-            if self._plots_dirty and self.auto_update_plots and not self._busy:
-                self._refresh_plots()
+            if not self._torn_down:     # closed mid-task: there is nothing left to update
+                if action.is_solver_task:
+                    self._plots_dirty=True
+                self.refresh()
+                self._autosave()
+                # Deliberately AFTER refresh/autosave and only once the task is over: a multistep
+                # sweep marks the plots dirty on every step but must re-render the mesh only when it
+                # finishes.
+                if self._plots_dirty and self.auto_update_plots and not self._busy:
+                    self._refresh_plots()
 
     def _autosave(self):
         """Persist after every command, as the key-driven version did after each of its handlers.
@@ -889,6 +1425,8 @@ class BifurcationTkApp:
         The saved state covers the axis limits and scales too, so view-only commands are worth
         saving as well - and a session that ends in a crash then still reopens where it was.
         """
+        if self._torn_down:
+            return    # _on_close already saved; what a half-aborted task leaves behind is not better
         if self.controller.current_point is None or self.controller.current_branch is None:
             return
         try:
@@ -900,6 +1438,8 @@ class BifurcationTkApp:
         self.log("*** "+what+" failed: "+repr(exc))
         for line in traceback.format_exc().splitlines():
             self.log("    "+line)
+        if self._torn_down:
+            return    # no window to put a dialog on - the lines above went to the terminal
         messagebox.showerror(what+" failed",str(exc),parent=self.root)
 
     def _on_key(self,event):
@@ -950,6 +1490,8 @@ class BifurcationTkApp:
 
     def _on_status(self,text:str | None):
         """A long operation reports what it is doing: repaint with the overlay and pump events."""
+        if self._torn_down:
+            return
         if text is not None:
             self.status_var.set(text)
         self.plotter.draw(self.controller,text)
@@ -957,6 +1499,8 @@ class BifurcationTkApp:
         self.pump()
 
     def _on_busy(self,name:str | None):
+        if self._torn_down:
+            return
         self._busy=name is not None
         self.status_var.set((name+" ...") if name else "Ready")
         self.abort_button.configure(state="normal" if self._busy else "disabled")
@@ -965,6 +1509,8 @@ class BifurcationTkApp:
 
     def pump(self):
         """Give Tk a chance to repaint and to register an Abort click during a solve."""
+        if self._torn_down:
+            return
         try:
             self.root.update()
         except tk.TclError:
@@ -972,6 +1518,8 @@ class BifurcationTkApp:
 
     def log(self,text:str):
         print(text)
+        if self._torn_down:
+            return    # the log widget is gone; the print above is all that is left of it
         self.logtext.configure(state=tk.NORMAL)
         self.logtext.insert(tk.END,text+"\n")
         self.logtext.see(tk.END)
@@ -980,34 +1528,61 @@ class BifurcationTkApp:
     # ================================================================== refresh
 
     def refresh(self,infotext:str | None=None):
+        if self._torn_down:
+            return
         self.plotter.draw(self.controller,infotext)
         self._update_panels()
         self._update_enabled_state()
 
+    @staticmethod
+    def _is_focused(widget)->bool:
+        """Whether the widget currently owns the keyboard focus.
+
+        Not just widget.focus_get() is widget: while a menu is posted, Tk reports an internal
+        widget name ("#!menu") that is not in the children dict, and focus_get raises KeyError.
+        """
+        try:
+            return widget.focus_get() is widget
+        except KeyError:
+            return False    # focus is on a Tk-internal widget, i.e. certainly not on this one
+
+    def _sync_radio_vars(self):
+        """Put each radio group's dot on whatever is actually in force.
+
+        The dot follows the state, not the click: a command that fails, or one that moves its group
+        by itself, must not leave the dot lying on something that is not in force.
+        """
+        for group,var in self._radio_vars.items():
+            getter=self._radio_getters.get(group)
+            if getter is not None:
+                var.set(str(getter()))
+
     def _update_panels(self):
         c=self.controller
-        if self.ds_entry.focus_get() is not self.ds_entry:   # do not overwrite what is being typed
+        if not self._is_focused(self.ds_entry):   # do not overwrite what is being typed
             self.ds_var.set("{:.6g}".format(c.ds))
         self.neigen_var.set(str(c.neigen))
         self.shift_var.set("{:g}".format(c.shift) if not isinstance(c.shift,complex) else str(c.shift))
         self.scale_al_var.set(bool(c.scale_arc_length))
-        if self.arc_prop_entry.focus_get() is not self.arc_prop_entry:
+        if not self._is_focused(self.arc_prop_entry):
             self.arc_prop_var.set("{:g}".format(c.arclength_proportion))
         self.arc_prop_entry.configure(state="normal" if c.scale_arc_length else "disabled")
-        if self.stripe_entry.focus_get() is not self.stripe_entry:
+        if not self._is_focused(self.stripe_entry):
             self.stripe_var.set("{:g},{:g},{:d}".format(c.stripe_re,c.stripe_im,int(c.stripe_max)))
         self.adapt_var.set(c.adapt_policy)
-        if self.adapt_n_entry.focus_get() is not self.adapt_n_entry:
+        if not self._is_focused(self.adapt_n_entry):
             self.adapt_n_var.set(str(c.adapt_every_n))
         self.adapt_eig_var.set(bool(c.adapt_to_eigenfunction))
         kind=c.normal_mode_kind()
         state="normal" if kind else "disabled"
         self.modes_entry.configure(state=state)
         self.modes_sweep_check.configure(state=state)
-        if self.modes_entry.focus_get() is not self.modes_entry:
+        if not self._is_focused(self.modes_entry):
             self.modes_var.set(",".join("{:g}".format(m) for m in c.normal_modes))
         self.modes_sweep_var.set(bool(c.compute_modes_during_sweep))
         self.splines_var.set(bool(c.interpolated_splines))
+        self._update_deflation_panel()
+        self._update_orbit_panel()
         self.mode_var.set(c.mode)
         self.movepoint_var.set(bool(c.move_point_active))
         self.movepoint_check.configure(state="normal" if c.mode=="mp" else "disabled")
@@ -1023,6 +1598,7 @@ class BifurcationTkApp:
             act=self._actions[aid]
             if act.getter is not None:
                 var.set(bool(act.getter()))
+        self._sync_radio_vars()
 
         self._fill_info(self.current_info,c.current_point,"current")
         self._fill_info(self.selected_info,c.selected_point,"selected")
@@ -1042,6 +1618,179 @@ class BifurcationTkApp:
         if slice_desc:
             summary+=" | fixed: "+slice_desc
         self.summary_var.set(summary)
+
+    def _on_canvas_drawn(self):
+        """The diagram was repainted, possibly because the user zoomed or panned.
+
+        Only the Deflation tab's range line depends on the axis limits, so only that is recomputed -
+        a full _update_panels() here would rebuild the trees on every repaint, and a repaint happens
+        during a sweep at every status update.
+        """
+        if self._torn_down:
+            return
+        try:
+            self._update_deflation_panel()
+        except tk.TclError:
+            pass    # the window went away underneath a pending draw
+
+    def _update_orbit_panel(self):
+        """Re-render the Orbit tab from the controller, and say what this point can and cannot do."""
+        import math
+        c=self.controller
+        if not self._is_focused(self.orbit_nt_entry):
+            self.orbit_nt_var.set("{:d}".format(int(c.orbit_NT)))
+        if not self._is_focused(self.orbit_order_entry):
+            self.orbit_order_var.set("{:d}".format(int(c.orbit_order)))
+        if not self._is_focused(self.orbit_eps_entry):
+            self.orbit_eps_var.set("auto" if c.orbit_eps is None else "{:g}".format(c.orbit_eps))
+        if not self._is_focused(self.orbit_ampl_entry):
+            self.orbit_ampl_var.set("{:g}".format(c.orbit_amplitude_factor))
+        if not self._is_focused(self.orbit_samples_entry):
+            self.orbit_samples_var.set("auto" if c.orbit_observable_samples is None
+                                       else "{:d}".format(int(c.orbit_observable_samples)))
+        if not self._is_focused(self.floquet_n_entry):
+            self.floquet_n_var.set("all" if c.floquet_n is None else "{:d}".format(int(c.floquet_n)))
+        self.orbit_mode_var.set(str(c.orbit_mode))
+        self.orbit_tconstr_var.set(str(c.orbit_T_constraint))
+        self.floquet_method_var.set(str(c.floquet_method))
+        self.orbit_collapse_var.set(bool(c.orbit_check_collapse))
+        self.orbit_portable_var.set(bool(c.orbit_portable))
+        self.floquet_enabled_var.set(bool(c.floquet_enabled))
+        self.floquet_shift_var.set(bool(c.floquet_shift_invert))
+
+        # Multipliers can only be had from a discretization that carries a degree of freedom at the
+        # end of the period. Greyed out rather than left to fail once per continuation step.
+        # bspline included: it has no multipliers of its own, but they are computed for it on a
+        # collocation sampling (BifurcationController._orbit_floquet), so the settings do apply.
+        can_floquet=str(c.orbit_mode) in ("collocation","floquet","bspline")
+        try:
+            self.floquet_method_combo.configure(state="readonly" if can_floquet else "disabled")
+            self.floquet_n_entry.configure(state="normal" if can_floquet else "disabled")
+        except tk.TclError:
+            pass
+
+        point=c.current_point
+        info=(point.orbit_info if point is not None else None) or {}
+        if info and point is not None:
+            unit=(" "+c._orbit_T_unit) if c._orbit_T_unit else ""
+            text="Period {:.6g}{:s}, {:d} time steps ({:s} order {:d})".format(
+                float(point.obs_values.get(ORBIT_T_KEY,float("nan"))),unit,int(info.get("nT",0)),
+                str(info.get("mode","?")),int(info.get("order",0)))
+            if point.floquet:
+                lead=max(point.floquet,key=lambda m: abs(m))
+                text+=", leading |mu| = {:.4g}".format(abs(lead))
+        else:
+            try:
+                refusal=c.orbit_can_be_started()
+            except Exception:
+                refusal=None
+            at_hopf=(point is not None and point.eig_value_Re==0
+                     and (point.bifurcation_info or {}).get("type")=="hopf")
+            if refusal is not None:
+                text=refusal
+            elif at_hopf:
+                text="This is a Hopf bifurcation: it sheds a periodic orbit."
+            else:
+                text="Locate a Hopf bifurcation to switch onto its periodic orbit."
+        self.orbit_state_var.set(text)
+
+        # The step off the Hopf is the one ds buys, because the orbit's parameter offset IS eps**2.
+        hint=""
+        if c.orbit_eps is None:
+            try:
+                offset=c.branch_switch_parameter_offset()
+                if math.isfinite(offset) and offset>0:
+                    hint="ds currently buys {:.4g} in {:s}, i.e. eps = {:.4g}".format(
+                        offset,c._get_paramname_str(),math.sqrt(offset))
+            except Exception:
+                hint=""
+        self.orbit_eps_hint_var.set(hint)
+
+        # What the INSTALLED orbit is discretized with, which is not the same question as the mode
+        # set above: the settings apply to the next switch until "Apply to this orbit" is pressed,
+        # and telling the user their mode has multipliers while the orbit in front of them has none
+        # is the confusion that button exists to resolve.
+        installed=str(info.get("mode","")) if (point is not None and info) else ""
+        if point is not None and point.floquet:
+            nun=c.orbit_unstable_count(point.floquet)
+            self.floquet_info_var.set("{:d} multiplier{:s}, {:d} outside the unit circle".format(
+                len(point.floquet),"" if len(point.floquet)==1 else "s",nun))
+        elif installed=="bspline":
+            self.floquet_info_var.set(
+                "A periodic B-spline basis has no degree of freedom at the end of the period and so "
+                "no multipliers of its own; they are computed on a collocation sampling of this "
+                "orbit, which leaves the orbit itself untouched.")
+        elif installed and installed not in ("collocation","floquet"):
+            self.floquet_info_var.set(
+                "This orbit is discretized with '{:s}', which carries no degree of freedom at the end "
+                "of the period and cannot be sampled onto one that has. Set the mode to collocation "
+                "and press 'Apply to this orbit'.".format(installed))
+        elif not can_floquet:
+            self.floquet_info_var.set("'{:s}' carries no degree of freedom at the end of the period, "
+                                      "so it has no Floquet multipliers of its own.".format(str(c.orbit_mode)))
+        else:
+            self.floquet_info_var.set("")
+
+    def _update_deflation_panel(self):
+        """Refresh the Deflation tab. Entries under the cursor are left alone, as everywhere else."""
+        c=self.controller
+        if not self._is_focused(self.defl_alpha_entry):
+            self.defl_alpha_var.set("{:g}".format(c.deflation_alpha))
+        if not self._is_focused(self.defl_p_entry):
+            self.defl_p_var.set(str(int(c.deflation_p)))
+        if not self._is_focused(self.defl_pert_entry):
+            self.defl_pert_var.set("auto" if c.deflation_perturbation is None
+                                   else "{:g}".format(c.deflation_perturbation))
+        if not self._is_focused(self.defl_tries_entry):
+            self.defl_tries_var.set(str(int(c.deflation_random_tries)))
+        if not self._is_focused(self.defl_seed_entry):
+            self.defl_seed_var.set("" if c.deflation_random_seed is None else str(int(c.deflation_random_seed)))
+        if not self._is_focused(self.defl_newton_entry):
+            self.defl_newton_var.set("" if c.deflation_max_newton_iterations is None
+                                     else str(int(c.deflation_max_newton_iterations)))
+        self.defl_eigpert_var.set(bool(c.deflation_use_eigenperturbation))
+        if not self._is_focused(self.defl_steps_entry):
+            self.defl_steps_var.set(str(int(c.deflated_scan_steps)))
+        if not self._is_focused(self.defl_dparam_entry):
+            self.defl_dparam_var.set("auto" if c.deflated_scan_dparam is None
+                                     else "{:g}".format(c.deflated_scan_dparam))
+        self.defl_scan_eig_var.set(bool(c.deflated_scan_eigensolve))
+
+        # The perturbation carries the SCALE of the whole search, so what "auto" resolved to has to be
+        # visible - and so does the case where it could not resolve to anything, on a solution that is
+        # exactly zero, which is the one time the number has to be set by hand.
+        if c.deflation_perturbation is None:
+            try:
+                amp=c.deflation_perturbation_value()
+                self.defl_pert_hint_var.set(
+                    "auto = {:g}".format(amp) if amp!=0.5 or c.current_point is None else
+                    "auto: the solution is zero, so 0.5 is a guess - set the field's own scale here")
+            except Exception:
+                self.defl_pert_hint_var.set("")
+        else:
+            self.defl_pert_hint_var.set("")
+
+        n=c.deflation_known_count()
+        self.defl_known_var.set("Avoiding {:d} solution{:s} at this parameter value".format(
+            n,"" if n==1 else "s") if n else
+            "Nothing deflated yet: the first solve will avoid the current solution")
+        # The scan range needs a parameter and an initialised problem to read its value from.
+        try:
+            values=c.deflated_scan_values() if isinstance(c._paramname,str) else None
+        except Exception:
+            values=None
+        if values and len(values)>1 and all(math.isfinite(v) for v in values):
+            text="Scan: {:s} = {:g} ... {:g} in {:d} step{:s}".format(
+                str(c._paramname),values[0],values[-1],len(values)-1,
+                "" if len(values)==2 else "s")
+            # Say so when the view is what shortened it, or the step count reads as a bug.
+            if c.deflated_scan_is_clipped():
+                text+=" (cut short by the visible range)"
+            self.defl_range_var.set(text)
+        else:
+            # No parameter, no step size, or a value that is not a number: say nothing rather than
+            # print "nan ... nan".
+            self.defl_range_var.set("")
 
     def _update_parameter_table(self):
         c=self.controller
@@ -1074,7 +1823,10 @@ class BifurcationTkApp:
         desc=c.describe_current_slice()
         if branch is None:
             self.slice_label.configure(text="")
-        elif branch.kind=="locus":
+        elif branch.kind==BRANCH_ORBIT:
+            self.slice_label.configure(text="Periodic orbits, continued in {:s}.\nFixed: {:s}".format(
+                str(branch.continuation_parameter),branch.describe_slice()))
+        elif branch.kind==BRANCH_LOCUS:
             self.slice_label.configure(text="Locus of {:s} bifurcations in ({:s}, {:s}).\nFixed: {:s}".format(
                 branch.bifurcation_type or "unclassified",str(branch.continuation_parameter),
                 str(branch.tracked_parameter),desc or "-"))
@@ -1093,9 +1845,33 @@ class BifurcationTkApp:
             lines.append("{:s} = {:.10g}".format(c._get_paramname_str(),point.param_value))
             obs=c._current_observable
             if obs is not None and obs in point.obs_values:
-                lines.append("{:s} = {:.10g}".format(obs,point.obs_values[obs]))
-            lines.append("eigenvalue = {:.6g} {:+.6g}i".format(point.eig_value_Re,point.eig_value_Im))
-            if point.eig_value_Re==0:
+                if point.orbit_info is not None:
+                    # On an orbit the recorded value is the average over the cycle; showing it without
+                    # saying so invites it to be read as the solution's value.
+                    lo,hi=orbit_band_names(obs)
+                    lines.append("{:s} = {:.10g} (mean over the period)".format(obs,point.obs_values[obs]))
+                    if lo in point.obs_values and hi in point.obs_values:
+                        lines.append("   from {:.10g} to {:.10g}".format(point.obs_values[lo],
+                                                                         point.obs_values[hi]))
+                else:
+                    lines.append("{:s} = {:.10g}".format(obs,point.obs_values[obs]))
+            if point.orbit_info is not None:
+                info=point.orbit_info
+                unit=(" "+c._orbit_T_unit) if c._orbit_T_unit else ""
+                lines.append("period = {:.10g}{:s}".format(
+                    float(point.obs_values.get(ORBIT_T_KEY,float("nan"))),unit))
+                lines.append("{:d} time steps, {:s} order {:d}".format(
+                    int(info.get("nT",0)),str(info.get("mode","?")),int(info.get("order",0))))
+                if point.floquet:
+                    lead=max(point.floquet,key=lambda m: abs(m))
+                    lines.append("leading multiplier = {:.6g} {:+.6g}i  (|mu| = {:.6g})".format(
+                        float(lead.real),float(lead.imag),abs(lead)))
+                    hint=_multiplier_hint(lead)
+                    if hint:
+                        lines.append("--> "+hint)
+            lines.append(("Floquet exponent = " if point.orbit_info is not None else "eigenvalue = ")+
+                         "{:.6g} {:+.6g}i".format(point.eig_value_Re,point.eig_value_Im))
+            if point.eig_value_Re==0 and point.orbit_info is None:
                 kind="bifurcation"
                 if point.bifurcation_info is not None:
                     kind=str(point.bifurcation_info.get("type",kind))
@@ -1111,7 +1887,7 @@ class BifurcationTkApp:
     def _describe_branch(self,branch)->str:
         """The branch's own summary, plus how it relates to the diagram being worked on."""
         info=branch.describe()
-        if branch.kind=="locus":
+        if branch.kind==BRANCH_LOCUS:
             # A locus varies two parameters deliberately, so it sits in no single slice and calling it
             # "other slice" would be misleading - describe() already says what it is.
             pass
@@ -1135,7 +1911,11 @@ class BifurcationTkApp:
             self._eigen_signature=None
             return
         values=list(point.eig_values)
-        signature=(id(point),len(values),which,tuple(point.eig_modes or ()),c.count_normal_modes_in_stability)
+        # len(point.floquet) is in the signature because an orbit point's list is rebuilt from the
+        # multipliers: without it, switching to a point whose spectrum happens to be the same length
+        # leaves the previous point's multipliers on screen.
+        signature=(id(point),len(values),which,tuple(point.eig_modes or ()),
+                   c.count_normal_modes_in_stability,len(point.floquet),point.tracked_eigenindex)
         if signature==self._eigen_signature:
             return                      # nothing to redo on every redraw
         self._eigen_signature=signature
@@ -1155,16 +1935,45 @@ class BifurcationTkApp:
                 # The settings were changed after this was computed, which is precisely when the
                 # Recompute command is what the user is looking for.
                 note+=" - computed with older settings, recompute to refresh"
+            if point.tracked_eigenindex is not None:
+                # Otherwise the "*" in the list is unexplained, and the one thing it has to say is
+                # which of these the bifurcation was tracked on - the rest are the base state's.
+                note+=", * = tracked"
             self.eigen_label_var.set("{:s} point: {:d} eigenvalue{:s}{:s}, {:d} unstable".format(
                 which,len(values),"" if len(values)==1 else "s",note,nunstable))
         self.eigen_tree.delete(*self.eigen_tree.get_children())
+        if point.floquet:
+            # An orbit: the MULTIPLIERS are what is shown, because they are what says which kind of
+            # bifurcation is approaching. The exponents stored alongside them drive the stability of
+            # the drawn branch and are one column away, in the info box above.
+            self.eigen_tree.heading("mode",text="|mu|")
+            self.eigen_tree.heading("re",text="Re mu")
+            self.eigen_tree.heading("im",text="Im mu")
+            nun=c.orbit_unstable_count(point.floquet)
+            self.eigen_label_var.set("{:s} point: {:d} Floquet multiplier{:s}, {:d} outside the unit "
+                                     "circle".format(which,len(point.floquet),
+                                     "" if len(point.floquet)==1 else "s",nun))
+            for i,m in enumerate(sorted(point.floquet,key=lambda z: -abs(z))):
+                mag=abs(m)
+                tags=("unstable",) if mag>1.0+c.floquet_unstable_tol else (
+                     ("critical",) if abs(mag-1.0)<=c.floquet_unstable_tol else ())
+                self.eigen_tree.insert("","end",text=str(i),
+                                       values=("{:.6g}".format(mag),"{:+.6g}".format(float(m.real)),
+                                               "{:+.6g}".format(float(m.imag))),tags=tags)
+            return
+        self.eigen_tree.heading("mode",text="m/k")
+        self.eigen_tree.heading("re",text="Re")
+        self.eigen_tree.heading("im",text="Im")
         shown=values if values else [complex(point.eig_value_Re,point.eig_value_Im)]
         modes=point.eig_modes if point.eig_modes is not None and len(point.eig_modes)==len(shown) else None
         for i,v in enumerate(shown):
             re,im=float(v.real),float(v.imag)
             tags=("unstable",) if re>0 else (("critical",) if re==0 else ())
             mode="" if modes is None else "{:g}".format(modes[i])
-            self.eigen_tree.insert("","end",text=str(i),
+            # The tracked one is marked rather than left out: it IS part of this spectrum, and its
+            # index is what "Locate the bifurcation of the selected eigenvalue" is read off.
+            label=str(i)+("*" if i==point.tracked_eigenindex else "")
+            self.eigen_tree.insert("","end",text=label,
                                    values=(mode,"{:+.6g}".format(re),"{:+.6g}".format(im)),tags=tags)
 
     def _update_tree(self):
@@ -1369,7 +2178,7 @@ class BifurcationTkApp:
 
     def _refresh_plots(self):
         """Re-render every field pane from the problem's current state."""
-        if not self.plot_panes.has_any():
+        if self._torn_down or not self.plot_panes.has_any():
             return
         self.plot_panes.refresh()
         self._plots_dirty=False
@@ -1393,9 +2202,20 @@ class BifurcationTkApp:
         self.fieldplot_menu.add_separator()
         # An eigenfunction plot is the same plot with eigenvector/eigenmode set, so it is derived from
         # the plotter the script already wrote rather than asked for again.
+        # A real eigenvalue's eigenvector is fixed only up to a global phase, and on a complex PETSc
+        # build there is no reason for that phase to come back as zero: Re v and Im v are then the
+        # same function at two amplitudes, and offering both draws the same picture twice.
+        real_mode=self.controller.eigenvector_is_essentially_real(0)
         for si,src in enumerate(sources):
             prefix=type(src).__name__+": " if len(sources)>1 else ""
             for mode in ("real","imag"):
+                if mode=="imag" and real_mode:
+                    # Disabled and labelled, rather than absent: an entry that silently disappears
+                    # between two refreshes is harder to understand than one that says why.
+                    self.fieldplot_menu.add_checkbutton(
+                        label=prefix+"Eigenfunction 0 (imag part - the eigenvector is real)",
+                        state="disabled")
+                    continue
                 var=self._eigen_vars.setdefault((si,0,mode),tk.BooleanVar())
                 var.set(self.plot_panes.eigen_pane_shown(si,0,mode))
                 self.fieldplot_menu.add_checkbutton(
@@ -1454,7 +2274,9 @@ class BifurcationTkApp:
         if not sel:
             return None
         try:
-            return int(self.eigen_tree.item(sel[0],"text"))
+            # rstrip: the tracked eigenvalue's row carries a trailing "*", and int() of that is a
+            # ValueError - which this used to swallow, leaving the button silently doing nothing.
+            return int(str(self.eigen_tree.item(sel[0],"text")).rstrip("*"))
         except (ValueError,tk.TclError):
             return None
 
@@ -1545,6 +2367,41 @@ class BifurcationTkApp:
         except RuntimeError as e:
             messagebox.showwarning("Cannot split",str(e),parent=self.root)
 
+    def _delete_branch(self):
+        """Delete a whole branch, after saying exactly which one and what is lost.
+
+        The only command in the diagram that throws state dumps away for good, so it names the branch,
+        its point count and the fact that reloading will not bring it back - and defaults to Cancel,
+        because the branch that is one click away in the tree is the one people mean to keep.
+        """
+        c=self.controller
+        branch=c.selected_branch if c.selected_branch is not None else c.current_branch
+        if branch is None:
+            messagebox.showwarning("Cannot delete","There is no branch to delete",parent=self.root)
+            return
+        if len(c.branches)<2:
+            messagebox.showwarning("Cannot delete",
+                                   "This is the last branch of the diagram; deleting it would leave "
+                                   "the problem sitting on nothing.",parent=self.root)
+            return
+        try:
+            index=c._branch_index_of(branch)
+        except RuntimeError as e:
+            messagebox.showwarning("Cannot delete",str(e),parent=self.root)
+            return
+        which="the branch you are on" if branch is c.current_branch else "the selected branch"
+        if not messagebox.askokcancel(
+                "Delete branch",
+                "Delete {:s} (branch {:d}, {:d} point{:s})?\n\n"
+                "Its state dumps are removed from disk as well, so this cannot be undone by "
+                "reloading the diagram.".format(which,index,len(branch),"" if len(branch)==1 else "s"),
+                default=messagebox.CANCEL,icon=messagebox.WARNING,parent=self.root):
+            return
+        try:
+            self.controller.delete_branch(branch)
+        except RuntimeError as e:
+            messagebox.showwarning("Cannot delete",str(e),parent=self.root)
+
     def _merge_branches(self):
         # Named in the question, because which branch survives and which one disappears from the tree
         # is not obvious from the menu entry alone.
@@ -1609,7 +2466,10 @@ class BifurcationTkApp:
         chosen:list[str]=[]
         row=ttk.Frame(dlg,padding=8)
         row.pack(side=tk.BOTTOM,fill=tk.X)
-        ttk.Button(row,text="OK",command=lambda: (chosen.append(var.get()),dlg.destroy())).pack(side=tk.RIGHT)
+        def _accept():
+            chosen.append(var.get())
+            dlg.destroy()
+        ttk.Button(row,text="OK",command=_accept).pack(side=tk.RIGHT)
         ttk.Button(row,text="Cancel",command=dlg.destroy).pack(side=tk.RIGHT,padx=4)
         dlg.transient(self.root)
         dlg.grab_set()
@@ -1660,6 +2520,15 @@ class BifurcationTkApp:
                                 initialvalue=float(_real_part(self.controller.shift)))
         if s is not None:
             self.controller.shift=s
+        # Its own value, because the shift above defaults to 0 and 0 is the one value that cannot work
+        # at a tracked point: the tracker has put an eigenvalue exactly there. 0 therefore means "do
+        # not take that eigensolve at all", which is also how it is switched off from a script.
+        t=simpledialog.askfloat("Eigenvalue settings",
+                                "Shift at a tracked bifurcation (0 = do not solve the rest of the "
+                                "spectrum there):",parent=self.root,
+                                initialvalue=float(_real_part(self.controller.tracked_eigen_shift or 0)))
+        if t is not None:
+            self.controller.tracked_eigen_shift=t if t else None
 
     def _dialog_parameter_range(self):
         c=self.controller
@@ -1694,15 +2563,108 @@ class BifurcationTkApp:
             self.controller.save_all()
         except Exception as e:
             self.log("Could not save the diagram on exit: "+repr(e))
-        self.root.destroy()
+        self.teardown()
+
+    def teardown(self):
+        """Destroy the window and let go of the problem. Idempotent.
+
+        A window that is not destroyed is never freed: its widgets and callbacks are held by the Tcl
+        interpreter, which the cyclic collector cannot see into, so the window - and the controller,
+        the plotter and through them the Problem, its meshes and every Expression they hold - lives
+        to the end of the process, and nanobind reports all of it as leaked instances while the
+        interpreter shuts down. Measured on a window built and left alone: 61 leaked instances and
+        the window still alive after del + gc.collect(); destroying it: none, collected.
+
+        The panes need closing on top of that, being pyplot-managed figures that matplotlib keeps in
+        its own process-wide registry (see :py:mod:`~pyoomph.utils.bifurcation_gui.panes`), and the
+        observer callbacks and the facade's ``app`` attribute keep the window reachable from a
+        controller that outlives it.
+        """
+        if self._torn_down:
+            return
+        # A sweep may be running: the close arrived through the event loop that step() pumps. Ask it
+        # to stop at its next check - otherwise it continues stepping into a window that is gone.
+        # Only while one is running, so the flag is not left set for whatever the script does next.
+        if self._busy:
+            self.controller.request_abort()
+        self._torn_down=True
+        try:
+            self.plot_panes.destroy_all()
+        except Exception:
+            pass    # the widgets may already be gone; the figures still have to be closed
+        self.controller.clear_observer()
+        self.plotter.on_drawn=None
+        # The facade is the BifurcationGUI a script keeps after start() returns - it must not go on
+        # holding a window that no longer exists (update_plot() falls back to drawing directly).
+        if getattr(self.facade,"app",None) is self:
+            self.facade.app=None    #type:ignore[union-attr]
+        self._tree_items.clear()
+        self._tree_index.clear()
+        self._branch_index.clear()
+        self._eigen_vars.clear()
+        try:
+            self.root.destroy()
+        except Exception:
+            pass    # already gone: closed by the window manager, or torn down twice
+        # The diagram is drawn into the window's Tk canvas. Hand the figure a plain Agg canvas back,
+        # so a facade that outlives the window can still draw and save the diagram (update_plot(),
+        # savefig()) without reaching into the destroyed widget graph.
+        try:
+            from matplotlib.backends.backend_agg import FigureCanvasAgg
+            FigureCanvasAgg(self.plotter.figure)
+        except Exception:
+            pass
+        # And finally let go of the problem's side of things: the window object can survive its own
+        # destruction (the Tcl interpreter holds what it registered, and the collector cannot see
+        # into it), so whatever does survive must at least hold nothing of pyoomph's.
+        self._actions.clear()
+        self._menu_entries.clear()
+        self._toolbar_buttons.clear()
+        self._check_vars.clear()
+        self._radio_vars.clear()
+        self._radio_getters.clear()
+        self._axis_choices.clear()
+        # Dropped, not declared Optional: every other method may assume these are present, and one
+        # that still runs after teardown() is a bug that should say so rather than read a None.
+        self.controller=cast("BifurcationController",None)
+        self.plotter=cast("BifurcationDiagramPlotter",None)
+        self.plot_panes=cast(PlotterPaneSet,None)
+        self.facade=None
 
     def run(self):
-        self._rebuild_axis_menus()
-        self._rebuild_fieldplot_menu()
-        self.refresh()
-        if self.plot_panes.has_any() and self.auto_update_plots:
-            self._refresh_plots()
-        self.root.mainloop()
+        # Everything is inside the try, not just the event loop: setting the window up reads the
+        # controller (the axis menus do), and a session that is not far enough along for that used to
+        # leave the whole window standing behind the exception - never freed, see teardown().
+        try:
+            self._rebuild_axis_menus()
+            self._rebuild_fieldplot_menu()
+            self.refresh()
+            if self.plot_panes.has_any() and self.auto_update_plots:
+                self._refresh_plots()
+            self.root.mainloop()
+        finally:
+            # Whatever ended the event loop - the close button, a script calling destroy(), an
+            # exception on the way in - the window has to be destroyed and the problem released.
+            self.teardown()
+
+
+def _multiplier_hint(mu)->str:
+    """What a Floquet multiplier approaching the unit circle would be, if it got there.
+
+    The multiplier says which of the three it is and the exponent cannot: a real multiplier leaving
+    through -1 and a complex pair leaving anywhere else both have the same exponent real part, and
+    they are a period doubling and a torus respectively. Nothing here LOCATES any of them - this is a
+    label on what the numbers are showing.
+    """
+    d=abs(abs(mu)-1.0)
+    if d>=0.05:
+        return ""
+    if abs(complex(mu).imag)>1e-8*abs(mu):
+        return "close to the unit circle as a complex pair: a torus (Neimark-Sacker) bifurcation"
+    if complex(mu).real<0:
+        return "close to -1: a period doubling (with a DAE and an odd number of time intervals, "\
+               "check that it is not the discretization's own -1)"
+    return "close to +1: a fold of the cycle"
 
 
 def _real_part(v):

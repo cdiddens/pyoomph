@@ -1,5 +1,7 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #
 #  @section LICENSE
 #
@@ -440,7 +442,13 @@ def test_diagonal_requirement_comes_from_the_linear_solver():
     unambiguous here, and checks the override machinery rather than the PETSc option parsing."""
     with _CavityProblem(N=6) as p:
         p.quiet()
-        p.set_linear_solver("pardiso")
+        try:
+            p.set_linear_solver("pardiso")
+        except RuntimeError as e:
+            # MKL has no arm64 build, so the macOS wheels for Apple silicon have no Pardiso at all -
+            # there is nothing to fall back to that would still exercise the point of the test, which
+            # is a solver answering requires_explicit_diagonal() with False.
+            pytest.skip("the pardiso solver is not available here: %s" % e)
         p.initialise()
         assert p.get_la_solver().requires_explicit_diagonal() is False
         p.solve()
@@ -505,7 +513,15 @@ def test_field_coupling_mask_is_tighter_than_connectivity():
         masked = _masked_pattern(p, "jacobian")
         assert masked.nnz < connectivity.nnz
         _M, J = _eigen_matrices(p)
-        assert masked.nnz == J.nnz, "the field-pair mask should reproduce the numerical pattern exactly here"
+        # The correctness property is containment: nothing may be assembled outside the mask. Exact
+        # equality is NOT portable - it says every predicted entry is numerically nonzero, and which
+        # ones land on exactly 0.0 is a property of the arithmetic. arm64 macOS prunes 33 of these
+        # 14666 where x86_64 prunes none. The slack is capped at 1 % so that a mask which regressed
+        # towards plain connectivity (~37 % over, per the docstring) still fails here.
+        assert ((J != 0).astype(int) - (masked > 0).astype(int) > 0).nnz == 0, \
+            "the numerical pattern has entries the field-pair mask does not predict"
+        assert J.nnz <= masked.nnz <= J.nnz * 1.01, \
+            "the field-pair mask should predict the numerical pattern to within pruned zeros (%d vs %d)" % (masked.nnz, J.nnz)
         # The mass matrix mask must be tighter still, and a subset of the Jacobian's.
         mass_masked = _masked_pattern(p, "mass")
         assert mass_masked.nnz < masked.nnz / 2

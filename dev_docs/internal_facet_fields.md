@@ -5,7 +5,7 @@ nodal DG spaces `D1`/`D2`/`D1TB`/`D2TB`) can be declared on the `_internal_facet
 mesh (1d/2d/3d, all element shapes including mixed), and **every one of them** survives spatial
 adaptation (§5), remeshing (§6), MPI `--distribute` (§7.1) and a state file (§8). Refused by design:
 continuous spaces on the skeleton (§2), and the parent-space constraints a `Dx` facet field inherits
-(§5.4). User docs: `AGENTS_ADVANCED.md` ("Unknowns on the facet skeleton") and the tutorial
+(§5.4). User docs: `agents/advanced.md` ("Unknowns on the facet skeleton") and the tutorial
 `docs/source/tutorial/dg/facetfields.rst`; tests: `tests/test_internal_facet_fields.py` and
 `tests/test_mpi_facet_fields.py`.
 
@@ -30,6 +30,19 @@ class Trace(Equations):
         self.define_scalar_field("lam","DL")
 eqs += Trace() @ "_internal_facets_"
 eqs.set_facet_recovery("lam", -dot(var("normal"), avg(grad(var("u")))))  # optional, see §5.3
+```
+
+or, since the facet weak form could always be written in the bulk class, declared from there too
+(§11):
+
+```python
+class HDGPoisson(Equations):
+    def __init__(self):
+        super().__init__()
+        self.requires_interior_facet_terms = True
+    def define_fields(self):
+        self.define_scalar_field("u","D2")
+        self.define_scalar_field("lam","DL",at_internal_facets=True)
 ```
 
 ---
@@ -220,6 +233,46 @@ was their predicate, stays as a query and is still bound to Python.
 | `Dx` whose parent domain cannot carry it | `pyoomph/generic/codegen.py` | pre-existing and unrelated to the transfer; §5.4 |
 | non-conforming 3d, non-uniform 2d-triangle enumeration | 3d/2d enumerators | `build_facet_adjacency` is the designated basis for both |
 | 1d-bulk and 3d **remeshing** of skeleton fields | untested, no guard | no `LineMesh` remesher exists; 3d transfer should work but has no test. 1d and 3d under `--distribute` *are* covered (`tests/test_mpi_facet_fields.py`) — it is only the remesh transfer that is not |
+| a skeleton of a **2d interface**, i.e. a free surface in 3d | `src/mesh.cpp:5988` | see §7.2 |
+| a skeleton of an interface under `--distribute` | `src/problem.cpp:4343` | see §7.2 |
+
+### 7.2 The skeleton of an INTERFACE, not of a bulk
+
+Everything above is about the `_internal_facets_` domain of a *bulk* mesh. An interface can carry one
+too — `domain/interface/_internal_facets_` — and that is what an upwind DG surfactant needs
+(`dev_docs/surfactant_transport.md` §7). It works, in 2d and axisymmetric, and it had no test or
+mention anywhere until then:
+
+* `InterfaceMesh::fill_internal_facet_buffers` (`src/mesh.cpp:5975`) pairs the two interface elements
+  sharing a vertex node. A closed curve of N elements gives N facets, an open one N−1 — exterior ends
+  are correctly excluded.
+* The facet element is `InterfaceElementPoint0d` (`oomph::PointIntegral`, J = 1), the same class a
+  contact line uses, and `var("normal")` there is the **in-surface conormal**, not the interface
+  normal (which stays reachable as `var("normal", domain="..")`).
+* The residual transfer to the child has its own path at `pyoomph/meshes/mesh.py:1986`, the interface
+  counterpart of the bulk one in `Problem.compile_meshes`.
+* No 2:1 bookkeeping is needed and its absence is not a gap: a facet of a curve is a point, and a
+  point is shared by exactly two elements whatever their sizes. Verified on a Z2-adapted interface
+  with an element-size ratio of 4.
+* **A field owned by the interface is not visible on its own facets.** Unlike a bulk DG field, which
+  the facet element carries as external data, an interface-owned field lives in that interface
+  element's internal data: `var("G")` unrestricted and `jump(G, at_facet=True)` both fail at code
+  generation, while `var("G", domain="+")`, `jump(G)` and `avg(G)` work. Facet terms there must be
+  written with `+`/`-` restrictions.
+
+**3d is the missing piece.** `be->dim() != 1` throws. The fix is a `dim()==2` branch built on
+`TemplatedMeshBase::build_facet_adjacency()` (`src/mesh.cpp:8814`), which is already shape-neutral and
+works off `get_possible_face_indices()` / `get_vertex_nodes_of_face()` — both inherited by
+`InterfaceElement*` from their `BulkElement*` base — so it is a smaller job than it looks. The facet
+elements it would have to produce (`InterfaceElementLine1d*`) already exist. Expect the same
+conforming-meshes-only restriction the 3d bulk enumerator carries.
+
+**MPI is a separate piece of work.** `Problem::setup_interior_facet_halo_scheme` refuses any skeleton
+whose bulk is an `InterfaceMesh`, and the reason is structural: the key it pairs facets across ranks
+with is the bulk element's `(root global_base_index, refinement path, face index)`, and here those
+"bulk" elements are face elements built on the fly rather than mesh elements numbered before the
+distribution. A partition-independent key would have to be built from the *interface's* own bulk
+element first.
 
 ### 7.1 MPI `--distribute`
 
@@ -290,9 +343,9 @@ and 4 ranks, reproducing the serial answer.
 ## 8. State files
 
 A state file has to reproduce exactly the state it was written at. Until recently it did not, and not
-only for `Dx`: **no interface or skeleton element data was written at all.** `Problem.define_state_file`
+only for `Dx`: **no interface or skeleton element data was written at all.** `Problem._define_state_file`
 looped `self._meshdict` only (asserting `not isinstance(mesh, InterfaceMesh)`), and `InterfaceMesh` has
-no `define_state_file` of its own. What happened on load instead: `_load_state` snapshots the *pre-load*
+no `_define_state_file` of its own. What happened on load instead: `_load_state` snapshots the *pre-load*
 interface values (`clear_before_adapt`), loads the bulk mesh, and lets
 `actions_after_adapt → restore_discontinuous_data` refit that pre-load snapshot onto the loaded
 geometry. So the facet values after a load were whatever the in-memory problem happened to hold — for a
@@ -310,7 +363,7 @@ fresh reader, zeros — and not what the file recorded. `DL`/`D0` were no better
   makes the record partition-independent — a file written serially loads on any number of ranks.
 * **Two-phase load.** The interface elements do not exist in their final form until after
   `actions_after_adapt()`, which is well past the point where the bulk block is read. So the block is
-  read into `Problem._pending_interface_states` during `define_state_file` and applied by
+  read into `Problem._pending_interface_states` during `_define_state_file` and applied by
   `Problem._apply_interface_states()` immediately after `actions_after_adapt()` — deliberately *after*
   `restore_discontinuous_data` has run, so the file's values overwrite that refit rather than race it.
   An element whose key is not in the file keeps what the rebuild left it (the refit, or the recovery
@@ -341,7 +394,7 @@ All found because skeleton fields exercise paths nothing else did; none is skele
 
 ## 10. Test map
 
-`tests/test_internal_facet_fields.py` (125 tests): trace projection exact on
+`tests/test_internal_facet_fields.py` (140 tests): trace projection exact on
 quad/tri/line/brick/tet/wedge/pyr/mixed × DL/D1/D2 (+D0); ndof accounting vs
 `facet_adjacency_summary()`; 1d hybridised Poisson (exact for linear, 2nd-order for `sin(πx)`);
 opposite-side orientation exactness for the 3d quad symmetries; SIP-DG over all 11 3d layouts at
@@ -353,7 +406,10 @@ facets, history levels, refine→unrefine round trip, 2:1 case, recovery hook, r
 remeshing (identical remesh machine-exact incl. history, distorted/coarsened/refined with measured
 tolerances, recovery hook, unrestored reporting), each over `DL`/`D0`/`D1`/`D2`; state files loaded
 without a solve, with the values compared bit for bit and keyed by the elements' structural keys;
-all error-message guards.
+all error-message guards. The last group covers §11: the fused single-class formulation against the
+two-class one (identical ndof and a bit-identical dof vector, over `DL`/`D2`/tri/`D0`-on-a-line), the
+three refusals, vector and tensor components, the recovery hook with its control case, one instance
+on two domains, and an interface-level skeleton.
 
 `tests/test_mpi_facet_fields.py` (69 tests, `--full`) is the distributed gate. Two layers, because a
 broken skeleton does not crash: the skeleton MEASURE and the integral of its NORMAL certify the
@@ -390,3 +446,51 @@ opposite way from oomph's `TElement<3,N>` convention, so tet face normals pointe
 inconsistent on every tet-bearing mesh. `add_tetra_3d_C1/C2` repair it now; the whole story, including
 why only the normals - not volumes or stiffness matrices - could notice, is in
 [mesh_construction.md](mesh_construction.md) §6.
+
+## 11. Declaring a facet field from the bulk class
+
+`define_scalar_field`, `define_vector_field`, `define_tensor_field` and `set_facet_recovery` take
+`at_internal_facets=True` (`pyoomph/generic/codegen.py`). The field is then declared **only** on the
+skeleton, not on the declaring domain, so the space rules of §2 apply to it unchanged. This removes
+the one asymmetry the feature had: the facet *weak form* was always writable from the bulk
+(`add_interior_facet_residual`, transferred to the skeleton's `_additional_residuals` in
+`Problem._compile_meshes`), while the facet *unknown* forced a second `Equations` class.
+
+**Why it is record-and-replay rather than a direct definition.** `define_fields()` runs far too late
+to create the skeleton domain: the `_internal_facets_` node has to exist by
+`EquationTree._fill_dummy_equations`, because `_finalize_equations` gives every node its
+`FiniteElementCodeGenerator` and the mesh loop of `Problem._link_geometry_and_equations` builds the
+`InterfaceMesh` objects for all children — all of that before any `define_fields()` is called. So the
+keyword only ever *fills* a skeleton that is already there, which is what
+`requires_interior_facet_terms=True` in `__init__` arranges. That is not an extra burden in practice:
+`add_interior_facet_residual` already demands it, so a class that formulates a facet weak form has
+set it anyway. Without it the declaration raises, naming the class and the line to add.
+
+The declaration is recorded on the skeleton **node** (`EquationTree._pending_internal_facet_defs`),
+not on the declaring equation instance. One `Equations` instance may sit on several domains
+(`eqs @ ["left","right"]`), and each of those skeletons must end up with exactly one copy — recording
+on the instance would accumulate them across the domains instead.
+
+`_fill_dummy_equations` attaches one `_InternalFacetFieldDeclarations` to whichever skeleton is
+present, auto-created or written out by the user; it defines nothing when nothing was recorded, which
+is what makes the user-supplied-skeleton case need no second code path. Its `define_fields` replays
+the field declarations and its `define_residuals` the recovery expressions (`set_facet_recovery` is
+`add_local_function` underneath and needs the fields in place).
+
+**Recording happens on the real pass only.** `_create_dummy_domains_for_DG` runs the bulk domain's
+`define_fields()` a *second* time, on the throwaway generators it builds for the two sides of a facet
+(so that the skeleton's residuals can resolve the opposite-side fields), and that pass happens before
+the skeleton defines its own fields. Everything would therefore be recorded twice. The guard is that
+the bound generator is not the domain's own `_codegen` on a dummy pass, which is exactly the
+condition `_defer_to_internal_facets` returns early on. A repeated field declaration is idempotent
+and would have gone unnoticed; a repeated `set_facet_recovery` registers a second local function,
+which is why this is a test of its own rather than a comment.
+
+**The ordering the replay relies on** is that the declaring domain defines its fields before its
+skeleton does. It holds at both levels: a bulk domain in `MeshFromTemplateBase.__init__`, before the
+`InterfaceMesh` objects of its children exist at all, and an interface in `_finalise_creation`, whose
+codim-1 loop runs before its codim-2 one (`pyoomph/meshes/mesh.py`). A test covers each.
+
+One consequence worth knowing: `scale`/`testscale` passed to the declaration are applied on the
+skeleton, but a scale set separately in the bulk's `define_scaling()` is not inherited by the
+skeleton field — pass it as the declaration's argument.

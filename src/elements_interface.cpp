@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -42,7 +42,7 @@ namespace pyoomph
 	bool InterfaceElementBase::fill_hang_info_with_equations_interface(JITShapeInfo_t *shape_info)
 	{
 		bool res=false;
-		auto * ft = codeinst->get_func_table();
+		auto * ft = jitcode->get_func_table();
 		for (unsigned int ispace=0;ispace<ft->num_present_continuous_spaces;ispace++)
 		{
 			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info = ft->present_continuous_spaces[ispace];
@@ -74,6 +74,73 @@ namespace pyoomph
 		return res;
 	}
 
+	// Stage-3 scan counterpart of fill_hang_info_with_equations_interface() AND of the interface half
+	// of fill_additional_hang_buffer_data() below: true exactly when either of them would report a
+	// hang, without writing a buffer.
+	bool InterfaceElementBase::scan_hang_interface_fields() const
+	{
+		auto *ft = jitcode->get_func_table();
+		for (unsigned ispace = 0; ispace < ft->num_present_continuous_spaces; ispace++)
+		{
+			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t *space_info = ft->present_continuous_spaces[ispace];
+			if (space_info->numfields == space_info->numfields_basebulk)
+				continue; // no interface-only fields in this space
+			const std::vector<unsigned> &s2e = this->get_nodal_space_index_to_element_index_map()[space_info->space_index];
+			const unsigned nnode_space = eleminfo.nnode_of_space[space_info->space_index];
+			for (unsigned l = 0; l < nnode_space; l++)
+			{
+				if (this->hang_info_for_space(space_info, s2e[l]))
+					return true;
+				if (!has_additional_dof_constraints)
+					continue;
+				Node *n = static_cast<Node *>(node_pt(s2e[l]));
+				if (!n)
+					continue;
+				for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info; info = info->next)
+				{
+					if (info->mode != INTERFACE_DOF_CONSTRAIN_TO_C1)
+						continue;
+					for (unsigned j = space_info->numfields_basebulk; j < space_info->numfields; j++)
+						if (space_info->interface_dof_indices[j - space_info->numfields_basebulk] == info->index)
+							return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	// Scan counterpart of interpolate_hang_values_at_interface(): a hanging node in a space carrying
+	// interface-only fields, or a dummy-value map entry for such a space.
+	bool InterfaceElementBase::scan_interface_has_something_to_interpolate() const
+	{
+		auto *ft = jitcode->get_func_table();
+		const std::vector<std::vector<std::vector<unsigned>>> &dummy_map = this->get_dummy_value_interpolation_map();
+		for (unsigned ispace = 0; ispace < ft->num_present_continuous_spaces; ispace++)
+		{
+			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t *space_info = ft->present_continuous_spaces[ispace];
+			if (space_info->numfields <= space_info->numfields_basebulk)
+				continue;
+			if (!dummy_map[space_info->space_index].empty())
+				return true;
+			const std::vector<unsigned> &s2e = this->get_nodal_space_index_to_element_index_map()[space_info->space_index];
+			for (unsigned l = 0; l < eleminfo.nnode_of_space[space_info->space_index]; l++)
+				if (node_pt(s2e[l])->is_hanging(space_info->hangindex))
+					return true;
+		}
+		return false;
+	}
+
+	// The recursion clause of the predicate: fill_hang_info_with_equations() below returns true for
+	// ANY interface element that pulls in a bulk or opposite element, because it then writes the
+	// local-equation REMAP into these very buffers. Skipping that fill would hand the generated code
+	// another element's equation numbers, so the predicate has to keep reporting "hanging" here.
+	bool InterfaceElementBase::hang_fill_would_report_hang(const JITFuncSpec_RequiredShapes_FiniteElement_t &required)
+	{
+		if (required.bulk_shapes || required.opposite_shapes)
+			return true;
+		return BulkElementBase::hang_fill_would_report_hang(required);
+	}
+
 	// Interface-field counterpart to BulkElementBase::fill_additional_hang_buffer_data: additionally
 	// sets up the synthetic hanging scheme for interface-only dofs locally reduced to C1 via
 	// add_additional_dof_constraint (mode INTERFACE_DOF_CONSTRAIN_TO_C1); "index" there is the
@@ -87,7 +154,7 @@ namespace pyoomph
 		bool res = BulkElementBase::fill_additional_hang_buffer_data(shape_info);
 		if (!has_additional_dof_constraints)
 			return res;
-		auto * ft = codeinst->get_func_table();
+		auto * ft = jitcode->get_func_table();
 		const std::vector<std::vector<unsigned>> &c1_dummy_map = this->get_dummy_value_interpolation_map()[SPACE_INDEX_C1];
 		auto get_c1_masters = [&c1_dummy_map](unsigned l_elem) -> const std::vector<unsigned> *
 		{
@@ -111,7 +178,7 @@ namespace pyoomph
 			for (unsigned int l = 0; l < nnode_space; l++)
 			{
 				const unsigned l_elem = space_node_to_elem_node[l];
-				Node *n = dynamic_cast<Node *>(node_pt(l_elem));
+				Node *n = static_cast<Node *>(node_pt(l_elem));
 				for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info != NULL; info = info->next)
 				{
 					if (info->mode != INTERFACE_DOF_CONSTRAIN_TO_C1)
@@ -197,7 +264,7 @@ namespace pyoomph
 	{
 		BulkElementBase::fill_local_dof_contribution_indices(dest);
 
-		const JITFuncSpec_Table_FiniteElement_t *ft = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *ft = jitcode->get_func_table();
 		if (!ft || !ft->contribution_names || !ft->contribution_entries_size) return;
 		std::map<std::string, int> my_class;
 		for (unsigned c = 0; c < ft->contribution_entries_size; c++)
@@ -212,7 +279,7 @@ namespace pyoomph
 		auto adopt = [&](BulkElementBase *src, const std::vector<int> &eqn_map, bool opposite)
 		{
 			if (!src || eqn_map.empty() || src == this) return;
-			const JITFuncSpec_Table_FiniteElement_t *sft = src->get_code_instance()->get_func_table();
+			const JITFuncSpec_Table_FiniteElement_t *sft = src->get_jit_code()->get_func_table();
 			if (!sft || !sft->contribution_names) return;
 			const std::vector<int> &sidx = src->get_local_dof_contribution_indices();
 			const size_t n = std::min(eqn_map.size(), sidx.size());
@@ -249,7 +316,7 @@ namespace pyoomph
 			// A facet whose two sides are the same element has no far side to speak of, and the
 			// disjointness the split relies on would not hold: adopt it as near-side throughout.
 			const bool self_facet = (opposite_side->bulk_element_pt() == this->bulk_element_pt());
-			adopt(dynamic_cast<BulkElementBase *>(opposite_side), opp_interf_eqn_map, !self_facet);
+			adopt(opposite_side, opp_interf_eqn_map, !self_facet);
 			adopt(dynamic_cast<BulkElementBase *>(opposite_side->bulk_element_pt()), opp_bulk_eqn_map, !self_facet);
 		}
 	}
@@ -277,11 +344,12 @@ namespace pyoomph
 
 	void InterfaceElementBase::fill_in_jacobian_from_nodal_by_fd(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian) 
 	{
+		HangInterpPassSuspension __no_pass; // the interface-only perturbation loop below re-enters get_residuals too
 		BulkElementBase::fill_in_jacobian_from_nodal_by_fd(residuals, jacobian);
 		const unsigned n_node = this->nnode();
 		if (n_node == 0) return;
 		this->update_before_nodal_fd();
-		auto *ft=codeinst->get_func_table();
+		auto *ft=jitcode->get_func_table();
 		const std::vector<std::vector<unsigned>> & space_node_to_elem_node_map=this->get_nodal_space_index_to_element_index_map();
 		oomph::Vector<double> newres(residuals.size());
 		for (unsigned int ispace=0;ispace<ft->num_present_continuous_spaces;ispace++)
@@ -395,7 +463,9 @@ namespace pyoomph
 	// get_dummy_value_interpolation_map()) so that both hold consistent interpolated values for output/restart.
 	void InterfaceElementBase::interpolate_hang_values_at_interface()
 	{
-		auto * ft=this->get_code_instance()->get_func_table();
+		if (__measure_skip_hang_fills)
+			return; // measurement lever only, see __measure_skip_hang_fills
+		auto * ft=this->get_jit_code()->get_func_table();
 		const std::vector<std::vector<std::vector<unsigned>>> & dummy_value_interpolation_map=this->get_dummy_value_interpolation_map();
 		for (unsigned int ispace=0;ispace<ft->num_present_continuous_spaces;ispace++)
 		{
@@ -411,7 +481,7 @@ namespace pyoomph
 			if (space_info->numfields<=space_info->numfields_basebulk) continue;
 			for (unsigned int inode=0;inode<nnode;inode++)
 			{
-				pyoomph::Node * node=dynamic_cast<pyoomph::Node*>(this->node_pt(get_nodal_space_index_to_element_index[inode]));
+				pyoomph::Node * node=static_cast<pyoomph::Node*>(this->node_pt(get_nodal_space_index_to_element_index[inode]));
 				if (node->is_hanging(hangindex))
 				{					
 					pyoomph::BoundaryNode * dest_bn=dynamic_cast<pyoomph::BoundaryNode*>(node);
@@ -426,7 +496,7 @@ namespace pyoomph
 						   double val=0.0;
 						   for (unsigned int m=0;m<hang_info->nmaster();m++)
 						   {
-								pyoomph::Node * master_node=dynamic_cast<pyoomph::Node*>(hang_info->master_node_pt(m));
+								pyoomph::Node * master_node=static_cast<pyoomph::Node*>(hang_info->master_node_pt(m));
 								BoundaryNode * boundnode=dynamic_cast<BoundaryNode*>(master_node);
 								if (!boundnode) throw_runtime_error("master_node is not a BoundaryNode");
 								unsigned master_value_index=boundnode->index_of_first_value_assigned_by_face_element(add_field_index);
@@ -444,7 +514,7 @@ namespace pyoomph
 			{
 				for (unsigned int idummy=0;idummy<dummy_value_interpolation.size();idummy++)
 				{
-					pyoomph::Node * dummynode=dynamic_cast<pyoomph::Node*>(this->node_pt(dummy_value_interpolation[idummy][0]));
+					pyoomph::Node * dummynode=static_cast<pyoomph::Node*>(this->node_pt(dummy_value_interpolation[idummy][0]));
 					pyoomph::BoundaryNode * dest_boundnode=dynamic_cast<pyoomph::BoundaryNode*>(dummynode);
 					if (!dest_boundnode) throw_runtime_error("dummynode is not a BoundaryNode");
 					for (unsigned int t=0;t<dummynode->ntstorage();t++)
@@ -455,7 +525,7 @@ namespace pyoomph
 						   double val=0.0;
 						   for (unsigned int m=1;m<dummy_value_interpolation[idummy].size();m++)
 						   {
-							  pyoomph::Node * master_node=dynamic_cast<pyoomph::Node*>(this->node_pt(dummy_value_interpolation[idummy][m]));
+							  pyoomph::Node * master_node=static_cast<pyoomph::Node*>(this->node_pt(dummy_value_interpolation[idummy][m]));
 							  pyoomph::BoundaryNode * boundnode=dynamic_cast<pyoomph::BoundaryNode*>(master_node);
 							  if (!boundnode) throw_runtime_error("master_node is not a BoundaryNode");
 							  unsigned master_index=boundnode->index_of_first_value_assigned_by_face_element(add_field_index);
@@ -492,7 +562,7 @@ namespace pyoomph
 
 			for (unsigned int l_elem = 0; l_elem < this->nnode(); l_elem++)
 			{
-				pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(node_pt(l_elem));
+				pyoomph::Node *n = static_cast<pyoomph::Node *>(node_pt(l_elem));
 				pyoomph::BoundaryNode *dest_bn = dynamic_cast<pyoomph::BoundaryNode *>(n);
 				bool hangs_on_C1 = has_C1_hanging && n->is_hanging(ft->continuous_spaces[SPACE_INDEX_C1].hangindex);
 				for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info != NULL; info = info->next)
@@ -567,13 +637,13 @@ namespace pyoomph
 			std::vector<std::map<oomph::Node*, bool>> local_eqn_number_done(addfields, std::map<oomph::Node*, bool>());									
 			for (unsigned int inode=0;inode<eleminfo.nnode_of_space[space->space_index];inode++)
 			{
-				pyoomph::Node * node=dynamic_cast<pyoomph::Node*>(this->node_pt(space_node_to_elem_map[inode]));
+				pyoomph::Node * node=static_cast<pyoomph::Node*>(this->node_pt(space_node_to_elem_map[inode]));
 				if (node->is_hanging(space->hangindex))
 				{
 					oomph::HangInfo * hang_info=node->hanging_pt(space->hangindex);
 					for (unsigned int m=0;m<hang_info->nmaster();m++)
 					{
-						pyoomph::Node * master_node=dynamic_cast<pyoomph::Node*>(hang_info->master_node_pt(m));
+						pyoomph::Node * master_node=static_cast<pyoomph::Node*>(hang_info->master_node_pt(m));
 						pyoomph::BoundaryNode * boundnode=dynamic_cast<pyoomph::BoundaryNode*>(master_node);
 						if (!boundnode) throw_runtime_error("master_node is not a BoundaryNode");
 
@@ -642,7 +712,7 @@ namespace pyoomph
 	{
 		Local_interface_hang_eqn.clear();
 		
-		auto * ft=this->get_code_instance()->get_func_table();
+		auto * ft=this->get_jit_code()->get_func_table();
 		for (unsigned int ispace=0;ispace<ft->num_present_continuous_spaces;ispace++)
 		{
 			auto space_info=ft->present_continuous_spaces[ispace];
@@ -662,28 +732,31 @@ namespace pyoomph
 			The generated code just accesses the local equations of the bulk element, but then we fake a hanging node, which just hangs on a single master, which is the corresponding local equation (of the external data) in the interface element
 		*/
 
-		const JITFuncSpec_Table_FiniteElement_t *functable = this->codeinst->get_func_table();
-		update_equation_remapping_from_element(dynamic_cast<BulkElementBase *>(this->bulk_element_pt()),functable->merged_required_shapes.bulk_shapes , bulk_eqn_map,1);	
-		if (functable->merged_required_shapes.bulk_shapes && functable->merged_required_shapes.bulk_shapes->bulk_shapes)
+		const JITFuncSpec_Table_FiniteElement_t *functable = this->jitcode->get_func_table();
+		// Must be the very set the attachment used: this hands out local equation numbers OF the attached
+		// external data, so remapping from a wider set would resolve dofs the element does not carry.
+		const JITFuncSpec_RequiredShapes_FiniteElement_t &attach_req = *attachment_required_shapes(functable);
+		update_equation_remapping_from_element(dynamic_cast<BulkElementBase *>(this->bulk_element_pt()),attach_req.bulk_shapes , bulk_eqn_map,1);	
+		if (attach_req.bulk_shapes && attach_req.bulk_shapes->bulk_shapes)
 		{
-			update_equation_remapping_from_element(dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(this->bulk_element_pt())->bulk_element_pt()),functable->merged_required_shapes.bulk_shapes->bulk_shapes,  bulk_bulk_eqn_map,2);
+			update_equation_remapping_from_element(dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(this->bulk_element_pt())->bulk_element_pt()),attach_req.bulk_shapes->bulk_shapes,  bulk_bulk_eqn_map,2);
 		}
-		if (functable->merged_required_shapes.opposite_shapes && !is_internal_facet_opposite_dummy())
+		if (attach_req.opposite_shapes && !is_internal_facet_opposite_dummy())
 		{
-			if (!dynamic_cast<InterfaceElementBase *>(opposite_side))
+			if (!opposite_side)
 			{
 				throw_runtime_error("Missing opposite element");
 			}
 			if (!this->is_internal_facet_opposite_dummy())
 			{		
-				update_equation_remapping_from_element(opposite_side,functable->merged_required_shapes.opposite_shapes,  opp_interf_eqn_map,-1);
-				if (functable->merged_required_shapes.opposite_shapes->bulk_shapes)
+				update_equation_remapping_from_element(opposite_side,attach_req.opposite_shapes,  opp_interf_eqn_map,-1);
+				if (attach_req.opposite_shapes->bulk_shapes)
 				{
-					if (!dynamic_cast<InterfaceElementBase *>(opposite_side)->bulk_element_pt())
+					if (!opposite_side->bulk_element_pt())
 					{
 						throw_runtime_error("Missing opposite bulk element");
 					}			
-					update_equation_remapping_from_element(dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(opposite_side)->bulk_element_pt()),functable->merged_required_shapes.opposite_shapes->bulk_shapes , opp_bulk_eqn_map,-2);
+					update_equation_remapping_from_element(dynamic_cast<BulkElementBase *>(opposite_side->bulk_element_pt()),attach_req.opposite_shapes->bulk_shapes , opp_bulk_eqn_map,-2);
 				}
 			}
 		}
@@ -700,7 +773,7 @@ namespace pyoomph
 	// buffer_offset_basebulk, interface-only DG fields after them at buffer_offset_interf.
 	unsigned InterfaceElementBase::get_DG_buffer_index(const unsigned &space_index,const unsigned &fieldindex)
     {
-		auto * ft=this->get_code_instance()->get_func_table();
+		auto * ft=this->get_jit_code()->get_func_table();
 		auto & space_info=ft->dg_spaces[space_index];
 
 		if (fieldindex<space_info.numfields_basebulk)
@@ -718,7 +791,7 @@ namespace pyoomph
 	// there); for interface-only DG fields the local node index is used directly.
 	unsigned InterfaceElementBase::get_DG_node_index(const unsigned &space_index,const unsigned &fieldindex,const unsigned &nodeindex) const
 	{
-		auto * ft=this->codeinst->get_func_table();
+		auto * ft=this->jitcode->get_func_table();
 		auto & space_info=ft->dg_spaces[space_index];
 		if (fieldindex>=space_info.numfields_bulk) 	return nodeindex;
 		else
@@ -736,7 +809,7 @@ namespace pyoomph
 	// as external data of this interface element).
 	oomph::Data * InterfaceElementBase::get_DG_nodal_data(const unsigned & space_index,const unsigned & fieldindex )
 	{
-		auto * ft=this->codeinst->get_func_table();
+		auto * ft=this->jitcode->get_func_table();
 		auto & space_info=ft->dg_spaces[space_index];
 		if (fieldindex>=space_info.numfields_bulk) return this->internal_data_pt(space_info.internal_offset_new+(fieldindex-space_info.numfields_bulk));
 		else
@@ -749,7 +822,7 @@ namespace pyoomph
 	// DG fields, external dof (resolved through get_DG_node_index) for base-bulk DG fields.
 	int InterfaceElementBase::get_DG_local_equation(const unsigned &space_index,const unsigned &fieldindex,const unsigned & nodeindex)
 	{
-		auto * ft=this->codeinst->get_func_table();
+		auto * ft=this->jitcode->get_func_table();
 		auto space_info=ft->dg_spaces[space_index];
 		if (fieldindex>=space_info.numfields_bulk) return this->internal_local_eqn(space_info.internal_offset_new+(fieldindex-space_info.numfields_bulk),nodeindex);
 		else
@@ -778,7 +851,7 @@ namespace pyoomph
 		if (bres >= 0)
 			return bres;
 		// Interface fields
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 
 		for (unsigned int si=0;si<functable->num_present_continuous_spaces;si++)
 		{
@@ -803,7 +876,7 @@ namespace pyoomph
 	// for the shared/bulk fields.
 	void InterfaceElementBase::fill_element_info_interface_part(bool without_equations)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 
 		const std::vector<std::vector<unsigned>> & space_to_elem_index = this->get_nodal_space_index_to_element_index_map();
 
@@ -867,10 +940,10 @@ namespace pyoomph
 		{
 		   unsigned node_index=j+local_field_offset;
 			std::cout << "INTEF NODE INDEX oF " << functable->fieldnames_ED0[i] << " IS " << node_index << std::endl;
-			if (!codeinst->linked_external_data[j].data) throw_runtime_error("Element has an external data contribution, which is not assigned: "+std::string(functable->fieldnames_ED0[j]));
-			int extdata_i=codeinst->linked_external_data[j].elemental_index;
+			if (!jitcode->linked_external_data[j].data) throw_runtime_error("Element has an external data contribution, which is not assigned: "+std::string(functable->fieldnames_ED0[j]));
+			int extdata_i=jitcode->linked_external_data[j].elemental_index;
 			if (extdata_i>=(int)this->nexternal_data())  throw_runtime_error("Somehow the external data array was not done well when trying to index data: "+std::string(functable->fieldnames_ED0[i])+"  ext_data_index is "+std::to_string(extdata_i)+", but only "+std::to_string((int)this->nexternal_data())+" ext data slots present");
-			int value_i=codeinst->linked_external_data[j].value_index;
+			int value_i=jitcode->linked_external_data[j].value_index;
 			if (value_i<0 || value_i>=(int)this->external_data_pt(extdata_i)->nvalue())  throw_runtime_error("Somehow the external data array was not done, i.e. wrong value index, well when trying to index data: "+std::string(functable->fieldnames_ED0[j])+" at value "+std::to_string(value_i));
 			 eleminfo.nodal_data[0][node_index]=this->external_data_pt(extdata_i)->value_pt(value_i);
 			 eleminfo.nodal_local_eqn[0][node_index]=this->external_local_eqn(extdata_i,value_i);
@@ -928,6 +1001,30 @@ namespace pyoomph
     return res;
   }
 
+  // See the declaration in elements.hpp.
+  double InterfaceElementBase::vertex_match_distance2(oomph::Node *a, oomph::Node *b, const std::vector<double> &offset)
+  {
+    pyoomph::Node *pa = static_cast<pyoomph::Node *>(a);
+    pyoomph::Node *pb = static_cast<pyoomph::Node *>(b);
+    bool coincident = true;
+    for (double o : offset)
+      if (o != 0.0) { coincident = false; break; }
+    if (coincident && !topological_interface_keys_disabled() &&
+        pa->has_interface_topological_id() && pb->has_interface_topological_id())
+    {
+      return (pa->get_interface_topological_id() == pb->get_interface_topological_id()) ? 0.0 : 1.0;
+    }
+    double d2 = 0.0;
+    const unsigned nd = std::min(a->ndim(), b->ndim());
+    for (unsigned k = 0; k < nd; k++)
+    {
+      const double off = (k < offset.size() ? offset[k] : 0.0);
+      const double d = a->x(k) - b->x(k) + off;
+      d2 += d * d;
+    }
+    return d2;
+  }
+
   void Quad2dFaceOrientation::analyze(const oomph::FiniteElement *self, const oomph::FiniteElement *opposite, const std::vector<double> &offset, unsigned nnode_1d, int &orientation, std::vector<int> &node_index)
   {
     if (!opposite) throw_runtime_error("No opposite side set");
@@ -938,11 +1035,11 @@ namespace pyoomph
     std::vector<double> pdists(8, 0.0);
     for (unsigned int i = 0; i < self->nvertex_node(); i++)
     {
-      pyoomph::Node *nthis = dynamic_cast<pyoomph::Node *>(self->vertex_node_pt(i));
+      pyoomph::Node *nthis = static_cast<pyoomph::Node *>(self->vertex_node_pt(i));
       for (int p = 0; p < 8; p++)
       {
         std::vector<int> perm = node_index_map(p, 2);
-        pyoomph::Node *nopp = dynamic_cast<pyoomph::Node *>(opposite->vertex_node_pt(perm[i]));
+        pyoomph::Node *nopp = static_cast<pyoomph::Node *>(opposite->vertex_node_pt(perm[i]));
         for (unsigned int k = 0; k < std::min(nthis->ndim(), nopp->ndim()); k++)
           pdists[p] += (nthis->x(k) - nopp->x(k) + offset[k]) * (nthis->x(k) - nopp->x(k) + offset[k]);
       }
@@ -958,7 +1055,34 @@ namespace pyoomph
       }
     }
     if (best_dist > 1e-14) throw_runtime_error("Vertex nodes are not matching here");
-    node_index = node_index_map(orientation, nnode_1d);
+    // Index the OPPOSITE element, which need not have the same number of nodes per direction: a C2 brick
+    // face has 9 nodes against a C1 one's 4. This used to build the map at THIS element's nnode_1d, so a
+    // C2-against-C1 pair was left holding indices up to 8 into a 4-node element -- latent (the case runs
+    // and converges) until something dereferenced one, at which point opposite_node_pt() returned a
+    // garbage pointer. The 1d line elements have always handled the same mismatch explicitly ("opposite
+    // is C1: no midside node" -> -1) and so do the triangular faces; this is the quad face doing it too.
+    // See dev_docs/interface_refinement_coupling.md section 14.6.
+    const unsigned onn = opposite->nnode_1d();
+    node_index.assign(nnode_1d * nnode_1d, -1);
+    const double h = 2.0 / (nnode_1d - 1.0);
+    const double ho = 2.0 / (onn - 1.0);
+    for (unsigned j = 0; j < nnode_1d; j++)
+    {
+      for (unsigned i = 0; i < nnode_1d; i++)
+      {
+        oomph::Vector<double> sv(2);
+        sv[0] = -1.0 + h * i;
+        sv[1] = -1.0 + h * j;
+        oomph::Vector<double> so = map_s(orientation, sv);
+        // The symmetries permute the tensor grid exactly, so a non-integer here means this side has a
+        // node the opposite one simply does not have (a midside against a C1 face), not a mismatch.
+        const double fi = (so[0] + 1.0) / ho, fj = (so[1] + 1.0) / ho;
+        const long li = std::lround(fi), lj = std::lround(fj);
+        if (std::fabs(fi - (double)li) > 1e-9 || std::fabs(fj - (double)lj) > 1e-9) continue;
+        if (li < 0 || lj < 0 || (unsigned)li >= onn || (unsigned)lj >= onn) continue;
+        node_index[i + nnode_1d * j] = (int)(li + (long)onn * lj);
+      }
+    }
   }
 
   // Finds the local coordinate s on this (surface) element whose interpolated position best matches the
@@ -1081,7 +1205,7 @@ namespace pyoomph
 	// allocated (not previously present) dofs are optionally seeded via interpolate_newly_constructed_additional_dof.
 	void InterfaceElementBase::add_interface_dofs()
 	{
-		auto *ft = codeinst->get_func_table();
+		auto *ft = jitcode->get_func_table();
 
 		// Continuous interface-only fields are stored as oomph-lib "additional values" on the element's
 		// nodes, which only BoundaryNodes provide. The interior-facet skeleton is built from ordinary
@@ -1100,6 +1224,31 @@ namespace pyoomph
 			}
 		}
 
+		// A space the BULK element does not have cannot hold an interface dof. BulkElementTri2dC2's C1TB
+		// row of Nodal_Space_Index_To_Element_Index_Map is empty -- a C2 triangle has no bubble node -- and
+		// interpolate_newly_constructed_additional_dof below indexes that row, so a C1TB interface field on
+		// such a parent SEGFAULTED rather than reporting anything (dev_docs/interface_refinement_coupling.md
+		// section 14.5). get_interface_field_connection_space now caps the negotiated space with
+		// largest_facet_space() and should never produce one; this is the backstop for a space a user
+		// declares explicitly, and it covers every site that indexes one of these rows.
+		{
+			BulkElementBase *blk = dynamic_cast<BulkElementBase *>(this->Bulk_element_pt);
+			for (unsigned int i = 0; i < ft->num_present_continuous_spaces; i++)
+			{
+				const JITFuncSpec_Table_FiniteElement_SpaceInfo_t *space_info = ft->present_continuous_spaces[i];
+				if (space_info->numfields <= space_info->numfields_bulk) continue; // no interface-only dof here
+				if (blk && blk->get_nodal_space_index_to_element_index_map()[space_info->space_index].empty())
+				{
+					throw_runtime_error("Cannot define the " + std::string(space_info->space_name) + " interface field '" +
+										std::string(space_info->fieldnames[space_info->numfields_bulk]) +
+										"' here: the bulk element of domain '" + std::string(blk->get_jit_code()->get_func_table()->domain_name) +
+										"' has no node in that space at all (its element space is " +
+										std::string(blk->get_jit_code()->get_func_table()->dominant_space) +
+										"). Use a lower facet space, or raise the bulk domain's space with an ElementSpace().");
+				}
+			}
+		}
+
 		for (unsigned int i=0;i<ft->num_present_continuous_spaces;i++)
 		{
 			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info = ft->present_continuous_spaces[i];
@@ -1109,7 +1258,7 @@ namespace pyoomph
 				
 				unsigned value_index=space_info->interface_dof_indices[i-space_info->numfields_basebulk];
 				// TODO: Can be removed once we are sure that the interface dof indices are always correct
-				unsigned value_index1 = codeinst->resolve_interface_dof_id(fieldname);
+				unsigned value_index1 = jitcode->resolve_interface_dof_id(fieldname);
 				if (value_index1!=value_index) throw_runtime_error("Mismatch between resolved interface dof id and space info index for field "+fieldname+" "+std::to_string(value_index1)+" vs. "+std::to_string(value_index));
 				
 				oomph::Vector<unsigned> additional_data_values(eleminfo.nnode, 0);
@@ -1126,7 +1275,7 @@ namespace pyoomph
 					this->add_additional_values(additional_data_values, value_index);
 				   for (unsigned l = 0; l < eleminfo.nnode; ++l)
 				   {
-					  if (additional_data_values[l] && !already_allocated[l] && interpolate_new_interface_dofs) this->interpolate_newly_constructed_additional_dof(l,value_index,space_info->space_name);
+					  if (additional_data_values[l] && !already_allocated[l] && jitcode->get_problem()->get_interpolate_new_interface_dofs()) this->interpolate_newly_constructed_additional_dof(l,value_index,space_info->space_name);
 					}				
 				}
 			}
@@ -1286,15 +1435,15 @@ namespace pyoomph
 			//	std::cout << "  ALREADY PART OF THE ELEMENT AT NODE INDEX " << k << std::endl;		
 				return true;
 			}
-			if (data==dynamic_cast<pyoomph::Node *>(this->node_pt(k))->variable_position_pt())
+			if (data==static_cast<pyoomph::Node *>(this->node_pt(k))->variable_position_pt())
 			{
 				return true;
 			}
 		}; // Nodes can be the same
 		const std::vector<std::vector<unsigned>> & space_to_elem_index = this->get_nodal_space_index_to_element_index_map();
-		for (unsigned int si=0;si<this->get_code_instance()->get_func_table()->num_present_continuous_spaces;si++)
+		for (unsigned int si=0;si<this->get_jit_code()->get_func_table()->num_present_continuous_spaces;si++)
 		{
-			auto * space_info=this->get_code_instance()->get_func_table()->present_continuous_spaces[si];
+			auto * space_info=this->get_jit_code()->get_func_table()->present_continuous_spaces[si];
 			// hangindex, NOT space_index: a hanging scheme is stored per nodal VALUE SLOT, and
 			// Node::is_hanging(i) reads Hanging_pt[i+1] out of an array of size nvalue()+1 without any
 			// bounds check. Asking a node that carries a single value (e.g. a bulk domain with just one
@@ -1304,14 +1453,14 @@ namespace pyoomph
 			// dominant space", which is exactly what is_hanging(-1)/hanging_pt(-1) (geometric) answer.
 			for (unsigned int j=0;j<eleminfo.nnode_of_space[space_info->space_index];j++)
 			{
-				auto *nod_pt = dynamic_cast<pyoomph::Node *>(this->node_pt(space_to_elem_index[space_info->space_index][j]));
+				auto *nod_pt = static_cast<pyoomph::Node *>(this->node_pt(space_to_elem_index[space_info->space_index][j]));
 				if (nod_pt->is_hanging(space_info->hangindex)) // TODO: In principle, it can also hang elsewhere, i.e. on another index!
 				{
 					oomph::HangInfo *const hang_pt = nod_pt->hanging_pt(space_info->hangindex);
 					const unsigned nmaster = hang_pt->nmaster();
 					for (unsigned m = 0; m < nmaster; m++)
 					{
-						auto *const master_nod_pt = dynamic_cast<pyoomph::Node *>(hang_pt->master_node_pt(m));
+						auto *const master_nod_pt = static_cast<pyoomph::Node *>(hang_pt->master_node_pt(m));
 						if (data==master_nod_pt) return true;
 						if (data==master_nod_pt->variable_position_pt()) return true;
 					}
@@ -1337,7 +1486,7 @@ namespace pyoomph
 		}; // External data already added		
 		for (unsigned int k = 0; k < this->nnode(); k++)
 		{
-			if (data == dynamic_cast<pyoomph::Node *>(this->node_pt(k))->variable_position_pt())
+			if (data == static_cast<pyoomph::Node *>(this->node_pt(k))->variable_position_pt())
 			{
 			//	std::cout << "  IS ALREADY VARIABLE POSITION AT INDEX " << k << std::endl;		
 				return true;
@@ -1356,14 +1505,28 @@ namespace pyoomph
 	// the generated interface code can read (but not directly own) those DG values/fluxes.
 	void InterfaceElementBase::add_DG_external_data()
 	{
-      auto *ft=this->codeinst->get_func_table();
+      auto *ft=this->jitcode->get_func_table();
 	  BulkElementBase * blk=dynamic_cast<BulkElementBase *>(this->bulk_element_pt());
 	  for (unsigned int si=0;si<ft->num_present_dg_spaces;si++)
 	  {
 		  auto * space_info=ft->present_dg_spaces[si];
+		  // Deliberately NOT gated on whether anything requires this space, although a Dirichlet-condition
+		  // element (which requires no shape at all) does carry half its dofs this way: the bulk DG data is
+		  // addressed POSITIONALLY, as external_data_pt(external_offset_bulk + fieldindex), and
+		  // fill_element_info marshals every present DG space unconditionally. Skipping one attachment
+		  // shifts every later index and reads past the end of the external data - it segfaults rather than
+		  // producing a wrong number. Narrowing this needs the DG marshalling to learn which spaces were
+		  // attached, which is a separate change from the external-data split.
 		  for (unsigned i=0;i<space_info->numfields_bulk;i++)
 		  {
-			this->add_external_data(blk->get_DG_nodal_data(space_info->space_index, i));
+			// DG field values, never positions. The flag has to be recorded here rather than left to
+			// the resize() in add_required_external_data: that only FILLS new slots, so a code with DG
+			// spaces but no ED0 and no bulk/opposite requirements would leave the vector shorter than
+			// nexternal_data() and trip the size check in fill_in_jacobian_from_lagragian_by_fd.
+			const unsigned index = this->add_external_data(blk->get_DG_nodal_data(space_info->space_index, i));
+			if (index >= external_data_is_geometric.size())
+				external_data_is_geometric.resize(index + 1, false);
+			external_data_is_geometric[index] = false;
 		  }
 	  }	  
 	}
@@ -1377,8 +1540,8 @@ namespace pyoomph
 	{
 		external_data_is_geometric.resize(this->nexternal_data(), false); // Fill with the ED0 fields
 		// std::cout << "EX DA " << this->nexternal_data() << std::endl;
-		DynamicBulkElementInstance *fcodeinst = from_elem->get_code_instance();
-		auto *fft = fcodeinst->get_func_table();		
+		DynamicJITCode *fjitcode = from_elem->get_jit_code();
+		auto *fft = fjitcode->get_func_table();		
 
 		if (fft->moving_nodes)
 		{
@@ -1401,14 +1564,14 @@ namespace pyoomph
 				
 				for (unsigned int j = 0; j < from_elem->get_eleminfo()->nnode; j++)
 				{
-					auto *nod_pt = dynamic_cast<pyoomph::Node *>(from_elem->node_pt(j));
+					auto *nod_pt = static_cast<pyoomph::Node *>(from_elem->node_pt(j));
 					if (nod_pt->is_hanging())
 					{						
 						oomph::HangInfo *const hang_pt = nod_pt->hanging_pt();
 						const unsigned nmaster = hang_pt->nmaster();
 						for (unsigned m = 0; m < nmaster; m++)
 						{
-							auto *const master_nod_pt = dynamic_cast<pyoomph::Node *>(hang_pt->master_node_pt(m));
+							auto *const master_nod_pt = static_cast<pyoomph::Node *>(hang_pt->master_node_pt(m));
 							this->add_required_ext_data(master_nod_pt->variable_position_pt(), true);
 						}
 					}
@@ -1463,7 +1626,7 @@ namespace pyoomph
 		}
 		
 
-		// std::cout << " AT REQ " << codeinst->get_code()->get_file_name() << " FROM " << fcodeinst->get_code()->get_file_name() << " USE DL " << (required->psi_DL || required->DL.dx_psi || required->DL.dX_psi) << std::endl;
+		// std::cout << " AT REQ " << jitcode->get_file_name() << " FROM " << fjitcode->get_file_name() << " USE DL " << (required->psi_DL || required->DL.dx_psi || required->DL.dX_psi) << std::endl;
 		if (required->DL.psi || required->DL.dx_psi || required->DL.dX_psi)
 		{
 
@@ -1885,11 +2048,11 @@ namespace pyoomph
 							{						
 								for (unsigned int jp = 0; jp < spatial_dim; jp++)
 								{	
-								   double old=dynamic_cast<pyoomph::Node*>(Bulk_element_pt->node_pt(lp))->variable_position_pt()->value(jp);
-								   dynamic_cast<pyoomph::Node*>(Bulk_element_pt->node_pt(lp))->variable_position_pt()->set_value(jp,old+FD_eps);								   
+								   double old=static_cast<pyoomph::Node*>(Bulk_element_pt->node_pt(lp))->variable_position_pt()->value(jp);
+								   static_cast<pyoomph::Node*>(Bulk_element_pt->node_pt(lp))->variable_position_pt()->set_value(jp,old+FD_eps);								   
                				this->get_dnormal_dcoords_at_s(s, dnormal_dcoord1, NULL);	
                				d2nodal_FD[i][l][j][lp][jp]= (dnormal_dcoord1[i][l][j]-dnormal_dcoord0[i][l][j])/FD_eps;
-								   dynamic_cast<pyoomph::Node*>(Bulk_element_pt->node_pt(lp))->variable_position_pt()->set_value(jp,old);								                  				
+								   static_cast<pyoomph::Node*>(Bulk_element_pt->node_pt(lp))->variable_position_pt()->set_value(jp,old);								                  				
 								}
 							}
 						}
@@ -2224,6 +2387,7 @@ namespace pyoomph
 	// add_required_ext_data), since those degrees of freedom are not covered by the base class's own nodes.
 	void InterfaceElementBase::fill_in_jacobian_from_lagragian_by_fd(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian)
 	{
+		HangInterpPassSuspension __no_pass; // see BulkElementBase::fill_in_jacobian_from_nodal_by_fd
 		BulkElementBase::fill_in_jacobian_from_lagragian_by_fd(residuals, jacobian);
 		const unsigned n_node = this->nnode();
 		if (n_node == 0)
@@ -2244,7 +2408,14 @@ namespace pyoomph
 		}
 		for (unsigned int ed = 0; ed < this->nexternal_data(); ed++)
 		{
-			// TODO: Only geometric data!
+			// Only the GEOMETRIC external data (the bulk/opposite nodes' variable_position_pt, added
+			// with is_geometric=true). This routine exists to patch in the position columns the
+			// generated code did not produce because fd_position_jacobian is set; the value columns of
+			// the attached elements come out of the generated code analytically, through the equation
+			// remapping, so finite-differencing them here only overwrote correct entries with less
+			// accurate ones.
+			if (!external_data_is_geometric[ed])
+				continue;
 			oomph::Data *data = this->external_data_pt(ed);
 			for (unsigned int i = 0; i < data->nvalue(); i++)
 			{
@@ -2305,13 +2476,13 @@ namespace pyoomph
 			}
 			oomph::Vector<double> sopp = this->local_coordinate_in_opposite_side(s);
 			double JLagrOpp;
-			dynamic_cast<InterfaceElementBase *>(opposite_side)->fill_shape_info_at_s(sopp, index, *(required.opposite_shapes), shape_info->opposite_shapeinfo, JLagrOpp, flag, NULL, history_index);
+			opposite_side->fill_shape_info_at_s(sopp, index, *(required.opposite_shapes), shape_info->opposite_shapeinfo, JLagrOpp, flag, NULL, history_index);
 			if (required.opposite_shapes->bulk_shapes)
 			{
-				oomph::Vector<double> sopp_blk = dynamic_cast<InterfaceElementBase *>(opposite_side)->local_coordinate_in_bulk(sopp);
+				oomph::Vector<double> sopp_blk = opposite_side->local_coordinate_in_bulk(sopp);
 				double JLagrOppBlk;
 				// std::cout << "FILLING OPPBLK HERE " << index << std::endl;
-				dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(opposite_side)->bulk_element_pt())->fill_shape_info_at_s(sopp_blk, index, *(required.opposite_shapes->bulk_shapes), shape_info->opposite_shapeinfo->bulk_shapeinfo, JLagrOppBlk, flag, NULL, history_index);
+				dynamic_cast<BulkElementBase *>(opposite_side->bulk_element_pt())->fill_shape_info_at_s(sopp_blk, index, *(required.opposite_shapes->bulk_shapes), shape_info->opposite_shapeinfo->bulk_shapeinfo, JLagrOppBlk, flag, NULL, history_index);
 			}
 		}
 
@@ -2322,6 +2493,10 @@ namespace pyoomph
 	// up to date before integration, then delegates the rest to the base class.
 	void InterfaceElementBase::prepare_shape_buffer_for_integration(const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag)
 	{
+		{
+		// Timed in its own slot: these are re-interpolations of NEIGHBOURING elements, i.e. work that
+		// each of those elements also does when it is assembled itself.
+		HangFillTimeScope __hftime(HANGFILL_SLOT_NEIGHBOUR);
 		if (required_shapes.bulk_shapes)
 		{
 			dynamic_cast<BulkElementBase *>(this->bulk_element_pt())->interpolate_hang_values(); // TODO: This might be put somewhere else
@@ -2336,12 +2511,12 @@ namespace pyoomph
 			{
 				throw_runtime_error("The interface element requires the opposite site to be set!");
 			}
-			dynamic_cast<InterfaceElementBase *>(this->opposite_side)->interpolate_hang_values(); // TODO: This might be put somewhere else
+			this->opposite_side->interpolate_hang_values(); // TODO: This might be put somewhere else
 			if (required_shapes.opposite_shapes->bulk_shapes)
 			{
-				dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(this->opposite_side)->bulk_element_pt())->interpolate_hang_values(); // TODO: This might be put somewhere else
+				dynamic_cast<BulkElementBase *>(this->opposite_side->bulk_element_pt())->interpolate_hang_values(); // TODO: This might be put somewhere else
 			}
-			this->fill_opposite_node_indices(shape_info);
+		}
 		}
 
 		BulkElementBase::prepare_shape_buffer_for_integration(required_shapes, flag);
@@ -2361,10 +2536,10 @@ namespace pyoomph
 		}
 		if (required_shapes.opposite_shapes)
 		{
-			dynamic_cast<InterfaceElementBase *>(this->opposite_side)->set_remaining_shapes_appropriately(shape_info->opposite_shapeinfo, *(required_shapes.opposite_shapes));
+			this->opposite_side->set_remaining_shapes_appropriately(shape_info->opposite_shapeinfo, *(required_shapes.opposite_shapes));
 			if (required_shapes.opposite_shapes->bulk_shapes)
 			{
-				dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(this->opposite_side)->bulk_element_pt())->set_remaining_shapes_appropriately(shape_info->opposite_shapeinfo->bulk_shapeinfo, *(required_shapes.opposite_shapes->bulk_shapes));
+				dynamic_cast<BulkElementBase *>(this->opposite_side->bulk_element_pt())->set_remaining_shapes_appropriately(shape_info->opposite_shapeinfo->bulk_shapeinfo, *(required_shapes.opposite_shapes->bulk_shapes));
 			}
 		}
 	}
@@ -2375,6 +2550,7 @@ namespace pyoomph
 	// (bulk_eqn_map, bulk_bulk_eqn_map, opp_interf_eqn_map, opp_bulk_eqn_map) built by update_equation_remapping().
 	bool InterfaceElementBase::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
 	{
+		HangFillTimeScope __hftime(HANGFILL_SLOT_FILL);
 		//	Bulk is setup elsewhere
 		bool ret_bulk = false;
 
@@ -2388,7 +2564,7 @@ namespace pyoomph
 			}
 			catch (...)
 			{
-				std::cerr << "AT PERFORMING BULK EQ REMAPPING OF INTERFACE ELEMENT with code " << this->codeinst->get_code()->get_file_name() << std::endl;
+				std::cerr << "AT PERFORMING BULK EQ REMAPPING OF INTERFACE ELEMENT with code " << this->jitcode->get_file_name() << std::endl;
 				throw;
 			}
 			// Now perform the mapping
@@ -2402,7 +2578,7 @@ namespace pyoomph
 				}
 				catch (...)
 				{
-					std::cerr << "AT PERFORMING BULK EQ REMAPPING OF INTERFACE ELEMENT with code " << this->codeinst->get_code()->get_file_name() << std::endl;
+					std::cerr << "AT PERFORMING BULK EQ REMAPPING OF INTERFACE ELEMENT with code " << this->jitcode->get_file_name() << std::endl;
 					throw;
 				}
 			}
@@ -2413,7 +2589,7 @@ namespace pyoomph
 		{
 
 			// We need to fill the hang info of the bulk
-			InterfaceElementBase *opp = dynamic_cast<InterfaceElementBase *>(this->opposite_side);
+			InterfaceElementBase *opp = this->opposite_side;
 			try
 			{
 				//std::cout << "Filling opposite hang info for interface element " << this << " with opposite " << opp << std::endl;
@@ -2422,7 +2598,7 @@ namespace pyoomph
 			}
 			catch (...)
 			{
-				std::cerr << "AT PERFORMING OPPOSING INTERGACE EQ REMAPPING OF INTERFACE ELEMENT with code " << this->codeinst->get_code()->get_file_name() << std::endl;
+				std::cerr << "AT PERFORMING OPPOSING INTERGACE EQ REMAPPING OF INTERFACE ELEMENT with code " << this->jitcode->get_file_name() << std::endl;
 				throw;
 			}
 
@@ -2436,7 +2612,7 @@ namespace pyoomph
 				}
 				catch (...)
 				{
-					std::cerr << "AT PERFORMING OPPOSING BULK EQ REMAPPING OF INTERFACE ELEMENT with code " << this->codeinst->get_code()->get_file_name() << std::endl;
+					std::cerr << "AT PERFORMING OPPOSING BULK EQ REMAPPING OF INTERFACE ELEMENT with code " << this->jitcode->get_file_name() << std::endl;
 					throw;
 				}
 			}
@@ -2450,11 +2626,15 @@ namespace pyoomph
 	// Currently a no-op override (the actual external-data setup happens via add_required_external_data /
 	// add_DG_external_data elsewhere); kept as an explicit override with the old approach commented out below
 	// for reference, since blindly calling the base class here would flush already-set-up external data.
+	// Deliberately a no-op, NOT BulkElementBase::ensure_external_data(): that one flushes the whole
+	// external-data list and re-adds only the ED0 entries, which on an interface element would drop the
+	// bulk/opposite data added at construction (and leave external_data_is_geometric describing a list
+	// that no longer exists).
 	void InterfaceElementBase::ensure_external_data()
 	{
 		/*   BulkElementBase::ensure_external_data(); //This would flush the storage...
 		   external_data_is_geometric.resize(this->nexternal_data(),false);
-			const JITFuncSpec_Table_FiniteElement_t * functable=this->codeinst->get_func_table();
+			const JITFuncSpec_Table_FiniteElement_t * functable=this->jitcode->get_func_table();
 			if (functable->shapes_required_ResJac.bulk_shapes) add_required_external_data(functable->shapes_required_ResJac.bulk_shapes,dynamic_cast<BulkElementBase*>(this->bulk_element_pt())); //TODO:
 
 			if (functable->shapes_required_ResJac.opposite_shapes)
@@ -2472,10 +2652,10 @@ namespace pyoomph
 	// own get_dof_names(), so e.g. "@BULK:..." / "@OPPSIDE:..." / "@OPPBLK:..." names show where a dof really lives.
 	std::vector<std::string> InterfaceElementBase::get_dof_names(bool not_a_root_call)
 	{
-		// const JITFuncSpec_Table_FiniteElement_t * functable=codeinst->get_func_table();
+		// const JITFuncSpec_Table_FiniteElement_t * functable=jitcode->get_func_table();
 		std::vector<std::string> res = BulkElementBase::get_dof_names(not_a_root_call);
 
-		const JITFuncSpec_Table_FiniteElement_t *functable = this->codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = this->jitcode->get_func_table();
 
 
 		for (unsigned int si=0;si<functable->num_present_continuous_spaces;si++)
@@ -2540,7 +2720,7 @@ namespace pyoomph
 					}
 				}
 			}
-			InterfaceElementBase *iopp = dynamic_cast<InterfaceElementBase *>(opp);
+			InterfaceElementBase *iopp = opp->as_interface_element();
 			if (iopp)
 			{
 				BulkElementBase *oppblk = dynamic_cast<BulkElementBase *>(iopp->bulk_element_pt());
@@ -2578,7 +2758,7 @@ namespace pyoomph
 	void InterfaceElementBase::pin_dummy_values()
 	{
 		BulkElementBase::pin_dummy_values();
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 
 		const std::vector<std::vector<unsigned>> & space_nodes_to_element_nodes=this->get_nodal_space_index_to_element_index_map();
 		const std::vector<std::vector<std::vector<unsigned>>> & dummy_interpolation_mapping=this->get_dummy_value_interpolation_map();
@@ -2623,13 +2803,13 @@ namespace pyoomph
 	void InterfaceElementBase::setup_additional_dof_constraints()
 	{
 		BulkElementBase::setup_additional_dof_constraints();
-		auto *functable = codeinst->get_func_table();
+		auto *functable = jitcode->get_func_table();
 
 		const std::vector<int> &elem_to_C1 = this->get_element_index_to_nodal_space_index_map()[SPACE_INDEX_C1];
 		bool has_C1_fields=functable->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk>0 || functable->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk>0 ;
 		for (unsigned int l = 0; l < nnode(); l++)
 		{
-			Node *n = dynamic_cast<Node *>(node_pt(l));
+			Node *n = static_cast<Node *>(node_pt(l));
 			pyoomph::BoundaryNode *bn = dynamic_cast<pyoomph::BoundaryNode *>(n);
 			// Interface elements on the interior-facet skeleton sit on ordinary interior nodes, which
 			// are not BoundaryNodes: dereferencing bn below segfaulted as soon as the bulk had any
@@ -2673,7 +2853,7 @@ namespace pyoomph
 	void InterfaceElementBase::unpin_Dirichlet_dofs_for_matrix_manipulation(DirichletMatrixManipulationInfo & info)
 	{
 		BulkElementBase::unpin_Dirichlet_dofs_for_matrix_manipulation(info);
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 
 
 		const std::vector<std::vector<unsigned>> & space_node_to_element_map=this->get_nodal_space_index_to_element_index_map();
@@ -2753,14 +2933,13 @@ namespace pyoomph
 	// then lets the base classes assign this element's own additional (hanging/interface) equations.
 	void InterfaceElementBase::assign_additional_local_eqn_numbers()
 	{
-		if (opposite_side && dynamic_cast<InterfaceElementBase *>(opposite_side)->is_internal_facet_opposite_dummy() && !(opposite_side->ndof()))
+		if (opposite_side && opposite_side->is_internal_facet_opposite_dummy() && !(opposite_side->ndof()))
 		{
 
-		  dynamic_cast<InterfaceElementBase *>(opposite_side)->assign_local_eqn_numbers(true);
+		  opposite_side->assign_local_eqn_numbers(true);
 		}
 		BulkElementBase::assign_additional_local_eqn_numbers();
 		oomph::FaceElement::assign_additional_local_eqn_numbers();
 	}
 
-	bool InterfaceElementBase::interpolate_new_interface_dofs=true;
 }

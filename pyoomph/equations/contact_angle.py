@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -463,7 +463,7 @@ class StickSlipContactLine(UnpinnedContactLine):
         dynamics = pin_value * pin_when + unpin_value * unpin_when + as_it_is_when * as_it_is_value
         dynamics = subexpression(dynamics)
         if dyncl is not None:
-            dyncl.add_residual(weak(up - dynamics, up_test, coordinate_system=cartesian))
+            dyncl.add_residual(weak(up - dynamics, up_test, coordsys=cartesian))
             if self._initial_pin_info is not None:
                 dyncl.set_initial_condition(dyncl.unpinned_indicator_name, self._initial_pin_info[0], True)
                 dyncl.set_initial_condition(dyncl.override_dynamics_name, self._initial_pin_info[1], True)
@@ -740,7 +740,11 @@ class DynamicContactLineEquations(InterfaceEquations):
         self.model.define_fields(self)
         inter=self.get_parent_equations()
         assert isinstance(inter,MultiComponentNavierStokesInterface)
-        if len(inter.interface_props._surfactants)>0: 
+        # Only the legacy surfactant transport has a projected advection velocity to constrain. The
+        # conservative form integrates the advection by parts, so its natural end condition already
+        # is zero flux out of the contact line and this multiplier has nothing left to do - see the
+        # module docstring of pyoomph.equations.surfactants.
+        if inter.uses_projected_surfactant_velocity():
             self.define_vector_field(self.enforce_proj_interface_velo_for_surfs_name,inter.surfactant_advect_velo_space,scale=1/test_scale_factor(inter.surfactant_advect_velo_name),testscale=1/scale_factor(inter.surfactant_advect_velo_name))
 
     def get_surface_tension_at_cl_expression(self)->ExpressionOrNum:
@@ -789,8 +793,11 @@ class DynamicContactLineEquations(InterfaceEquations):
                 assert sigma0 is not None
                 self.set_initial_condition(self.surface_tension_name,sigma0,degraded_start=True)
 
-        # In case of surfactants, enforce the velocity of the contact line for the projected velocity        
-        if len(parent.interface_props._surfactants) > 0: 
+        # In case of surfactants, enforce the velocity of the contact line for the projected velocity.
+        # Legacy transport only: that form does not integrate the advection by parts, so it retains a
+        # genuine advective outflow of surfactant at the contact line, and pinning the projected
+        # velocity to the mesh velocity is what cancels it. The conservative form has no such term.
+        if parent.uses_projected_surfactant_velocity():
             upro,upro_test=var_and_test(parent.surfactant_advect_velo_name)
             enf_upro,enf_upro_test=var_and_test(self.enforce_proj_interface_velo_for_surfs_name)
             self.add_residual(weak(enf_upro,upro_test))

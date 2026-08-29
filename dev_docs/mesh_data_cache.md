@@ -105,8 +105,9 @@ entry. Details settled during implementation:
 
 * `MeshDataCacheKey.create()` normalizes any sequence of eigenvector indices to a **sorted** tuple, so
   `[1,0]` and `[0,1]` now hit the same slot (the old `tuple(set(...))` did not guarantee that).
-* `MeshDataCache.__init__` keeps its old keyword/positional signature — `pyoomph/equations/topological_changes.py:49`
-  and `:535` construct it directly, `MeshDataCache(True, True)` positionally — and builds
+* `MeshDataCache.__init__` keeps its old keyword/positional signature — callers construct it directly,
+  e.g. `AxisymmetricReconnection` in `pyoomph/equations/topological_changes.py`, and the positional
+  form `MeshDataCache(True, True)` is in use — and builds
   `self.key` from its arguments. The nine option attributes are now read-only properties on the key.
   The storage constructs it as `MeshDataCache(**key.as_kwargs())`, so the storage key and the cache's
   own key cannot drift apart.

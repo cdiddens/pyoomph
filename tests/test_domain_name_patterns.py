@@ -1,5 +1,7 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #
 #  @section LICENSE
 #
@@ -35,10 +37,10 @@
 # bit-identical, which is stronger than "it runs" and is what catches a boundary being missed.
 #
 # Two behaviours here are worth pinning rather than assuming, because both were found the hard way:
-# the expanded clones share their Equations objects and must be wrapped in a CombinedEquations first
-# (see EquationTree._wrap_equations_for_sharing), and a pattern hands its slot in the child order to
-# the names it produced, so an explicitly named sibling stays where it was written and therefore still
-# wins over the wildcard.
+# the expanded clones share their Equations objects - which is safe because nothing per-domain is
+# stored on an equation, see tests/test_shared_equations.py - and a pattern hands its slot in the
+# child order to the names it produced, so an explicitly named sibling stays where it was written
+# and therefore still wins over the wildcard.
 
 import numpy
 import pytest
@@ -207,10 +209,9 @@ def test_star_is_bit_identical_to_the_enumerated_list(tmp_path):
     assert numpy.max(numpy.abs(sol_g - sol_l)) == 0.0
 
 
-def test_expanded_equations_are_wrapped_like_the_list_form(tmp_path):
-    # The clones share their Equations objects. Sharing a *raw* Equations object breaks the
-    # _final_element bookkeeping as soon as it is also merged into a sibling's CombinedEquations, so
-    # the expansion wraps first - exactly as BaseEquations.__matmul__ does for a list of names.
+def test_expanded_equations_match_the_list_form(tmp_path):
+    # The clones share their Equations objects, exactly as eqs @ ["a","b"] does. Each domain
+    # resolves such an instance on its own, so the two spellings produce the same tree.
     with _Poisson("*") as p:
         p.set_output_directory(str(tmp_path))
         p.quiet()

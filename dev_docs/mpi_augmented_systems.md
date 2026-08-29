@@ -6,7 +6,10 @@ Two halves of the same subject, at opposite ends of their lifecycle:
   `AzimuthalSymmetryBreakingHandler`) — **done**. They used to refuse `--distribute` outright; §1–§6
   record what had to change, what deliberately did not, and what is still refused.
 * **The Python custom assembler** (`CustomAssemblyBase` and the `AugmentedAssemblyHandler` family in
-  `pyoomph/generic/bifurcation_tools.py`) — **plan only, nothing implemented**. §7–§10.
+  `pyoomph/generic/bifurcation_tools.py`) — **stage 0 built, the rest plan only**. §7–§10.
+  `Problem.set_custom_assembler` now calls `_require_single_rank`, which became possible once the
+  normal form left this pipeline ([branch_switching.md](branch_switching.md)); what is still on it is
+  the `CustomBifurcationTracker` family, `DeflationAssemblyHandler` and `CriticalWavenumberTracker`.
 
 The two are independent implementations of the same idea, and the second one throws from deep inside
 C++ the moment `nproc > 1`.
@@ -96,9 +99,28 @@ reach the bifurcation parameter, where `Parameter_pt` says it directly. The azim
 
 ## 4. Still refused when distributed
 
-- **`blocksolve=True`**, and the handlers' block modes (`solve_block_system`, `solve_complex_system`,
-  `Block_augmented_J`, …). They rebuild replicated in-place dof vectors, and upstream's own augmented
-  block path throws when distributed too.
+- ~~**`blocksolve=True`**~~ — **it does not work anywhere, and is now refused outright rather than only
+  when distributed.** Listing it here was itself misleading: it is not an MPI restriction. The flag
+  installs one of oomph-lib's own block linear solvers, and both of those open with
+
+      FoldHandler* handler_pt = static_cast<FoldHandler*>(problem_pt->assembly_handler_pt());
+
+  (`assembly_handler.cc`) and then call a `FoldHandler` method on the result. pyoomph installs
+  `MyFoldHandler`/`MyHopfHandler`, which derive from `oomph::AssemblyHandler` and **not** from those
+  classes, so the `static_cast` reinterprets an unrelated object and the first member access is
+  undefined behaviour. Measured: a plain **serial** Bratu fold track dies with "Caught signal number 11
+  SEGV", with the default linear solver and with `petsc_mumps` alike. The guard that used to sit here
+  covered `--distribute` only, so every serial and replicated crash went straight through it.
+
+  For every other bifurcation type the flag was **silently ignored** — only fold and Hopf ever installed
+  a block solver, the pitchfork one being commented out — which is why it is refused rather than warned
+  about. `Problem.activate_bifurcation_tracking` raises before anything is installed, and
+  `Problem::activate_my_fold_tracking`/`activate_my_hopf_tracking` throw as a backstop for any caller
+  that bypasses Python. Nothing in `pyoomph/`, `tests/`, `docs/` or `citools/` passed it.
+  `tests/test_blocksolve_refused.py`.
+- The handlers' block MODES (`solve_block_system`, `solve_complex_system`, `Block_augmented_J`, …)
+  remain refused when distributed on their own terms: they rebuild replicated in-place dof vectors.
+  Nothing reaches them now that the only caller is gone, but the guards are kept.
 - **Periodic orbit tracking.** `PeriodicOrbitHandler` temporarily overwrites arbitrary global dofs during
   assembly; a separate project. Its Poincaré-plane constraint also has a pre-existing inconsistency worth
   fixing first: `-d_plane` is not divided by `nelement` while the row is assembled additively per
@@ -207,24 +229,54 @@ this work, but the Navier–Stokes azimuthal eigensolve is currently broken with
 machine and is worth its own look. The azimuthal tracking case is built on a reaction-diffusion problem
 instead, which SLEPc handles.
 
-## 6b. Open: the moving-mesh droplet segfaults
+## 6b. The moving-mesh droplet: the evidence was misread, and the real bug was elsewhere
 
 `docs/source/tutorial/advstab/movmesh/hanging_droplet.py` — fold tracking on a moving mesh with an
-interface and Lagrange multipliers — **segfaults on rank 0 during the tracking solve** under
-`mpirun -n 2 --distribute`. Serially, and under plain `mpirun`, it is fine (`Bo_c = 2.946075780049` at
-`V = 2.0944`). Not diagnosed, and not re-run since — a segfault under MPI takes PETSc's `MPI_ABORT` with
-it.
+interface and Lagrange multipliers — was recorded here as segfaulting on rank 0 during the tracking
+solve under `mpirun -n 2 --distribute`, fine serially and under plain `mpirun`
+(`Bo_c = 2.946075780049` at `V = 2.0944`).
 
-The one observation says the failure is probably **not** in the handler: the distributed run reported
-`ndof = 7846` where serial has `15693`, i.e. its *base state* was already a different problem before
-tracking was activated. The script gets there through `go_to_param` with
-`remesh_handler_during_continuation` followed by `force_remesh()`, so it sits directly on distributed
-remeshing, whose stage 5 is deliberately unfinished. The sensible next step is to check whether a
-`--distribute` run of that script *without* any bifurcation tracking already produces the wrong `ndof`,
-which would settle it without touching the handlers.
+The experiment this section asked for has now been run — the base-state prefix (`go_to_param` with
+`remesh_handler_during_continuation`, `force_remesh()`, `solve()`) with **no bifurcation tracking at
+all**, so it cannot reach the segfault. It settles the question, in the opposite direction:
 
-Until that is understood, treat moving-mesh problems with remeshing as unvalidated here. The four handler
-cases above use fixed meshes.
+**The `ndof` observation was base against augmented.** Serial gives `ndof = 7846` for the base state —
+the *same* number the distributed run was reported as producing. `15693` is `2*7846 + 1`, i.e. the
+**augmented** count after the fold handler is installed. The two numbers were never in conflict, so the
+inference that the distributed base state "was already a different problem", and the "probably not in
+the handler" conclusion drawn from it, had no support. Measured directly instead: the distributed base
+state agrees with serial on the droplet's apex depth to **8e-12** (`-1.377206951739` against
+`-1.377206951731`, MIN-allreduced — a rank-local minimum over a distributed mesh is a statement about
+the partition and the first version of this probe got that wrong by 47 %).
+
+**A real distributed defect was found on the way, and is fixed.** The prefix did not merely give a
+different `ndof` under `--distribute`; it did not run at all, throwing
+
+    RuntimeError: Mismatch in size of ddof and current dof vectors
+
+out of `remesh_handler_during_continuation` → `update_dof_vectors_for_continuation`. The arclength
+tangent is carried across a remesh through the history slots, and `get_history_dofs()` returns a
+**globally indexed** vector while that setter demanded `nrow_local()`; the reverse direction was wrong
+the same way, `get_arclength_dof_derivative_vector()` handing local-length data to `set_history_dofs()`.
+Both boundaries are global now, matching `get_history_dofs`/`set_history_dofs` and
+`get_current_dofs`/`set_current_dofs`; serially and under plain `mpirun` they are the identity, which is
+why this only ever showed with `--distribute`. So **arclength continuation across a remesh did not work
+under `--distribute` at all**, which is a bigger statement than anything this section used to make.
+
+**What is still unknown.** Whether the tracking solve still segfaults once the base state actually
+builds. It has deliberately not been re-run: the standing rule in this repository is not to re-run a
+configuration known to segfault under MPI, because PETSc's `MPI_ABORT` takes the whole session with it.
+What has changed is that the failure it was attributed to is gone and the attribution itself was
+unfounded, so if it is retried it should be treated as an undiagnosed report, not as a continuation of
+this one.
+
+**One thing worth knowing before comparing distributed remeshes.** The `ndof` after a distributed
+remesh varies **between runs of the same script** — 7845 and 7846 both observed, against 7846 serially.
+The remesher rebuilds the geometry from boundary data gathered across the ranks, and that is evidently
+not bit-reproducible. Compare the physics, never the dof count.
+
+The four handler cases above use fixed meshes, and moving-mesh problems with remeshing remain
+unvalidated *for tracking* here.
 
 ## 6c. Eigensolving the base state while a handler is installed
 
@@ -268,9 +320,31 @@ the augmented one, reached SLEPc.
 
 # Part II — the Python custom assembler (plan only)
 
+> **Deflation and the normal form both left this part.** Deflation is no longer a custom assembler:
+> it adds no unknowns and does not modify the Jacobian, so it now scales the assembled residual by a
+> scalar and rescales the Newton step on top of the ORDINARY assembly, and works serially, under
+> plain `mpirun` and under `--distribute`. See [deflation.md](deflation.md).
+>
+> `NormalFormCalculator` — and with it `classify_bifurcation` and `switch_branch` — made the same
+> move afterwards: every quantity it took from the multi-assembly now comes from an accessor that is
+> already MPI-safe in both regimes (`assemble_eigenproblem_matrices` + `_allgather_square`,
+> `get_parameter_derivative`, and a polarisation of `get_second_order_directional_derivative`), each
+> A/B'd against the multi-assembly serially first. See [branch_switching.md](branch_switching.md).
+> **The `CustomBifurcationTracker` family is now the only thing left on this pipeline**, which is what
+> makes stage 0 below possible without breaking a working feature. That answers **B4** and **B6** below (the hang was
+> the unseeded RNG sending the ranks down different control flow) and removes the only user of
+> `has_custom_solve_routine` outside the augmented trackers. **B1, B2, B3 and B5 are untouched and
+> still block the `CustomBifurcationTracker` family**, which is what the rest of this part is about --
+> and B2 in particular is still a live memory-corruption bug worth fixing on its own merits.
+>
+> Two things deflation had to arrange are worth reading before porting anything else here: oomph
+> passes a meaningful `first_row` only on the FACTORISE call, never on the back-substitution; and
+> under `--distribute` the linear solver's default row split is a UNIFORM one, i.e. a different
+> partition of the same rows than the dof distribution. Both produced wrong answers with no error.
+
 `CustomAssemblyBase` (`pyoomph/generic/assembly.py`) and the `AugmentedAssemblyHandler` family in
-`pyoomph/generic/bifurcation_tools.py` — the fold/pitchfork/Hopf/normal-mode/eigenbranch trackers and the
-deflation handler — work only in serial. Under `mpirun`:
+`pyoomph/generic/bifurcation_tools.py` — the fold/pitchfork/Hopf/normal-mode/eigenbranch trackers —
+work only in serial. Under `mpirun`:
 
     RuntimeError: src/problem.cpp: This likely does not work in parallel
 
@@ -339,26 +413,30 @@ independent of everything else here**, and the one part of the plan worth doing 
 distribution with `distributed=false` while the solver picks a distributed one for the same ndof. In (a)
 that is survivable because the dof *values* are replicated; in (b) it is not.
 
-**B4 — no LA backend supports the deflation solve under MPI.** `DeflationAssemblyHandler` is the only
-assembler with `has_custom_solve_routine`: its routine wraps three solves of the same Jacobian into a
-Sherman-Morrison correction, using global dot products. PETSc refuses it outright in the serial *and* the
-distributed path — which also means deflation cannot use PETSc at all, not just under MPI. Pardiso's
-distributed path gathers the system onto rank 0 but then passes the **local** `b` into the routine
-(against the gathered `b_global` used on the line below it) — a latent wrong-answer bug. scipy/SuperLU is
-serial-only.
+**B4 — ANSWERED, and no longer about deflation.** It used to read: no LA backend supports the
+deflation solve under MPI, PETSc refuses it even serially, and the gather-to-root path passes the local
+`b` where the line below uses `b_global`. All of that is gone — the Sherman-Morrison correction turned
+out to collapse to a single solve and one dot product ([deflation.md](deflation.md) §2), so the
+"custom solve routine" it needed does not exist any more; the rescale is applied after the scatter, on
+each rank's own block. What remains under this number is the augmented trackers' own use of
+`has_custom_solve_routine`, which genuinely does need several re-solves of one factorisation and is
+still refused by PETSc and by the gather-to-root path.
 
 **B5 — the Python algebra is global.** Every reduction in the trackers (`numpy.dot`,
 `numpy.linalg.norm`), every `J@V`, and `split()` reading `Dof_pt` assume one rank owns everything. This
 costs nothing in regime (a) — the vectors really are replicated — and is the bulk of the work for (b).
 
-**B6 — unexplained hang.** The prototype completed several Newton solves and then stopped making
-progress. Candidates, in order of suspicion: a rank-dependent decision inside the deflation loop
-(`Problem.iterate_over_multiple_solutions_by_deflation` retries from random perturbations, and any RNG
-not identically seeded on every rank sends the ranks down different control flow), the
-Newton-failure/`max_newton_iterations` recovery path taking different branches per rank, and PETSc's
-`_ksp_solve_checked` rebuild retry. **Diagnose this before committing to stage 2** — it may be an entirely
-separate bug from the assembly, and it decides whether the "identical Python on every rank" assumption
-that stages 1–3 rest on actually holds.
+**B6 — ANSWERED: it was the RNG.** The prototype completed several Newton solves and then stopped
+making progress. The first candidate on the original list was the right one:
+`Problem.iterate_over_multiple_solutions_by_deflation` retried from `numpy.random.rand(...)`, which is
+not identically seeded across ranks, so the ranks perturbed differently, converged differently and took
+different branches of the driver — and deadlocked at the next collective. Both drivers now draw from a
+`numpy.random.default_rng(random_seed)`. The MPI deflation suite has not hung since, at `np=2` plain,
+`np=2 --distribute` and `np=3 --distribute`.
+
+The reassuring part for the rest of this plan: the "identical Python on every rank" assumption that
+stages 1–3 rest on does hold, provided nothing draws random numbers and every Newton failure is agreed
+on. Both are cheap to arrange.
 
 ## 9. Which parallelism, in which regime
 
@@ -393,11 +471,13 @@ unchanged.
 
 ## 10. Stages
 
-**Stage 0 — refuse honestly (small, do first).** A `_require_single_rank(...)` guard next to
-`_require_non_distributed`, called from `Problem.set_custom_assembler` so the failure names the feature at
-the point the user switched it on, instead of arriving five frames deep from `problem.cpp` — or, worse,
-not arriving at all (B2 corrupts memory silently). Also fix the pardiso `b`/`b_global` mix-up (B4), a
-two-character fix that is wrong today regardless of this plan.
+**Stage 0 — refuse honestly. DONE.** `Problem._require_single_rank(...)` sits next to
+`_require_non_distributed` and is called from `Problem.set_custom_assembler`, so the failure names the
+feature at the point the user switched it on instead of arriving five frames deep from `problem.cpp`
+— or, worse, not arriving at all (B2 corrupts memory silently). It became possible only once the
+normal form left this pipeline; before that the guard would have refused `classify_bifurcation` and
+`switch_branch`, which now work under MPI. The pardiso `b`/`b_global` mix-up (B4) is separate and was
+already answered above.
 
 **Stage 1 — make the handoff distribution-correct (B2).** In the three custom branches: read
 `first_row()`/`nrow_local()` off the incoming `DoubleVector`/`CRDoubleMatrix`, copy only that row block,
@@ -418,7 +498,10 @@ the timings mean what they normally mean. Keep the `Problem_has_been_distributed
 Validate by asserting the assembled CSR matches the serial one at 1, 2 and 4 ranks — same element set, so
 only summation order differs; compare with a tolerance and say so.
 
-**Stage 3 — the deflation solve under MPI (B4).** Deflation needs `solve_Jx_b` several times on the same
+**Stage 3 — SUPERSEDED.** Deflation left this pipeline (see the note at the top of Part II), so the
+gather/scatter adapter described below was never needed. Kept for the design point in its last
+sentence, which still applies to anything else that needs a per-rank branch inside a solve: choose it
+from the caller, never from `len(b) == n`. The original text: **the deflation solve under MPI (B4).** Deflation needs `solve_Jx_b` several times on the same
 factorisation plus global dot products. With the system replicated (stage 2) and the solve
 row-distributed, the adapter is: `Allgatherv` the local RHS block, run the routine on global vectors with
 a `solve_Jx_b` that scatters into the KSP and gathers the result back, then write this rank's block into
@@ -436,8 +519,7 @@ small reduction API (`self.dot(a,b)`, `self.norm(a)`) so `numpy.dot`/`numpy.lina
 and user-written trackers have one obvious way to stay correct; `block_array` assembles local blocks with
 global column indices.
 
-**Validation** across the stages: the two deflation tutorials must report the same solution set as serial
-(`x = [0, 1, -1]` at `r=1`); one tracker tutorial per family at 1 vs 2 vs 4 ranks with the same critical
+**Validation** across the stages: one tracker tutorial per family at 1 vs 2 vs 4 ranks with the same critical
 parameter to solver tolerance and the same eigenvector up to sign/normalisation; and a unit test at the
 C++ boundary assembling the same augmented system in serial and at N ranks and comparing the CSR — which
 is what would have caught B2 immediately.
@@ -453,3 +535,33 @@ is what would have caught B2 immediately.
   `CLAUDE.md` on benchmarking) rather than assumed.
 * Should the trackers' reduction API (stage 4) be introduced early, as no-ops in regime (a), so that
   user-written trackers written today keep working when (b) lands?
+
+---
+
+## 12. Two bugs found while moving the normal form off this pipeline
+
+Both outside the augmented systems themselves, both recorded here because they are the shape of thing
+this document is a catalogue of.
+
+**`Problem::get_current_dofs`'s `is_positional` mask is rank-dependent under `--distribute`**
+(`src/problem.cpp`). The mask is sized by the **global** `ndof()` but filled by walking
+`mesh_pt(ism)->nnode()`, i.e. this rank's own and halo nodes only, so a positional dof living on
+another partition is reported as non-positional here. Every caller that reads only
+`get_current_dofs()[0]` is unaffected, which is why nothing has tripped over it. Reproduction: compare
+`get_current_dofs()[1]` between a serial run and a `--distribute` one of any moving-mesh problem — the
+masks differ. The fix is an `MPI_LOR` allreduce over the mask, or building it from the base dof
+distribution instead; it is a C++ change and was deliberately not bundled into an otherwise
+rebuild-free one.
+
+**`save_state()` into an in-memory stream lost everything but rank 0's copy, and the load then hung.**
+Measured at `np=2 --distribute`: rank 0's `BytesIO` received the whole merged 5726-byte state and
+rank 1's received **zero** bytes. §7's merge sends the non-root ranks' bytes to `/dev/null`, which is
+right when there is one file and wrong when "the file" is each rank's own private object. The failure
+mode is the reason it mattered: `load_state` of the empty stream raises on the non-root ranks while
+rank 0 loads happily, and the ranks split — the one that raised leaves for `load_state`'s
+`mpi_share_any_failure` barrier while the others are still inside `_load_state`'s own collectives
+(`reapply_boundary_conditions` → `assign_eqn_numbers` → `MPI_Alltoall`). **That barrier cannot catch
+this**: it sits *after* `_load_state`, and `_load_state` is itself collective. So the run hangs rather
+than fails. `save_state` now broadcasts the merged stream, which is the broadcast `_snapshot_state`
+already had to do for itself and has now dropped. A save to a real FILE was never affected.
+

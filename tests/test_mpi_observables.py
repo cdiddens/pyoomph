@@ -1,5 +1,7 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #
 #  @section LICENSE
 #
@@ -71,8 +73,8 @@ def _run(tmpdir, extra_args, nproc=None, timeout=300):
     cmd = []
     if nproc is not None:
         cmd = ["mpirun", "-n", str(nproc)]
-        if os.environ.get("PYOOMPH_MPI_OVERSUBSCRIBE", "1") == "1":
-            cmd += ["--oversubscribe"]
+        # No --oversubscribe: this project's machines have the cores these ranks need, and an
+        # oversubscribed run trades a deadlock for a machine that stops responding.
     cmd += [sys.executable, _WORKER, "--outdir", str(tmpdir)] + extra_args
     env = dict(os.environ)
     if nproc is not None:

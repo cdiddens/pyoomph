@@ -450,7 +450,7 @@ class TracerParticles(Equations):
     # ----------------------------------------------------------------------------- code generation
 
     def define_additional_functions(self):
-        master = self._get_combined_element()
+        master = self._master()
         cg = master._assert_codegen()
         scale = scale_factor("temporal") / scale_factor("spatial")
 

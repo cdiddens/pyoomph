@@ -49,7 +49,7 @@ As an example, we will check the Lorenz system (with the default parameters :mat
 .. literalinclude:: lorenz_lyapunov.py
    :language: python
    :start-at: # Import the LyapunovExponentCalculator from the utils module
-   :end-at: problem.run(endtime=200,outstep=0.001)
+   :end-at: problem.run(endtime=200,outstep=False,maxstep=0.01)
 
 we get a file called ``lyapunov.txt`` in the output directory. The delay times are chosen to :math:`T_\text{wait}=T_\text{relax}=10`. The resulting plot is the following, where we also added the long-time limit literature values by dotted lines. The sum of all Lyapunov exponents corresponds to the phase space divergence, i.e. the trace of the Jacobian, which can be obtained analytically by :math:`\sum_{i=1}^3 \lambda_i=-\sigma-1-\beta\approx -13.666`. Finer time steps give even better agreement.
 

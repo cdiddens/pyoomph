@@ -1,5 +1,7 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #
 #  @section LICENSE
 #
@@ -58,12 +60,26 @@ from pyoomph.expressions import *
 from pyoomph.equations.navier_stokes import NavierStokesEquations
 from pyoomph.equations.advection_diffusion import AdvectionDiffusionEquations
 from pyoomph.equations.poisson import PoissonEquation
+from pyoomph.equations.navier_stokes import NavierStokesFreeSurface
+from pyoomph.equations.ALE import LaplaceSmoothedMesh
+from pyoomph.equations.solid import DeformableSolidEquations, GeneralizedHookeanSolidConstitutiveLaw
 from pyoomph.meshes.simplemeshes import CuboidBrickMesh, RectangularQuadMesh
 from pyoomph.generic.mpi import get_mpi_rank, get_mpi_nproc
 
 
-CASES = ["ns3d", "ns2d", "coupled", "poisson3d"]
-DEFAULT_SIZE = {"ns3d": 8, "ns2d": 60, "coupled": 40, "poisson3d": 8}
+# ale2d/solid3d are the moving-mesh (coordinates_as_dofs) arms. They exist because every other case
+# here has a static mesh, and the position-dof Jacobian columns - which are the largest expressions the
+# generator emits - therefore never appear at all. ale2d is the ordinary production shape (free surface
+# on a smoothed mesh, first derivatives only); solid3d is the shape dev_docs/code_generation.md
+# repeatedly names as the largest generated code in the project.
+CASES = ["ns3d", "ns2d", "coupled", "poisson3d", "ale2d", "solid3d"]
+DEFAULT_SIZE = {"ns3d": 8, "ns2d": 60, "coupled": 40, "poisson3d": 8, "ale2d": 24, "solid3d": 6}
+
+# Cases measured at their initial condition rather than after a steady solve. solid3d starts from a
+# 90-degrees-per-metre torsion, which is the deformed configuration we WANT to assemble at, and which a
+# steady Newton solve cannot unwind (it hits the 10-iteration limit). Solving is only ever here to
+# avoid measuring at a trivial state; for this case the initial state is the non-trivial one.
+NO_STEADY_SOLVE = {"solid3d"}
 
 
 class BenchProblem(Problem):
@@ -80,6 +96,26 @@ class BenchProblem(Problem):
                 eqs += DirichletBC(velocity_x=0, velocity_y=0, velocity_z=0) @ b
             eqs += DirichletBC(velocity_x=1, velocity_y=0, velocity_z=0) @ "top"
             eqs += DirichletBC(pressure=0) @ "bottom/left/front"
+        elif self.case == "ale2d":
+            self.add_mesh(RectangularQuadMesh(N=self.N))
+            eqs = NavierStokesEquations(dynamic_viscosity=0.02, mass_density=1)
+            eqs += LaplaceSmoothedMesh()
+            eqs += NavierStokesFreeSurface(surface_tension=1) @ "top"
+            for b in ["left", "right", "bottom"]:
+                eqs += DirichletBC(velocity_x=0, velocity_y=0, mesh_x=True, mesh_y=True) @ b
+            eqs += DirichletBC(pressure=0) @ "bottom/left"
+        elif self.case == "solid3d":
+            # The torsioned hyperelastic beam of docs/.../ale/solid/solid_oscillations.py, kept
+            # dimensionless here: the benchmark only needs the weak form's shape, and the unit
+            # prescan of dev_docs/code_generation.md 2.2 would otherwise sit in the middle of it.
+            self.add_mesh(CuboidBrickMesh(size=[1.0, 0.05, 0.05], N=[self.N * 4, self.N, self.N]))
+            claw = GeneralizedHookeanSolidConstitutiveLaw(E=1.0, nu=0.38)
+            eqs = DeformableSolidEquations(constitutive_law=claw, coordinate_space="C2", mass_density=1)
+            X = var("lagrangian")
+            theta = 1.5 * X[0]
+            eqs += InitialCondition(mesh_y=X[1] * cos(theta) + X[2] * sin(theta),
+                                    mesh_z=-X[1] * sin(theta) + X[2] * cos(theta))
+            eqs += DirichletBC(mesh_x=0, mesh_y=True, mesh_z=True) @ "left"
         elif self.case == "poisson3d":
             self.add_mesh(CuboidBrickMesh(N=self.N))
             eqs = PoissonEquation(name="u", source=1, space="C2")
@@ -118,7 +154,8 @@ def bench_assembly(case, N, repeats):
         p.set_c_compiler("system").optimize_for_max_speed()
         p.quiet()
         p.initialise()
-        p.solve()  # measure at a realistic state, not at U=0
+        if case not in NO_STEADY_SOLVE:
+            p.solve()  # measure at a realistic state, not at U=0
 
         t_el_res = p._benchmark_elemental_assembly(repeats, False, False)
         t_el_jac = p._benchmark_elemental_assembly(repeats, True, False)
@@ -150,7 +187,10 @@ def bench_newton(case, N, solver, repeats):
             p.set_linear_solver(solver)
             p.initialise()
             p.keep_structural_zeros = flag
-            p.solve()  # warm: JIT compile + first factorisation
+            if case in NO_STEADY_SOLVE:
+                p.assemble_jacobian()  # warm: JIT compile, without a solve this case cannot do
+            else:
+                p.solve()  # warm: JIT compile + first factorisation
             times = []
             for _ in range(repeats):
                 t0 = time.perf_counter()

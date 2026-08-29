@@ -81,16 +81,26 @@ namespace oomph
   //------------------------------------------------------------
   // N=3
   //------------------------------------------------------------
+  //FOR PYOOMPH: sqrt(3/5), the outer knot of the three-point Gauss-Legendre rule. Five of the nine
+  // entries below used to read 0.774596662941483 -- two digits transposed, 6.3e-9 off, and on the
+  // positive knot only, so the rule kept the right total weight but was not symmetric. The integral
+  // of a mid-side shape function derivative over a 2D quadrilateral element then came out as 7e-9
+  // rather than zero, and any C2 field lying exactly in the finite element space left a residual of
+  // that size no matter how fine the mesh. Written once and negated rather than spelled out with a
+  // leading minus, because negation is exact in IEEE arithmetic: the rule is now symmetric to the
+  // last bit, so an odd integrand vanishes identically instead of nearly.
+  static const double gauss_3_outer_knot = 0.77459666924148338;
+
   const double Gauss<2, 3>::Knot[9][2] = {
-    {-0.774596669241483, -0.774596669241483},
-    {-0.774596669241483, 0.0},
-    {-0.774596669241483, 0.774596662941483},
-    {0.0, -0.774596669241483},
+    {-gauss_3_outer_knot, -gauss_3_outer_knot},
+    {-gauss_3_outer_knot, 0.0},
+    {-gauss_3_outer_knot, gauss_3_outer_knot},
+    {0.0, -gauss_3_outer_knot},
     {0.0, 0.0},
-    {0.0, 0.774596662941483},
-    {0.774596662941483, -0.774596669241483},
-    {0.774596662941483, 0.0},
-    {0.774596662941483, 0.774596662941483}};
+    {0.0, gauss_3_outer_knot},
+    {gauss_3_outer_knot, -gauss_3_outer_knot},
+    {gauss_3_outer_knot, 0.0},
+    {gauss_3_outer_knot, gauss_3_outer_knot}};
   const double Gauss<2, 3>::Weight[9] = {(25.0 / 81.0),
                                          (40.0 / 81.0),
                                          (25.0 / 81.0),

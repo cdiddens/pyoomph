@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -158,15 +158,19 @@ class BaseMesh(abc.ABC):
         assert isinstance(self, _pyoomph.Mesh)
         imesh = self.get_mesh(bname1)
         assert imesh is not None
-        res: set[Node] = set()
+        # First-encounter order, not the order of a set of nodes: a set of Node objects iterates by
+        # id(), i.e. by allocation address, which differs from process to process. Anything derived
+        # from that order - a list index, a preCICE vertex numbering, the seed of a flood fill -
+        # then differs between the MPI ranks. The dict is only used to deduplicate.
+        res: dict[Node, None] = {}
         i2 = self.get_boundary_index(bname2)
         for e in imesh.boundary_elements(bname2):
             nn = e.nnode()
             for i in range(nn):
                 n = e.node_pt(i)
                 if n.is_on_boundary(i2):
-                    res.add(n)
-        return list(res)
+                    res[n] = None
+        return list(res.keys())
 
     def nodes(self) -> Iterator[_pyoomph.Node]:
         assert isinstance(self, _pyoomph.Mesh)
@@ -562,8 +566,8 @@ class MeshTemplate(_pyoomph.MeshTemplate):
         for name in args:
             self._interior_boundaries.add(name)
 
-    def define_state_file(self, state: "DumpFile",additional_info={}) -> "MeshTemplate":
-        mshfile = self.get_template()._meshfile
+    def _define_state_file(self, state: "DumpFile",additional_info={}) -> "MeshTemplate":
+        mshfile = self._get_template()._meshfile
         if mshfile is None:
             mshfile = ""
         else:
@@ -590,26 +594,21 @@ class MeshTemplate(_pyoomph.MeshTemplate):
                 lambda: self.remesher._cnt, lambda s: s)  # type:ignore
         if found_mshfile != mshfile:
             # We need to load the remeshed version here
-            from . import gmsh
             statedir = os.path.dirname(state.fname)
             fffound_mshfile = os.path.join(statedir, found_mshfile)
-            newtempl = gmsh.GmshTemplate(fffound_mshfile)
+            newtempl = self._template_for_stored_mesh_file(fffound_mshfile)
             newtempl.remesher = self.remesher
+            if newtempl.remesher is not None:
+                # Otherwise the next remesh would recreate the geometry from the template this state
+                # file replaced, whose domains and geometry belong to the run that wrote it.
+                newtempl.remesher.template = newtempl
             newtempl._do_define_geometry(self.get_problem())
             self._template_override = newtempl
-            newtempl.get_template()._meshfile = fffound_mshfile
+            newtempl._get_template()._meshfile = fffound_mshfile
             # self._meshfile=found_mshfile
-        return self.get_template()
+        return self._get_template()
         # print("IN STATE FILE "+mshfile,state.fname,)
         # exit()
-
-    def get_opposite_interface(self, side: str) -> str | None:
-        for ic in self._opposite_interface_connections:
-            if ic._sideA == side:
-                return ic._sideB
-            elif ic._sideB == side:
-                return ic._sideA
-        return None
 
     # Called from C on automatic finding
     def _add_opposite_interface_connection(self, sideA: str, sideB: str):
@@ -631,7 +630,7 @@ class MeshTemplate(_pyoomph.MeshTemplate):
         for conn in self._opposite_interface_connections:
             conn._connect_elements(eqtree_root)
 
-    def get_template(self) -> "MeshTemplate":
+    def _get_template(self) -> "MeshTemplate":
         if self._template_override is None:
             return self
         else:
@@ -648,7 +647,7 @@ class MeshTemplate(_pyoomph.MeshTemplate):
         # MeshedMeshTemplate can tell (see there), any other remesher is always taken at face value.
         return True
 
-    def available_domains(self) -> set[str]:
+    def _available_domains(self) -> set[str]:
         """
         Returns a list of all available domains constructed with :py:meth:`new_domain`.
         """
@@ -666,7 +665,7 @@ class MeshTemplate(_pyoomph.MeshTemplate):
                 "Can only check the available domains after _do_define_geometry")
         return name in self._domains.keys()
 
-    def get_domain(self, name: str) -> _pyoomph.MeshTemplateElementCollection:
+    def _get_domain(self, name: str) -> _pyoomph.MeshTemplateElementCollection:
         """
         Get a domain by name constructed with the method :py:meth:`new_domain` before.
         """
@@ -679,16 +678,39 @@ class MeshTemplate(_pyoomph.MeshTemplate):
         if not self._geometry_defined:
             self._geometry_defined = True
             self._set_problem(problem)
-            self.define_geometry()
+            if self._define_geometry_is_required():
+                self.define_geometry()
             if self.auto_find_opposite_interface_connections:
                 self._find_opposite_interface_connections()
+
+    def _define_geometry_is_required(self) -> bool:
+        """Whether :py:meth:`define_geometry` has to run at all.
+
+        ``False`` where the geometry comes from a file instead of from the user's code - a
+        :py:class:`~pyoomph.meshes.gmsh.GmshTemplate` reloading a stored ``.msh`` after a state file
+        was read. Calling ``define_geometry`` there would ask a subclass to build a geometry with no
+        backend behind it, which is what used to make the reload fall back to a plain
+        ``GmshTemplate`` and lose the template's class. See :py:meth:`_template_for_stored_mesh_file`.
+        """
+        return True
+
+    def _template_for_stored_mesh_file(self, meshfile: str) -> "MeshTemplate":
+        """The template that a state file's stored mesh is to be rebuilt from.
+
+        A distinct object from ``self``, since the mesh is only replaced when the template changes
+        (see ``Problem._define_state_file``). The default cannot do anything but a plain
+        :py:class:`~pyoomph.meshes.gmsh.GmshTemplate`; :py:class:`~pyoomph.meshes.gmsh.GmshTemplate`
+        itself overrides it to keep the class.
+        """
+        from . import gmsh
+        return gmsh.GmshTemplate(meshfile)
 
     def new_domain(self, name: str, nodal_dimension: int | None = None) -> _pyoomph.MeshTemplateElementCollection:
         """
         Create a new domain with the given name. With the help of this domain, elements can be added to the mesh.
         """
         if not self.has_domain(name):
-            self._domains[name] = self.new_bulk_element_collection(name)
+            self._domains[name] = self._new_bulk_element_collection(name)
             if nodal_dimension is not None:
                 self._domains[name].set_nodal_dimension(nodal_dimension)
         else:
@@ -736,17 +758,6 @@ class MeshTemplate(_pyoomph.MeshTemplate):
                                "If the problem uses dimensional scales (set_scaling(spatial=...)), all mesh coordinates and sizes must be given dimensionally as well, e.g. size=1*meter.\n"
                                "Original error: "+str(e)) from e
         return res
-
-    def add_nodes(self, *args: Sequence[float]) -> int | tuple[int, ...] | None:
-        res: list[int] = []
-        for a in args:
-            res.append(self.add_node(*a))
-        if len(res) == 0:
-            return None
-        elif len(res) == 1:
-            return res[0]
-        else:
-            return tuple(res)
 
     def create_curved_entity(self, typ: str, *args: Any, **kwargs: Any)-> _pyoomph.MeshTemplateCurvedEntityBase:
         """
@@ -1153,10 +1164,8 @@ class MeshFromTemplateBase(BaseMesh):
         self._templatemesh: MeshTemplate = templatemesh
         self._name = domainname
         self._eqtree: "EquationTree" = eqtree
-        self._eqtree._mesh = self
-        # self._equations = eqtree._equations
         self._codegen = eqtree.get_code_gen()
-        self._codegen._mesh = self
+        self._eqtree._mesh = self
         self.ignore_initial_condition = False
         self._set_problem(problem, self._codegen._code)
         self._error_estimator: Z2ErrorEstimator  # =None
@@ -1190,7 +1199,7 @@ class MeshFromTemplateBase(BaseMesh):
             self._setup_information_from_old_mesh(previous_mesh)
 
         if previous_mesh is None:
-            coll = self._templatemesh.get_domain(self._name)
+            coll = self._templatemesh._get_domain(self._name)
             edim = coll.get_element_dimension()
             assert self._codegen is not None
             self._codegen._set_nodal_dimension(coll.nodal_dimension())
@@ -1286,7 +1295,10 @@ class MeshFromTemplateBase(BaseMesh):
 
         self.setup_boundary_element_info()
 
-        for interior_bound in self._templatemesh.get_template()._interior_boundaries:
+        # sorted: _interior_boundaries is a set of names, whose iteration order is randomized per
+        # process by PYTHONHASHSEED. It decides in which order the interior boundary elements are
+        # created, and with them the element and equation numbering.
+        for interior_bound in sorted(self._templatemesh._get_template()._interior_boundaries):
             try:
                 bindex = self.get_boundary_index(interior_bound)
                 self.setup_interior_boundary_elements(bindex)
@@ -1314,7 +1326,7 @@ class MeshFromTemplateBase(BaseMesh):
         assert isinstance(
             self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
         self.generate_from_template(
-            self._templatemesh.get_template().get_domain(self._name))
+            self._templatemesh._get_template()._get_domain(self._name))
         # if self.refinement_possible():
         from .. import get_dev_option
 
@@ -1323,7 +1335,8 @@ class MeshFromTemplateBase(BaseMesh):
 
         self.setup_boundary_element_info()
 
-        for interior_bound in self._templatemesh.get_template()._interior_boundaries:
+        # sorted, for the reason given in recreate_boundary_information() above.
+        for interior_bound in sorted(self._templatemesh._get_template()._interior_boundaries):
             try:
                 bindex = self.get_boundary_index(interior_bound)
                 self.setup_interior_boundary_elements(bindex)
@@ -1367,7 +1380,7 @@ class MeshFromTemplateBase(BaseMesh):
             for b, imsh in imsh1._interfacemeshes.items():
                 if not (b in bn) and b!="_internal_facets_":
                     raise RuntimeError("Boundary " + b + " not in mesh")
-                ieqs = imsh._eqtree._equations
+                ieqs = imsh._eqtree.get_equations()
                 icg = imsh._eqtree._codegen
                 assert icg is not None
                 assert ieqs is not None
@@ -1392,7 +1405,7 @@ class MeshFromTemplateBase(BaseMesh):
                     icg._coordinate_space = self._codegen._coordinate_space
                     icg._do_define_fields(self._codegen.dimension - 2)
 
-    def _compile_bulk_equations(self) -> _pyoomph.DynamicBulkElementInstance:
+    def _compile_bulk_equations(self) -> _pyoomph.DynamicJITCode:
         problem = self.get_problem()
         assert problem is not None
         assert self._codegen is not None
@@ -1407,8 +1420,8 @@ class MeshFromTemplateBase(BaseMesh):
             templ = mesh._templatemesh
             # Get point to evaluate the IC and DBC to check whether it is a numeric value (Can prevent problems if somethink like 1/x is used)
             if templ is not None:
-                templ = templ.get_template()
-                dom = templ.get_domain(self._name)
+                templ = templ._get_template()
+                dom = templ._get_domain(self._name)
                 refpos = dom._get_reference_position_for_IC_and_DBC(set())
                 refnorm=[0.1,0.1,0.1] # TODO: Get a right reference normal
                 t = problem.time_pt().time()
@@ -1418,10 +1431,10 @@ class MeshFromTemplateBase(BaseMesh):
         #problem.before_compile_equations(self._eqtree._equations)
         eqs.before_finalization(self._codegen)
         self._codegen._finalise()
-        eqs.before_compilation(self._codegen)
-        self._codegen._code = problem.compile_bulk_element_code(
+        eqs._before_compilation(self._codegen)
+        self._codegen._code = problem._compile_bulk_element_code(
             self._codegen, assert_spatial_mesh(self), self._name)
-        self._templatemesh.get_domain(
+        self._templatemesh._get_domain(
             self._name).set_element_code(self._codegen.get_code())
         self._finalise_creation()
 #        self._transfer_mesh_functions()
@@ -1431,7 +1444,7 @@ class MeshFromTemplateBase(BaseMesh):
 
     def _construct_after_remesh(self):
         assert self._codegen is not None
-        self._templatemesh.get_domain(
+        self._templatemesh._get_domain(
             self._name).set_element_code(self._codegen.get_code())
         self._finalise_creation()
         # self._transfer_mesh_functions()
@@ -1439,7 +1452,7 @@ class MeshFromTemplateBase(BaseMesh):
     def get_dimension(self) -> int:
         raise NotImplementedError("Please specify")
 
-    def define_state_file(self, state: "DumpFile",additional_info={}):
+    def _define_state_file(self, state: "DumpFile",additional_info={}):
         # Write/load the template information
         assert isinstance(
             self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
@@ -1708,7 +1721,7 @@ def MeshFromTemplate(problem: "Problem", templatemesh: MeshTemplate, domainname:
     if not templatemesh.has_domain(domainname):
         raise RuntimeError("There is no domain '" +
                            domainname + "' defined in this mesh")
-    coll = templatemesh.get_domain(domainname)
+    coll = templatemesh._get_domain(domainname)
 
     edim = coll.get_element_dimension()
 
@@ -1772,6 +1785,13 @@ class InterfaceMesh(_InterfaceMeshTypingBase):
         self._error_estimator = _pyoomph.Z2ErrorEstimator()
         self._error_estimator.use_Lagrangian = False
         self.ignore_initial_condition = False
+        #: Set while somebody else owns this interface's zeta chart for the duration of one remesh -
+        #: a topological-change handler, whose chart spans an event that no assignment derived from
+        #: the geometry could reproduce. A zeta assigner then leaves the mesh alone until the
+        #: transfer is over (see pyoomph.meshes.zeta.AssignZetaCoordinatesBase). It lives here rather
+        #: than on the interpolator because the assignment that would clobber it happens in
+        #: after_mapping_on_macro_elements, which sees no interpolator at all.
+        self._zeta_chart_overridden: bool = False
         self.set_spatial_error_estimator_pt(self._error_estimator)
         # Inherit the refinement thresholds from the bulk mesh this interface hangs off (which in
         # turn got them from the template or the Problem). Only MeshFromTemplate* used to set them,
@@ -1939,8 +1959,8 @@ class InterfaceMesh(_InterfaceMeshTypingBase):
         templ: MeshTemplate | None = curri._templatemesh
         # Get point to evaluate the IC and DBC to check whether it is a numeric value (Can prevent problems if somethink like 1/x is used)
         if templ is not None:
-            templ = templ.get_template()
-            dom = templ.get_domain(curri._name)
+            templ = templ._get_template()
+            dom = templ._get_domain(curri._name)
             bnames = curri.get_boundary_names()
             if boundname_set=={"_internal_facets_"}:
                 # Just select anything
@@ -1977,9 +1997,7 @@ class InterfaceMesh(_InterfaceMeshTypingBase):
         self._eqtree.get_equations()._set_current_codegen(self._codegen)
 
         assert self._codegen is not None
-        self._codegen._mesh = self
         eqs = self._eqtree.get_equations()
-
 
         #self._problem.before_compile_equations(self._eqtree)
         eqs.before_finalization(self._codegen)
@@ -1996,9 +2014,9 @@ class InterfaceMesh(_InterfaceMeshTypingBase):
                         internal_eqs._additional_residuals[destination]=int_contrib                        
 
         eqs._set_current_codegen(self._codegen)
-        eqs.before_compilation(self._codegen)
+        eqs._before_compilation(self._codegen)
 
-        self._codegen._code = self._codegen.get_problem().compile_bulk_element_code(self._codegen, self, curri._name + "__" + name)  
+        self._codegen._code = self._codegen.get_problem()._compile_bulk_element_code(self._codegen, self, curri._name + "__" + name)  
 
         self._set_problem(self.get_problem(),
                           self._codegen._code)  # type:ignore
@@ -2007,32 +2025,43 @@ class InterfaceMesh(_InterfaceMeshTypingBase):
             oppblk.get_equations()._set_current_codegen(old_oppblkcg)  # type:ignore
 
         blk.get_equations()._set_current_codegen(oldblk)
-        self._eqtree._equations._set_current_codegen(oldmy)  # type:ignore
+        self._eqtree.get_equations()._set_current_codegen(oldmy)
 
-        self._eqtree._equations.after_compilation(self._codegen)  # type:ignore
+        self._eqtree.get_equations().after_compilation(self._codegen)
                 
         mpi_barrier()
 
     def nodes(self) -> Iterator[_pyoomph.Node]:
-        uniqnods: set[Node] = set()
+        """The nodes of this interface, each once, in the order the elements first reach them.
+
+        An interface mesh has no Node_pt array of its own, so the nodes have to be collected from
+        the elements. Collecting them in a *set* made the yielded order the id() order of the Node
+        objects, i.e. their allocation addresses: reproducible within one process, but different on
+        every MPI rank and between two runs. Callers that pair this order with anything else broke
+        silently - update_history() indexes evaluate_local_expression_at_nodes(), which is in the
+        C++ node order, and the preCICE adapter numbers its coupling vertices by it. The dict is
+        only a set that keeps insertion order.
+        """
+        uniqnods: dict[Node, None] = {}
         for e in self.elements():
             nn = e.nnode()
             for ni in range(nn):
                 n = e.node_pt(ni)
-                uniqnods.add(n)
-        for n in uniqnods:
+                uniqnods[n] = None
+        for n in uniqnods.keys():
             yield n
 
     def boundary_nodes(self, b: str) -> Iterable[_pyoomph.Node]:
-        uniqnods: set[Node] = set()
+        # Element order rather than set order, for the reason given in nodes() above.
+        uniqnods: dict[Node, None] = {}
         bind = self.get_boundary_index(b)
         for e in self.boundary_elements(b):
             nn = e.nnode()
             for ni in range(nn):
                 n = e.node_pt(ni)
                 if n.is_on_boundary(bind):
-                    uniqnods.add(n)
-        return uniqnods
+                    uniqnods[n] = None
+        return list(uniqnods.keys())
 
     def nodes_on_both_sides(self) -> Generator[tuple[_pyoomph.Node, _pyoomph.Node], None, None]:
         nodemap: dict[Node, Node] = {}
@@ -2140,7 +2169,7 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
             scales[i]=s
         codegen.get_equations()._set_current_codegen(ocg)
 
-    def _compile_bulk_equations(self) -> _pyoomph.DynamicBulkElementInstance:
+    def _compile_bulk_equations(self) -> _pyoomph.DynamicJITCode:
         assert self._eqtree is not None
         assert self._codegen is not None
         problem=self.get_problem()
@@ -2152,12 +2181,11 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
         eqs=self._eqtree.get_equations()
         #problem.before_compile_equations(self._eqtree)
         eqs.before_finalization(self._codegen)
-        eqs._problem=problem
         self._codegen._finalise()
         self._codegen.get_equations()._set_current_codegen(self._codegen)
 
-        eqs.before_compilation(self._codegen)
-        self._codegen._code = problem.compile_bulk_element_code(self._codegen, self, self._name)
+        eqs._before_compilation(self._codegen)
+        self._codegen._code = problem._compile_bulk_element_code(self._codegen, self, self._name)
         #self._element = _pyoomph.BulkElementODE0d.construct_new(self._codegen.get_code(), problem.timestepper)
         #self._element.set_must_be_kept_as_halo(True) # ODE Dofs are always halo dofs, so they can be accessed from everywhere
         self._set_problem(problem, self._codegen._code)
@@ -2278,7 +2306,7 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
             assert isinstance(val, (float, int))
             ode.internal_data_pt(inds[n]).set_value(0, val)
 
-    def define_state_file(self, state: "DumpFile",additional_info={}):
+    def _define_state_file(self, state: "DumpFile",additional_info={}):
         ode = self.get_element()
         _, inds = ode._ode_elem_to_numpy()
         inds_sorted = list(sorted(list(inds)))

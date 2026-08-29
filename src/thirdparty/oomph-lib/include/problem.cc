@@ -2344,6 +2344,20 @@ namespace oomph
 
       //Block_dof_pt_start.clear(); //FOR PYOOMPH - Deactivate this
 
+      //FOR PYOOMPH: let a derived Problem permute the numbering it has just been handed. This is
+      // deliberately the ONLY place it can happen, and it is here rather than after
+      // assign_eqn_numbers() returns because everything that consumes the numbering is built below:
+      // the local equation numbers and the elemental info, the interface equation remapping, the
+      // Dirichlet pinned-equation set, the dof distribution and the sparsity generation id. A
+      // permutation applied here is therefore simply what the numbering IS, and no cached dof index
+      // can survive it.
+      //
+      // It also serves both MPI modes with one implementation. Distributed, the equation numbers here
+      // are still rank-local 0..my_n-1 and synchronise_eqn_numbers() below shifts them by this rank's
+      // base afterwards, so a rank-local permutation leaves each rank's range contiguous, which is
+      // what the distributed assembly and the condensation row ownership rely on.
+      reorder_global_eqn_numbers(Dof_pt);
+
 #ifdef OOMPH_HAS_MPI
 
       // reset previous allocation
@@ -17140,25 +17154,36 @@ namespace oomph
     {
       Node* nod_pt = mesh_pt()->node_pt(j);
 
-      // loop over ALL eqn numbers - variable number of values
-      unsigned nval = nod_pt->nvalue();
-
-      for (unsigned ival = 0; ival < nval; ival++)
+      //FOR PYOOMPH: a periodic ("copy") node does not own its equation numbers - make_periodic()
+      // points its Eqn_number array at the master's, and eqn_number(i) hands out a reference into
+      // that shared array. Master and copy are both in Node_pt, so bumping both adds
+      // my_eqn_num_base twice to the same long. That is invisible on rank 0 (base 0) and silently
+      // renumbers every periodic dof out of range on every other rank.
+      if (!nod_pt->is_a_copy())
       {
-        int old_eqn_number = nod_pt->eqn_number(ival);
-        // Include all eqn numbers
-        if (old_eqn_number >= 0)
+        // loop over ALL eqn numbers - variable number of values
+        unsigned nval = nod_pt->nvalue();
+
+        for (unsigned ival = 0; ival < nval; ival++)
         {
-          // Bump up eqn number
-          int new_eqn_number = old_eqn_number + my_eqn_num_base;
-          nod_pt->eqn_number(ival) = new_eqn_number;
+          int old_eqn_number = nod_pt->eqn_number(ival);
+          // Include all eqn numbers
+          if (old_eqn_number >= 0)
+          {
+            // Bump up eqn number
+            int new_eqn_number = old_eqn_number + my_eqn_num_base;
+            nod_pt->eqn_number(ival) = new_eqn_number;
+          }
         }
       }
 
       // Is this a solid node? If so, need to bump up its equation number(s)
       SolidNode* solid_nod_pt = dynamic_cast<SolidNode*>(nod_pt);
 
-      if (solid_nod_pt != 0)
+      //FOR PYOOMPH: same reasoning for the position data. make_periodic() does not alias positions
+      // (see the warning in BoundaryNode<SolidNode>::make_periodic), so this is never true today,
+      // but hijacked or copied position data would hit exactly the same double bump.
+      if (solid_nod_pt != 0 && !solid_nod_pt->position_is_a_copy())
       {
         // Find equation numbers
         unsigned nval = solid_nod_pt->variable_position_pt()->nvalue();

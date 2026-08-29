@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -233,7 +233,7 @@ class MatplotLibMainAxes(MatplotLibAxes):
             return
         assert self.ax is not None
         ax=self.ax
-        l,b,r,t=self.plotter.margins
+        l,b,r,t=cast("MatplotlibPlotter1D",self.plotter).margins
         ax.set_position([l,b,r-l,t-b]) #type:ignore
         if self.plotter.aspect_ratio:
             # Applied here rather than left to the inherited _reset_before_plot, which runs before
@@ -263,6 +263,20 @@ class MatplotLibMainAxes(MatplotLibAxes):
                 self.ax_y2.set_ylabel(y2lab,size=self.textsize,color=self.y2label_color) #type:ignore
             if self.y2log:
                 self.ax_y2.set_yscale("log")
+        if self.ax_y2 is not None:
+            # twinx() shares the x-axis - that part was always right - but it copies the parent's
+            # RECTANGLE once, when it is created, and does not follow later set_position() calls. The
+            # twin can be created before the margins above are applied (the inherited add_to_plot
+            # makes one as soon as y2label is set), so it kept matplotlib's default subplot rect and
+            # drew a second frame a few percent inside the real one: measured (0.125,0.11,0.775,0.77)
+            # against the main axes' (0.1,0.13,0.8,0.82). Re-applying the position is the whole fix;
+            # the shared x-axis needs nothing.
+            self.ax_y2.set_position(ax.get_position()) #type:ignore
+            # A twin draws its own frame on top of the parent's. Aligned they coincide exactly, but
+            # only the right spine carries anything, and leaving the rest visible doubles every line
+            # of the box at half opacity wherever antialiasing disagrees.
+            for side in ("top","bottom","left"):
+                self.ax_y2.spines[side].set_visible(False) #type:ignore
         # One bound at a time, unlike the inherited version, which applies a limit only when both
         # ends are known - so "ymin=0, autoscale the top" was not expressible at all.
         xlo,xhi=self._limits_for("x")
@@ -458,7 +472,8 @@ class MatplotLibGraphLine(MatplotLibLinePlot):
 
         cdata=None
         if self.colorbar is not None:
-            cfield=self.colorfield if self.colorfield is not None else self.field
+            # A curve plots exactly one field, so the inherited str|list[str] is a str here.
+            cfield=self.colorfield if self.colorfield is not None else cast(str,self.field)
             cdata=self._data if cfield==self.field else self._resolve_field_for_color(cfield)
 
         result:list[tuple[NPFloatArray,NPFloatArray]]=[]

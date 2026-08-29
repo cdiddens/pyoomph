@@ -480,6 +480,10 @@ brace of "if (this->nelement()>0)" and before classify_halo_and_haloed_nodes(): 
 block is skipped on a rank holding no elements of a submesh, so a collective in there deadlocks, and
 the halo/haloed NODE lists are not rebuilt until afterwards, so only the ELEMENT lists can drive it.
 Only the h-adaptive adapt_mesh is hooked; p_adapt_mesh is not, as pyoomph has no p-refinable elements.
+The two declarations sit just ABOVE mesh.h's "#ifdef OOMPH_HAS_MPI" block (corrected on 22nd August
+2026; they were inside it at first). Only the second one communicates, but both call sites in
+refineable_mesh.cc are unconditional, so an MPI-less configuration -- which is what every wheel is --
+did not compile at all.
 See dev_docs/boundary_node_membership.md.
 Upstream equivalent: none, this is a pyoomph fix.
 
@@ -631,6 +635,46 @@ The dead code just below the solver call site (the commented-out "if (problem_pt
 block) is an older, unconditional version of the same idea and was left as it was.
 Upstream equivalent: none; this is a pyoomph-specific extension point, inert for any other user.
 
+problem.h / problem.cc (Changed on 24th August 2026, reorder_global_eqn_numbers):
+New public virtual "void reorder_global_eqn_numbers(Vector<double*>& dof_pt)" (problem.h, next to
+preferred_linear_solver_distribution), a no-op by default. Called from Problem::assign_eqn_numbers()
+at exactly one point: immediately after "n_dof = Mesh_pt->assign_global_eqn_numbers(...)" and before
+the "#ifdef OOMPH_HAS_MPI" block that either calls synchronise_eqn_numbers() or builds
+Dof_distribution_pt. An override permutes dof_pt and the matching Data::eqn_number() entries; it must
+not change WHICH values are dofs.
+It exists for pyoomph's user-selectable dof layouts (dev_docs/dof_ordering.md): oomph numbers every
+nodal value of a mesh before any element-internal one, which is the wrong layout for both consumers
+that care -- a block preconditioner (Hypre BoomerAMG) wants a node's fields adjacent so it can
+coarsen the vector system, and static condensation wants an element's selected dofs adjacent so a
+replicated row split can cut between the blocks rather than through them.
+The position in the function is the whole point and is not incidental. Everything that consumes the
+numbering is built BELOW it: Mesh::assign_local_eqn_numbers() with the elemental info,
+InterfaceMesh::update_equation_remapping(), the Dirichlet pinned-equation set, the dof distribution
+and pyoomph's sparsity generation id. A permutation applied here is therefore what the numbering IS,
+and nothing that caches a dof index can survive it -- which is what makes this safe where permuting
+after assign_eqn_numbers() had returned would not have been.
+The same call also serves both MPI modes. On a DISTRIBUTED problem the equation numbers at this point
+are still rank-local (0..my_n-1, halo data being Is_pinned) and synchronise_eqn_numbers() shifts them
+by the rank's base afterwards, so a rank-local permutation leaves each rank's global range
+contiguous, which the distributed assembly and the condensation row ownership both require. On a
+serial or replicated run the numbers are already global and the permutation is the whole thing.
+Upstream equivalent: none; this is a pyoomph-specific extension point, inert for any other user of
+the library.
+
+problem.h / mesh.cc / linear_algebra_distribution.* / linear_solver.cc (Note added 24th August 2026,
+Block_dof_pt_start):
+The "Block_dof_pt_start" / "Block_dof_arrangement_used" machinery (problem.h, filled in
+Mesh::assign_global_eqn_numbers and Problem::assign_eqn_numbers) is DEAD and has been since it was
+added. Every consumer is commented out: the block-aware LinearAlgebraDistribution constructor
+(linear_algebra_distribution.h/.cc), and the call to it in SuperLUSolver::solve and
+Problem::assign_eqn_numbers. It was an attempt at the same goal pyoomph now reaches through
+reorder_global_eqn_numbers plus Problem::dof_ordering_row_cuts: keeping an MPI row split from cutting
+inside a node's block, so that Hypre AMG sees whole blocks.
+Left in place rather than reverted, because reverting it would touch four files of vendored code to
+delete something already inert. The Python property that exposed it
+(Problem.nodal_block_dof_arrangement_used) now RAISES and names the replacement, since a property
+that silently does nothing is worse than one that is gone.
+
 Telements.h (Changed on 15th August 2026, TBubbleEnrichedElementShape<3,3>::d2shape_local):
 d2psids(9, 2) added the quartic-bubble term as "32.0 * d2_quartic_bubble_ds3" instead of "..._ds2",
 i.e. it used the mixed d^2/(ds0 ds1) derivative where the pure d^2/ds2^2 one belongs. Every other
@@ -673,3 +717,64 @@ nothing to re-derive and Ds_current keeps the value it was given.
 Upstream equivalent: none; upstream never prescribes the tangent by hand, so it cannot reach a
 Parameter_derivative of exactly 0 (calculate_continuation_derivatives_helper builds it as
 1/sqrt(1+theta^2*chi), which is always positive).
+
+integral.cc (Changed on 21st August 2026, Gauss<2,3>::Knot, the 3x3 rule for 2D quadrilaterals):
+five of the nine entries read 0.774596662941483 where the outer Gauss-Legendre knot is
+0.774596669241483 -- two digits transposed, 6.3e-9 -- and only on the positive knot. The rule
+therefore kept the correct total weight, which is why it passed every consistency check, but was no
+longer symmetric. That leaves a defect in the assembly rather than an error refinement can remove:
+the integral of a mid-side shape function derivative over an element came out as 7.0e-9 instead of
+identically zero, so a field lying exactly in the C2 space no longer produced a zero residual and
+results on 2D quadrilateral meshes were wrong by about 1e-9 HOWEVER FINE THE MESH. Measured on a
+Poisson problem with a linear exact solution, the mid-side node deviation drops from 8.5e-10 to
+4.0e-15; C1 quadrilaterals and triangles of any order use different rules and were always exact.
+The knot is now a named constant that is negated for the lower half, so symmetry is exact in IEEE
+arithmetic. An audit of every Gauss<D,N> knot and weight table against exact Legendre roots found no
+other entry worse than 4e-15, so this was the only one. tests/test_quadrature.py guards the rules
+directly -- odd monomials over a symmetric domain, and a Poisson solution lying in the space -- for
+lines, quadrilaterals, triangles and bricks; it was verified to fail on the pre-fix build, on
+exactly the three quadrilateral cases.
+Upstream equivalent: none; this is an upstream oomph-lib typo, present in the same table there.
+
+mesh.cc + problem.cc (Changed on 23rd August 2026, periodic boundary conditions under --distribute):
+Periodicity is pointer aliasing, not a constraint: BoundaryNodeBase::make_node_periodic points the
+copy node's Value/Eqn_number arrays at its master's, and BoundaryNode::assign_eqn_numbers is a no-op
+on a copy. Nothing in the distribution machinery knows that - mesh.cc, problem.cc, refineable_mesh.cc
+and partitioning.cc do not contain the word "periodic" - so master and copy were two independent
+Data* keys in every halo map while being one array, and pyoomph refused the combination outright.
+Two changes, both marked //FOR PYOOMPH.
+(a) Mesh::setup_shared_node_scheme and Mesh::classify_halo_and_haloed_nodes skip nodes with
+is_a_copy() when building Shared_node_pt, Halo_node_pt, Haloed_node_pt and the
+processors_associated_with_data / processor_in_charge maps; the copies are given their master's halo
+status at the end of classify_halo_and_haloed_nodes instead of getting a verdict of their own. Safe
+because a copy owns no data - whatever the master receives IS the copy's data - and necessary because
+the two members of a pair sit at opposite ends of the domain: no partitioning puts them in the same
+halo layer, so the schemes, which are built out of element adjacency, structurally cannot pair them
+up. is_a_copy() is a local property of the node and identical on every rank, so both sides of every
+scheme skip the same nodes and the ordering invariants still hold.
+Giving the pair one agreed owner instead - computable without communicating in Mesh::distribute,
+where the mesh is still replicated and element_domain has been broadcast - was tried first and does
+NOT work: the forced owner holds the OTHER member, so the node is not in the shared node scheme with
+it and the overlooked-halo reconciliation throws "Failed to find node that is shared node N ... in
+shared node lookup scheme with processor P which is in charge". Patching that reconciliation only
+moved the failure to three or more ranks, where the intermediate is a third rank that also lacks the
+node.
+(b) Problem::synchronise_eqn_numbers no longer bumps a copy's equation numbers. Data::eqn_number(i)
+returns a long& into the SHARED array and master and copy are both in Node_pt, so every periodic dof
+got my_eqn_num_base added twice - invisible on rank 0, silently out of range everywhere else. Needed
+independently of (a); the position bump is guarded by position_is_a_copy() for symmetry, though
+make_periodic never aliases positions.
+(b) was verified by ablation: restoring the stock loop while keeping (a) makes five of the twelve
+tests in tests/test_mpi_periodic.py fail, all with PETSc's "Column too large: col 1440 max 991".
+The pyoomph half of the fix is Mesh::ensure_halos_for_periodic_boundaries (src/mesh.cpp), which keeps
+a boundary element from each side of the seam on every rank so the master is always present - (a)
+depends on that, since the master then becomes the only node of the pair the halo exchange reaches,
+and stubbing it out fails 6 of the tests -
+plus two refusals in Problem: _require_no_distributed_periodic_refinement, because Mesh::distribute
+ends with setup_tree_forest(), which rebuilds tree neighbours by matching shared nodes, so the
+TreeRoot::Neighbour_periodic links do not survive it; and
+_require_no_distributed_periodic_position_dofs, because make_periodic aliases only the values, so on
+a moving mesh a copy carries position dofs of its own and (a) leaves nothing to carry them.
+See dev_docs/distributed_periodic_bc.md and tests/test_mpi_periodic.py.
+Upstream equivalent: none, this is a pyoomph fix (upstream oomph-lib does not support periodic
+boundary conditions on a distributed mesh either).

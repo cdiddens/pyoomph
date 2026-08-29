@@ -217,8 +217,17 @@ class ScalarTransportStabilization:
             :py:class:`~pyoomph.equations.stabilized_ns.StabilizedNavierStokes`, where it was
             measured to be on the diffusive side; it has *not* been measured for scalar transport.
         c_t: coefficient of the transient term in :math:`\\tau`.
-        stab_factor: global prefactor on :math:`\\tau` and :math:`\\nu_\\text{dc}`, for sensitivity
-            studies. Setting it to zero must reproduce the unstabilized residual exactly.
+        c_r: coefficient of the reaction term in :math:`\\tau`, i.e. of whatever
+            :py:meth:`ScalarTransportEquations.stabilization_reaction_rate` returns.
+        reaction_eps: regularization of that rate, relative to ``1/scale_factor("temporal")``. The
+            rate enters :math:`\\tau` as a magnitude, and ``absolute()`` has a 0/0 derivative at the
+            origin -- where a reaction rate proportional to the solution genuinely sits on a uniform
+            initial condition.
+        stab_factor: prefactor on :math:`\\tau`, for sensitivity studies. It does **not** scale
+            :math:`\\nu_\\text{dc}`, which has its own ``dc_factor`` -- so switching everything off
+            takes ``stab_factor=0, dc_factor=0``, as
+            ``tests/test_stabilized_transport.py::test_stab_factor_zero_is_bitwise_identical``
+            does. (This entry used to claim it scaled both.)
         transient_tau: include the :math:`1/\\Delta t` term in :math:`\\tau`. ``"auto"`` uses the
             BDF1 weight, which pyoomph zeroes in a steady solve, so the term switches itself off
             there.
@@ -281,7 +290,8 @@ class ScalarTransportStabilization:
 
     def __init__(self, terms: "str | Iterable[str] | None" = "SUPG", *,
                  tau_formula: Literal["shakib", "codina", "tezduyar"] = "shakib",
-                 C_I: float = 4.0, c_t: float = 2.0,
+                 C_I: float = 4.0, c_t: float = 2.0, c_r: float = 1.0,
+                 reaction_eps: ExpressionOrNum = 1e-10,
                  stab_factor: ExpressionOrNum = 1,
                  transient_tau: "Literal['auto'] | bool" = "auto",
                  include_diffusion_in_residual: bool = True,
@@ -315,7 +325,8 @@ class ScalarTransportStabilization:
         if cast(str, tau_formula) not in ("shakib", "codina", "tezduyar"):
             raise ValueError(f"unknown tau_formula '{tau_formula}'")
         self.tau_formula: Literal["shakib", "codina", "tezduyar"] = tau_formula
-        self.C_I, self.c_t = C_I, c_t
+        self.C_I, self.c_t, self.c_r = C_I, c_t, c_r
+        self.reaction_eps = reaction_eps
         self.stab_factor = stab_factor
         self.transient_tau: "Literal['auto'] | bool" = transient_tau
         self.include_diffusion_in_residual = include_diffusion_in_residual
@@ -387,8 +398,40 @@ class ScalarTransportEquations(Equations):
         raise NotImplementedError
 
     def stabilization_wind(self) -> ExpressionOrNum:
-        """The advecting velocity, *before* subtracting the mesh velocity."""
+        """The advecting velocity, *before* subtracting the mesh velocity.
+
+        The part that is common to every transported field. When the fields are advected at
+        *different* speeds -- ions drifting in an electric field, each with its own mobility and
+        charge -- override :py:meth:`stabilization_wind_for_field` instead.
+        """
         raise NotImplementedError
+
+    def stabilization_wind_for_field(self, fieldname: str) -> ExpressionOrNum:
+        """
+        The advecting velocity of one particular field, *before* subtracting the mesh velocity.
+
+        Defaults to :py:meth:`stabilization_wind`, i.e. all fields ride the same wind, which is the
+        case for advection-diffusion, a mixture composition and the temperature. Nernst-Planck is
+        the counter-example: its wind is :math:`\\vec{u}-z_i m_i F\\nabla\\phi`, so both the
+        streamline direction of the SUPG weight and the cell Peclet number in :math:`\\tau` differ
+        per species. Sizing every species from the fluid velocity alone leaves :math:`\\tau` too
+        large wherever migration dominates -- which is precisely inside a Debye layer.
+        """
+        return self.stabilization_wind()
+
+    def stabilization_reaction_rate(self, fieldname: str) -> ExpressionOrNum:
+        """
+        The rate (1/s) of any term *linear in the transported field itself*, for :math:`\\tau`.
+
+        :math:`\\tau` is the inverse of a sum of rates, one per mechanism that can remove a
+        perturbation, so a mechanism left out makes it too large by whatever that rate contributes.
+        Zero by default, because a plain advection-diffusion equation has no such term.
+
+        Return a rate, signed or not: the base class takes a regularized magnitude of it, since
+        ``"codina"`` and ``"tezduyar"`` add it linearly and a negative contribution there would
+        inflate :math:`\\tau` rather than reduce it.
+        """
+        return 0
 
     def stabilization_diffusivity(self, fieldname: str) -> ExpressionOrNum:
         """A *kinematic* diffusivity (m^2/s) for this field, used in :math:`\\tau`."""
@@ -422,7 +465,18 @@ class ScalarTransportEquations(Equations):
             self.stab_cfg.velocity_scale = velocity_scale
         self.stab: set[str] = self.stab_cfg.terms
 
-    def _stabilization_is_advective(self) -> bool:
+    def _wind(self, fieldname: "str | None") -> ExpressionOrNum:
+        """The wind to use: the field's own if one was asked for, the common one otherwise.
+
+        ``fieldname=None`` goes through :py:meth:`stabilization_wind` rather than through
+        :py:meth:`stabilization_wind_for_field`, so that an equation which overrides only the
+        former keeps producing exactly the expression it did before this hook existed.
+        """
+        if fieldname is None:
+            return self.stabilization_wind()
+        return self.stabilization_wind_for_field(fieldname)
+
+    def _stabilization_is_advective(self, fieldname: "str | None" = None) -> bool:
         """
         Whether the SUPG/DC terms have anything to act on at all.
 
@@ -430,22 +484,25 @@ class ScalarTransportEquations(Equations):
         would only bloat the generated code. This also keeps ``scale_factor("velocity")`` out of
         purely diffusive domains, where it need not be defined at all.
         """
-        if not is_zero(self.stabilization_wind()):
+        if not is_zero(convert_to_expression(self._wind(fieldname))):
             return True
         return bool(self.get_combined_equations()._assert_codegen()._coordinates_as_dofs)  # type:ignore
 
-    def convective_velocity(self) -> Expression:
+    def convective_velocity(self, fieldname: "str | None" = None) -> Expression:
         """
         :math:`\\vec{a}=\\vec{u}-\\vec{u}_\\text{mesh}`. On a moving (ALE) mesh it is the relative
         velocity that is advected, so it is that one which must set both the streamline direction
         and the cell Peclet number in :math:`\\tau`.
+
+        With a ``fieldname`` it is that field's own wind, see
+        :py:meth:`stabilization_wind_for_field`; without one, the wind common to all of them.
         """
-        a = convert_to_expression(self.stabilization_wind())
+        a = convert_to_expression(self._wind(fieldname))
         if self.get_combined_equations()._assert_codegen()._coordinates_as_dofs:  # type:ignore
             a = a - mesh_velocity()
         return a
 
-    def stabilization_velocity_magnitude(self) -> Expression:
+    def stabilization_velocity_magnitude(self, fieldname: "str | None" = None) -> Expression:
         """
         Regularized :math:`|\\vec{a}|`, see :py:func:`regularized_magnitude`.
 
@@ -453,10 +510,10 @@ class ScalarTransportEquations(Equations):
         being advected: a purely diffusive domain need not define ``scale_factor("velocity")`` at
         all, and asking for it there fails at code generation rather than at construction.
         """
-        if not self._stabilization_is_advective():
+        if not self._stabilization_is_advective(fieldname):
             return Expression(0)
         eps = self.stab_cfg.velocity_eps * scale_factor(self.stab_cfg.velocity_scale)
-        return regularized_magnitude(self.convective_velocity(), eps)
+        return regularized_magnitude(self.convective_velocity(fieldname), eps)
 
     def stabilization_element_h(self) -> Expression:
         """The element length scale entering :math:`\\tau`. An override point."""
@@ -469,9 +526,23 @@ class ScalarTransportEquations(Equations):
         if cfg.tau_formula == "tezduyar" and is_zero(D):
             raise RuntimeError(f"tau_formula='tezduyar' divides by the diffusivity, but the "
                                f"diffusivity of '{fieldname}' is zero. Use 'shakib' or 'codina'.")
-        t = tau_advective_diffusive(self.stabilization_element_h(),
-                                    self.stabilization_velocity_magnitude(), D,
-                                    inv_dt(cfg.transient_tau), cfg.tau_formula, cfg.C_I, cfg.c_t)
+        r = convert_to_expression(self.stabilization_reaction_rate(fieldname))
+        if is_zero(r):
+            # Pass nothing rather than a literal zero, so that an equation without a reaction term
+            # generates exactly the expression it did before the slot was wired up.
+            t = tau_advective_diffusive(self.stabilization_element_h(),
+                                        self.stabilization_velocity_magnitude(fieldname), D,
+                                        inv_dt(cfg.transient_tau), cfg.tau_formula, cfg.C_I, cfg.c_t)
+        else:
+            # A magnitude: "codina" and "tezduyar" add the rate linearly, so a negative one would
+            # inflate tau instead of reducing it. Regularized rather than absolute(), whose 0/0
+            # derivative at the origin is exactly where a rate proportional to the solution sits on
+            # a uniform initial condition -- the trap dc_diffusivity records.
+            reps = cfg.reaction_eps / scale_factor("temporal")
+            t = tau_advective_diffusive(self.stabilization_element_h(),
+                                        self.stabilization_velocity_magnitude(fieldname), D,
+                                        inv_dt(cfg.transient_tau), cfg.tau_formula, cfg.C_I, cfg.c_t,
+                                        reaction=square_root(r * r + reps ** 2), c_r=cfg.c_r)
         return _maybe_sub(self._wrap_tau, cfg.stab_factor * t)
 
     def dc_gradient(self, fieldname: str) -> Expression:
@@ -481,7 +552,7 @@ class ScalarTransportEquations(Equations):
             return g
         # Crosswind: project out the streamline component, so that the added diffusivity acts only
         # perpendicular to the flow and does not undo the streamline accuracy SUPG provides.
-        ahat = self.convective_velocity() / self.stabilization_velocity_magnitude()
+        ahat = self.convective_velocity(fieldname) / self.stabilization_velocity_magnitude(fieldname)
         return g - dot(g, ahat) * ahat
 
     def dc_diffusivity(self, fieldname: str, R: Expression) -> Expression:
@@ -522,7 +593,7 @@ class ScalarTransportEquations(Equations):
         Rmag = square_root(R * R + Reps ** 2)
         nu = cfg.dc_factor * self.stabilization_element_h() / 2 * Rmag / (rho_hat * gmag)
         if cfg.dc_subtract_supg:
-            U = self.stabilization_velocity_magnitude()
+            U = self.stabilization_velocity_magnitude(fieldname)
             nu = maximum(nu - self.tau(fieldname) * U ** 2, 0)
         return _maybe_sub(self._wrap_tau, nu)
 
@@ -545,15 +616,19 @@ class ScalarTransportEquations(Equations):
             return
         if ts is None:
             ts = lambda e: e
-        advective = self._stabilization_is_advective()
-        if not advective and not (self.stab & {"GLSDIFF", "ASGSDIFF"}):
+        # Per field, not once: with a per-species wind (see stabilization_wind_for_field) one field
+        # can be advected while another is not. For every equation whose fields share a wind this is
+        # the same decision and the same expression for all of them, so nothing changes there.
+        if not any(self._stabilization_is_advective(fn) for fn in self.stabilized_fieldnames()) \
+                and not (self.stab & {"GLSDIFF", "ASGSDIFF"}):
             return
-        a = self.convective_velocity() if advective else None
 
         for fn in self.stabilized_fieldnames():
             v = testfunction(fn)
             R = _maybe_sub(self._wrap_R, self.strong_residual(fn))
             tau = self.tau(fn)
+            advective = self._stabilization_is_advective(fn)
+            a = self.convective_velocity(fn) if advective else None
 
             if "SUPG" in self.stab and advective:
                 assert a is not None
@@ -603,7 +678,7 @@ class ScalarTransportEquations(Equations):
         active = self.stab & self.stab_cfg.natural_bc_correction
         if not active or fieldname not in self.stabilized_fieldnames():
             return Expression(0)
-        if not self._stabilization_is_advective():
+        if not self._stabilization_is_advective(fieldname):
             return Expression(0)
         # Everything strong must be evaluated in the bulk: on an interface grad() is the *surface*
         # gradient, which would silently drop exactly the normal derivatives that matter here.
@@ -611,7 +686,7 @@ class ScalarTransportEquations(Equations):
         res = Expression(0)
         R = _maybe_sub(self._wrap_R, ed(self.strong_residual(fieldname)))
         if "SUPG" in active:
-            res = res + ed(self.tau(fieldname)) * dot(ed(self.convective_velocity()), normal) * R
+            res = res + ed(self.tau(fieldname)) * dot(ed(self.convective_velocity(fieldname)), normal) * R
         if "DC" in active:
             res = res + ed(self.stabilization_residual_scale(fieldname)
                            * self.dc_diffusivity(fieldname, R)) * dot(ed(self.dc_gradient(fieldname)), normal)

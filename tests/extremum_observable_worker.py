@@ -1,5 +1,7 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #
 #  @section LICENSE
 #
@@ -92,9 +94,25 @@ def main() -> int:
         gui = BifurcationGUI(problem, "mu")
         gui.neigen = 1
         gui.set_initial_view(-0.2, 1.2, -0.2, 2.2)
+        # The diagram should open on this one rather than on the first name in alphabetical order.
+        # Written with a single space, which the double space of the extremum names has to tolerate.
+        gui.set_initial_observable("domain/h_extreme [min, x]")
         problem.solve()
         gui.controller.start(0.05)
         c = gui.controller
+
+        assert c._current_observable == MINX, \
+            "set_initial_observable() did not take: " + str(c._current_observable)
+        assert c.y_axis == ("observable", MINX), "the y axis did not follow: " + str(c.y_axis)
+        # A name that does not exist must say so, not fall back to an arbitrary observable.
+        c._initial_observable = "domain/not_an_observable"
+        try:
+            c._resolve_initial_observable()
+        except ValueError as e:
+            assert "not_an_observable" in str(e)
+        else:
+            raise AssertionError("an unknown initial observable was accepted")
+        c._initial_observable = None
 
         obs = c.evaluate_observables()
         print("axis choices: " + ", ".join(sorted(k for k in obs if "h_extreme" in k)))

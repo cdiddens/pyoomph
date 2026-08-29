@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -88,6 +88,8 @@ hour = 60 * minute
 day = 24 * hour
 litre = _power_of_ten(-3) * meter ** 3
 liter = litre
+#: Molar concentration, i.e. mol/litre. "1 mM NaCl" is 1*milli*molar.
+molar = mol / litre
 
 hertz = 1 / second
 newton = kilogram * meter / second ** 2
@@ -107,10 +109,12 @@ dyne = _power_of_ten(-5) * newton
 darcy = 9.86923e-13 * meter ** 2
 
 volt = watt / ampere
-coloumb = ampere * second
-farad= coloumb / volt
+coulomb = ampere * second
+farad= coulomb / volt
 henry = volt * second / ampere
 siemens = ampere / volt
+#: Electrical resistance. Note that only its reciprocal, :py:data:`siemens`, used to be defined.
+ohm = volt / ampere
 
 ## TODO Celsius conversion function
 class CelsiusClass:
@@ -306,6 +310,33 @@ __simplified_units["Nm"] = _pyoomph.GiNaC_sep_base_units(newton*meter)
 __simplified_units["W"] = _pyoomph.GiNaC_sep_base_units(watt)
 __simplified_units["V"] = _pyoomph.GiNaC_sep_base_units(volt)
 __simplified_units["F"] = _pyoomph.GiNaC_sep_base_units(farad)
+# The electric units below. unit_to_string matches on the exact base-unit signature and takes the
+# first hit in insertion order, so a new entry can only ever relabel a quantity whose signature is
+# identical to it and to no earlier entry. These seven are pairwise distinct and distinct from
+# everything above, and every one of them contains ampere, which occurs in no non-electric entry --
+# so nothing mechanical or thermal can be caught by them. Appended last, which also preserves the
+# prefix estimation described further up.
+__simplified_units["C"] = _pyoomph.GiNaC_sep_base_units(coulomb)
+__simplified_units["S"] = _pyoomph.GiNaC_sep_base_units(siemens)
+__simplified_units["S/m"] = _pyoomph.GiNaC_sep_base_units(siemens/meter)
+__simplified_units["F/m"] = _pyoomph.GiNaC_sep_base_units(farad/meter)
+__simplified_units["V/m"] = _pyoomph.GiNaC_sep_base_units(volt/meter)
+__simplified_units["C/m^2"] = _pyoomph.GiNaC_sep_base_units(coulomb/meter**2)
+__simplified_units["C/m^3"] = _pyoomph.GiNaC_sep_base_units(coulomb/meter**3)
+__simplified_units["Ohm"] = _pyoomph.GiNaC_sep_base_units(ohm)
+__simplified_units["Ohm m"] = _pyoomph.GiNaC_sep_base_units(ohm*meter)
+__simplified_units["F/m^2"] = _pyoomph.GiNaC_sep_base_units(farad/meter**2)
+__simplified_units["C/mol"] = _pyoomph.GiNaC_sep_base_units(coulomb/mol)
+__simplified_units["C m"] = _pyoomph.GiNaC_sep_base_units(coulomb*meter)
+__simplified_units["S m^2/mol"] = _pyoomph.GiNaC_sep_base_units(siemens*meter**2/mol)
+__simplified_units["H"] = _pyoomph.GiNaC_sep_base_units(henry)
+__simplified_units["H/m"] = _pyoomph.GiNaC_sep_base_units(henry/meter)
+# A name registered here MUST start with a derived symbol, i.e. one whose prefix binds with exponent
+# 1 -- the lookup above short-circuits the exponent search whenever a simplified name is found, so a
+# label like "m^2/(V s)" would be printed with a prefix meant for exponent 1 while reading as
+# exponent 2, i.e. wrong by three orders per prefix step. That is the same trap the farad comment
+# further up records, seen from the other side. Ion mobility (m^2/(V s)) is therefore deliberately
+# NOT registered and keeps its base-unit spelling.
 
 
 

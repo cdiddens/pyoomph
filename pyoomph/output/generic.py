@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -990,7 +990,12 @@ class GenericOutput(BaseEquations):
             return
         self._outputter[eqtree].output(step)
 
-    def change_output_directory(self, newdir:str,eqtree:"EquationTree"):
+    # This is the BaseEquations hook, which is underscored (ec1f960); the _BaseOutputter method it
+    # forwards to deliberately is not. Naming this one after the outputter's silently unhooked the
+    # whole relocation: EquationTree._change_output_directory dispatches "_change_output_directory",
+    # hit BaseEquations' no-op instead, and PeriodicOrbit.output_orbit() created its subdirectory and
+    # then wrote nothing into it.
+    def _change_output_directory(self, newdir:str,eqtree:"EquationTree"):
         self._outputter[eqtree].change_output_directory(newdir,eqtree)
 
 
@@ -1200,7 +1205,11 @@ class _IntegralObservableOutput(_BaseOutputter):
         args:dict[str,Expression]={k:v for k,v in intres.items()}
         res:dict[str,Expression] = {k: v for k, v in intres.items()}
         args["time"]=self._mesh.get_problem().get_current_time(dimensional=True,as_float=False)
-        remaining=set(deps.keys())
+        # A list in the order the observables were declared, not a set: res is written out column by
+        # column below in its insertion order, and resolving the dependencies in the order of a set
+        # of names - randomized per process by PYTHONHASHSEED - reshuffled the columns of the output
+        # file from one run to the next.
+        remaining=list(deps.keys())
         while len(remaining)>0:
             torem:set[str]=set()
             for r in remaining:
@@ -1229,8 +1238,8 @@ class _IntegralObservableOutput(_BaseOutputter):
                     args[r]=depres
                     res[r]=depres
             if len(torem)==0:
-                raise RuntimeError("Cannot evaluate the dependent integral functions, probably due to unknown or circular arguments : "+str(remaining))
-            remaining = remaining-torem
+                raise RuntimeError("Cannot evaluate the dependent integral functions, probably due to unknown or circular arguments : "+str(sorted(remaining)))
+            remaining = [r for r in remaining if r not in torem]
 
 
         for n,v in res.items():

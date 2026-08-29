@@ -3,30 +3,31 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
  
+from .._deprecation import deprecated_kwargs as _deprecated_kwargs, deprecated_attribute_alias as _deprecated_attribute_alias
 from ..meshes.mesh import AnyMesh, InterfaceMesh
 from ..generic import Equations, InterfaceEquations
 from ..generic.codegen import sorted_field_kwargs
@@ -34,10 +35,12 @@ from ..equations.generic import InitialCondition, SpatialErrorEstimator, FiniteE
 from ..expressions import *  # Import grad et al
 from .navier_stokes import NavierStokesEquations #type:ignore
 from .stabilization import ScalarTransportEquations,ScalarTransportStabilization
+from .salt_transport import SaltTransportEquations
 from ..materials.generic import *
 from ..typings import *
 from ..materials.mass_transfer import MassTransferModelBase
 from .generic import get_interface_field_connection_space
+from .surfactants import SurfactantTransportEquations
 
 if TYPE_CHECKING:
     from ..generic.codegen import EquationTree
@@ -64,9 +67,45 @@ def CompositionInitialCondition(fluid_props:AnyFluidProperties,isothermal:bool,i
     return InitialCondition(degraded_start="auto", IC_name="", **icsettings)
 
 
+def _salt_equations_for(fluid_props:AnyFluidProperties,salts:"Literal['auto'] | bool",
+                        space:FiniteElementSpaceEnum,wind:ExpressionOrNum,
+                        advection_by_parts:bool,GCL:bool,dt_factor:ExpressionOrNum,
+                        stabilization:"str | Iterable[str] | ScalarTransportStabilization | None",
+                        scheme:TimeSteppingScheme,
+                        salt_treatment:"Literal['dilute','component']"="dilute")->"Equations | None":
+    """The salt transport of a material that carries salts, or None.
+
+    ``salts="auto"`` is the default everywhere: a salted material that silently generated the same
+    system as an unsalted one is exactly the trap this closes, and an unsalted one is unaffected
+    because there is nothing to add.
+    """
+    carries=bool(getattr(fluid_props,"get_salts",lambda:{})())
+    if not carries:
+        if salts is True:
+            raise RuntimeError("salts=True, but no salt is dissolved in this material. Use "+
+                               "add_salt() on it, or leave salts at its default \"auto\".")
+        return None
+    if salt_treatment=="component":
+        # The composition equations transport the salt themselves, mass fraction and all; what is
+        # still needed is the concentration fields everything else is written against.
+        from .salt_transport import SaltConcentrationsFromMassFractions
+        return SaltConcentrationsFromMassFractions(fluid_props)
+    if salts is False:
+        # Not nothing: the surface tension law reads a concentration field, so the salt still has to
+        # have a value even when nobody transports it. FrozenSaltConcentrations stands down if an
+        # electrolyte model turns out to be on the domain, which is how salts=False stays the route
+        # to Poisson-Nernst-Planck.
+        from .salt_transport import FrozenSaltConcentrations
+        return FrozenSaltConcentrations(fluid_props)
+    return SaltTransportEquations(fluid_props=fluid_props,space=space,wind=wind,
+                                  advection_by_parts=advection_by_parts,GCL=GCL,dt_factor=dt_factor,
+                                  stabilization=stabilization,scheme=scheme)
+
+
 def CompositionDiffusionEquations(fluid_props:AnyFluidProperties, space:FiniteElementSpaceEnum="C2", dt_factor:ExpressionOrNum=1, with_IC:bool=True, spatial_errors:float | None=None,isothermal:bool=True,initial_temperature:ExpressionNumOrNone=None,
                                   compo_stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None,
-                                  thermal_stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None) -> Equations:
+                                  thermal_stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None,
+                                  salts:"Literal['auto'] | bool"="auto") -> Equations:
     """
     Adds diffusion equations for the mass fractions of the components in a multi-component system, but without any Navier-Stokes equations. Can be used e.g. for diffusion-limited species transport in a gas phase.
 
@@ -80,11 +119,15 @@ def CompositionDiffusionEquations(fluid_props:AnyFluidProperties, space:FiniteEl
         initial_temperature: Initial condition for the temperature.
         compo_stabilization: Optional residual-based stabilization of the mass fraction transport. Without a wind there is nothing for SUPG to act on unless the mesh moves, so this is mainly of interest on an ALE mesh.
         thermal_stabilization: The same for the temperature.
+        salts: Whether to transport the salts dissolved in ``fluid_props``, see :py:func:`CompositionFlowEquations`.
 
     Returns:
         A coupled set of equations for the mass fractions for the diffusive transport of the components in the mixture.
     """
     res:Equations = CompositionAdvectionDiffusionEquations(fluid_props, space=space, dt_factor=dt_factor, wind=0, stabilization=compo_stabilization)
+    salt_eqs=_salt_equations_for(fluid_props,salts,space,0,False,False,dt_factor,compo_stabilization,"BDF2")
+    if salt_eqs is not None:
+        res = res + salt_eqs
     if not isothermal:
         res+=TemperatureConductionEquation(fluid_props,space=space,stabilization=thermal_stabilization)
     if with_IC:
@@ -103,7 +146,10 @@ def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteE
                              hele_shaw_thickness:ExpressionNumOrNone=None, spatial_errors:float | None=None, isothermal:bool=True,initial_temperature:ExpressionNumOrNone=None,additional_advection:ExpressionOrNum=0,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",compo_scheme:TimeSteppingScheme="BDF2",integrate_advection_by_parts:bool=False,wrap_params_in_subexpressions=True,thermal_dt_factor:ExpressionOrNum=1,thermal_adv_factor:ExpressionOrNum=1,GCL:bool=False,
                              ns_stabilization:"str | Iterable[str] | None"=None, ns_stabilization_options:"dict[str,Any] | None"=None,
                              compo_stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None,
-                             thermal_stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None) -> Equations:
+                             thermal_stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None,
+                             salts:"Literal['auto'] | bool"="auto",salt_space:FiniteElementSpaceEnum | None=None,
+                             salt_stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None,
+                             salt_treatment:"Literal['dilute','component']"="dilute") -> Equations:
     """
     Assembles a system for multi-component flow with advection-diffusion equations for mass fraction fields of the mixture composition and the Navier-Stokes equations. Potentially, also a temperature field is included.
 
@@ -131,6 +177,22 @@ def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteE
         thermal_dt_factor: Factor for the time derivative of the temperature field.
         thermal_adv_factor: Factor for the advection term of the temperature field.
         GCL: If True, the Geometric Conservation Law is enforced in the ALE formulation of the Navier-Stokes equations and the composition equations.
+        salts: Whether to transport the salts dissolved in ``fluid_props``, see
+            :py:class:`~pyoomph.equations.salt_transport.SaltTransportEquations`. ``"auto"`` (the
+            default) does it whenever the material carries any, which is what makes
+            ``water.add_salt("NaCl", 1*milli*molar)`` actually mean something here. Pass ``False``
+            for the electrohydrodynamic route, where
+            :py:func:`~pyoomph.equations.electrostatics.PoissonNernstPlanck` solves for the ions and
+            the potential instead -- the two must not both define the ion concentrations.
+        salt_space: Space of the salt fields. Defaults to ``compo_space``.
+        salt_stabilization: The same as ``compo_stabilization``, for the salt transport.
+        salt_treatment: ``"dilute"`` (the default) transports a dissolved salt as a concentration
+            that takes no part in the mass fractions -- right to a few percent up to about half
+            molar. ``"component"`` upgrades the material in place so that the salt is an ordinary
+            component with a mass fraction, a mole fraction and a share of the volume; the
+            composition equations then transport it, and the evaporation interface condition it
+            needs is the one they already write for any non-volatile component. See
+            :py:meth:`~pyoomph.materials.generic.BaseLiquidProperties.treat_salts_as_components`.
         ns_stabilization: Residual-based stabilization of the flow, e.g. ``"SUPG+PSPG"``. Anything but ``None`` switches the flow equations to :py:class:`~pyoomph.equations.stabilized_ns.StabilizedNavierStokes`. This is what makes the inf-sup unstable equal-order pairs ``ns_mode="C1C1"``/``"C2C2"`` usable.
         ns_stabilization_options: Further arguments of :py:class:`~pyoomph.equations.stabilized_ns.StabilizedNavierStokes`, e.g. ``{"tau_formula":"codina","C_I":36}``.
         compo_stabilization: Residual-based stabilization of the mass fraction transport, see :py:class:`~pyoomph.equations.stabilization.ScalarTransportStabilization`.
@@ -151,6 +213,18 @@ def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteE
         A coupled set of equations describing the multi-component flow of the mixture
     """
 
+    if salt_treatment=="component":
+        # In place, and before anything is built from the material: the composition equations, the
+        # interface and the vapour pressures all read the same object, and they have to agree about
+        # what a mass fraction means.
+        if not getattr(fluid_props,"get_salts",lambda:{})():
+            raise RuntimeError("salt_treatment='component' but nothing is dissolved in this "+
+                               "material. Dissolve a salt, or leave it at 'dilute'.")
+        if getattr(fluid_props,"is_pure",False):
+            raise RuntimeError("A salt as a composition field makes the solution a mixture, and a "+
+                               "pure liquid cannot hold components. Build it with "+
+                               "Mixture(solvent + <c>*get_salt(...), salt_treatment='component').")
+        cast(Any,fluid_props).treat_salts_as_components()
     if GCL:
         if not integrate_advection_by_parts:
             integrate_advection_by_parts=True
@@ -185,6 +259,11 @@ def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteE
     cp = CompositionAdvectionDiffusionEquations(fluid_props=fluid_props, space=compo_space, dt_factor=compo_dt_factor,
                                                 boussinesq=boussinesq, wind=wind,integrate_advection_by_parts=integrate_advection_by_parts,wrap_params_in_subexpressions=wrap_params_in_subexpressions,GCL=GCL,scheme=compo_scheme,stabilization=compo_stabilization)
     res = ns + cp
+    salt_eqs=_salt_equations_for(fluid_props,salts,salt_space if salt_space is not None else compo_space,
+                                 wind,integrate_advection_by_parts,GCL,compo_dt_factor,
+                                 salt_stabilization,compo_scheme,salt_treatment)
+    if salt_eqs is not None:
+        res = res + salt_eqs
     if not isothermal:
         res+=TemperatureAdvectionConductionEquation(fluid_props,space=compo_space,wind=wind,adv_factor=thermal_adv_factor,dt_factor=thermal_dt_factor,stabilization=thermal_stabilization)
     if with_IC:
@@ -221,6 +300,11 @@ class CompositionAdvectionDiffusionEquations(ScalarTransportEquations):
         GCL(bool): Whether to consider the Generalized Continuity Equation. Default is False.
         scheme(TimeSteppingScheme): The time stepping scheme. Default is "BDF2".
         stabilization: Optional residual-based stabilization (SUPG etc.) of the mass fraction transport, see :py:class:`~pyoomph.equations.stabilization.ScalarTransportStabilization`. ``None`` (the default) adds nothing at all.
+
+    .. note::
+        **Scaling to set on problem level.** The residual is a *mass* balance, so each mass fraction
+        is tested with ``scale_factor("temporal")/scale_factor("mass_density")``. ``mass_density`` is
+        no field of the system and must be set by ``problem.set_scaling(mass_density=...)``.
     """
 
     def __init__(self, fluid_props:AnyFluidProperties, *, space:FiniteElementSpaceEnum="C2", wind:ExpressionOrNum=var("velocity"), dt_factor:ExpressionOrNum=1, boussinesq:bool=False,integrate_advection_by_parts:bool=False,wrap_params_in_subexpressions:bool=True, GCL:bool=False, scheme:TimeSteppingScheme="BDF2", stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None):
@@ -444,7 +528,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         additional_normal_traction(ExpressionOrNum): Additional normal traction. Default is 0.
         surface_tension_gradient_directly(bool): Whether to consider the surface tension gradient directly. Default is False.
         use_highest_space_for_velo_connection(bool): Whether to use the highest space for the velocity connection. Default is False.
-        kinematic_bc_coordinate_sys(Optional[BaseCoordinateSystem]): The coordinate system for the kinematic boundary condition. Default is None.
+        kinematic_bc_coordsys(Optional[BaseCoordinateSystem]): The coordinate system for the kinematic boundary condition. Default is None.
         kinematic_bc_space: The finite element space for the kinematic boundary condition. Default is None, means auto-select.
         additional_masstransfer_scale(ExpressionOrNum): Additional mass transfer scale. Default is 1.
         additional_kin_bc_test_scale(ExpressionOrNum): Additional kinematic boundary condition test scale. Default is 1.
@@ -452,12 +536,22 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         static_interface_motion_testfunction(ExpressionNumOrNone): If set, we solve that the total outflux is zero by adjusting this.
         project_interface_flux(bool): If set to True, the interface flux (kinematic BC) is projected and used for the kinematic BC. Default is False.
         surface_tension_factor(ExpressionOrNum): The surface tension factor. Multiplicative factor for the imposition of the surface tension. Default is 1.
+        surfactant_transport: How the surfactants registered on the interface properties are transported. ``None`` (the default) uses :py:class:`~pyoomph.equations.surfactants.SurfactantTransportEquations` in its conservative form, which keeps the total amount of an insoluble surfactant exact rather than to the order of the time stepping. Pass a configured instance to change the form, the variable or the stabilization -- ``SurfactantTransportEquations(form="legacy")`` reproduces the pre-2026 behaviour bit for bit. ``False`` switches the surfactant equations off entirely, e.g. to supply your own.
+
+    .. note::
+        **Scaling to set on problem level.** The mass transfer rate is scaled with
+        ``scale_factor("velocity")*scale_factor("mass_density")``, i.e. besides the velocity also
+        ``mass_density`` -- no field of the system -- has to be set by
+        ``problem.set_scaling(mass_density=...)``.
     """
             
         
+    kinematic_bc_coordinate_sys = _deprecated_attribute_alias("kinematic_bc_coordinate_sys","kinematic_bc_coordsys")
+
+    @_deprecated_kwargs(kinematic_bc_coordinate_sys="kinematic_bc_coordsys")
     def __init__(self, interface_props:AnyFluidFluidInterface, *, kinbc_name:str="_kin_bc", velo_connect_prefix:str="_lagr_conn_",
                  masstransfer_model:MassTransferModelBase | Literal[False] | None=None, static:Literal["auto"] | bool="auto", surface_tension_theta:float=1, total_mass_loss_factor_inside:ExpressionOrNum=1,total_mass_loss_factor_outside:ExpressionOrNum=1,
-                 surface_tension_projection_space:FiniteElementSpaceEnum | None=None,additional_normal_traction:ExpressionOrNum=0,surface_tension_gradient_directly:bool=False,use_highest_space_for_velo_connection:bool=False,kinematic_bc_coordinate_sys:BaseCoordinateSystem | None=None,kinematic_bc_space:FiniteElementSpaceEnum | None=None,additional_masstransfer_scale=1,additional_kin_bc_test_scale=1,static_normal_interface_motion:ExpressionOrNum=0,static_interface_motion_testfunction:ExpressionNumOrNone=None,project_interface_flux:bool=False,surface_tension_factor:ExpressionOrNum=1):
+                 surface_tension_projection_space:FiniteElementSpaceEnum | None=None,additional_normal_traction:ExpressionOrNum=0,surface_tension_gradient_directly:bool=False,use_highest_space_for_velo_connection:bool=False,kinematic_bc_coordsys:BaseCoordinateSystem | None=None,kinematic_bc_space:FiniteElementSpaceEnum | None=None,additional_masstransfer_scale=1,additional_kin_bc_test_scale=1,static_normal_interface_motion:ExpressionOrNum=0,static_interface_motion_testfunction:ExpressionNumOrNone=None,project_interface_flux:bool=False,surface_tension_factor:ExpressionOrNum=1,surfactant_transport:"SurfactantTransportEquations | Literal[False] | None"=None):
         super(MultiComponentNavierStokesInterface, self).__init__()
         self.interface_props = interface_props
         self.kinbc_name = kinbc_name
@@ -480,7 +574,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         self.surfactant_advect_velo_name="_uinterf_proj"
         self.surfactant_advect_velo_space:FiniteElementSpaceEnum="C2"
         self.use_highest_space_for_velo_connection=use_highest_space_for_velo_connection
-        self.kinematic_bc_coordinate_sys=kinematic_bc_coordinate_sys
+        self.kinematic_bc_coordsys=kinematic_bc_coordsys
         self.kinematic_bc_space:FiniteElementSpaceEnum | None=kinematic_bc_space
         self.additional_masstransfer_scale=additional_masstransfer_scale
         self.additional_kin_bc_test_scale=additional_kin_bc_test_scale
@@ -488,6 +582,47 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         self.static_interface_motion_testfunction=static_interface_motion_testfunction
         self.project_interface_flux=project_interface_flux
         self.surface_tension_factor=surface_tension_factor
+        self.surfactant_transport=surfactant_transport
+        self._surfactant_transport:"SurfactantTransportEquations | None"=None
+        if isinstance(surfactant_transport,SurfactantTransportEquations) and surfactant_transport.requires_interior_facet_terms:
+            # A DG surfactant needs the '_internal_facets_' child of *this* domain, and that child is
+            # created from this flag in EquationTree._fill_dummy_equations - which runs long before any
+            # residual is assembled, so it has to be set here in the constructor rather than when the
+            # delegate first assembles something.
+            self.requires_interior_facet_terms=True
+
+    def _resolve_surfactant_transport(self)->"SurfactantTransportEquations | None":
+        """Pick the surfactant handler and bind it to this interface's material properties.
+
+        Called at the top of every assembly hook, since define_fields/define_scaling/define_residuals
+        each run on their own and none of them may depend on another having gone first.
+        """
+        if self.surfactant_transport is False:
+            self._surfactant_transport=None
+            return None
+        if self._surfactant_transport is None:
+            if self.surfactant_transport is None:
+                self._surfactant_transport=SurfactantTransportEquations(
+                    advection_velocity_name=self.surfactant_advect_velo_name,
+                    advection_velocity_space=self.surfactant_advect_velo_space)
+            else:
+                self._surfactant_transport=cast(SurfactantTransportEquations,self.surfactant_transport)
+        self._surfactant_transport._bind(self.interface_props)
+        return self._surfactant_transport
+
+    def get_surfactant_transport(self)->"SurfactantTransportEquations | None":
+        """The :py:class:`~pyoomph.equations.surfactants.SurfactantTransportEquations` in use, if any."""
+        return self._resolve_surfactant_transport()
+
+    def uses_projected_surfactant_velocity(self)->bool:
+        """Whether the projected advection velocity field ``_uinterf_proj`` exists.
+
+        It only does in the legacy transport form. The conservative form integrates the advection by
+        parts, so its natural end condition is already zero flux and there is nothing for the contact
+        line to constrain - see the module docstring of :py:mod:`~pyoomph.equations.surfactants`.
+        """
+        st=self._resolve_surfactant_transport()
+        return st is not None and st.uses_projected_advection_velocity(self)
 
     def define_fields(self):
         # Add kinematic boundary condition multiplier
@@ -534,7 +669,9 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
                     oppns=oppblkeq.get_equation_of_type(NavierStokesEquations)
                     if oppns is not None and isinstance(oppns,NavierStokesEquations):
                         outside_space=oppns.get_velocity_space_from_mode(for_interface=True)
-                        conn_space=get_interface_field_connection_space(inside_space,outside_space,use_highest_space=self.use_highest_space_for_velo_connection)
+                        conn_space=get_interface_field_connection_space(inside_space,outside_space,use_highest_space=self.use_highest_space_for_velo_connection,
+                                                                       parent_space=str(self.get_parent_domain()._coordinate_space),
+                                                                       parent_dim=int(self.get_parent_domain().dimension))
                         assert conn_space!=""
                         fields = ["velocity_x", "velocity_y", "velocity_z"]
                         fields = fields[0:self.get_nodal_dimension()]
@@ -546,21 +683,14 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
 
         facet_space=nseqs.get_velocity_space_from_mode(for_interface=True)
 
-        has_surfactants = False
-        surfsI = self.interface_props.surfactants
-        if surfsI is None:
-            surfs:set[str]=set()
-        elif isinstance(surfsI, str):
-            surfs = {surfsI}
-        else:
-            surfs=surfsI
-        # sorted: interface_props.surfactants is a class-level set, so without this the surfconc_
-        # fields would get a hash-seed-dependent nodal index whenever there is more than one
-        for s in sorted(surfs):
-            self.define_scalar_field("surfconc_" + s, facet_space)
-            has_surfactants = True
-        if has_surfactants:
-            self.define_vector_field(self.surfactant_advect_velo_name, self.surfactant_advect_velo_space)
+        # The surfactant fields, their advection velocity (legacy form only) and the transport
+        # residuals all live in pyoomph.equations.surfactants now, so that the same code serves this
+        # class and a standalone SurfactantTransportEquations on a plain free surface.
+        st = self._resolve_surfactant_transport()
+        if st is not None:
+            if st.space is None:
+                st.space = facet_space
+            st._define_fields_on(self)
 
         if self.masstransfer_model is not None:
             self.masstransfer_model._setup_for_code(self.get_current_code_generator(),self.interface_props) 
@@ -599,15 +729,12 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
 
     def define_scaling(self):
         super(MultiComponentNavierStokesInterface, self).define_scaling()
-        scals:dict[str,str | ExpressionOrNum] = {"surfconc_" + s.name: "surface_concentration" for s in self.interface_props._surfactants.keys()} 
-        if len(scals) > 0:
-            scals[self.surfactant_advect_velo_name] = "velocity"
-            tscals:dict[str,ExpressionOrNum | str] = {"surfconc_" + s.name: scale_factor("temporal") / scale_factor("surfconc_" + s.name) for s in
-                      self.interface_props._surfactants.keys()}
-            self.set_test_scaling(tscals)
+        # The surfactant scalings used to be set here *and* again further down, the second call
+        # overwriting the first with the same values. They are set once now, by the transport class.
+        scals:dict[str,str | ExpressionOrNum] = {}
         scals["mass_transfer_rate"] = scale_factor("velocity") * scale_factor("mass_density")*self.additional_masstransfer_scale
         self.set_scaling(scals)
-        self.add_named_numerical_factor(surface_tension_term=test_scale_factor("velocity")/scale_factor("spatial"))
+        self._add_named_numerical_factor(surface_tension_term=test_scale_factor("velocity")/scale_factor("spatial"))
 
         if self.masstransfer_model is not None:
             self.masstransfer_model._setup_for_code(self.get_current_code_generator(),self.interface_props) 
@@ -628,17 +755,9 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
             self.set_scaling({self.kinbc_name: 1 / test_scale_factor("mesh")})
             self.set_test_scaling({self.kinbc_name: 1 / scale_factor("velocity")})
 
-        has_surfactants = False
-        surfscales:dict[str,ExpressionOrNum | str] = {self.surfactant_advect_velo_name: "velocity"}
-        tsurfscales:dict[str,ExpressionOrNum | str] = {self.surfactant_advect_velo_name: 1 / scale_factor("velocity")}
-        if self.interface_props.surfactants is not None:
-            for s in self.interface_props.surfactants:
-                surfscales["surfconc_" + s] = "surface_concentration"
-                tsurfscales["surfconc_" + s] = scale_factor("temporal") / scale_factor("surface_concentration")
-                has_surfactants = True
-        if has_surfactants:
-            self.set_scaling(surfscales)
-            self.set_test_scaling(tsurfscales)
+        st = self._resolve_surfactant_transport()
+        if st is not None:
+            st._setup_scaling_on(self)
 
         if self._has_opposite_flow:
             fields = ["velocity_x", "velocity_y", "velocity_z"]
@@ -691,13 +810,13 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
             static = not self.get_current_code_generator()._coordinates_as_dofs
 
 
-        self.add_residual(weak(kin_bc, l_test,coordinate_system=self.kinematic_bc_coordinate_sys))
+        self.add_residual(weak(kin_bc, l_test,coordsys=self.kinematic_bc_coordsys))
         if static:
-            self.add_residual(-weak(l, dot(n, u_test),coordinate_system=self.kinematic_bc_coordinate_sys))
+            self.add_residual(-weak(l, dot(n, u_test),coordsys=self.kinematic_bc_coordsys))
             if self.static_interface_motion_testfunction is not None:
-                self.add_residual(weak(kin_bc,self.static_interface_motion_testfunction,coordinate_system=self.kinematic_bc_coordinate_sys))
+                self.add_residual(weak(kin_bc,self.static_interface_motion_testfunction,coordsys=self.kinematic_bc_coordsys))
         else:
-            self.add_residual(weak(l, dot(n, R_test),coordinate_system=self.kinematic_bc_coordinate_sys))
+            self.add_residual(weak(l, dot(n, R_test),coordsys=self.kinematic_bc_coordsys))
 
         # dynamic boundary condition
         surf_tens = self.interface_props.surface_tension
@@ -775,6 +894,35 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
                 # way. Zero unless natural_bc_correction is switched on.
                 self.add_residual(-weak(advdiffu_inner.get_stabilization_flux(fname,n,self.get_parent_domain()),wi_test))
 
+            # Salt dynamics inside. A salt does not evaporate, so its interface flux is the j_i = 0
+            # case of the loop above -- but *not* nothing: the liquid keeps flowing through the
+            # receding surface while the salt does not, and without this term the salt would be
+            # carried out with the vapour instead of piling up. Divided by rho because a salt field
+            # is a molar concentration, whereas the mass fractions above are per unit mass.
+            salt_inner = inner_bulk_eqs.get_equation_of_type(SaltTransportEquations)
+            if isinstance(salt_inner,SaltTransportEquations):
+                # Its own scheme, and not advdiffu_inner's: a pure liquid has no mass fraction
+                # fields at all, so the loop above may not have run even once.
+                for salt in salt_inner.salts:
+                    fname = salt_inner.fieldname_of(salt.name)
+                    cs, cs_test = var_and_test(fname)
+                    if salt_inner.GCL:
+                        # The conservative form advects with the velocity relative to the mesh, so
+                        # its natural condition already *is* zero flux through the moving surface.
+                        flux = 0
+                    elif salt_inner.advection_by_parts:
+                        # Integrating the advection by parts leaves its own surface term behind, so
+                        # this branch differs from the one below by exactly c*u.n -- which, with the
+                        # kinematic condition (u-u_mesh).n = j/rho, is what turns -c*j/rho into
+                        # +c*u_mesh.n. Both say the same thing: nothing but the solvent leaves.
+                        flux = cs * dot(mesh_velocity(scheme=salt_inner.scheme), n)
+                    else:
+                        # Natural condition is zero *diffusive* flux, so what is missing is the
+                        # liquid flowing through the surface while the salt does not.
+                        flux = -cs * total_mass_transfer_rate / rho_inner
+                    self.add_residual(weak(time_scheme(salt_inner.scheme, flux), cs_test))
+                    self.add_residual(-weak(salt_inner.get_stabilization_flux(fname,n,self.get_parent_domain()),cs_test))
+
             # Component dynamics outside if necessary
             if self.get_opposite_side_of_interface(raise_error_if_none=False):
                 opp = self.get_opposite_side_of_interface()
@@ -834,30 +982,13 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
                 self.add_residual(weak(l, inside_test))
                 self.add_residual(-weak(l, outside_test))
 
-        if self.interface_props.surfactants is not None and len(self.interface_props.surfactants) > 0:
-            nn = dyadic(n, n)
-            ut_proj = u - nn @ u
-            un_proj = dot(mesh_velocity(), n) * n
-            ui, ui_test = var_and_test(self.surfactant_advect_velo_name)
-            self.add_residual(weak(ui - (ut_proj + un_proj), ui_test))
-
-            for sprops, amount in self.interface_props._surfactants.items(): 
-                self.set_initial_condition("surfconc_" + sprops.name, amount, degraded_start="auto")
-                assert isinstance(self.interface_props,LiquidGasInterfaceProperties)
-                D = self.interface_props.get_surface_diffusivity(sprops.name)
-                assert D is not None
-                G, G_test = var_and_test("surfconc_" + sprops.name)
-                self.add_residual(weak(partial_t(G), G_test))
-                self.add_residual(D * weak(grad(G), grad(G_test)))
-                self.add_residual(weak(div(G * ui), G_test))
-                if self.interface_props.surfactant_adsorption_rate.get(sprops.name) is not None:
-                    assert isinstance(ns_inner.fluid_props,MixtureLiquidProperties)
-                    if sprops.name in ns_inner.fluid_props.components:
-                        rate = subexpression(self.interface_props.surfactant_adsorption_rate[sprops.name])
-                        self.add_residual(-weak(rate, G_test))
-                        w_test = testfunction("massfrac_" + sprops.name)
-                        # This is not accurate: We will lose partial mass of the liquid (but it won't contribute to any interface motion)
-                        self.add_residual(weak(rate * ns_inner.fluid_props.pure_properties[sprops.name].molar_mass, w_test))
+        st = self._resolve_surfactant_transport()
+        if st is not None:
+            # The interface velocity, not the fluid velocity, is what the surfactant follows in the
+            # normal direction: under evaporation the two differ by j/rho and the surfactant stays
+            # with the interface.
+            st._bind(self.interface_props, ns_inner.fluid_props)
+            st._define_residuals_on(self)
 
     def before_assigning_equations_postorder(self, mesh:AnyMesh):
         # Pin kinematic boundary condition where necessary
@@ -919,6 +1050,9 @@ class MultiComponentNavierStokesInterfaceBalancedEnd(InterfaceEquations):
             sigma=inter_eqs.interface_props.surface_tension
             if sigma is None:
                 raise RuntimeError("No surface tension set in the interface properties " + str(inter_eqs.interface_props))
+            # Same reason as in NavierStokesContactAngle: the surface tension belongs to the interface,
+            # and a discontinuous surfactant inside it is invisible from this co-dimension-2 domain.
+            sigma=evaluate_in_domain(0+sigma,"..")
             if inter_eqs.surface_tension_theta!=1:
                 # Same split as the parent: with theta != 1 the lag replaces the momentum scheme's
                 # treatment rather than being wrapped in it. It has to stay the very same expression
@@ -1025,14 +1159,24 @@ class TemperatureConductionEquation(ScalarTransportEquations):
         cp_override(ExpressionNumOrNone): The specific heat capacity. Default is None.
         lambda_override(ExpressionNumOrNone): The thermal conductivity. Default is None.
         dt_factor(ExpressionOrNum): The factor for the time derivative. Default is 1.
+        GCL(bool): Write the transient term as the derivative of the whole integral of ``rho*cp*T``, and (in the advective subclass) advect with the velocity *relative to the mesh*: the conservative ALE form. On a mesh that follows a moving or evaporating boundary the enthalpy is then conserved to machine precision instead of to the order of the time stepping. **If rho or cp depend on the temperature this is a different model**, not merely a different discretization: the GCL form differentiates the product ``rho*cp*T`` in time, where the standard form multiplies ``rho*cp`` onto ``partial_t(T)``. Identical for constant properties. Default is False.
+        gcl_scheme: Time stepping scheme of the ``GCL`` transient, from the set a derivative of an integral understands. The default ``"BDF2_degr"`` degrades to first order in the first step, where an initial condition has no history.
         stabilization: Optional residual-based stabilization (SUPG etc.), see :py:class:`~pyoomph.equations.stabilization.ScalarTransportStabilization`. ``None`` (the default) adds nothing at all. Without a wind there is nothing to stabilize on a static mesh, but on a moving (ALE) mesh the transport by the mesh motion is stabilized.
+
+    .. note::
+        **Scaling to set on problem level.** The temperature equation is tested with
+        ``scale_factor("temporal")/(scale_factor("temperature")*scale_factor("rho_cp"))``. Besides
+        the ``temperature`` field scale, the volumetric heat capacity ``rho_cp`` is therefore
+        required, i.e. ``problem.set_scaling(rho_cp=...)``, and it is no field of the system.
     """
-    def __init__(self,material:AnyMaterialProperties,space:FiniteElementSpaceEnum="C2",rho_override:ExpressionNumOrNone=None,cp_override:ExpressionNumOrNone=None,lambda_override:ExpressionNumOrNone=None,dt_factor:ExpressionOrNum=1,stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None):
+    def __init__(self,material:AnyMaterialProperties,space:FiniteElementSpaceEnum="C2",rho_override:ExpressionNumOrNone=None,cp_override:ExpressionNumOrNone=None,lambda_override:ExpressionNumOrNone=None,dt_factor:ExpressionOrNum=1,GCL:bool=False,gcl_scheme:"IntegralTimeSteppingScheme"="BDF2_degr",stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None):
         super(TemperatureConductionEquation, self).__init__()
         self.material=material
         self.space:FiniteElementSpaceEnum=space
         self.rho_override,self.cp_override,self.lambda_override=rho_override,cp_override,lambda_override
         self.dt_factor=dt_factor
+        self.GCL=GCL
+        self.gcl_scheme:"IntegralTimeSteppingScheme"=gcl_scheme
         self._init_stabilization(stabilization)
 
     def define_fields(self):
@@ -1072,7 +1216,14 @@ class TemperatureConductionEquation(ScalarTransportEquations):
     def strong_residual(self, fieldname:str) -> Expression:
         T=var("temperature")
         rho,cp,k=self.get_rho_cp_k()
-        R:Expression=self.dt_factor*rho*cp*partial_t(T)
+        if self.GCL:
+            # The GCL transient is strongly d_t(rho cp T)|_E + div(rho cp T w), and the mesh part of
+            # the flux term contributes exactly -div(rho cp T w), so the two cancel and what remains
+            # is the Eulerian derivative of the *enthalpy density* -- not rho*cp times the derivative
+            # of T, which is the same thing only for constant properties.
+            R:Expression=self.dt_factor*partial_t(rho*cp*T)
+        else:
+            R=self.dt_factor*rho*cp*partial_t(T)
         if self.stab_cfg.include_diffusion_in_residual:
             R=R-div(convert_to_expression(k)*grad(T))
         return R
@@ -1082,7 +1233,20 @@ class TemperatureConductionEquation(ScalarTransportEquations):
         stabilization stays the last thing added and is added exactly once."""
         T,T_test=var_and_test("temperature")
         rho,cp,k=self.get_rho_cp_k()
-        self.add_residual(weak(self.dt_factor*rho*cp*partial_t(T),T_test))
+        if self.GCL:
+            # The derivative of the whole integral of the enthalpy density, so that the change of the
+            # element volume is taken by the same finite difference that advances the field. rho and
+            # cp sit INSIDE the integral: if either is a field, the conserved quantity is rho*cp*T
+            # and not T. dt_factor multiplies from outside, or the history terms would carry it at
+            # their own time levels.
+            self.add_residual(self.dt_factor*time_derivative_of_integral(weak(rho*cp*T,T_test),
+                                                                         scheme=self.gcl_scheme))
+            # The advective counterpart of the mesh motion. The subclass adds the fluid part.
+            w=mesh_velocity()
+            if not is_zero(w):
+                self.add_residual(weak(self.dt_factor*rho*cp*T*w,grad(T_test)))
+        else:
+            self.add_residual(weak(self.dt_factor*rho*cp*partial_t(T),T_test))
         self.add_residual(weak(k*grad(T),grad(T_test)))
 
     def define_residuals(self):
@@ -1136,10 +1300,15 @@ class TemperatureAdvectionConductionEquation(TemperatureConductionEquation):
         dt_factor(ExpressionOrNum): Multiplicative factor for the time derivative. Default is 1.
         adv_factor(ExpressionOrNum): Multiplicative factor for the advection term. Default is 1.
         stabilization: Optional residual-based stabilization (SUPG etc.), see :py:class:`~pyoomph.equations.stabilization.ScalarTransportStabilization`. ``None`` (the default) adds nothing at all.
+
+    .. note::
+        **Scaling to set on problem level.** As for
+        :py:class:`TemperatureConductionEquation`, the test scaling requires the non-field scale
+        ``rho_cp``, i.e. ``problem.set_scaling(rho_cp=...)``.
     """
 
-    def __init__(self,material:AnyMaterialProperties,space:FiniteElementSpaceEnum="C2",wind:ExpressionOrNum=var("velocity"),rho_override:ExpressionNumOrNone=None,cp_override:ExpressionNumOrNone=None,lambda_override:ExpressionNumOrNone=None,dt_factor:ExpressionOrNum=1,adv_factor:ExpressionOrNum=1,stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None):
-        super(TemperatureAdvectionConductionEquation, self).__init__(material,space,rho_override=rho_override,cp_override=cp_override,lambda_override=lambda_override,dt_factor=dt_factor,stabilization=stabilization)
+    def __init__(self,material:AnyMaterialProperties,space:FiniteElementSpaceEnum="C2",wind:ExpressionOrNum=var("velocity"),rho_override:ExpressionNumOrNone=None,cp_override:ExpressionNumOrNone=None,lambda_override:ExpressionNumOrNone=None,dt_factor:ExpressionOrNum=1,adv_factor:ExpressionOrNum=1,GCL:bool=False,gcl_scheme:"IntegralTimeSteppingScheme"="BDF2_degr",stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None):
+        super(TemperatureAdvectionConductionEquation, self).__init__(material,space,rho_override=rho_override,cp_override=cp_override,lambda_override=lambda_override,dt_factor=dt_factor,GCL=GCL,gcl_scheme=gcl_scheme,stabilization=stabilization)
         self.wind=wind
         self.adv_factor=adv_factor
 
@@ -1148,14 +1317,25 @@ class TemperatureAdvectionConductionEquation(TemperatureConductionEquation):
 
     def strong_residual(self,fieldname:str) -> Expression:
         rho,cp,_=self.get_rho_cp_k()
-        return (super(TemperatureAdvectionConductionEquation,self).strong_residual(fieldname)
-                + self.adv_factor*rho*cp*dot(self.wind,grad(var("temperature"))))
+        T=var("temperature")
+        base=super(TemperatureAdvectionConductionEquation,self).strong_residual(fieldname)
+        if self.GCL:
+            # Mirror the flux form actually assembled, so that the sum with the base class's
+            # d_t(rho cp T) + div(rho cp T w) is d_t(rho cp T) + div(rho cp T u).
+            return base+self.adv_factor*div(rho*cp*T*self.wind)
+        return base+self.adv_factor*rho*cp*dot(self.wind,grad(T))
 
     def define_galerkin_residuals(self):
         super(TemperatureAdvectionConductionEquation, self).define_galerkin_residuals()
         T,T_test=var_and_test("temperature")
         rho,cp,_=self.get_rho_cp_k()
-        self.add_residual(weak(self.adv_factor*rho*cp*dot(self.wind,grad(T)),T_test))
+        if self.GCL:
+            # The fluid part of the flux. The base class already contributed the mesh part with the
+            # opposite sign, so the two together are -weak(rho cp T (adv_factor*u - dt_factor*w),
+            # grad(v)), i.e. advection with the velocity relative to the mesh.
+            self.add_residual(-weak(self.adv_factor*rho*cp*T*self.wind,grad(T_test)))
+        else:
+            self.add_residual(weak(self.adv_factor*rho*cp*dot(self.wind,grad(T)),T_test))
 
 
 class TemperatureInfinityEquations(InterfaceEquations):
@@ -1287,66 +1467,10 @@ class BalanceGravityAtFarField(InterfaceEquations):
 
 
 
-class SurfactantsAtSolidInterface(InterfaceEquations):
-    """
-    Represents the handling of surfactants at the solid-liquid-gas interface.
-        
-    This class requires the parent equations to be of type CompositionAdvectionDiffusionEquations, meaning that if CompositionAdvectionDiffusionEquations (or subclasses) are not defined in the parent domain, an error will be raised.    
-        
-    Args:
-        ls_properties(LiquidSolidInterfaceProperties): The liquid-solid interface properties.
-        out_surface_tension(bool): Whether to output the surface tension as a local expression. Default is True.
-    """
-    required_parent_type=CompositionAdvectionDiffusionEquations
-    def __init__(self,ls_properties:LiquidSolidInterfaceProperties,out_surface_tension:bool=True) -> None:
-        super().__init__()
-        self.space:FiniteElementSpaceEnum="C2"
-        self.prefix="_surfconcS_" # we cannot use surfconc_, since it would coincide with the LG-surfactants at the contact line
-        self.ls_properties=ls_properties
-        self.out_surface_tension=out_surface_tension # Do we output the surface tension (as local expression)
-
-    def identify_surfactants_in_bulk(self) -> list[str]:
-        parent=self.get_parent_equations(of_type=CompositionAdvectionDiffusionEquations)
-        assert isinstance(parent,CompositionAdvectionDiffusionEquations)
-        res:list[str]=[]
-        for cname in sorted(parent.fluid_props.components):
-            c=parent.fluid_props.get_pure_component(cname)
-            if isinstance(c,SurfactantProperties) and cname in self.ls_properties.get_liquid_properties().components:
-                res.append(cname)
-        return res
-
-    def get_surfactant_field_name(self,cname:str) -> str:
-        return self.prefix+cname
-
-    def define_fields(self) -> None:
-        surfs=self.identify_surfactants_in_bulk()
-        for s in surfs:
-            fieldname=self.get_surfactant_field_name(s)
-            self.define_scalar_field(fieldname,self.space,scale="surface_concentration",testscale=scale_factor("temporal")/scale_factor(fieldname))
-            self.define_field_by_substitution("surfconc_"+s,var(fieldname)) # Bind as substitution for e.g. isotherms
-            self.add_local_function("surfconc_"+s,var(fieldname)) # And also as local expression for output/plotting
-
-    def define_residuals(self) -> None:
-        surfs=self.identify_surfactants_in_bulk()
-        parent=cast(CompositionAdvectionDiffusionEquations,self.get_parent_equations(of_type=CompositionAdvectionDiffusionEquations))
-
-        if self.out_surface_tension:
-#            expd=self.expand_expression_for_debugging(self.ls_properties.surface_tension)
-            self.add_local_function("surface_tension",self.ls_properties.surface_tension)
-                    
-        for s in surfs:
-            fieldname=self.get_surfactant_field_name(s)
-            G,Gtest=var_and_test(fieldname)
-            transfer=self.ls_properties.surfactant_adsorption_rate.get(s,0)
-            transfer=subexpression(transfer)
-            self.add_residual(weak(partial_t(G)-transfer,Gtest))            
-            DS=self.ls_properties.get_surface_diffusivity(s)
-            if DS is not None:
-                self.add_residual(weak(DS*grad(G),grad(Gtest)))
-            liq_c=parent.fluid_props.get_pure_component(s)
-            w_test = testfunction("massfrac_" + s)
-            assert liq_c is not None
-            self.add_residual(weak(transfer * liq_c.molar_mass, w_test))
+# SurfactantsAtSolidInterface moved to pyoomph.equations.surfactants, so that the surfactants on the
+# substrate and the ones on the free surface share one transport implementation. Re-exported here,
+# since that is where every existing script imports it from.
+from .surfactants import SurfactantsAtSolidInterface
 
 
 from ..typings import _set_public_api

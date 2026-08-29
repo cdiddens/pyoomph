@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -419,6 +419,23 @@ void PyReg_CodeGen(nb::module_ &m)
                         "right before write_code() runs; exposed read-write here so the JIT cache's Tier-2 pre-codegen "
                         "fingerprint (see jit_cache.py) can be computed with the same up-to-date value instead of "
                         "whatever this held at some earlier, possibly stale point.")
+        .def_rw("jacobian_hoist_min_cost", &pyoomph::FiniteElementCode::jacobian_hoist_min_cost,
+                "How many expression nodes a Jacobian/Hessian entry's coefficient must have before it is "
+                "worth naming above the trial loop (see dev_docs/code_generation.md 9.4). -1, the default, "
+                "follows the global setting. Raising it trades assembly speed for a smaller generated "
+                "function; there is normally no reason to set it per element except to bisect a regression.")
+        .def_rw("split_rjm_by_flag", &pyoomph::FiniteElementCode::split_rjm_by_flag,
+                "Whether to emit the Residual/Jacobian/Mass function once per assembly mode, with the flag "
+                "as a compile-time constant, instead of one body testing it at run time. True by default: "
+                "it is what keeps a residual-only assembly from paying for the Jacobian code it never "
+                "executes, at the cost of a larger shared library and a longer compile.")
+        .def_rw("split_rjm_by_hang", &pyoomph::FiniteElementCode::split_rjm_by_hang,
+                "Whether the Residual/Jacobian/Mass function additionally gets a twin in which the "
+                "hanging-node machinery is folded away, so that elements without a single hanging degree "
+                "of freedom - the vast majority even on an adapted mesh - skip the master loops and test "
+                "pinned equations first (see dev_docs/code_generation.md 9.4.14). True by default. Has no "
+                "effect without split_rjm_by_flag or without with_adaptivity; the cost is again a larger "
+                "shared library and a longer compile.")
         .def_rw("assemble_hessian_by_symmetry", &pyoomph::FiniteElementCode::assemble_hessian_by_symmetry,
                         "Whether Hessian assembly exploits its symmetry to only derive half of the entries - see generate_hessian.")
         .def("_debug_second_order_Hessian_deriv", &pyoomph::FiniteElementCode::debug_second_order_Hessian_deriv,
@@ -447,7 +464,8 @@ void PyReg_CodeGen(nb::module_ &m)
         .def_rw("use_shared_shape_buffer_during_multi_assemble", &pyoomph::FiniteElementCode::use_shared_shape_buffer_during_multi_assemble,
                         "Whether shape function buffers are shared/reused across the different residual/Jacobian/Hessian combinations assembled in a single multi-assembly pass.")
         .def_rw("warn_on_large_numerical_factor", &pyoomph::FiniteElementCode::warn_on_large_numerical_factor,
-                        "Whether to emit a warning when a very large or very small numerical prefactor is encountered while generating code (often indicating a units/scaling mistake).")
+                        "Magnitude a numerical prefactor in a generated residual may not exceed (often indicating a units/scaling mistake). "
+                        "A positive value only warns, a negative one raises an error, 0 disables the check.")
         .def_rw("stop_on_jacobian_difference", &pyoomph::FiniteElementCode::stop_on_jacobian_difference,
                         "Whether to raise an error (rather than just warn) when the analytical and finite-difference Jacobians disagree beyond debug_jacobian_epsilon.")
         .def("get_precodegen_fingerprint_text", &pyoomph::FiniteElementCode::get_precodegen_fingerprint_text,

@@ -50,7 +50,7 @@ public:
 	// normal destructor, all of its elements and nodes - right now, rather than whenever this
 	// handle's Python wrapper object eventually gets garbage collected. Used by
 	// Problem.release() (see problem.py) to guarantee every element referencing a
-	// DynamicBulkElementCode's compiled residual/Jacobian function table has actually been
+	// DynamicJITCode's compiled residual/Jacobian function table has actually been
 	// destructed *before* that code's shared library is dlclose()'d - otherwise, if the mesh
 	// happened to outlive release() (e.g. because a user script still holds a reference to it,
 	// which is common and not itself a bug), its elements' destructors would run later against

@@ -29,7 +29,7 @@ Spatial derivatives
 
     Note also that :py:func:`~pyoomph.expressions.generic.grad` takes a scalar or a vector, not a rank-2 tensor - the result would be rank 3, which is not implemented. :py:func:`~pyoomph.expressions.div` and :py:func:`~pyoomph.expressions.generic.directional_derivative`, on the other hand, do accept a rank-2 tensor.
 
-All of these respect the **coordinate system** of the equations they are used in, i.e. in axisymmetry ``div(u)`` contains the :math:`u_r/r` term. A different system can be imposed per call with the ``coordsys`` argument of :py:func:`~pyoomph.expressions.generic.grad` and :py:func:`~pyoomph.expressions.div`; see :numref:`secspatialcoordsys`.
+All of these respect the **coordinate system** of the equations they are used in, i.e. in axisymmetry ``div(u)`` contains the :math:`u_r/r` term. A different system can be imposed per call with the ``coordsys`` argument of :py:func:`~pyoomph.expressions.generic.grad` and :py:func:`~pyoomph.expressions.div`; see :numref:`secspatialcoordsys` for how to select one and :numref:`seccoordinatesystems` for what each of them means mathematically.
 
 On a domain with a co-dimension, i.e. on an interface, :py:func:`~pyoomph.expressions.generic.grad` and :py:func:`~pyoomph.expressions.div` are the **surface** gradient and divergence - also for a field that lives in the bulk. To get the bulk gradient evaluated at the interface instead, take the gradient of the bulk-bound variable, i.e. ``grad(var("u",domain=".."))``.
 

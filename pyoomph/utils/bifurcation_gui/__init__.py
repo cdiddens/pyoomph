@@ -116,6 +116,7 @@ class BifurcationGUI:
 
     neigen=_fwd("neigen","Number of eigenvalues computed at every solution point.")
     shift=_fwd("shift","Shift handed to the eigensolver.")
+    tracked_eigen_shift=_fwd("tracked_eigen_shift","Shift for the eigensolve taken while a bifurcation tracker is installed - at a located bifurcation and at every point of a locus - which is how the rest of the spectrum is recorded there. It cannot be 0: the tracker has put an eigenvalue exactly there. None skips that eigensolve and records the tracked value alone.")
     classify_bifurcations=_fwd("classify_bifurcations","Compute the normal form at each located bifurcation, naming it fold/transcritical/pitchfork. On by default; branch switching computes it on demand if it is off.")
     interpolated_splines=_fwd("interpolated_splines","Draw and export spline-interpolated branches instead of the raw polylines.")
     arclength_proportion=_fwd("arclength_proportion","Fraction D of the arclength given to the continued parameter while the scaling is on, i.e. (dparameter/ds)^2 == D after every step. Set it through set_arclength_proportion() to have it reach the problem.")
@@ -128,6 +129,28 @@ class BifurcationGUI:
     _avail_observables=_fwd("_avail_observables")
     _mode=_fwd("_mode")
     _state_step=_fwd("_state_step")
+
+    # --- periodic orbits (a Hopf sheds one; see dev_docs/bifurcation_loci.md). Every one of these
+    # needs the problem to have been built with setup_for_stability_analysis(analytic_hessian=True):
+    # the orbit handler's own Jacobian refuses without it.
+    orbit_NT=_fwd("orbit_NT","Number of time steps the orbit is discretized with. Raised at use time to a multiple of the order and to an even number, so that a DAE's algebraic directions do not land on the -1 a period doubling would sit at.")
+    orbit_mode=_fwd("orbit_mode","Discretization of the orbit: 'collocation' (default), 'floquet', 'central', 'BDF2' or 'bspline'. Only the first two carry a degree of freedom at the end of the period, which is what the Floquet multipliers are computed from; a 'bspline' orbit gets them on a collocation sampling of itself, which leaves it untouched, while 'central' and 'BDF2' have no stability at all.")
+    orbit_order=_fwd("orbit_order","Order of the collocation or B-spline discretization.")
+    orbit_GL_order=_fwd("orbit_GL_order","Gauss-Legendre integration order, or -1 for the default.")
+    orbit_T_constraint=_fwd("orbit_T_constraint","How the phase of the orbit is pinned: 'phase' or 'plane'.")
+    orbit_amplitude_factor=_fwd("orbit_amplitude_factor","Extra factor on the amplitude of the starting guess at the Hopf.")
+    orbit_check_collapse=_fwd("orbit_check_collapse","Verify the solved orbit did not collapse back onto the stationary branch.")
+    orbit_floquet_sampling_order=_fwd("orbit_floquet_sampling_order","Collocation order of the sampling a B-spline orbit's Floquet multipliers are computed on.")
+    orbit_eps=_fwd("orbit_eps","Parameter step off the Hopf, or None to take what the current ds buys. The offset IS eps**2, so this is the epsilon of the switch, squared.")
+    orbit_observable_samples=_fwd("orbit_observable_samples","Samples per period for the minimum, average and maximum of each observable, or None for one per time step.")
+    orbit_portable=_fwd("orbit_portable","Store an orbit as one state dump per time point instead of as a raw dof vector: partition- and mesh-independent, at nT times the disk. Forced on a distributed problem.")
+    floquet_enabled=_fwd("floquet_enabled","Compute the Floquet multipliers at every continuation point of an orbit branch.")
+    floquet_method=_fwd("floquet_method","'condensed' (default), 'periodic_schur' or 'eigenproblem'.")
+    floquet_n=_fwd("floquet_n","How many multipliers, or None for all of them.")
+    floquet_unity_tol=_fwd("floquet_unity_tol","Tolerance for recognising the trivial multiplier at 1, which every orbit has and which must be removed.")
+    floquet_unstable_tol=_fwd("floquet_unstable_tol","Deadband on ``|mu| > 1`` when counting unstable directions.")
+    floquet_shift_invert=_fwd("floquet_shift_invert","Seek the multipliers near sigma rather than by largest magnitude (matrix-free route only).")
+    floquet_sigma=_fwd("floquet_sigma","Shift for the shift-invert, or None for just outside the unit circle.")
     del _fwd
 
     # ---------------------------------------------------------------- forwarded commands
@@ -160,6 +183,22 @@ class BifurcationGUI:
         """Move a parameter that is being held fixed, which begins a new slice."""
         self.controller.set_fixed_parameter(name,value)
 
+    def set_initial_observable(self,name:str):
+        """Observable the diagram opens on when it is built from scratch.
+
+        Called before :py:meth:`start`, which is where the name is checked - the observables are read
+        off the initialised problem and cannot be listed earlier::
+
+            gui.set_initial_observable("liquid/interface/nx [min, x]")
+
+        A reloaded diagram keeps the observable it was left on instead.
+        """
+        self.controller.set_initial_observable(name)
+
+    def available_observables(self)->list[str]:
+        """Every observable that can go on the y axis (only complete after :py:meth:`start`)."""
+        return self.controller.available_observables
+
     def set_arclength_scaling(self,scale:bool):
         """Retune theta^2 after every step so the parameter keeps a fixed share of the arclength."""
         self.controller.set_arclength_scaling(scale)
@@ -180,6 +219,25 @@ class BifurcationGUI:
     def leave_locus(self,continue_in:str | None=None,offset:float | None=None):
         """Step off a bifurcation locus onto an ordinary branch through it."""
         self.controller.leave_locus(continue_in,offset)
+
+    def switch_to_orbit(self,eps:float | None=None):
+        """From a located HOPF bifurcation, step onto the periodic orbit it sheds.
+
+        What "Switch branch" does at a Hopf, and what the Orbit tab drives. The branch that opens is
+        continued, drawn and saved like any other, except that each of its points is a whole cycle:
+        the line shows each observable's average over the period and the shaded band its extremes,
+        and the stability comes from the Floquet multipliers rather than from an eigenvalue.
+
+        ``eps`` is the step off the bifurcation IN THE PARAMETER (the orbit's offset is eps**2, so
+        this is that offset); None takes what the current ds buys, which is what makes the keys that
+        steer a sweep steer this too. Which SIDE of the Hopf the orbits are on is not a choice - the
+        first Lyapunov coefficient decides it.
+
+        Requires the problem to have been set up with
+        ``setup_for_stability_analysis(analytic_hessian=True)``: the orbit handler's own Jacobian
+        refuses without it, and that cannot be arranged after the problem is initialised.
+        """
+        return self.controller.switch_to_orbit(eps)
 
     def describe_slice(self)->str:
         """The parameters the current diagram holds fixed, e.g. ``"b = 0.3"``.
@@ -264,7 +322,13 @@ class BifurcationGUI:
                 self.controller.start(init_ds,initial_max_newton_iterations,ignore_saved=True)
                 self.plotter.initialise_view(self.controller)
 
-        app.run()
+        try:
+            app.run()
+        finally:
+            # run() tears the window down itself once its event loop ends, but not when it raises on
+            # the way in (rebuilding the menus reads the controller, which a half-set-up session can
+            # trip over). A window left standing is never freed - see BifurcationTkApp.teardown.
+            app.teardown()
 
     def must_init(self,init_ds:float | None=None)->bool:
         """Prepare the problem for a diagram and say whether it still has to be built by hand.

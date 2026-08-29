@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -90,6 +90,21 @@ class DeterministicRandomField(CustomMathExpression):
 
   def eval(self ,arg_array:NPFloatArray)->float:
     return self.interp((arg_array -self.min_x ) *self.coord_denom)[0] #type:ignore
+
+  def evaluate_at(self ,points:NPFloatArray)->NPFloatArray:
+    """Evaluate the field at many points at once.
+
+    Args:
+      points: array of shape ``(N,dim)``, one point per row.
+
+    Returns:
+      The ``N`` field values. Points outside ``[min_x,max_x]`` give 0, as for :py:meth:`eval`.
+    """
+    pts=numpy.asarray(points ,dtype=float)
+    dim=int(numpy.atleast_1d(self.min_x).size) # min_x is a numpy array after __init__, but not by declaration
+    if pts.ndim!=2 or pts.shape[1]!=dim:
+      raise RuntimeError("Expected an array of shape (N,"+str(dim)+"), got "+str(pts.shape))
+    return numpy.asarray(self.interp((pts -self.min_x ) *self.coord_denom)) #type:ignore
 		
 		
 		

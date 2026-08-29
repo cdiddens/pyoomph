@@ -1,5 +1,7 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #
 #  @section LICENSE
 #
@@ -269,6 +271,15 @@ def solve_case(kind, eq, levels, N=4, outdir=None):
         # levels may carry a trailing criterion tag (see BoxProblem._add_refinement_criterion), so take
         # the cap from the numeric entries only.
         p.max_refinement_level = max(max(levels[0], levels[1]), 1) + 1
+        if eq == "stokes_cr":
+            # Crouzeix-Raviart on refined triangles is ill-conditioned enough that MKL Pardiso's
+            # STATIC pivoting leaves backward errors of order 1e0 and Newton diverges on the
+            # resulting increments. The Jacobian is not at fault - umfpack solves the same system to
+            # machine precision - so let the solver escalate its pivoting and refactorise instead.
+            p.initialise()
+            solver = p.get_la_solver()
+            if hasattr(solver, "repair_bad_solves"):
+                solver.repair_bad_solves = True
         p.solve()
         m = p.get_mesh("domain")
         conv = p.get_last_residual_convergence()

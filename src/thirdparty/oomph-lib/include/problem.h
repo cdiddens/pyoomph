@@ -1850,6 +1850,20 @@ namespace oomph
       dist_pt = 0;
     }
 
+    //FOR PYOOMPH: hook to permute the global equation numbering, called from
+    /// assign_eqn_numbers() immediately after Mesh::assign_global_eqn_numbers()
+    /// and before synchronise_eqn_numbers() / the dof distribution is built. An
+    /// override must permute dof_pt and the matching Data::eqn_number() entries
+    /// consistently, and must not change which values are dofs. Everything that
+    /// reads the numbering is built after this point, which is the reason the
+    /// hook is here rather than anywhere else. See the call site for why the same
+    /// implementation serves a distributed and a replicated run.
+    /// It exists for pyoomph's user-selectable dof layouts: a block preconditioner
+    /// wants a node's fields adjacent, and static condensation wants an element's
+    /// dofs adjacent, and neither is what the node-then-element numbering gives.
+    /// A no-op here, so nothing changes for anybody who does not override it.
+    virtual void reorder_global_eqn_numbers(Vector<double*>& dof_pt) {}
+
     /// Return the number of dofs
     unsigned long ndof() const
     {

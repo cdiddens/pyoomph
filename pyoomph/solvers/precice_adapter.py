@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -99,6 +99,13 @@ class _PyoomphPreciceAdapater:
                 problem.adaptive_unsteady_newton_solve(dt,temporal_error,True)
                 dt=problem.get_current_time(as_float=True,dimensional=False)-current_time
 
+            # This loop drives the C++ solve itself instead of going through Problem.solve(), so it
+            # owns the deferred remesh too: actions_after_newton_solve() only records the request,
+            # because performing it inside the call corrupts the dof snapshot that
+            # adaptive_unsteady_newton_solve() restores from on a rejected step. See
+            # Problem._perform_pending_remesh().
+            problem._perform_pending_remesh()
+
             problem._equation_system._after_precice_solve(dt)
 
             interface.advance(dt)
@@ -127,12 +134,16 @@ class _PyoomphPreciceAdapater:
         mesh_write_data:dict[str,list[str]]={}
         precice_read_data:dict[str,list[str]]={}
         precice_write_data:dict[str,list[str]]={}
+        # Sets here, but never iterated as such: everything written into the XML below is emitted in
+        # sorted order. A set of strings iterates in an order randomized per process by
+        # PYTHONHASHSEED, which would make each rank - and each run - write a differently ordered
+        # precice config for the same problem.
         provided_meshes:set[str]=set()
         received_meshes:set[tuple[str,str,str]]=set() # (preCICE name, participant it comes from, pyoomph domain)
         pyoomph_mesh_name_to_provide_name:dict[str,str]={}
         def recursive_scan_data(eqtree:EquationTree):
-            if eqtree._equations is not None:
-                read_datas=eqtree._equations.get_equation_of_type(PreciceReadData,always_as_list=True)
+            if eqtree._equations:
+                read_datas=eqtree.get_equations().get_equation_of_type(PreciceReadData,always_as_list=True)
                 for read_data in read_datas:                                 
                     read_data=cast(PreciceReadData,read_data)
                     meshname=eqtree.get_full_path().lstrip("/")
@@ -144,7 +155,7 @@ class _PyoomphPreciceAdapater:
                         mesh_read_data[meshname].append(precice_name)                        
                         
                 
-                write_datas=eqtree._equations.get_equation_of_type(PreciceWriteData,always_as_list=True)
+                write_datas=eqtree.get_equations().get_equation_of_type(PreciceWriteData,always_as_list=True)
                 for write_data in write_datas:                                 
                     write_data=cast(PreciceWriteData,write_data)
                     meshname=eqtree.get_full_path().lstrip("/")
@@ -159,12 +170,12 @@ class _PyoomphPreciceAdapater:
                 recursive_scan_data(subeqs)    
                         
         def recursive_scan_meshes(eqtree:EquationTree):
-            if eqtree._equations is not None:
-                mesh_provides=eqtree._equations.get_equation_of_type(PreciceProvideMesh,always_as_list=True)
+            if eqtree._equations:
+                mesh_provides=eqtree.get_equations().get_equation_of_type(PreciceProvideMesh,always_as_list=True)
                 for mesh_provide in mesh_provides:                    
                     mesh_provide=cast(PreciceProvideMesh,mesh_provide)
                     meshname=eqtree.get_full_path().lstrip("/")
-                    if eqtree._equations.get_combined_equations()._is_ode() is True:
+                    if eqtree._is_ode() is True:
                         meshdim=2 # Must be 2 for ODEs
                     else:
                         mesh=problem.get_mesh(meshname)
@@ -184,18 +195,20 @@ class _PyoomphPreciceAdapater:
                     if len(use_data)==0:
                         raise RuntimeError("Provided Mesh "+meshname+" (preCICE name '"+str(mesh_provide.name)+"') has no data to read or write")
                     else:
-                        for ud in set(use_data):
+                        # dict.fromkeys, not set(): deduplicates but keeps the order the data was
+                        # declared in, which a set would randomize per process.
+                        for ud in dict.fromkeys(use_data):
                             ET.SubElement(meshentry,"use-data",name=ud)
                     provided_meshes.add(mesh_provide.name)
                     if meshname in pyoomph_mesh_name_to_provide_name.keys():
                         raise RuntimeError("Mesh "+meshname+" has multiple PreciceProvideMesh entries")
                     pyoomph_mesh_name_to_provide_name[meshname]=mesh_provide.name
                     
-                mesh_receives=eqtree._equations.get_equation_of_type(PreciceReceiveMesh,always_as_list=True)
+                mesh_receives=eqtree.get_equations().get_equation_of_type(PreciceReceiveMesh,always_as_list=True)
                 for mesh_receive in mesh_receives:
                     mesh_receive=cast(PreciceReceiveMesh,mesh_receive)
                     meshname=eqtree.get_full_path().lstrip("/")
-                    if eqtree._equations.get_combined_equations()._is_ode() is True:
+                    if eqtree._is_ode() is True:
                         meshdim=2 # Must be 2 for ODEs
                     else:
                         mesh=problem.get_mesh(meshname)
@@ -213,7 +226,9 @@ class _PyoomphPreciceAdapater:
                     if len(use_data)==0:
                         raise RuntimeError("Received Mesh "+meshname+" (preCICE name '"+str(mesh_receive.name)+"') has no data to read or write")
                     else:
-                        for ud in set(use_data):
+                        # dict.fromkeys, not set(): deduplicates but keeps the order the data was
+                        # declared in, which a set would randomize per process.
+                        for ud in dict.fromkeys(use_data):
                             ET.SubElement(meshentry,"use-data",name=ud)
                     received_meshes.add((mesh_receive.name,mesh_receive.from_participant,meshname))
                     
@@ -226,16 +241,16 @@ class _PyoomphPreciceAdapater:
             raise RuntimeError("Please set a preCICE participant name by the Problem property precice_participant")
         
         participant=ET.SubElement(root,"participant",name=problem.precice_participant)
-        for meshname in provided_meshes:
+        for meshname in sorted(provided_meshes):
             ET.SubElement(participant,"provide-mesh",name=meshname)
-        for entry in received_meshes:
+        for entry in sorted(received_meshes):
             ET.SubElement(participant,"receive-mesh",{"from":entry[1]},name=entry[0]) # "from" is a keyword, so it can only go in through the attribute dict
-        for meshname in provided_meshes:
+        for meshname in sorted(provided_meshes):
             for data in precice_write_data.get(meshname,[]):
                 ET.SubElement(participant,"write-data",name=data,mesh=meshname)
             for data in precice_read_data.get(meshname,[]):
                 ET.SubElement(participant,"read-data",name=data,mesh=meshname)
-        for entry in received_meshes:
+        for entry in sorted(received_meshes):
             if entry[2] not in pyoomph_mesh_name_to_provide_name.keys():
                 print("WARNING: Received mesh "+str(entry[0])+" is not provided by this participant")
                 #raise RuntimeError("Received mesh "+str(entry[0])+" is not provided by this participant")
@@ -267,7 +282,7 @@ class PreciceProvideMesh(BaseEquations):
         self.name=precice_mesh_name
         self.use_lagrangian_coords=use_lagrangian_coords
 
-    def before_precice_initialise(self,eqtree:"EquationTree"):
+    def _before_precice_initialise(self,eqtree:"EquationTree"):
         mesh=eqtree.get_mesh()
         pr=mesh.get_problem()
         interface=pr._precice_interface
@@ -560,14 +575,14 @@ class PreciceWriteData(BaseEquations):
                     interface.write_data(provider.name, write_name, vertex_ids[inds], buffer)
 
    
-    def before_precice_initialise(self, eqtree: "EquationTree"):
+    def _before_precice_initialise(self, eqtree: "EquationTree"):
         interface=self.get_problem()._precice_interface
         assert interface is not None
         if interface.requires_initial_data():
             self._do_write_data(0)
         
 
-    def after_precice_solve(self, eqtree: "EquationTree",precice_dt:float):
+    def _after_precice_solve(self, eqtree: "EquationTree",precice_dt:float):
         self._do_write_data(precice_dt)
 
             
@@ -676,7 +691,7 @@ class PreciceReadData(BaseEquations):
                         for i,n in enumerate(mesh.nodes()):
                             n.set_value(index,buffer[_v2v(mesh)[n],vindex])
 
-    def before_precice_solve(self, eqtree: EquationTree, precice_dt: float):
+    def _before_precice_solve(self, eqtree: EquationTree, precice_dt: float):
         self._do_read_data(precice_dt)
              
 

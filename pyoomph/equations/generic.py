@@ -1,3 +1,29 @@
+#  @file
+#  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
+#
+#  @section LICENSE
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+#  The main author may be contacted at c.diddens@utwente.nl
+#
+# ========================================================================
 """
 The physics-independent equation classes of pyoomph: the pieces that are combined with actual
 physics (:py:mod:`pyoomph.equations.navier_stokes`, :py:mod:`pyoomph.equations.poisson`, ...) to
@@ -55,10 +81,11 @@ from __future__ import annotations
 
 # Not "from .. import var_and_test,var": this module is imported while the pyoomph package itself is
 # still being set up, so it must not depend on what the top-level __init__ has bound so far.
+from .._deprecation import deprecated_kwargs as _deprecated_kwargs, deprecated_attribute_alias as _deprecated_attribute_alias
 from .. import _pyoomph_core as _pyoomph
 from ..expressions import var_and_test,var
 from ..generic.codegen import  InterfaceEquations,Equations,BaseEquations,ODEEquations,FiniteElementCodeGenerator,sorted_field_kwargs
-from ..expressions.generic import ExpressionOrNum,ExpressionNumOrNone,FiniteElementSpaceEnum, grad,nondim, scale_factor,test_scale_factor,Expression,assert_valid_finite_element_space, testfunction,find_dominant_element_space,weak
+from ..expressions.generic import ExpressionOrNum,ExpressionNumOrNone,FiniteElementSpaceEnum, grad,nondim, scale_factor,test_scale_factor,Expression,assert_valid_finite_element_space, testfunction,find_dominant_element_space,find_subordinate_element_space,largest_facet_space,weak
 
 #Connects one or multiple fields at both sides of the interfaces via Lagrange multipliers
 #i.e. it ensures the same Neumann flux on both sides, whereas the magnitude of this flux is given by the Lagrange multiplier
@@ -81,24 +108,55 @@ if TYPE_CHECKING:
 
 
 # TODO Check this
-def get_interface_field_connection_space(inside_space:FiniteElementSpaceEnum | Literal[""],outside_space:FiniteElementSpaceEnum | Literal[""],use_highest_space:bool=False)->FiniteElementSpaceEnum | Literal[""]:
+def _facet_space_cap(eqs)->"tuple[str,int]":
+    """(coordinate space, dimension) of the bulk domain an interface equation is attached to.
+
+    The Lagrange multiplier of an interface coupling is a nodal value on the INNER domain's bulk nodes,
+    so that domain is the one that has to be able to carry the negotiated space on a facet. Returns
+    ("",0) when the parent cannot be resolved, which leaves the negotiation uncapped exactly as before.
+    """
+    try:
+        pdom=eqs.get_parent_domain()
+        if pdom is None:
+            return ("",0)
+        return (str(pdom._coordinate_space),int(pdom.dimension))
+    except Exception:
+        return ("",0)
+
+
+def get_interface_field_connection_space(inside_space:FiniteElementSpaceEnum | Literal[""],outside_space:FiniteElementSpaceEnum | Literal[""],use_highest_space:bool=False,parent_space:str="",parent_dim:int=0)->FiniteElementSpaceEnum | Literal[""]:
+    """The space the Lagrange multiplier coupling the two sides of an interface lives in.
+
+    By default the MEET of the two -- the largest space both sides can represent -- capped by what the
+    inner domain can actually carry on a facet (the multiplier is a nodal value on the INNER domain's
+    bulk nodes, so only that side's facet has to hold it).
+
+    This used to walk a total order ["D2TB","C2TB","D2","C2","D1TB","C1TB","D1","C1"], which is wrong:
+    C1TB and C2 are incomparable, so "the one further down that list" is not the meet. A C2 domain
+    coupled to a C1TB one negotiated a C1TB multiplier -- a space a C2 triangle does not have -- and the
+    run segfaulted rather than complained. See dev_docs/interface_refinement_coupling.md section 14.5 and
+    find_subordinate_element_space, which is the lattice this now uses.
+    """
     if outside_space == "":
         return inside_space
     elif inside_space == "":
         return outside_space    
     if outside_space[0]!=inside_space[0]:
         raise RuntimeError("TODO: Think about what space is lower/higher ") #TODO: Is e.g. D2 lower or higher than C2TB? hard to tell
-    space_order:list[FiniteElementSpaceEnum]=["D2TB","C2TB","D2","C2","D1TB","C1TB","D1","C1"]
-    for sp in space_order:
-        if inside_space==sp:
-            if outside_space==sp or use_highest_space:
-                return sp
-            else:
-                return outside_space
-        elif outside_space==sp:
-            return inside_space
-
-    raise RuntimeError("Should not happen: Cannot get field connection space for "+inside_space+" and "+outside_space)
+    # The lattice works on the continuous names; both inputs are the same kind here (checked above), so
+    # whatever it returns is translated back to that kind.
+    discontinuous=(inside_space[0]=="D")
+    if use_highest_space:
+        res=find_dominant_element_space(inside_space,outside_space)
+    else:
+        res=find_subordinate_element_space(inside_space,outside_space)
+    if parent_space!="":
+        res=find_subordinate_element_space(res,largest_facet_space(parent_space,parent_dim))
+    if res=="":
+        raise RuntimeError("Should not happen: Cannot get field connection space for "+inside_space+" and "+outside_space)
+    if discontinuous:
+        res=cast("FiniteElementSpaceEnum","D"+res[1:])
+    return cast("FiniteElementSpaceEnum",res)
 
 class ConnectFieldsAtInterface(InterfaceEquations):
     """
@@ -140,7 +198,8 @@ class ConnectFieldsAtInterface(InterfaceEquations):
                 raise RuntimeError("Cannot connect field "+fouter+" at the interface, since it cannot find in the outer domain")
             inside_space=assert_valid_finite_element_space(inside_space)
             outside_space=assert_valid_finite_element_space(outside_space)            
-            space=get_interface_field_connection_space(inside_space,outside_space,use_highest_space=self.use_highest_space) 
+            pspace,pdim=_facet_space_cap(self)
+            space=get_interface_field_connection_space(inside_space,outside_space,use_highest_space=self.use_highest_space,parent_space=pspace,parent_dim=pdim) 
             space=assert_valid_finite_element_space(space)
             self.define_scalar_field(self.lagr_mult_prefix+finner+"_"+fouter,space,scale=1/test_scale_factor(finner)) 
 
@@ -156,13 +215,13 @@ class ConnectFieldsAtInterface(InterfaceEquations):
                     testscale_inside=self.expand_expression_for_debugging(test_scale_factor(finner))
                     testscale_outside=self.expand_expression_for_debugging(test_scale_factor(fouter,domain=self.get_opposite_side_of_interface()))
                     
-                    raise self.add_exception_info(RuntimeError("When connecting fields "+str(finner)+" and "+str(fouter)+" at the interface, the test function scaling is inconsistent.\nPlease either set check_consistent_scaling=False or ensure that the test function scaling is consistent.\n   test_scale("+str(finner)+")_inside = "+str(testscale_inside)+"\n   test_scale("+str(fouter)+")_outside = "+str(testscale_outside)))
+                    raise self._add_exception_info(RuntimeError("When connecting fields "+str(finner)+" and "+str(fouter)+" at the interface, the test function scaling is inconsistent.\nPlease either set check_consistent_scaling=False or ensure that the test function scaling is consistent.\n   test_scale("+str(finner)+")_inside = "+str(testscale_inside)+"\n   test_scale("+str(fouter)+")_outside = "+str(testscale_outside)))
                 testdiff=scale_factor(finner)-scale_factor(fouter,domain=self.get_opposite_side_of_interface())
                 testdiff=self.expand_expression_for_debugging(testdiff,raise_error=False,unit_error=False)
                 if not testdiff.is_zero():
                     scale_inside=self.expand_expression_for_debugging(scale_factor(finner))
                     scale_outside=self.expand_expression_for_debugging(scale_factor(fouter,domain=self.get_opposite_side_of_interface()))
-                    raise self.add_exception_info(RuntimeError("When connecting fields "+str(finner)+" and "+str(fouter)+" at the interface, the scaling is inconsistent.\nPlease either set check_consistent_scaling=False or ensure that the scaling is consistent.\n   scale("+str(finner)+")_inside = "+str(scale_inside)+"\n   scale("+str(fouter)+")_outside = "+str(scale_outside)))
+                    raise self._add_exception_info(RuntimeError("When connecting fields "+str(finner)+" and "+str(fouter)+" at the interface, the scaling is inconsistent.\nPlease either set check_consistent_scaling=False or ensure that the scaling is consistent.\n   scale("+str(finner)+")_inside = "+str(scale_inside)+"\n   scale("+str(fouter)+")_outside = "+str(scale_outside)))
 
 
             l, l_test=var_and_test(self.lagr_mult_prefix+finner+"_"+fouter)
@@ -314,7 +373,7 @@ class SpatialErrorEstimator(Equations):
         # here used to raise "matrix::operator(): index out of range" from vector_gradient. Each
         # component contributes its own criterion to the same group, which is what naming the
         # components by hand would have done anyway.
-        combined=self._get_combined_element()
+        combined=self._master()
         tensorfields=getattr(combined,"_tensorfields",{}) if isinstance(combined,Equations) else {}
         for flux,factor in self.fluxes.items():
             if isinstance(flux,str):
@@ -361,7 +420,7 @@ class RefineToLevel(Equations):
         super(RefineToLevel, self).__init__()
         self.level:Literal["max"] | int = level
 
-    def register_refinement_directives(self,codegen):
+    def _register_refinement_directives(self,codegen):
         mesh=codegen._mesh
         assert mesh is not None
         # Registered as a C++ refinement directive rather than evaluated by a Python loop over the
@@ -372,7 +431,7 @@ class RefineToLevel(Equations):
         mesh._add_refinement_directive_to_level(-1 if self.level=="max" else int(self.level))
 
     def after_compilation(self,codegen):
-        self.register_refinement_directives(codegen)
+        self._register_refinement_directives(codegen)
         mesh=codegen._mesh
         assert mesh is not None
         # Only MeshFromTemplate1d/2d/3d actually carry _initial_uniform_refinement_level.
@@ -396,14 +455,18 @@ class RemeshingOptions:
         active: Flag indicating whether the remeshing is active.
         min_quality_decrease: Minimum quality decrease of an element before remeshing is invoked.
         on_invalid_triangulation: Flag indicating whether to remesh if the triangulation is invalid.
+        on_inverted_element: Remesh when an element turns inside out. Off by default; switching it on also
+            switches on the (global, off-by-default) inverted-element detection, since without it nothing
+            reports an inversion in the first place.
     """    
-    def __init__(self,max_expansion:float=1.75,min_expansion:float=0.6,min_solves_before_remesh:int=0,reinit_initial_size_after_one_step:bool=False,active:bool=True,min_quality_decrease:float=0.2,on_invalid_triangulation:bool=False):
+    def __init__(self,max_expansion:float=1.75,min_expansion:float=0.6,min_solves_before_remesh:int=0,reinit_initial_size_after_one_step:bool=False,active:bool=True,min_quality_decrease:float=0.2,on_invalid_triangulation:bool=False,on_inverted_element:bool=False):
         self.max_expansion=max_expansion
         self.min_expansion=min_expansion
         self.min_solves_before_remesh=min_solves_before_remesh
         self.reinit_initial_size_after_one_step=reinit_initial_size_after_one_step
         self.min_quality_decrease=min_quality_decrease
         self.on_invalid_triangulation=on_invalid_triangulation
+        self.on_inverted_element=on_inverted_element
         self.active=active
 
     def keys(self) -> list[str]:
@@ -427,7 +490,7 @@ class RemeshWhen(Equations):
         min_quality_decrease: Minimum quality decrease of an element before remeshing is invoked.
         on_invalid_triangulation: Flag indicating whether to remesh if the triangulation is invalid.
     """
-    def __init__(self,remeshing_opts:RemeshingOptions | None=None,*,max_expansion:float | None=None,min_expansion:float | None=None,min_solves_before_remesh:int | None=0,reinit_initial_size_after_one_step:bool | None=False,active:bool=True,min_quality_decrease:float | None=None,on_invalid_triangulation:bool=False):
+    def __init__(self,remeshing_opts:RemeshingOptions | None=None,*,max_expansion:float | None=None,min_expansion:float | None=None,min_solves_before_remesh:int | None=0,reinit_initial_size_after_one_step:bool | None=False,active:bool=True,min_quality_decrease:float | None=None,on_invalid_triangulation:bool=False,on_inverted_element:bool=False):
 
         super(RemeshWhen, self).__init__()
         if isinstance(remeshing_opts,RemeshingOptions):
@@ -437,6 +500,7 @@ class RemeshWhen(Equations):
             self.reinit_initial_size_after_one_step:bool | None=remeshing_opts.reinit_initial_size_after_one_step
             self.min_quality_decrease:float | None=remeshing_opts.min_quality_decrease
             self.on_invalid_triangulation=remeshing_opts.on_invalid_triangulation
+            self.on_inverted_element=remeshing_opts.on_inverted_element
             self.active=remeshing_opts.active
         else:
             self.max_expansion = max_expansion
@@ -444,6 +508,7 @@ class RemeshWhen(Equations):
             self.min_solves_before_remesh = min_solves_before_remesh
             self.reinit_initial_size_after_one_step = reinit_initial_size_after_one_step
             self.on_invalid_triangulation=on_invalid_triangulation
+            self.on_inverted_element=on_inverted_element
             self.active = active
             self.min_quality_decrease = min_quality_decrease
 
@@ -453,6 +518,37 @@ class RemeshWhen(Equations):
         if self.min_expansion and self.min_expansion>=1:
             raise ValueError("min_expansion must be <1")
 
+
+    def before_finalization(self,codegen:"FiniteElementCodeGenerator"):
+        """Arm the inverted-element trigger, at code generation time.
+
+        Detection is a **process-wide** switch (`BulkElementBase::detect_inverted_elements`), while
+        this equation is per domain, so arming it here turns the check on for every domain of the
+        problem and everyone pays its ~2 % of the assembly time. That is a deliberate trade rather
+        than an oversight - making it per-domain means threading a flag down to the element, on the
+        hottest read there is - but it is worth knowing before switching this on.
+        """
+        if not (self.active and self.on_inverted_element):
+            return
+        from .. import _pyoomph_core
+        _pyoomph_core.set_detect_inverted_elements(True)
+        # The C++ threshold is deliberately NOT armed here. Whether a fold has happened is decided in
+        # Problem._solve_with_inversion_remesh(), from whether the step collapsed, because counting
+        # inversions cannot tell a fold from a transient Newton iterate - measured, see that method.
+        # The threshold is armed only for the retry after a remesh, where an inversion does mean the
+        # remesh failed.
+
+    def on_apply_boundary_conditions(self,mesh:"AnyMesh"):
+        # Registers WHICH template to rebuild when an inversion escalates. Done here rather than in
+        # before_finalization because the mesh (and hence the template) does not exist there yet.
+        if not (self.active and self.on_inverted_element):
+            return
+        if isinstance(mesh,MeshFromTemplateBase) and mesh._templatemesh is not None:
+            if mesh._templatemesh.remesher is None:
+                raise RuntimeError("RemeshWhen(on_inverted_element=True) on '"+mesh.get_full_name()+
+                                   "' needs the corresponding MeshTemplate to have its 'remesher' property set, "
+                                   "otherwise there is nothing to remesh with when an element inverts.")
+            mesh.get_problem()._domains_remesh_on_inversion.add(mesh._templatemesh)
 
     def after_newton_solve(self):
         need_remesh=False
@@ -564,18 +660,28 @@ class ProjectExpression(Equations):
             refers to a registered scale by name. Defaults to 1.
         space: Finite element space to project onto. Defaults to "C2".
         destination: Residual destination for the projection. Defaults to None, i.e. the default residual.
-        field_type: Type of the projected field. Can be "scalar" or "vector". Defaults to "scalar".
-        coordinate_system: Coordinate system for the projection. If None, the coordinate system of the domain/problem will be used. Defaults to None.
+        field_type: Type of the projected field: "scalar" (default), "vector", "tensor" or
+            "symmetric_tensor". A symmetric tensor shares one test function between each pair of
+            off-diagonal entries, so it projects the symmetric part of the expression.
+        dim: Number of components (vector) or rows and columns (tensor) of the projected field.
+            Defaults to the nodal dimension. In Cartesian coordinates that leaves a planar tensor
+            without its out-of-plane entry, so pass ``dim=3`` to project a full three-dimensional
+            tensor on a two-dimensional mesh. Ignored for a scalar field.
+        coordsys: Coordinate system for the projection. If None, the coordinate system of the domain/problem will be used. Defaults to None. The former name ``coordinate_system`` is deprecated, but still accepted.
         **projs: Keyword arguments representing the expressions to project. The keys are the names of the projected fields, and the values are the expressions to project.
         
     """
-    def __init__(self,scale:ExpressionOrNum | str=1,space:FiniteElementSpaceEnum="C2",destination:str | None=None,field_type:Literal["scalar","vector"]="scalar",coordinate_system:"BaseCoordinateSystem | None"=None, **projs:ExpressionOrNum):
+    coordinate_system = _deprecated_attribute_alias("coordinate_system","coordsys")
+
+    @_deprecated_kwargs(coordinate_system="coordsys")
+    def __init__(self,scale:ExpressionOrNum | str=1,space:FiniteElementSpaceEnum="C2",destination:str | None=None,field_type:Literal["scalar","vector","tensor","symmetric_tensor"]="scalar",dim:int | None=None,coordsys:"BaseCoordinateSystem | None"=None, **projs:ExpressionOrNum):
         super(ProjectExpression, self).__init__()
         self.space:FiniteElementSpaceEnum=space
         self.scale:ExpressionOrNum=scale_factor(scale) if isinstance(scale,str) else scale
         self.field_type=field_type
+        self.dim=dim
         self.projs=projs.copy()
-        self.coordinate_system=coordinate_system
+        self.coordsys=coordsys
         self.destination=destination
         
     def define_fields(self):
@@ -583,7 +689,13 @@ class ProjectExpression(Equations):
             if self.field_type=="scalar":
                 self.define_scalar_field(n,self.space,scale=self.scale,testscale=1/self.scale)
             elif self.field_type=="vector":
-                self.define_vector_field(n,self.space,scale=self.scale,testscale=1/self.scale)
+                self.define_vector_field(n,self.space,dim=self.dim,scale=self.scale,testscale=1/self.scale)
+            elif self.field_type in {"tensor","symmetric_tensor"}:
+                # The residuals below need no case of their own: weak() double-contracts matrices,
+                # and matrix() pads everything to 3x3, so a tensor expression and a tensor test
+                # function meet at the same size whatever the dimension of the field.
+                self.define_tensor_field(n,self.space,dim=self.dim,symmetric=self.field_type=="symmetric_tensor",
+                                         scale=self.scale,testscale=1/self.scale)
             else:
                 raise ValueError("Unsupported field type "+self.field_type)
 
@@ -591,8 +703,8 @@ class ProjectExpression(Equations):
         from ..expressions.generic import weak
         for n,e in self.projs.items():
             f,ftest=var_and_test(n)
-            self.add_residual(weak(f,testfunction(n,dimensional=False)/scale_factor(n),coordinate_system=self.coordinate_system),destination=self.destination)
-            self.add_residual(weak(-e,testfunction(n,dimensional=False)/scale_factor(n),coordinate_system=self.coordinate_system),destination=self.destination)
+            self.add_residual(weak(f,testfunction(n,dimensional=False)/scale_factor(n),coordsys=self.coordsys),destination=self.destination)
+            self.add_residual(weak(-e,testfunction(n,dimensional=False)/scale_factor(n),coordsys=self.coordsys),destination=self.destination)
 
 class InitialCondition(BaseEquations):
     """
@@ -608,7 +720,7 @@ class InitialCondition(BaseEquations):
     the field's components in their own order, so this is also correct in e.g. an axisymmetric
     coordinate system. This includes the position fields and values that are not written as an explicit
     ``vector(...)``, i.e. ``InitialCondition(mesh=var("lagrangian"))``. See
-    :py:meth:`~pyoomph.generic.codegen.BaseEquations.expand_vectorial_entries`.
+    :py:meth:`~pyoomph.generic.codegen.BaseEquations._expand_vectorial_entries`.
     """
 
     def __init__(self, *, degraded_start: bool | Literal["auto"] = "auto", IC_name: str = "", **kwargs: ExpressionOrNum):
@@ -624,7 +736,7 @@ class InitialCondition(BaseEquations):
         # Vector-valued entries split into their components. Not done in __init__: which components
         # "velocity" has is a property of the domain this condition ends up on, which is not known
         # until the equations are attached.
-        for n, val in self.expand_vectorial_entries(self._ics, "initial condition").items():
+        for n, val in self._expand_vectorial_entries(self._ics, "initial condition").items():
             assert isinstance(self._degraded_start, bool) or self._degraded_start == "auto"
             self.set_initial_condition(n, val, degraded_start=self._degraded_start, IC_name=self._ic_name)
             if self.get_problem().project_initial_conditions:
@@ -672,8 +784,8 @@ class LocalExpressions(Equations):
         self.local_expressions = {k:v for k,v in local_expressions.items()}
 
     def define_additional_functions(self):
-        if self._get_combined_element()._is_ode():
-            raise self.add_exception_info( RuntimeError("LocalExpressions cannot be used with ODE equations. Use IntegralObservables instead."))
+        if self._master()._is_ode():
+            raise self._add_exception_info( RuntimeError("LocalExpressions cannot be used with ODE equations. Use IntegralObservables instead."))
         for k,v in self.local_expressions.items():
             self.add_local_function(k, v )
             
@@ -727,25 +839,31 @@ class IntegralObservables(Equations):
     does work.
 
     Args:
-        _coordinate_system: The coordinate system to use. Defaults to None, i.e. the one of the
-            equations or the problem.
+        coordsys: The coordinate system to use. Defaults to None, i.e. the one of the
+            equations or the problem. The former name ``_coordinate_system`` is deprecated, but still
+            accepted. Since the observables are passed as keyword arguments, an observable cannot be
+            named ``coordsys`` (nor ``_lagrangian``).
         _lagrangian: Integrate over the Lagrangian instead of the Eulerian domain. Defaults to False.
         **integral_observables: The observables, either expressions to integrate or callables of other
             observables (see above).
     """
-    def __init__(self,_coordinate_system:"BaseCoordinateSystem | None"=None,_lagrangian:bool=False, **integral_observables:ExpressionOrNum | Callable[..., ExpressionOrNum]):
+    @_deprecated_kwargs(_coordinate_system="coordsys")
+    def __init__(self,coordsys:"BaseCoordinateSystem | None"=None,_lagrangian:bool=False, **integral_observables:ExpressionOrNum | Callable[..., ExpressionOrNum]):
         super(IntegralObservables, self).__init__()
         is_dependent_func=lambda v: callable(v) and not isinstance(v,Expression)
         self.integral_observables = {k:v for k,v in integral_observables.items() if not is_dependent_func(v)}
         self.dependent_funcs={k:v for k,v in integral_observables.items() if is_dependent_func(v)}
-        self._coordinate_system=_coordinate_system
+        # NOT self._coordinate_system: that is the slot BaseEquations uses for the coordinate system of
+        # the entire equation object, so storing the argument there used to override the system of whatever
+        # this class was combined with, not just the measure of these observables.
+        self.coordsys=coordsys
         self._lagrangian=_lagrangian
 
     def define_additional_functions(self):
-        if self._coordinate_system is None:
+        if self.coordsys is None:
             dx = self.get_dx(lagrangian=self._lagrangian)
         else:
-            dx=self.get_dx(coordsys=self._coordinate_system,lagrangian=self._lagrangian)
+            dx=self.get_dx(coordsys=self.coordsys,lagrangian=self._lagrangian)
         for k,v in self.integral_observables.items():
             #import pyoomph._pyoomph_core as _pyoomph
             #_pyoomph.set_verbosity_flag(1)
@@ -788,7 +906,7 @@ class ExtremumObservables(Equations):
 
     def add_extremum_function(self,name:str,expr:"ExpressionOrNum | Callable[[], ExpressionOrNum]"):
         from .. import _pyoomph_core as _pyoomph
-        master = self._get_combined_element()
+        master = self._master()
         cg = master._assert_codegen()
         # Equivalent to the original "not(isinstance(expr,int) or isinstance(expr,float) or
         # isinstance(expr,Expression)) and callable(expr)": int/float instances are never
@@ -907,16 +1025,16 @@ class _AverageOrIntegralConstraintBase(Equations):
         self.set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve
         self.scaling_factor:ExpressionNumOrNone=scale_factor(scaling_factor) if isinstance(scaling_factor,str) else scaling_factor
 
-    def get_global_dof_storage_name(self, pathname: str | None = None):
+    def _get_global_dof_storage_name(self, pathname: str | None = None):
         if self.ode_storage_domain is None:
-            return super().get_global_dof_storage_name(pathname)
+            return super()._get_global_dof_storage_name(pathname)
         else:
             return self.ode_storage_domain
         
-    def after_fill_dummy_equations(self, problem: "Problem", eqtree: "EquationTree",pathname:str,elem_dim:int | None=None):
+    def _after_fill_dummy_equations(self, problem: "Problem", eqtree: "EquationTree",pathname:str,elem_dim:int | None=None):
         if len(self.constraints)==0:
-            return super().after_fill_dummy_equations(problem,eqtree,pathname,elem_dim)        
-        odestorage=self.get_global_dof_storage_name(pathname=pathname)  
+            return super()._after_fill_dummy_equations(problem,eqtree,pathname,elem_dim)        
+        odestorage=self._get_global_dof_storage_name(pathname=pathname)  
         add_eqs=None      
         for field,integral_value in self.constraints.items():
             scale_correction=problem.get_scaling(field) if self.scaling_factor is None else self.scaling_factor
@@ -939,10 +1057,10 @@ class _AverageOrIntegralConstraintBase(Equations):
         # once and add_eqs was assigned.
         assert add_eqs is not None
         problem._equation_system+=add_eqs@odestorage
-        return super().after_fill_dummy_equations(problem,eqtree,pathname,elem_dim)        
+        return super()._after_fill_dummy_equations(problem,eqtree,pathname,elem_dim)        
 
     def define_residuals(self):
-        odestorage=self.get_global_dof_storage_name()        
+        odestorage=self._get_global_dof_storage_name()        
         for field,integral_value in self.constraints.items():
             u,utest=var_and_test(field)
             l,ltest=var_and_test(field,domain=odestorage)
@@ -1030,20 +1148,23 @@ class WeakContribution(BaseEquations):
             string is taken as a field name, i.e. ``"u"`` means ``testfunction("u")``.
         dimensional_dx: If set to ``True``, the weak contribution is treated as a dimensional contribution, i.e. spatial integration dx will carry dimension.
         lagrangian: If set to ``True``, the weak contribution is integrated in the Lagrangian frame of reference.
-        coordinate_system: The coordinate system in which the weak contribution is defined. If not set, the coordinate system of the equations or the problem is used.
+        coordsys: The coordinate system in which the weak contribution is defined. If not set, the coordinate system of the equations or the problem is used. The former name ``coordinate_system`` is deprecated, but still accepted.
         destination: The residual destination of the weak contribution. Can be used to define multiple residuals.
     """
-    def __init__(self,a:"ExpressionOrNum | str",b:"Expression | str",dimensional_dx:bool=False,lagrangian:bool=False,coordinate_system:BaseCoordinateSystem | None=None,destination:str | None=None):
+    coordinate_system = _deprecated_attribute_alias("coordinate_system","coordsys")
+
+    @_deprecated_kwargs(coordinate_system="coordsys")
+    def __init__(self,a:"ExpressionOrNum | str",b:"Expression | str",dimensional_dx:bool=False,lagrangian:bool=False,coordsys:BaseCoordinateSystem | None=None,destination:str | None=None):
         super(WeakContribution, self).__init__()
         self.dimensional_dx=dimensional_dx
-        self.coordinate_system=coordinate_system
+        self.coordsys=coordsys
         self.lagrangian=lagrangian
         self.destination=destination
         self.b:Expression=testfunction(b) if isinstance(b,str) else b
         self.a:ExpressionOrNum=var(a) if isinstance(a,str) else a
 
     def define_residuals(self):
-        self.add_residual(weak(self.a,self.b,dimensional_dx=self.dimensional_dx,lagrangian=self.lagrangian,coordinate_system=self.coordinate_system),destination=self.destination)
+        self.add_residual(weak(self.a,self.b,dimensional_dx=self.dimensional_dx,lagrangian=self.lagrangian,coordsys=self.coordsys),destination=self.destination)
 
 
 class ScalarField(Equations):
@@ -1222,12 +1343,14 @@ class EnforcedBC(InterfaceEquations):
             Defaults to False.
         domain: Domain of the adjusted field, if it is not the one this condition is added to.
         space: Space of the Lagrange multiplier field. Defaults to the space of the adjusted field.
-        coordinate_system: Coordinate system of the constraint integral. Defaults to the one of the
-            equations or the problem.
+        coordsys: Coordinate system of the constraint integral. Defaults to the one of the
+            equations or the problem. The former name ``coordinate_system`` is deprecated, but still
+            accepted.
         **constraints: Name of the field to adjust, with the constraint expression in residual form.
     """
  
-    def __init__(self,*, only_for_stationary_solve:bool=False, set_zero_on_normal_mode_eigensolve=False,domain:str | None=None,space:FiniteElementSpaceEnum | None=None,coordinate_system:BaseCoordinateSystem | None=None,**constraints:Expression):
+    @_deprecated_kwargs(coordinate_system="coordsys")
+    def __init__(self,*, only_for_stationary_solve:bool=False, set_zero_on_normal_mode_eigensolve=False,domain:str | None=None,space:FiniteElementSpaceEnum | None=None,coordsys:BaseCoordinateSystem | None=None,**constraints:Expression):
         super(EnforcedBC, self).__init__()
         self.constraints = constraints.copy()
         self.lagrangian:bool = False
@@ -1235,7 +1358,7 @@ class EnforcedBC(InterfaceEquations):
         self.set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve
         self.domain=domain
         self.space=space
-        self.coordsys=coordinate_system
+        self.coordsys=coordsys
 
     def get_lagrange_multiplier_name(self, varname:str)->str:
         return "_lagr_enf_bc_" + varname
@@ -1257,7 +1380,7 @@ class EnforcedBC(InterfaceEquations):
                         if sp == "":
                             # Test if it is a vector field
                             # print(dir(self.get_parent_domain().get_equations()))
-                            # expanded = self.expand_additional_field(k, True, 0, self.get_current_code_generator(),False,False)
+                            # expanded = self._expand_additional_field(k, True, 0, self.get_current_code_generator(),False,False)
                             # peqs = self.get_parent_domain().get_equations()
                             raise RuntimeError("Cannot use EnforcedBC on an unknown field " + k)
                 if sp not in allowed_spaces:
@@ -1283,8 +1406,8 @@ class EnforcedBC(InterfaceEquations):
             lagr_name=self.get_lagrange_multiplier_name(k)
             l, ltest = var_and_test(lagr_name)  # get the Lagrange multiplier
             utest = testfunction(k,domain=self.domain)
-            self.add_residual(weak(v, ltest, lagrangian=self.lagrangian,coordinate_system=self.coordsys))  # Enforce the constraint
-            self.add_residual(weak(l, utest,lagrangian=self.lagrangian,coordinate_system=self.coordsys))  # Lagrange multiplier pair to enforce it
+            self.add_residual(weak(v, ltest, lagrangian=self.lagrangian,coordsys=self.coordsys))  # Enforce the constraint
+            self.add_residual(weak(l, utest,lagrangian=self.lagrangian,coordsys=self.coordsys))  # Lagrange multiplier pair to enforce it
             if self.only_for_stationary_solve:
                 self.set_Dirichlet_condition(lagr_name,0)
 
@@ -1294,10 +1417,10 @@ class EnforcedBC(InterfaceEquations):
         assert mesh._eqtree._parent is not None #type: ignore
         bulkmesh = mesh._eqtree._parent._mesh #type: ignore
         assert bulkmesh is not None
-        codeinst_inside=mesh.get_code_gen().get_code()
-        #codeinst_inside = mesh.element_pt(0).get_code_instance()
+        jitcode_inside=mesh.get_code_gen().get_code()
+        #jitcode_inside = mesh.element_pt(0).get_jit_code()
         for k, _ in self.constraints.items():            
-            index = [codeinst_inside.get_nodal_field_index(k)]  # TODO: Vectors
+            index = [jitcode_inside.get_nodal_field_index(k)]  # TODO: Vectors
             #print("Index is ",index," for field ",k)
             psindex = None
             nfi=None
@@ -1418,15 +1541,17 @@ class EnforcedDirichlet(EnforcedBC):
             Defaults to False.
         domain: Domain of the adjusted field, if it is not the one this condition is added to.
         space: Space of the Lagrange multiplier field. Defaults to the space of the adjusted field.
-        coordinate_system: Coordinate system of the constraint integral. Defaults to the one of the
-            equations or the problem.
+        coordsys: Coordinate system of the constraint integral. Defaults to the one of the
+            equations or the problem. The former name ``coordinate_system`` is deprecated, but still
+            accepted.
         **constraints: Name of the field to adjust, with the value it is enforced to.
     """
     
-    def __init__(self,*, only_for_stationary_solve:bool=False, set_zero_on_normal_mode_eigensolve=False,domain:str | None=None,space:FiniteElementSpaceEnum | None=None,coordinate_system:BaseCoordinateSystem | None=None, **constraints:Expression):
+    @_deprecated_kwargs(coordinate_system="coordsys")
+    def __init__(self,*, only_for_stationary_solve:bool=False, set_zero_on_normal_mode_eigensolve=False,domain:str | None=None,space:FiniteElementSpaceEnum | None=None,coordsys:BaseCoordinateSystem | None=None, **constraints:Expression):
         from ..expressions import var        
         new_kwargs={k:var(k,domain=domain)-v for k,v in constraints.items()}
-        super(EnforcedDirichlet, self).__init__(only_for_stationary_solve=only_for_stationary_solve, set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve,coordinate_system=coordinate_system ,**new_kwargs.copy(),domain=domain,space=space)
+        super(EnforcedDirichlet, self).__init__(only_for_stationary_solve=only_for_stationary_solve, set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve,coordsys=coordsys ,**new_kwargs.copy(),domain=domain,space=space)
 
 
 class ForceZeroOnEigenSolve(BaseEquations):
@@ -1584,7 +1709,7 @@ class DirichletBC(BaseEquations):
     field's components in their own order, so this is also correct in e.g. an axisymmetric coordinate
     system. This includes the position fields and values that are not written as an explicit
     ``vector(...)``, i.e. ``DirichletBC(mesh=var("lagrangian"))`` to hold the mesh at its undeformed
-    position. See :py:meth:`~pyoomph.generic.codegen.BaseEquations.expand_vectorial_entries`.
+    position. See :py:meth:`~pyoomph.generic.codegen.BaseEquations._expand_vectorial_entries`.
     """
 
     def __init__(self, *, prefer_weak_for_DG: bool = True, **kwargs: ExpressionOrNum):
@@ -1596,7 +1721,7 @@ class DirichletBC(BaseEquations):
         # Vector-valued entries split into their components. Not done in __init__: which components
         # "velocity" has is a property of the domain this condition ends up on (and, for an interface
         # condition, of its parent), which is not known until the equations are attached.
-        return self.expand_vectorial_entries(self._dcs, "Dirichlet condition")
+        return self._expand_vectorial_entries(self._dcs, "Dirichlet condition")
 
     def define_residuals(self):
         pdom = self.get_parent_domain()
@@ -1660,11 +1785,17 @@ class AxisymmetryBC(InterfaceEquations):
             assert eqtree_parent is not None
             trunk=eqtree_parent.get_full_path().lstrip("/")
             myname=eqtree.get_my_path_name()
-            for conn in interinter:
+            for conn in sorted(interinter):
                 rest=conn[len(eqtree.get_full_path().lstrip("/")):].lstrip("/")
                 path=trunk+"/"+rest+"/"+myname
                 revconns.append(path)
-            revconns.sort(key=lambda x: x.count("/")) # Sort by number of slashes to get it in good order
+            # By depth first, so that a parent interface is created before the one nested in it, and
+            # then alphabetically. The tie-break is not cosmetic: the sort is stable, so with the
+            # slash count alone the paths of equal depth kept the order of the interinter SET they
+            # came from - randomized per process by PYTHONHASHSEED - and that order is the insertion
+            # order of the _children created below, which decides which condition on a shared
+            # boundary is applied last.
+            revconns.sort(key=lambda x: (x.count("/"),x))
             root=eqtree
             while True:
                 root_parent=root.get_parent()
@@ -1685,21 +1816,16 @@ class AxisymmetryBC(InterfaceEquations):
                     continue # Nothing to be done. There is no interface added
                 if splt[-1] in dom._children:
                     iface=dom.get_child(splt[-1])
-                    if iface.get_equations() is not None:
+                    if iface._equations:
                         axieq_list=iface.get_equations().get_equation_of_type(AxisymmetryBC,always_as_list=True)
                         if len(axieq_list)>0:
                             continue # Already added
                         else:
-                            assert iface._equations is not None
-                            oldeqs=iface._equations
-                            iface._equations=iface._equations+AxisymmetryBC(verbose=self.verbose,recurse=self.recurse)
-                            iface._equations._problem=oldeqs._problem
+                            iface._equations=iface._equations+[AxisymmetryBC(verbose=self.verbose,recurse=self.recurse)]
                 else:
                     new_child=EquationTree(AxisymmetryBC(verbose=self.verbose,recurse=self.recurse),dom)
                     dom._children[splt[-1]]=new_child
-                    assert new_child._equations is not None
-                    assert dom._equations is not None
-                    new_child._equations._problem=dom._equations._problem
+                    new_child._problem=dom._problem
                     
             
         return super()._fill_interinter_connections(eqtree, interinter)
@@ -1898,7 +2024,17 @@ class PythonDirichletBC(Equations):
         self.additional_vals:dict[int,float | Literal[True] | tuple[Callable[..., ExpressionOrNum], list[int], Expression]] = {}
         self.pinnedpositions:dict[int,float | Literal[True] | tuple[Callable[..., ExpressionOrNum], list[int], Expression]] = {}
         self.internal_vals:dict[int,float | Literal[True] | tuple[Callable[..., ExpressionOrNum], list[int], Expression]] = {}
-        codeinst = self.mesh.element_pt(0).get_code_instance()
+        # The JIT code off the code generator, not off element 0. It is the same DynamicJITCode
+        # object either way - every element of a domain carries the one its generator compiled -
+        # but this one does not need the domain to own an element on this rank. Under --distribute
+        # it need not: with 4 ranks on a unit square, "domain/top" comes out with nelement()==0 on
+        # two of them, and element_pt(0) is then an out-of-range access, not an error. That has not
+        # bitten yet only because setup() happens to run before the mesh is distributed and is not
+        # repeated across adaptation - an accident of when the mesh object is replaced, not a
+        # guarantee. Reading it off the generator also makes the "unknown field" errors below
+        # rank-independent: raised by every rank or by none, rather than by whoever owns an element.
+        assert self.mesh._codegen is not None
+        jitcode = self.mesh._codegen.get_code()
 
         currcodegen = self.get_current_code_generator()
 
@@ -1908,9 +2044,9 @@ class PythonDirichletBC(Equations):
             if k == "mesh_x" or k == "mesh_y" or k == "mesh_z":
                 vals[k] = val
                 continue
-            nodalfield = codeinst.get_nodal_field_index(k)
+            nodalfield = jitcode.get_nodal_field_index(k)
             if nodalfield < 0:
-                internalfield = codeinst.get_discontinuous_field_index(k)
+                internalfield = jitcode.get_discontinuous_field_index(k)
                 if internalfield < 0:
                     interfid = self.mesh.has_interface_dof_id(k)
                     if interfid == -1:
@@ -1959,7 +2095,6 @@ class PythonDirichletBC(Equations):
             else:
                 vals[k] = val
 
-        assert self.mesh._codegen is not None 
         for k, val in vals.items():
             if k == "mesh_x" or k == "mesh_y" or k == "mesh_z":
                 
@@ -1978,7 +2113,7 @@ class PythonDirichletBC(Equations):
                 elif k == "mesh_z":
                     self.pinnedpositions[2] = fval
                     continue
-            nodalfield = codeinst.get_nodal_field_index(k)
+            nodalfield = jitcode.get_nodal_field_index(k)
             scal = self.mesh._codegen.get_scaling(k)  
             fval:float | bool | tuple[Callable[..., ExpressionOrNum], list[int], Expression]
             if not isinstance(val, bool) or val != True:
@@ -2001,7 +2136,7 @@ class PythonDirichletBC(Equations):
                 fval=True
             
             if nodalfield < 0:
-                internalfield = codeinst.get_discontinuous_field_index(k)
+                internalfield = jitcode.get_discontinuous_field_index(k)
                 if internalfield < 0:
                     # Last chance: Get the index from an additional interface field
                     interfid = self.mesh.has_interface_dof_id(k)
@@ -2316,6 +2451,36 @@ class StaticCondensation(Equations):
         # Adding the class to the tree is the request; the problem-level switch stays available as a
         # kill switch, and an explicit assignment to it - True or False - always wins over this.
         problem._auto_enable_static_condensation() #type:ignore
+
+
+def interface_transport_velocities(host:InterfaceEquations,
+                                   fluid_velocity:"ExpressionOrNum | None"=None,
+                                   interface_velocity:"ExpressionOrNum | None"=None)->tuple[Expression,Expression]:
+    """The two velocities a quantity transported along an interface needs: the fluid velocity that
+    carries it tangentially, and the velocity of the interface itself, which it follows normally.
+
+    Both default to nothing at all when there is nothing to take them from: a surfactant or a surface
+    charge sitting on a prescribed, immobile interface is a legitimate configuration, and asking for
+    ``var("velocity")`` there fails at code generation with a message about an undefined field rather
+    than about the equations being incomplete.
+
+    Shared by :py:class:`~pyoomph.equations.surfactants.SurfactantTransportEquations` and
+    :py:class:`~pyoomph.equations.electrostatics.SurfaceChargeConservation`, which assemble the same
+    conservative surface transport and would otherwise carry two copies of this - and of the reason
+    the conservative form takes ``u`` and ``w`` separately rather than one combined velocity.
+    """
+    from ..expressions import mesh_velocity, convert_to_expression
+    if fluid_velocity is not None:
+        u=convert_to_expression(fluid_velocity)
+    else:
+        from .navier_stokes import StokesEquations
+        u=var("velocity") if host.get_parent_equations(of_type=StokesEquations) is not None else Expression(0)
+    if interface_velocity is not None:
+        w=convert_to_expression(interface_velocity)
+    else:
+        pdom=host.get_current_code_generator().get_parent_domain()
+        w=mesh_velocity() if (pdom is not None and pdom._coordinates_as_dofs) else Expression(0)  #type:ignore[attr-defined]
+    return u,w
 
 
 from ..typings import _set_public_api

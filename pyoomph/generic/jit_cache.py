@@ -122,7 +122,7 @@ def set_enabled(enabled: bool) -> None:
     process-wide command-line flag, so a process-wide switch is the correct
     scope for it, unlike the per-Problem suppress_code_writing/suppress_compilation
     checks, which are applied at the call site instead - see problem.py's
-    compile_bulk_element_code())."""
+    _compile_bulk_element_code())."""
     global _runtime_disabled
     _runtime_disabled = not enabled
 
@@ -236,7 +236,9 @@ def tier2_shadow_enabled() -> bool:
 # without a bump every affected code reports a Tier-2 MISMATCH once, blaming the
 # fingerprint's coverage for a change that was intended.
 # 9: contribution classes distinguish the two sides of an interior facet (@opposite).
-FINGERPRINT_FORMAT_VERSION = 9
+# 10: buffer aliases - the emitted code binds loop-invariant shapeinfo->/eleminfo-> accesses to
+#     locals at the top of each integration-point body, so unchanged inputs emit different text.
+FINGERPRINT_FORMAT_VERSION = 10
 
 
 class JITCache:
@@ -339,7 +341,25 @@ class JITCache:
             self.misses += 1
             return False
         try:
-            shutil.copy2(src, dest_path)
+            # Copy to a sibling temp file and rename over the destination, rather than
+            # shutil.copy2(src, dest_path) straight onto it. copy2 truncates and rewrites the SAME
+            # inode, and that inode may be mmapped right now by a shared library another Problem in
+            # this process still has loaded -- rewriting its pages under it is a segfault waiting to
+            # happen somewhere far away (dlsym, or any call into the library). os.replace is atomic
+            # and installs a NEW inode, so an existing mapping keeps the bytes it was opened with.
+            tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(dest_path)),
+                                                prefix=".jitcache-", suffix=".tmp")
+            os.close(tmp_fd)
+            try:
+                shutil.copyfile(src, tmp_path)
+                shutil.copystat(src, tmp_path)
+                os.replace(tmp_path, dest_path)
+            except BaseException:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+                raise
             os.utime(src, None)  # bump mtime for LRU purposes
             self.hits += 1
             return True

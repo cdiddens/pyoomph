@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -99,6 +99,49 @@ class PoissonEquation(Equations):
         return None
 
 
+def farfield_monopole_residual(coefficient:ExpressionOrNum,fieldname:str,far_value:ExpressionOrNum,
+                               origin:ExpressionOrNum,farfield_length:ExpressionNumOrNone,
+                               real_dim:int,normal:Expression)->Expression:
+    """
+    The weak residual of a monopole far-field condition ``u + R*du/dr = u_infinity`` on an
+    artificial outer boundary, i.e. the body of :py:class:`PoissonFarFieldMonopoleCondition`.
+
+    Factored out so that other potential equations of the same shape can reuse it without having to
+    derive from :py:class:`PoissonEquation` -- see
+    :py:class:`~pyoomph.equations.electrostatics.ElectricFarFieldCondition`.
+
+    Args:
+        coefficient: The coefficient in front of the gradient, e.g. the permittivity.
+        fieldname: The name of the potential field.
+        far_value: The value at infinity.
+        origin: The origin the distance is measured from.
+        farfield_length: The far-field length scale L, required in 1D and 2D.
+        real_dim: The actual dimension of the coordinate system, from
+            ``get_coordinate_system().get_actual_dimension(get_nodal_dimension())``.
+        normal: The outward normal of the boundary.
+
+    Returns:
+        The residual to be added on the far-field interface.
+    """
+    d=var("coordinate")-origin
+    c,c_test=var_and_test(fieldname)
+    R = square_root(dot(d, d))
+    if real_dim==1:
+        if farfield_length is None:
+            raise RuntimeError("For 1D far-field monopole conditions, a farfield_length must be provided")
+        dist_to_ff=dot(normal,d)-farfield_length
+        return weak(-coefficient * (c - far_value) /dist_to_ff,c_test)
+    if real_dim==3:
+        coordsys_dim_factor:ExpressionOrNum = 1
+    elif real_dim==2:
+        if farfield_length is None:
+            raise RuntimeError("For 2D far-field monopole conditions, a farfield_length must be provided")
+        coordsys_dim_factor = -1/log(R/farfield_length)
+    else:
+        raise RuntimeError("Far-field monopole conditions are only implemented for real_dim in {1,2,3}, not "+str(real_dim))
+    return weak(coefficient * coordsys_dim_factor * (c - far_value) * dot(normal,d)/dot(d,d),c_test)
+
+
 class PoissonFarFieldMonopoleCondition(InterfaceEquations):
     """
     Represents a far-field condition for the Poisson equation in the form:
@@ -138,8 +181,6 @@ class PoissonFarFieldMonopoleCondition(InterfaceEquations):
         self.farfield_length=farfield_length
 
     def define_residuals(self):
-        n=self.get_normal()
-        d=var("coordinate")-self.origin
         name=self.name
         parent=self.get_parent_equations()
         if name is None:
@@ -149,24 +190,9 @@ class PoissonFarFieldMonopoleCondition(InterfaceEquations):
         if coefficient is None:
             assert isinstance(parent,PoissonEquation)
             coefficient = parent.coefficient
-        c,c_test=var_and_test(name)
-        R = square_root(dot(d, d))
         real_dim=self.get_coordinate_system().get_actual_dimension(self.get_nodal_dimension())
-        if real_dim==1:
-            if self.farfield_length is None:
-                raise RuntimeError("For 1D far-field monopole conditions, a farfield_length must be provided")
-            dist_to_ff=dot(n,d)-self.farfield_length
-            self.add_residual(weak(-coefficient * (c - self.far_value) /dist_to_ff,c_test))
-        else:
-            if real_dim==3:
-                coordsys_dim_factor = 1
-            elif real_dim==2:
-                if self.farfield_length is None:
-                    raise RuntimeError("For 2D far-field monopole conditions, a farfield_length must be provided")
-                coordsys_dim_factor = -1/log(R/self.farfield_length)
-            else:
-                raise RuntimeError("Far-field monopole conditions are only implemented for real_dim in {1,2,3}, not "+str(real_dim))
-            self.add_residual(weak(coefficient * coordsys_dim_factor * (c - self.far_value) * dot(n,d)/dot(d,d),c_test))
+        self.add_residual(farfield_monopole_residual(coefficient,name,self.far_value,self.origin,
+                                                     self.farfield_length,real_dim,self.get_normal()))
 
 
 class DiffusionEquation(PoissonEquation):

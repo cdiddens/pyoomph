@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -94,6 +94,12 @@ namespace pyoomph
 
 		double _call(double *args, unsigned int nargs) override
 		{
+			// Generated code reaches this from inside a threaded element loop, where the calling thread
+			// holds no GIL (see thread_state.hpp: the assembly hands it back before the parallel
+			// region). Taking it here is also what makes the shared argbuffer below safe, since it
+			// serialises the callbacks. On the main thread of a serial run this is a TLS lookup that
+			// finds the GIL already held.
+			nb::gil_scoped_acquire gil;
 			if (argbuffer.size() != nargs)
 				argbuffer.resize(nargs);
 			for (unsigned int i = 0; i < nargs; i++)
@@ -235,6 +241,12 @@ namespace pyoomph
 
 		void _call(int flag, double *args, unsigned int nargs, double *res, unsigned int nres, double *derivs) override
 		{
+			// Generated code reaches this from inside a threaded element loop, where the calling thread
+			// holds no GIL (see thread_state.hpp: the assembly hands it back before the parallel
+			// region). Taking it here is also what makes the shared argbuffer below safe, since it
+			// serialises the callbacks. On the main thread of a serial run this is a TLS lookup that
+			// finds the GIL already held.
+			nb::gil_scoped_acquire gil;
 			if (flag & 128)
 			{
 				flag &= ~(128);
@@ -979,7 +991,7 @@ void PyReg_Expressions(nb::module_ &m)
 	m.def(
 		"GiNaC_wrap_coordinate_system", [](pyoomph::CustomCoordinateSystem &sys) -> GiNaC::ex
 		{ return 0 + GiNaC::GiNaCCustomCoordinateSystemWrapper(pyoomph::CustomCoordinateSystemWrapper(&sys)); },
-		nb::arg("coordinate_system"),
+		nb::arg("coordsys"),
 		// No keep_alive needed: CustomCoordinateSystemWrapper itself pins sys's Python wrapper alive
 		// (via acquire_leaf_reference()/release_leaf_reference()) for exactly as long as any copy of
 		// this GiNaC leaf survives - see CustomCoordinateSystemWrapper in expressions.hpp. Previously
@@ -1399,9 +1411,10 @@ void PyReg_Expressions(nb::module_ &m)
 		"GiNaC_delayed_expansion", [](std::function<GiNaC::ex()> func)
 		{
 	  pyoomph::DelayedPythonCallbackExpansion * cbexpr=new pyoomph::DelayedPythonCallbackExpansion(func);
-	  pyoomph::DelayedPythonCallbackExpansionWrapper * wrapped=new pyoomph::DelayedPythonCallbackExpansionWrapper(cbexpr);
-
-	  return 0+GiNaC::GiNaCDelayedPythonCallbackExpansion(*wrapped); },
+	  // The GiNaC leaf stores a COPY of the wrapper (PYGINACSTRUCT), so the wrapper itself does not
+	  // have to outlive this call - it used to be heap-allocated and then leaked. Only cbexpr, which
+	  // the copy points at, is deliberately kept alive for as long as the expression can be expanded.
+	  return 0+GiNaC::GiNaCDelayedPythonCallbackExpansion(pyoomph::DelayedPythonCallbackExpansionWrapper(cbexpr)); },
 		nb::keep_alive<0, 1>(), nb::keep_alive<1, 0>(), nb::arg("func"),
 		"Wrap the Python callable ``func`` (taking no arguments, returning an Expression) as a symbolic placeholder that is only evaluated once actually expanded/needed.");
 

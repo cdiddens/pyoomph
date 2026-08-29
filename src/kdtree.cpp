@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -155,7 +155,8 @@ namespace pyoomph
 		{
 			if (cloud.pts.size())
 			{
-				addIndices(0, cloud.pts.size() - 1);
+				// Qualified: called from the constructor, where an override could not run.
+				DynamicImplementedKDTreeNDIM::addIndices(0, cloud.pts.size() - 1);
 			}
 		}
 		void addIndex(unsigned index) override { tree.addPoints(index, index); }
@@ -187,12 +188,15 @@ namespace pyoomph
 			if (cloud.pts.empty())
 				return -1;
 			const size_t num_results = 1;
-			size_t ret_index;
-			num_t out_dist_sqr;
+			// Initialised, and the search result checked: findNeighbors leaves both untouched when it
+			// returns nothing, which would otherwise be returned as a garbage node index.
+			size_t ret_index = 0;
+			num_t out_dist_sqr = 0.0;
 			nanoflann::KNNResultSet<num_t> resultSet(num_results);
 			resultSet.init(&ret_index, &out_dist_sqr);
 			num_t query_pt[3] = {x, y, z};
-			tree.findNeighbors(resultSet, query_pt, {10});
+			if (!tree.findNeighbors(resultSet, query_pt, {10}))
+				return -1;
 			if (distret)
 				*distret = sqrt(out_dist_sqr);
 			return ret_index;
@@ -250,12 +254,15 @@ namespace pyoomph
 			if (cloud.pts.empty())
 				return -1;
 			const size_t num_results = 1;
-			size_t ret_index;
-			num_t out_dist_sqr;
+			// Initialised, and the search result checked: findNeighbors leaves both untouched when it
+			// returns nothing, which would otherwise be returned as a garbage node index.
+			size_t ret_index = 0;
+			num_t out_dist_sqr = 0.0;
 			nanoflann::KNNResultSet<num_t> resultSet(num_results);
 			resultSet.init(&ret_index, &out_dist_sqr);
 			num_t query_pt[3] = {x, y, z};
-			tree.findNeighbors(resultSet, query_pt, {10});
+			if (!tree.findNeighbors(resultSet, query_pt, {10}))
+				return -1;
 			if (distret)
 				*distret = sqrt(out_dist_sqr);
 			return ret_index;

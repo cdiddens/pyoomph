@@ -209,7 +209,7 @@ namespace pyoomph
 
   TracerCollection::~TracerCollection()
   {
-    clear();
+    TracerCollection::clear(); // qualified: a destructor cannot dispatch to an override anyway
     drop_locators();
   }
 
@@ -314,7 +314,7 @@ namespace pyoomph
     auto *be = dynamic_cast<BulkElementBase *>(mesh->element_pt(0));
     if (!be)
       return;
-    auto *ft = be->get_code_instance()->get_func_table();
+    auto *ft = be->get_jit_code()->get_func_table();
     for (unsigned ind = 0; ind < ft->numtracer_advections; ind++)
     {
       const std::string nm(ft->tracer_advection_names[ind]);
@@ -409,7 +409,7 @@ namespace pyoomph
       p->payload[i] = payload_init[i];
     p->tag = tag;
 
-    if (!place_globally(p, 0) || (p->elem && p->elem->is_halo()))
+    if (!place_globally(p, 0) || (p->elem && element_is_halo(p->elem)))
     {
       // A halo element is somebody else's; letting both keep the particle would advect it twice and
       // report it twice.
@@ -1326,7 +1326,7 @@ namespace pyoomph
       for (unsigned i = 0; i < nodal_dim; i++)
         p->x[i] = before[i] + (i < shift.size() ? shift[i] : 0.0);
       p->elem = nullptr;
-      if (place_globally(p, 0) && !p->elem->is_halo())
+      if (place_globally(p, 0) && !element_is_halo(p->elem))
       {
         // The trail is a path through the plotted coordinates, and a wrapped path is not continuous
         // there: keeping the samples from before the jump would draw a line straight back across
@@ -1512,7 +1512,7 @@ namespace pyoomph
     p->payload.resize(n_payload, 0.0);
     if (!place_globally(p, 0))
       return false;
-    if (p->elem->is_halo())
+    if (element_is_halo(p->elem))
       return false; // let the owning process take it, on the next migration round
 
     TracerTimeConfig cfg = TracerTimeConfig::from_mesh(mesh, time_interpolation_order, nlevel_available);

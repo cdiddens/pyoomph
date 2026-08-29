@@ -12,6 +12,200 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
 
 ### Added
 
+- **Axisymmetric pinch-off and coalescence, rewritten.** A free surface may now change its topology:
+  attach `AxisymmetricReconnection(rmin=..., distmin=...)` to it and a neck thinner than `rmin` pinches
+  off, two fragments closer than `distmin` merge. Both thresholds are physical lengths and either may
+  be `None` to switch that kind of event off.
+  - **Detection is morphological**, on the cross section mirrored about the symmetry axis: an opening
+    with structuring radius `rmin` for a pinch, a closing with `distmin/2` for a merge, so the two
+    thresholds come out at exactly "minimum interface radius below `rmin`" and "tip-to-tip gap below
+    `distmin`". Needs the new optional dependency shapely (`pip install pyoomph[topology]`).
+  - **The surgery is delivered through the ordinary remeshing-by-recreation path**, not by editing a
+    `Remesher2d`. Derive the bulk mesh from the new `TopologicalChangesGmshTemplate` and write
+    `define_geometry` so that its remeshing branch takes the interface and axis from
+    `get_reconnected_boundaries(...)` instead of from `get_boundary_coordinates(...)`. That branch is
+    entered for a reconnection *and* for a plain quality remesh, and is not told which -- so the
+    resolution after an event is the resolution the user asked for, everywhere.
+  - **Nearly volume conserving**: the fresh cap or bridge points are displaced along their normals
+    until the revolved volume matches, exactly on the plan polyline. What is left is the O(h^2) sag of
+    the spline the mesh generator draws through those points, i.e. the same error an ordinary quality
+    remesh has. Measured on the physics tests: the event step costs 1e-5 of the volume in a
+    Rayleigh-Plateau pinch-off and 4e-4 in a coalescence, against 1e-5 to 9e-5 for an ordinary remesh
+    of the same mesh.
+  - **Restart the time stepper at every event.** A node the surgery created has no time history, and
+    the one the transfer gives it is whatever the old mesh held at that place - for a fresh cap, the
+    middle of a neck that was collapsing at the largest velocity in the domain. BDF2 extrapolates
+    through it on the first step past the event and the Newton solve diverges there. A single
+    `assign_initial_values_impulsive()` per event fixes that. The accurate alternative, one step with
+    BDF1 weights (`timestepper.set_num_unsteady_steps_done(0)`), measures about 270 times better at
+    the same step size, because the transferred history only ever reaches the scheme as its second
+    level and BDF1 ignores that level - but it is less robust on a marginally resolved cap retraction,
+    so it is not the default. Section 8.4 of the dev doc has the convergence study, including four
+    per-node restart strategies that were measured, all came out worse than doing nothing on
+    accuracy, and were therefore not kept.
+  - **Interface fields survive the event.** The plan carries a zeta chart that knows which new points
+    are old ones and where the fresh ones came from, so a cap's values come from its own side of the
+    removed neck and a bridge's from the two tips it grew between.
+  - Works under `mpirun` and `--distribute`: the interface is merged, the plan is made on rank 0 and
+    broadcast, so every rank builds the identical geometry.
+  - The previous `AxisymmetricPinchoffAndCoalescence` is **removed** rather than deprecated. It had no
+    tests, no tutorial, an unimplemented zeta continuation, no volume conservation, and a mesh-velocity
+    gate that was identically zero (it read `partial_t(var("mesh_y"))` under `ALE="auto"`, which on a
+    moving mesh is `u_y - u_y`). `DisjunctDomainMarker` is unchanged.
+  - Reference: `dev_docs/axisymmetric_topological_changes.md`, with a runnable minimal example in
+    `dev_docs/examples/axisymm_reconnection_minimal.py`.
+
+- **Any liquid can be given by concentration.**
+  `Mixture(water + 1*milli*molar*get_pure_liquid("my_surfactant"), temperature=20*celsius)` -- and
+  `5*gram/litre*...` for a mass concentration -- instead of a mass fraction worked out by hand. The
+  literature values for a soluble surfactant, and every isotherm in
+  `pyoomph.materials.surfactant_isotherms`, are written against `molarconc_`, so a mass fraction was
+  the one form nobody has. Unlike a dissolved salt, such a species is *always* a real component: it
+  counts towards the mass fractions, gets a mole fraction and a share of the density, and needs the
+  registered `MixtureLiquidProperties` for the full set of names. The remaining fractions describe the
+  base mixture and are scaled by `1-sum w` to make room, so `water + 20*percent*glycerol + 1*mM*surf`
+  keeps a 20 % glycerol *base*.
+  - **Two conventions, because there are two volumes**, selected by `concentration_basis`.
+    `"base_mixture"` (the default) is how a solution is made -- mix the base, measure *its* volume, add
+    the solute by that volume -- so it is a mass balance and claims nothing about the volume the solute
+    occupies; it is `_set_salt_initial_conditions` with the apparent molar volume set to zero.
+    `"solution"` is moles per volume of the finished solution, i.e. what the solver reports: it solves
+    `w = c*M/rho(w)` against the mixture's own density by fixed-point iteration, so `molarconc_<name>`
+    at t=0 is exactly the value that was typed. The two differ by the solute's own mass fraction, i.e.
+    not at all in the dilute limit.
+  - A `temperature=` is required, since essentially every density correlation has one.
+  - A dimensionless factor still means a fraction. A factor carrying any other unit is now refused at
+    the multiplication with a message naming the three accepted forms, rather than surviving as a
+    "fraction" of 1 mol/m^3 until `float(total)` inside `Mixture` failed on it.
+
+- **Salt as a real composition field.** `CompositionFlowEquations(..., salt_treatment="component")`
+  promotes every dissolved salt from a dilute solute to an ordinary component: a mass fraction that
+  sums to unity with the solvents, a mole fraction, and a share of the volume. The composition
+  equations then transport it, and the evaporation condition it needs is the `j_i = 0` case of the
+  term they already write for any non-volatile component -- none of the three ALE branches the
+  dilute treatment needed arises, and the salt is conserved to 1e-14 by machinery that knows nothing
+  about salts. `"dilute"` remains the default.
+  - The density becomes volume-additive, `1/rho = w_solv/rho_solv + sum w_s V_phi,s/M_s`, with the
+    solvent correlation evaluated at the *renormalised* salt-free composition. `V_phi` is stored per
+    ion and combined by stoichiometry, the same way the ambipolar diffusivity is -- the additivity
+    holds to 0.1 cm^3/mol against measured salt values -- and reproduces brine density to 0.1% at
+    5 wt%, 0.4% at 10 and 1.5% at 20. A salt whose ions have no tabulated volume is refused: zero is
+    not a harmless default for a volume.
+  - The ion concentration fields survive as substitutions of the mass fraction, so a surface tension
+    law, an activity coefficient or an observable written against `c_Na_p` works in every mode.
+  - **The two modes agree on more than expected**: with a prescribed evaporation rate they thin a
+    film identically at any concentration, because the salt's volume is conserved and the film
+    therefore loses volume at `j/rho_solvent` whatever is dissolved in it. What differs is the liquid
+    -- at 3 molal the dilute treatment still reports the density of water and a water mass fraction
+    of one -- which is what feeds anything that computes an evaporation rate rather than being handed
+    one.
+  - The AIOMFAC conversion changes rather than disappearing: `molefrac_*` now counts a salt as one
+    particle where AIOMFAC counts its `nu` ions, so `gamma_pyoomph = gamma_AIOMFAC (1+f)/(1+nu f)`.
+    A test asks both modes for the same physical state and requires the activities to agree while
+    the coefficients and mole fractions differ.
+  See `dev_docs/salt_transport.md` section 6.
+
+- **AIOMFAC with ions: activity coefficients of a salt solution.** A dissolved salt changed the
+  surface tension but not the *activity* of the solvent, so a drying brine evaporated like pure
+  water. AIOMFAC is the only model in the library with an electrolyte generalisation and only its
+  short-range half was present; the middle-range ion interactions and the long-range
+  Pitzer-Debye-Hueckel term are now there too, for the solvents as well as the ions. Water activity
+  and molality-based ionic activity coefficients agree with AIOMFAC 3.13 to six digits, for aqueous
+  NaCl and for water + glycerol + NaCl; gamma_pm of NaCl reproduces the literature minimum near 1
+  molal, and the dilute limit follows the Debye-Hueckel limiting law. `set_activity_coefficients_by_unifac`
+  picks the salts up by itself, so the vapour pressure over a brine now drops as it should, and
+  `get_ion_activity_coefficient` and `get_mean_ionic_activity_coefficient` expose the ionic ones. A
+  pure solvent with a salt in it counts: that case had no activity machinery at all before.
+  - **The maths is written once and rendered three ways** -- symbolic GiNaC, numpy, and generated C
+    -- against the expression-generator interface the short-range part already had, rather than
+    written out three times as that part historically was.
+  - **The parameters were regenerated from the AIOMFAC source** by `citools/generate_aiomfac_parameters.py`,
+    which is kept in-tree so the next AIOMFAC release is a rerun. The audit found two ions attached
+    to the wrong species (subgroup 246 was called CH3COO- and is IO3-, 247 was called SCN- and is
+    OH-), ion molar masses in g/mol among neutrals in kg/mol *and discarded on the way in*, seven
+    ions with placeholder parameters AIOMFAC does not have, 155 changed and 528 missing interaction
+    entries, and 246 pairs AIOMFAC marks as never determined -- which now raise rather than being
+    silently treated as ideal. Salt-free mixtures are unchanged to 1e-8; the residual difference is
+    that the old table had been round-tripped through single precision.
+  - AIOMFAC's `BRR`/`CRR` are deliberately **not** imported: they belong to a different temperature
+    parameterisation that AIOMFAC only uses for selected fit datasets, and pyoomph's B and C mean
+    something else again, so importing them would be wrong rather than merely different.
+  See `dev_docs/aiomfac_electrolytes.md`.
+
+- **Salt transport, evaporation and salt-induced Marangoni flow, with no electrostatics involved.**
+  A salted material handed to `CompositionFlowEquations` used to generate exactly the same system as
+  an unsalted one — the composition equations build their field list from the mixture *components*,
+  and the ion table is a different dictionary that nothing read. It is now picked up automatically
+  (`salts="auto"`), and `pyoomph/equations/salt_transport.py` solves one field per salt with the
+  ambipolar diffusivity `D = (z+-z-)D+D-/(z+D+-z-D-)`, derived from the ion table rather than
+  tabulated: NaCl 1.610, KCl 1.994, CaCl2 1.335, Na2SO4 1.230, HCl 3.336 against measured 1.610,
+  1.990, 1.335, 1.230, 3.340 (1e-9 m²/s). One field per *salt* rather than two per pair is what makes
+  electroneutrality structural — the ion concentrations are stoichiometric substitutions, so
+  `get_charge_density()` is literal zero — and it is the only option without a potential to hold the
+  two ions together.
+  - **A non-volatile solute stays behind when the solvent evaporates**, which is not the natural
+    boundary condition of the weak form: that one is zero *diffusive* flux, and a receding surface
+    then sweeps the salt out with the vapour. `MultiComponentNavierStokesInterface` supplies the
+    condition next to the one it already supplies for the volatile components, and it is a different
+    term for each of the three ALE forms. With `GCL=True` — the conservative form, whose natural
+    condition already is zero flux through a moving boundary — the dissolved amount is conserved to
+    machine precision (3e-15) at any step size; the other two converge at second order in `dt`.
+  - **Salt raises the surface tension** (`SaltProperties.surface_tension_increment`, tabulated for 29
+    salts: NaCl +1.64, CaCl2 +3.66 mN/m per mol/L, and the strong acids negative), so Marangoni flow
+    runs *towards* the enriched region — the opposite of a surfactant, and worth knowing when reading
+    an evaporating drop. The law is written against the *ion* concentrations, which exist under both
+    electrolyte models, so the same interface drives the same Marangoni stress whether the ions come
+    from the electroneutral model or from `PoissonNernstPlanck`.
+  - **The two models agree where they overlap**: an electroneutral gradient relaxing in a 1 µm box
+    decays to 0.610553 of its amplitude under the electroneutral model and 0.610554 under full
+    Poisson-Nernst-Planck, against the analytic 0.610498. They may not share a domain, since a
+    substituted ion concentration shadowed by a solved one would run and be wrong.
+  - `add_salt` now also takes a salt directly, `water.add_salt("NaCl", 1*milli*molar)`, and two salts
+    sharing an ion add up on it instead of overwriting.
+  See `dev_docs/salt_transport.md`.
+
+- **Salts, and mixtures that carry them.** `pyoomph.materials.ions` also registers the common salts
+  and strong acids, and `get_salt("NaCl")` fetches one the way `get_ion` and `get_pure_liquid` fetch
+  theirs. A salt names two ions and pulls them out of the ion library when it is constructed, so it
+  cannot name an ion that does not exist; the stoichiometry is *derived* from the two charge numbers
+  rather than parsed out of the name, which is why Na2SO4 comes out 2:1 -- sulfate is divalent, not
+  because the name contains a 2. Multiplying a salt by a concentration dissolves it, and `Mixture`
+  now takes that alongside the solvent fractions:
+
+      mix = Mixture(water + 20*percent*glycerol + 1*milli*molar*get_salt("NaCl"))
+
+  The dissolved species stay out of the fraction bookkeeping: fractions must sum to unity and a
+  concentration is not one of them, and at 1 mM a salt is 6e-5 of the solution by mass, so pretending
+  it displaces some of the water would be a bigger error than ignoring it
+  (`DissolvedSpeciesComponent.mass_fraction_in` is there when that needs checking). A single ion
+  works the same way -- `c*ion` dissolves it while `fraction*ion` keeps the mixture-component meaning
+  an ion inherits from `PureLiquidProperties`, with the units telling the two apart. `molar`
+  (mol/litre) joined the units. Because the Walden correction reads the *mixture's* viscosity, 20 wt%
+  glycerol slows Na+ from 1.33e-9 to 8.0e-10 m^2/s and drops the conductivity of 1 mM NaCl from 12.6
+  to 7.6 mS/m without any of that being wired up separately. Glycerol also gained its measured
+  relative permittivity (42.5); a mixture still does not average that automatically, since linear
+  mixing is a poor rule for it, but the error now names
+  `set_by_weighted_average('relative_permittivity')` as the way to ask.
+
+- **A library of ionic species, `pyoomph.materials.ions`.** The 28 common ions (H+ through HPO4 2-)
+  are registered with the same `@MaterialProperties.register()` decorator every other material uses,
+  and `get_ion("Na+")` fetches one exactly as `get_pure_liquid` and `get_surfactant` do -- a fresh
+  instance per call, so dissolving it in one liquid cannot reach another. `add_ion` and `add_salt`
+  take a name and go through the same lookup, so an electrolyte is
+  `water.add_salt("Na+", "Cl-", 1*milli*mol/liter)`; a name that is not registered still needs an
+  explicit `charge_number` and `diffusivity`, which `new_ion` then puts into the same table. The
+  datum stored per ion is the limiting molar conductivity at 25 °C and the diffusivity follows from
+  it by Nernst-Einstein: one number per ion, so the conductivity closure and the transport model
+  cannot end up describing different ions. Both the temperature dependence and the solvent dependence
+  come from the fractional Walden rule `λ⁰μⁿ = const`, applied by the solvent
+  (`BaseLiquidProperties.get_ion_diffusivity`) since an ion does not know what it is dissolved in.
+  That puts D(Na+) at 0 °C within 0.03% of the measured value where a constant `λ⁰` is 47% out, makes
+  an electrolyte's conductivity rise at the ~2 %/K a conductivity meter compensates for instead of
+  being exactly temperature independent, and estimates Na+ in glycerol as 737x slower than in water
+  rather than identical to it. H+ carries a fitted exponent of 0.63 against everyone else's ~0.94,
+  which is Grotthuss proton transfer being far less sensitive to the solvent viscosity than Stokes
+  drag.
+
 - **Adaptivity across coupled domain interfaces.** Two domains that share an interface (tied by
   `ConnectFieldsAtInterface`, `ConnectMeshAtInterface` or any other opposite-interface connection) are
   adapted individually by oomph-lib, so a refinement criterion stated for one of them left the other with
@@ -82,7 +276,211 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
   tutorial; `AGENTS.md`/agent-facing docs for AI-assisted development.
 - numerical-data-file loading as numpy array with column and parameter information
 
+- **Shift-invert for the matrix-free Floquet route.** Plain Arnoldi has the right target -- stability
+  lives at the largest moduli -- but converges badly when the wanted multipliers are clustered, which
+  is the normal case for a PDE orbit: eight of the 1D Brusselator's cost 277 s that way. The shift
+  turns out to be available *exactly*, without forming the monodromy, because the chain came from a
+  sparse system in the first place: keep the orbit Jacobian's element rows and replace the wrap-around
+  row `v_last - v_0 = 0` with `v_last - sigma*v_0 = b`, and the last row reads
+  `(Mono - sigma*I) v_0 = b`. One solve of a matrix the size of the orbit system is the shift-invert
+  apply, factorized once at the cost the orbit's own Newton step already pays each iteration. The same
+  eight multipliers then take 0.7 s to factorize plus 17 s, accurate to 2.6e-13. On by default for the
+  matrix-free route, with `sigma` just outside the unit circle; `shift_invert=False` restores the old
+  behaviour.
+
+- **History degrees of freedom under `--distribute`.** `Problem::get_dofs(t,...)` and `set_dofs(t,...)`
+  work distributed now. oomph-lib's own versions build the vector on the dof distribution -- this
+  rank's rows -- and then index it by *global* equation number, which is why they guard themselves
+  with a `PARANOID` throw that vanishes in pyoomph's default build; pyoomph does the walk itself,
+  writing only the rows a rank owns and letting the halo exchange carry the rest (which works because
+  `Data::add_values_to_vector` transmits every time level, not just the current one). That unblocked
+  three things, each now tested against serial: **arclength continuation of a bifurcation locus**,
+  which was refused outright; the **transient hand-back** when leaving a `with orbit:` block, so a
+  plain `run()` continues the orbit; and `set_history_dofs` itself. `refine_eigenfunction()` stays
+  refused -- it was on the list for this reason but also adapts the mesh to an eigenfunction, which
+  needs its own validation.
+
+- **`switch_to_hopf_orbit()` under MPI**, replicated and `--distribute`, which completes the route from
+  a Hopf point to a periodic orbit in parallel. Three things were in the way. The first Lyapunov
+  coefficient used the local row block of the eigenproblem pencil as if it were the whole square
+  matrix; it is now allgathered rather than gathered to one rank, so every rank runs the routine in
+  lockstep (it calls `set_current_dofs`/`get_residuals`, which are collective, so doing the work on
+  rank 0 alone would deadlock). `Problem::get_second_order_directional_derivative` indexed the
+  caller's direction by *global* equation number while requiring it to be `nrow_local` long, counted
+  halo elements twice and never reduced across ranks -- a heap overrun when distributed, correct
+  under a replicated `mpirun` only because the two lengths coincide there; it now takes and returns
+  global-length vectors like `get_residuals()`. And the final `d(Re lambda)/d(parameter)` walked one
+  finite-difference step by arclength continuation, which is refused while a tracker is installed on
+  a distributed problem; a step that small does not need it.
+  - Measured against serial on a distributed 1D problem: the coefficient agrees to 2e-12, the orbit
+    radius to 8e-11 and the period to 1e-14. The whole coefficient costs 0.09 s at 1602 degrees of
+    freedom -- the Hopf tracking and the orbit solve around it dominate by orders of magnitude.
+
+- **Periodic orbits and Floquet multipliers under `--distribute`.** `PeriodicOrbitHandler` was
+  entirely replicated -- `Tadd`, `x0`, `n0`, `du0ds` and `Count` were global-`Ndof` `std::vector`s
+  indexed by global equation number -- and orbit tracking refused a distributed problem outright. It
+  now carries an `AugmentedDofDistributionHelper` like the four bifurcation-tracking handlers: the
+  time-point unknowns and the orbit's reference data are `DoubleVectorWithHaloEntries` on the base
+  distribution, read by base equation number through `global_value()` (which degrades to plain `[]`
+  when not distributed, so one code path serves serial, replicated `mpirun` and `--distribute`);
+  `Count` and the element count come from a halo-skipping loop plus a reduction so the `1/Count`
+  weights still telescope to 1 across ranks; `eqn_number()` runs its naive number through the helper's
+  translation table; and a `synchronise()` override refreshes the halos and broadcasts the
+  rank-0-owned period after each Newton step. On an exact limit cycle of a reaction-diffusion system
+  the period comes out **bit-identical** serial and on 2, 3 and 4 ranks, the multipliers agree to
+  4e-14, and the sampled orbit states are identical to 14 digits.
+  - Two things around it are still serial and now say precisely why rather than claiming orbit
+    tracking is unsupported: `switch_to_hopf_orbit()` needs the first Lyapunov coefficient from the
+    Python custom assembler, and leaving a `with orbit:` block seeds history dof values, which
+    oomph-lib declares unsupported when distributed (it warns and drops the orbit instead). Build the
+    orbit guess yourself and use `activate_periodic_orbit_handler` there.
+
 ### Changed / Improved
+
+- **The coordinate-system keyword is called `coordsys` everywhere.** It used to come in five
+  spellings - `coordsys` on the operators (`grad`, `div`, ...) and the moving-mesh equations,
+  `coordinate_system` on the weak-form layer (`weak`, `add_weak`, `WeakContribution`, `EnforcedBC`,
+  ...), plus `csys` on `Problem.set_coordinate_system`, `coord_sys` on `SetCoordinateSystem`,
+  `_coordinate_system` on `IntegralObservables` and `kinematic_bc_coordinate_sys` on the free-surface
+  equations. All of them now take `coordsys`; the old names still work but emit a
+  `DeprecationWarning`, as do the attributes the old constructor arguments were stored in. Passing
+  both spellings in one call is a `TypeError`. Run with `-W error::DeprecationWarning` to find them in
+  an existing script.
+  - Fixes a collateral bug: `IntegralObservables` stored its argument in `self._coordinate_system`,
+    which is the slot `BaseEquations` keeps the coordinate system of the *whole* equation object in,
+    so the argument silently overrode the system of whatever it was combined with instead of only
+    setting the measure of those observables.
+- **The "MPI parallelization" tutorial chapter is now "Parallelization"**, and covers the threaded
+  element assembly (`--omp N`) in a section of its own before the MPI one - what switches it on, why it
+  is bit-identical to the serial loop, what it does and does not buy, and when pyoomph declines to use
+  it. The MPI section gained a subsection on combining the two, including the `mpirun --bind-to none`
+  trap that turns `--omp` into a no-op which still looks like it works. `secmpimodes` still resolves.
+
+- **The tutorial documents what each coordinate system means.** A new section
+  (*Mathematical expressions* > *Coordinate systems*) gives `grad`, `div` of a vector and of a tensor,
+  the directional derivative and the integration measure explicitly for the Cartesian, axisymmetric
+  (2d cylindrical and 1d polar), flipped-axis, radially symmetric, azimuthally symmetry-breaking,
+  Cartesian-normal-mode, rectangular-to-polar and ODE coordinate systems, as well as for the
+  differential-geometry base class one writes a custom system with.
+
+- **Floquet multipliers got a lot faster, mostly serially.** Reconstructing the eigenfunction over the
+  orbit pushed each eigenvector through the time chain on its own, so asking for every multiplier of a
+  1282-dof orbit spent 185 s there against 13 s for everything else; they now go through together, for
+  a 14x cut on the whole call. Under MPI the per-element transfer solves are shared out by column
+  (2.8x on that step across 4 ranks) and the matrix product and eigendecomposition happen on rank 0
+  and are broadcast rather than repeated identically on every rank -- the repeated `eig` contended for
+  memory bandwidth badly enough to make a 4-rank Floquet solve slower than a serial one.
+  - Beyond that the calculation does not usefully parallelize: what remains is dense linear algebra on
+    `nbase x nbase` objects, and ranks on one node share memory bandwidth rather than adding to it.
+    MPI buys the orbit *solve* being distributed, not faster multipliers.
+
+- **Floquet multipliers are computed by structured condensation now**, which is what
+  `get_floquet_multipliers()` does by default (`method="condensed"`). The periodic-orbit Jacobian is
+  block bidiagonal in time -- each element of the time discretization writes only its own time blocks
+  -- so condensing every element to one `nbase x nbase` transfer matrix and multiplying them along the
+  orbit gives the monodromy matrix directly. This is the classical Fairgrieve-Jepson condensation that
+  AUTO performs. It returns **exactly** as many multipliers as the problem has degrees of freedom,
+  deterministically, with no shift and no magnitude threshold.
+  - What it replaces still works as `method="eigenproblem"`: one pencil over all `nT*nbase` time
+    points whose mass matrix has rank `nbase`, so all but `nbase` of its eigenvalues are infinite and
+    had to be filtered by `valid_threshold`. That filter cannot tell a spurious eigenvalue from a
+    genuinely small multiplier, so small multipliers were discarded wholesale, a shift had to be
+    supplied by hand, and *how many* multipliers came back depended on the eigensolver -- the Langford
+    tutorial carried an explicit workaround saying it differed between a serial and an `mpirun` run.
+    That workaround is gone.
+  - **The mass matrix may be arbitrary, including singular.** It never appears on its own in the
+    condensation -- it is already folded into the element blocks -- so nothing inverts it and a DAE
+    goes through unchanged. But read such a spectrum carefully: Gauss-Legendre collocation is not
+    stiffly accurate, so an algebraic direction does not decay to a zero multiplier. It lands at
+    exactly `(-1)**(number of time intervals)`, which for an odd interval count is a spurious `-1`,
+    sitting where a period-doubling bifurcation would be. That is the discretization, not the method.
+  - For a problem too large to form the monodromy, only the dominant multipliers are computed, by
+    applying it matrix-free. `method="periodic_schur"` is an opt-in third route that never multiplies
+    the transfer matrices at all (periodic QR with the diagonal accumulated in logs), which is worth
+    it only for multipliers many orders of magnitude below the dominant one -- see
+    `dev_docs/floquet_multipliers.md` for the measurements, including why the plain product is far
+    better than its reputation.
+
+- **Internal `BaseEquations`/`Equations`/`ODEEquations` methods are now underscore-prefixed.** A survey
+  of every call and override across the tutorials, the test suite and the example scripts found a
+  group of methods that only the framework itself ever touches. They now say so:
+  `change_output_directory`, `before_fill_dummy_equations`, `after_fill_dummy_equations`,
+  `get_list_of_vector_fields`, `get_list_of_tensor_fields`, `get_creation_info`, `add_exception_info`,
+  `interior_facet_terms_required`, `expand_vectorial_entries`, `expand_additional_field`,
+  `expand_additional_testfunction`, `get_default_timestepping_scheme`, `get_global_dof_storage_name`,
+  `register_refinement_directives`, `before_compilation`, `before_mesh_to_mesh_interpolation`,
+  `add_named_numerical_factor` and the three `*_precice_*` hooks all gained a leading underscore.
+  The similarly named methods on other classes are unaffected: the outputters keep their public
+  `change_output_directory`, and `FiniteElementCodeGenerator.expand_additional_field`,
+  `.expand_additional_testfunction` and `.get_default_timestepping_scheme` stay public because they are
+  the nanobind trampolines for the corresponding C++ virtuals. The hooks that scripts *do* override --
+  `after_compilation`, `before_finalization`, `calculate_error_overrides`,
+  `after_mapping_on_macro_elements`, `setup_remeshing_size`, `on_apply_boundary_conditions`, the
+  Newton/remeshing hooks -- keep their public names. `EquationTree._register_refinement_directives`,
+  the recursion over the tree, is now `_register_all_refinement_directives`, since the hook it
+  dispatches took that name.
+
+- **Removed two dead methods:** `BaseEquations.get_latex_info` had no caller anywhere (the LaTeX output
+  is fed by the C++ printer callbacks, not by this dict), and with it the write-only
+  `_residuals_for_tex` bookkeeping in `add_residual` is gone too. `BaseEquations.define_external_field`
+  was never called nor overridden by anything.
+
+- **Removed seven write-only `Problem` attributes**: `_already_set_ic`, `_use_first_order_timestepper`,
+  `_in_transient_newton_solve`, `_no_cache`, `_interface_vertex_balance_refinements` and the public
+  `further_cmdlineargs` were all assigned and never read. `--no-cache` is unaffected -- it acts through
+  the `jit_cache.set_enabled(False)` beside the flag -- and command lines with unknown arguments are
+  still tolerated, since `parse_known_args` stays; only the discarded half is no longer stored.
+  `_static_condensation_applied_meshes` looks equally dead and is not: it keeps the meshes behind the
+  `id()`s in `_static_condensation_applied` alive so a destroyed mesh cannot hand its id to its
+  replacement, and now says so where it is declared.
+
+- **The same pass over `MeshTemplate`, `MeshedMeshTemplate` and `GmshTemplate`.** Methods only the
+  framework calls are now underscored: `get_template`, `get_domain`, `available_domains` and, on
+  `GmshTemplate`, `post_process`, `process_cells_for_optional_mirroring`,
+  `process_points_for_optional_mirroring`, `write_curved_entities` and `read_curved_entities`.
+  `define_state_file` was renamed on `Problem`, `MeshTemplate`, `MeshFromTemplateBase` and
+  `ODEStorageMesh` together, so the save/restore protocol keeps one name across all four. The two
+  nanobind bindings nothing ever called from Python, `new_bulk_element_collection` and
+  `add_periodic_node_pair`, were renamed to match. The geometry surface scripts actually use --
+  `point`, `line`, `circle_arc`, `plane_surface`, `sphere`, `extrude`, `revolve`, the mesh-size fields,
+  `add_node`, `add_facet_to_boundary` and the rest -- is untouched, as is the plotters' own public
+  `post_process`, which is a different hook that scripts do override.
+
+- **Removed three dead methods and four dead attributes** from those classes.
+  `MeshTemplate.get_opposite_interface`, `MeshTemplate.add_nodes` and `GmshTemplate.points` had no
+  caller anywhere, and `GmshTemplate._entities0d`, `_entities2d`, `_curved_entities0d` and the
+  `_has_curved_entries` flag were only ever written. Two write-only members deliberately stay:
+  `MeshTemplate._macrobounds`, which keeps the C++ `MeshTemplateCurvedEntity` objects alive because the
+  template stores them as raw pointers, and `GmshTemplate.num_flipped_2d_elements`, which is read by
+  the orientation matrix in `dev_docs/examples/`.
+
+- **The generated element code binds its loop-invariant buffer reads to locals.** Every
+  `shapeinfo->`/`eleminfo->` access whose leading indices do not depend on the test/trial node -- the
+  shape buffers, the nodal data, the hanging-node rows, the local-equation table, the loop bounds, the
+  timestepper weights, and the Jacobian/mass row strides inside the scatter macros -- is now read once
+  at the top of the integration-point body and indexed from there. It had to be re-read at every use:
+  the `jacobian[...] +=` store in the innermost trial loop may alias `shapeinfo` as far as the C
+  compiler knows, and qualifying the output pointers with `restrict` does not help (it was tried, and
+  produces a byte-identical object file). Worth 20% of the emitted instructions and 11-15% of an
+  elemental Jacobian across the tutorial elements, with the residual-only path -- which has no such
+  store -- unchanged, and every residual, Jacobian and mass matrix bitwise identical. `-O3` cannot do
+  this itself: it is not allowed to. Revertible with `PYOOMPH_DISABLE_BUFFER_ALIASES`.
+
+- **`-fno-math-errno` is now a default compile flag** for the system compiler. It changes no
+  arithmetic -- residuals are bit-identical -- but it lets the compiler treat libm calls as pure and so
+  hoist them out of the trial loop. On polynomial weak forms it is noise; on pyoomph's own hyperelastic
+  mesh smoothers, where the user cannot reach in and wrap anything in `subexpression()`, it halves
+  `HyperelasticSmoothedMesh` (41.9 -> 20.7 ms elemental residual+Jacobian) and cuts `YeohSmoothedMesh`
+  by a factor of 5.7 (127.2 -> 22.3 ms). `SystemCCompiler.get_cache_flag_state()` now hashes the
+  computed flag list itself, so a future flag change invalidates the JIT cache on its own and needs no
+  epoch.
+
+- **`use_subexpressions` removed from `HyperelasticSmoothedMesh` and `YeohSmoothedMesh`.** Both
+  activate the coordinates as dofs by construction, so the subexpression derivative cache always took
+  the position-symbol escape hatch: the body was differentiated on the spot and inlined at every use
+  site, and the cached scalar was written and never read. Passing `True` was measured at **+87%**
+  elemental residual+Jacobian, 16% more generated C and 2.4x the `pow()` calls, i.e. the option could
+  not pay off on any element these classes can be attached to. Nothing in the repository passed it.
 
 - **An adaptation that refines and unrefines nothing no longer touches the problem.** Deciding to do
   nothing is the normal end state rather than an edge case: oomph-lib only leaves its own adaption loop
@@ -219,7 +617,162 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
   downloadable scripts to `literalinclude`, several documentation gaps filled,
   full spellcheck.
 
+### Added
+
+- **`RemeshWhen(on_inverted_element=True)`: remeshing as the response to a folded mesh.** Off by
+  default. Every previous answer to an inverted element was "take a smaller step" -- the adaptive
+  timestepper halves `dt`, the arclength loop scales `Ds` by 2/3 -- and there is a class of problem
+  where no step size works: if the deformation is prescribed as a function of time, the fold sits at a
+  fixed TIME, so halving `dt` only approaches it more slowly. On the notch case of
+  `dev_docs/examples/inverted_element_notch.py` that meant 189 rejections, `dt` driven to the 1e-12
+  floor, `t` frozen at the fold time to six digits, and a dead run. With the option armed the same case
+  runs to t = 1.0, remeshing 11 times -- serially, under plain `mpirun`, and under `--distribute`, all
+  three reaching t = 1.001055.
+  - Switching it on also switches on the inverted-element detection, which is a **process-wide** flag,
+    so every domain of the problem then pays its ~2 % of the assembly time.
+  - The trigger is *not* "an element inverted": most inversions are transient Newton iterates on a mesh
+    whose converged states are all fine, and remeshing on those pre-empts the quality-based trigger that
+    would have done better. It fires when a step reported an inversion AND achieved less than
+    `inversion_remesh_dt_collapse` (default 1/16) of the last clean step, i.e. when time has stopped
+    advancing. `inversion_remesh_max_retries` (default 3) caps the remesh-and-retry loop.
+  - **The quality-based trigger remains the better instrument** where it applies, because it acts before
+    the mesh folds rather than after; this is a safety net for meshes that fold without any element
+    having grown, shrunk or lost quality enough to notice. Arming both does not degrade the quality one.
+  - `tests/test_inverted_element_remesh.py`; `dev_docs/mesh_construction.md` section 5.
+
 ### Fixed
+
+- **`activate_bifurcation_tracking(blocksolve=True)` segfaulted instead of being refused.** It installs
+  one of oomph-lib's own block linear solvers, and both of those open with a
+  `static_cast<FoldHandler*>(problem_pt->assembly_handler_pt())` and then call a `FoldHandler` method on
+  the result. pyoomph installs `MyFoldHandler`/`MyHopfHandler`, which derive from
+  `oomph::AssemblyHandler` and not from those classes, so the cast reinterprets an unrelated object and
+  the first member access is undefined behaviour -- a plain serial Bratu fold track died with "Caught
+  signal number 11 SEGV", with any linear solver. **This was never an MPI restriction**, although the
+  only guard covered `--distribute`, so serial and replicated crashes went straight through it. For
+  every other bifurcation type the flag was silently ignored, only fold and Hopf ever installing a block
+  solver, which is why it is now refused rather than warned about. Python raises before anything is
+  installed and the C++ activators throw as a backstop; nothing in the repository passed it.
+  `tests/test_blocksolve_refused.py`, `dev_docs/mpi_augmented_systems.md` section 4.
+
+- **Arclength continuation across a remesh did not work under `--distribute` at all.** The tangent is
+  carried through the history slots, and `get_history_dofs()` returns a GLOBALLY indexed vector while
+  `update_dof_vectors_for_continuation()` demanded `nrow_local()`, so
+  `remesh_handler_during_continuation()` threw "Mismatch in size of ddof and current dof vectors". The
+  reverse direction was wrong the same way, handing local-length data to `set_history_dofs()`. Both
+  boundaries are global now, matching the `get_history_dofs`/`set_history_dofs` and
+  `get_current_dofs`/`set_current_dofs` pairs; serially and under plain `mpirun` they are the identity,
+  which is why this only showed with `--distribute`. Found by running the experiment
+  `dev_docs/mpi_augmented_systems.md` section 6b asked for, which also established that the `ndof`
+  evidence that section rested on was a base-state count compared against an augmented one -- the
+  distributed base state agrees with serial to 8e-12 on the droplet shape.
+
+- **A differential-algebraic orbit's spurious Floquet multiplier is now flagged.**
+  `get_floquet_multipliers()` returns `-1` for an algebraic direction whenever the orbit has an odd
+  number of time intervals -- exactly where a period-doubling bifurcation lives. The value is a
+  property of Gauss-Legendre collocation, which is not stiffly accurate, and cannot be fixed without
+  changing the quadrature; but nothing in the returned array distinguished it from the physics it
+  imitates. It now warns, and names the discriminating experiment: re-solve with an EVEN number of
+  intervals, where the artefact moves to `+1` while a genuine period doubling stays at `-1`. The
+  even-parity case warns too, because the doubled `+1` used to be reported by the "multiple unity
+  Floquet multipliers" message as "a distinct bifurcation of the orbit", which is wrong for a DAE.
+  Tolerance is `Problem.floquet_artefact_tolerance` (1e-6). `dev_docs/floquet_multipliers.md`
+  section 6.
+
+- **Refining a wedge or pyramid mesh aborted the run.** `Mesh::assign_interface_topological_ids()`,
+  which `actions_after_adapt()` runs on every refinement of every mesh, called
+  `get_nodal_s_in_father()` unconditionally -- and wedges and pyramids do not implement it, having no
+  son->father local-coordinate map. Any refinement of such a mesh therefore died with a bare
+  "Implement" from the middle of `refine_uniformly()`. Refusing is legitimate there (a tetrahedron
+  already refuses a pyramid father, the mixed red split not being the 1->8 tet map); what was missing
+  was a way to ask without provoking the throw. The sweep now marks those nodes unresolved and the mesh
+  incomplete, which is the state interface refinement coupling already falls back to position matching
+  on. `dev_docs/macro_elements.md` section 10a.
+
+- **Inverted-element detection hung under MPI.** `set_detect_inverted_elements(True)` had never been
+  run under `mpirun`, and did not work there: the throw is per element, oomph-lib splits the element
+  loop by rank in BOTH MPI modes, so the rank holding the folded element left the loop while the others
+  were still inside the assembly's collectives. `mpirun -n 2` on a folding mesh did not disagree with
+  serial, it **hung**, having printed the error on one rank. An inversion is now recorded rather than
+  thrown while inside the element loop, reduced across the ranks with one `MPI_Allreduce`, and then
+  raised on every rank or on none -- the same shape of agreement `consume_newton_abort_request()`
+  already used. Replicated and distributed runs now fail at the same `dt` and the same fold time as
+  serial. `dev_docs/mesh_construction.md` section 5.4.
+
+- **A `RemeshWhen` firing inside a solve corrupted the dof vector.** `force_remesh()` was called from
+  `actions_after_newton_solve()`, which oomph-lib calls from inside `newton_solve()` -- and therefore
+  from inside `adaptive_unsteady_newton_solve()`, which brackets the whole step with a **flat-index**
+  dof snapshot and restores it the same way if the step is rejected on temporal error. A remesh in
+  between changes `ndof` and the meaning of every index, so the restore wrote the old mesh's values
+  into unrelated dofs of the new one -- and, whenever the remesh shrank the system, past the end of
+  `Dof_pt` entirely. What it looked like was a converged state coming back with a huge residual, the
+  retry diverging to `inf`, and `dt` being halved to below `Minimum_dt` until the run died with
+  "Max. residual has been exceeded" -- a message that mentions nothing about remeshing, which is why
+  it was never attributed. Only `RemeshWhen` **plus** temporal adaptivity (`temporal_error=...`) was
+  affected; four tutorials combine the two. The request is now recorded and carried out once the C++
+  call has returned (`Problem._perform_pending_remesh()`), so the temporal error estimate and the
+  accept/reject decision see the mesh the step was actually taken on.
+  - **One visible consequence**: with temporal adaptivity, a remesh now happens *after* the step's
+    error estimation rather than in the middle of it, so a script that remeshes under `temporal_error`
+    can end on a slightly different mesh than before (Rayleigh-Plateau: same 15 remeshes, 13024
+    instead of 12673 equations at the end). Without temporal adaptivity nothing moves at all.
+  - `tests/test_remesh_inside_solve.py`; `dev_docs/mesh_construction.md` section 5.1.
+
+- **The first Lyapunov coefficient had several defects around it**, found by auditing it term by term
+  against Kuznetsov's real form before porting it (the mathematics itself is correct, including where
+  the mass-matrix generalisation belongs). The three `CHECKING r/sR/sI` diagnostics carried an `M` on
+  the right-hand side from a rejected variant, so they printed the residual of an equation that was
+  never solved; `use_hopf_tracker_for_adjoint` was inverted, so asking for the Hopf tracker selected
+  the eigensolver; three "should be zero" checks had no `abs()` before `amax()`, so a large negative
+  residual passed; `activate_eigenbranch_tracking` was handed an eigenvector that is `None` whenever
+  the auto-solve produced it; and a near-zero `<p,Mq>` printed diagnostics and then divided by it
+  anyway, which yields a confident wrong answer and now raises. None of them moved a result on the
+  systems tested, and `tests/test_hopf_lyapunov.py` now pins the coefficient, the amplitude and the
+  criticality, which nothing did before.
+
+- **`PeriodicOrbit.iterate_over_samples` leaked its dof backup** when the caller's loop body raised,
+  so the next `backup_dofs()` reported "the dofs have already been backed up" and that, rather than
+  the user's own error, is what surfaced -- including on the way out of the `with` block.
+
+- **`output_orbit()` wrote nothing.** The underscore-prefixing above renamed the `BaseEquations` hook
+  to `_change_output_directory`, but `GenericOutput`'s override kept the outputter's public name, so
+  the equation-tree dispatch hit the base class no-op and no outputter ever relocated:
+  `PeriodicOrbit.output_orbit()` created its subdirectory and left it empty. Every other renamed hook
+  was checked for the same mismatch; this was the only one.
+
+- **`Problem::set_history_dofs` overran the heap on a distributed problem.** `set_dofs(t, ...)` already
+  refuses there -- the loops inside it index a local vector by global equation number -- but
+  `set_history_dofs` reached that refusal only after its own fill loop, which builds its vector on the
+  dof distribution (`nrow_local` entries) and then writes `ndof()`, the *global* count, into it. At 162
+  dofs on four ranks that is some 120 doubles past the end of the buffer. The refusal is now hoisted
+  above the loop. Previously unreachable -- both callers were refused on the Python side first -- and
+  worth recording for the next time this shape appears: the corruption surfaced as a glibc "corrupted
+  double-linked list" inside an unrelated `malloc` much later, whereupon PETSc's signal handler called
+  `MPI_Abort`, which allocates, so the job *hung* on the already-held malloc lock rather than dying.
+
+- **`EquationTree.__add__` on an already-placed tree.** `+` hands the children of *both* operands to
+  the new node it returns, rewriting their `_parent`. Doing that to a tree that had already been
+  placed with `@ "domain"` (or added to the `Problem`) left the placed children pointing at a new root
+  nobody keeps, and the damage surfaced arbitrarily far away as "Mesh is None" in
+  `pin_redundant_lagrange_multipliers`. Adding to, or with, a placed tree is now refused up front and
+  names the path it was placed at; assemble a domain's equations first and place the result
+  afterwards. The merge itself moved to an internal `_merge_with`, which the recursion and the
+  boundary-pattern expansion still use, since there the operands are nobody else's.
+
+- **Quadrature, 2D quadrilateral elements**: the 3x3 Gauss-Legendre knot table had two digits
+  transposed. Five of the nine entries of `Gauss<2,3>::Knot` read `0.774596662941483` for
+  `0.774596669241483`, and only on the *positive* knot, so the rule kept the correct total weight but
+  stopped being symmetric — which is why it survived: an asymmetric quadrature is invisible to any
+  test whose reference value is computed on the same mesh. The effect was a fixed defect in the
+  assembly rather than an error that refinement could remove: the integral of a mid-side shape
+  function derivative over an element came out as 7e-9 instead of identically zero, so a field lying
+  exactly in the C2 space no longer produced a zero residual, and results on 2D quadrilateral meshes
+  were wrong by about 1e-9 *however fine the mesh*. Measured on a Poisson problem whose exact
+  solution is linear, the deviation at the mid-side nodes drops from 8.5e-10 to 4.0e-15 (2e-16 was
+  already reached by `C1`, and by triangles at any order, which use different rules). The knot is now
+  written once and negated, so the rule is symmetric to the last bit. An audit of every `Gauss<D,N>`
+  knot and weight table against exact Legendre roots found no other defect above 4e-15;
+  `tests/test_quadrature.py` now tests the rules directly, across lines, quads, triangles and bricks.
 
 - **Adaptivity, mixed quad+tri meshes**: refining across a quad↔triangle interface could tear the mesh.
   oomph-lib's quad neighbour lookup maps a new node's position into the edge neighbour with the quad box

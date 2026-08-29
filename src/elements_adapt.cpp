@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -114,19 +114,19 @@ namespace pyoomph
 	}
 
 	// Called by oomph-lib's tree-based mesh refinement before a son element is otherwise set up:
-	// makes sure the new (son) element has a code instance, inheriting it from its father since
+	// makes sure the new (son) element has a code, inheriting it from its father since
 	// sons are constructed generically without going through the normal Python-driven creation.
 	void BulkElementBase::pre_build(oomph::Mesh *&, oomph::Vector<oomph::Node *> &)
 	{
-		if (!this->codeinst)
+		if (!this->jitcode)
 		{
 			BulkElementBase *cast_father_element_pt = dynamic_cast<BulkElementBase *>(this->father_element_pt());
 			if (!cast_father_element_pt)
 			{
-				throw_runtime_error("Trying to build an element without a code instance during pre_build...");
+				throw_runtime_error("Trying to build an element without a code during pre_build...");
 			}
 			else
-				this->codeinst = cast_father_element_pt->codeinst;
+				this->jitcode = cast_father_element_pt->jitcode;
 		}
 	}
 
@@ -149,17 +149,36 @@ namespace pyoomph
 			this->ensure_external_data();
 			return;
 		}
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		BulkElementBase *father = dynamic_cast<BulkElementBase *>(this->tree_pt()->father_pt()->object_pt());
 		if (!father)
 			throw_runtime_error("Try to split an element, but found not father...");
+		// A son sits under the same root as its father, so it carries the same stamped root index.
+		// Without this a mesh refined AFTER being distributed would hand out fresh elements with -1
+		// and become unwritable again - the stamp is only laid down while the mesh is still whole.
+		this->global_root_index = father->global_root_index;
+		// The son's address is the father's path with one more step appended, packed the way
+		// Mesh::get_element_structural_keys() packs it (3 bits per level, +1 so that son 0 is not a
+		// no-op). Recomputing it from the tree is not an option once the mesh has been distributed:
+		// the tree no longer reaches back past the distribution.
+		if (father->global_root_path >= 0)
+		{
+			long which = -1;
+			oomph::Tree *f = this->tree_pt() ? this->tree_pt()->father_pt() : NULL;
+			if (f)
+			{
+				for (unsigned sn = 0; sn < f->nsons(); sn++)
+					if (f->son_pt(sn) == this->tree_pt()) { which = (long)sn; break; }
+			}
+			if (which >= 0) this->global_root_path = father->global_root_path * 8 + (which + 1);
+		}
 
 		oomph::QuadTree *quadtree_pt = dynamic_cast<oomph::QuadTree *>(Tree_pt);
 		oomph::BinaryTree *binarytree_pt = dynamic_cast<oomph::BinaryTree *>(Tree_pt);
 		oomph::OcTree *octree_pt = dynamic_cast<oomph::OcTree *>(Tree_pt);
 		int nsons = this->tree_pt()->father_pt()->nsons();
 
-		this->set_nlagrangian_and_ndim(this->codeinst->get_func_table()->lagr_dim, this->codeinst->get_func_table()->nodal_dim);
+		this->set_nlagrangian_and_ndim(this->jitcode->get_func_table()->lagr_dim, this->jitcode->get_func_table()->nodal_dim);
 
 		for (unsigned int i = 0; i < ninternal_data(); i++)
 			internal_data_pt(i)->set_time_stepper(node_pt(0)->time_stepper_pt(), false);
@@ -467,7 +486,7 @@ namespace pyoomph
 		// Before anything reads node_pt(): put back any interior node that the split orphaned.
 		restore_orphaned_interior_nodes(mesh_pt);
 
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		// Quad tree
 		oomph::QuadTree *quadtree_pt = dynamic_cast<oomph::QuadTree *>(Tree_pt);
 		oomph::BinaryTree *binarytree_pt = dynamic_cast<oomph::BinaryTree *>(Tree_pt);

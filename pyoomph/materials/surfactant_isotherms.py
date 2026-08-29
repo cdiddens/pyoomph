@@ -2,24 +2,24 @@
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -32,7 +32,7 @@ from ..expressions.phys_consts import gas_constant
 from ..expressions.units import *
 from ..expressions import *
 from ..typings import *
-from .generic import BaseInterfaceProperties,LiquidGasInterfaceProperties, LiquidSolidInterfaceProperties
+from .generic import BaseInterfaceProperties,LiquidGasInterfaceProperties, LiquidSolidInterfaceProperties, LiquidLiquidInterfaceProperties
 
 # Default rates: Please use the ones appropriate for the surfactant you are using
 # Not by modifying these parameters here, but by passing k_ads and k_des to the Isotherm constructor
@@ -101,7 +101,12 @@ class SurfactantIsotherm:
             pure_surface_tension: Surface tension without surfactants. If not set, it will be taken from the interface properties.
             min_surface_tension: Minimum surface tension. If set, the surface tension will be limited to this value.
         """
-        assert isinstance(interface_properties,(LiquidGasInterfaceProperties,LiquidSolidInterfaceProperties))
+        # Liquid-liquid is in here too. It used to be excluded, which made a surfactant at a
+        # liquid-liquid interface unreachable although the properties class carries the very
+        # dictionaries this method writes into. Note that, unlike the liquid-gas case, its
+        # surface_tension is a plain attribute rather than the salt-shifted property, so no salt
+        # surface tension shift is applied on top of the isotherm there.
+        assert isinstance(interface_properties,(LiquidGasInterfaceProperties,LiquidSolidInterfaceProperties,LiquidLiquidInterfaceProperties))
         if pure_surface_tension is None:
             pure_surface_tension=interface_properties.surface_tension
         pure_surface_tension=cast(ExpressionOrNum,pure_surface_tension)

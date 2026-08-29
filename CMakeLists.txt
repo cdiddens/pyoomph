@@ -52,6 +52,15 @@ option(PYOOMPH_USE_MPI       "Build with MPI support (defines OOMPH_HAS_MPI)"   
 option(PYOOMPH_PARANOID      "Build with extra runtime sanity checks (defines PARANOID)" OFF)
 option(PYOOMPH_DOWNLOAD_CLN  "Download and build CLN from source via its own autotools ./configure" ON)
 option(PYOOMPH_DOWNLOAD_GINAC "Download and build GiNaC from source via its own autotools ./configure" ON)
+# AUTO (the default) links OpenMP if the toolchain has it and builds without it
+# if not; ON makes a missing OpenMP a hard error, OFF never looks for it. The
+# tri-state exists because AUTO alone means the capability of a wheel is decided
+# silently by whatever the build machine happened to have: manylinux always has
+# libgomp, AppleClang usually has no libomp at all, so the same release would
+# ship --omp on Linux/Windows and not on macOS without anyone noticing. A CI job
+# that means to ship threaded assembly says ON and finds out at configure time.
+set(PYOOMPH_USE_OPENMP "AUTO" CACHE STRING "OpenMP for the parallel element assembly (--omp N): AUTO=use if found, ON=require, OFF=never")
+set_property(CACHE PYOOMPH_USE_OPENMP PROPERTY STRINGS AUTO ON OFF)
 option(PYOOMPH_GENERATE_STUBS "Generate .pyi stubs for the _core extension via nanobind.stubgen (best effort, non-fatal)"  ON)
 option(PYOOMPH_COPY_STUBS_TO_SOURCE_TREE "Also mirror the generated .pyi stub into the source-tree pyoomph/ directory, so Pylance/Pyright/mypy can resolve pyoomph._core while editing without a full pip install" ON)
 # Only meaningful together with -DPYOOMPH_DOWNLOAD_GINAC=OFF (a system-supplied
@@ -219,6 +228,41 @@ endif()
 if(PYOOMPH_USE_MPI)
   find_package(MPI REQUIRED COMPONENTS CXX)
   target_link_libraries(generic PUBLIC MPI::MPI_CXX)
+endif()
+
+# ----------------------------------------------------------------------------
+# OpenMP: only for pyoomph's own element loop (see
+# dev_docs/openmp_assembly.md). Not REQUIRED under the default AUTO - the
+# parallel assembly is opt-in at runtime (--omp N / problem.set_num_threads),
+# so a toolchain without OpenMP (AppleClang without libomp being the usual one)
+# must still produce a working build; everything threaded is behind
+# PYOOMPH_HAS_OPENMP and set_num_threads(N>1) then says so once. Only
+# PYOOMPH_USE_OPENMP=ON turns a missing OpenMP into a configure error.
+#
+# PUBLIC on pyoomph_core so that the flag reaches the nanobind translation
+# units too: they include problem.hpp, which has inline members guarded by
+# PYOOMPH_HAS_OPENMP, and a definition mismatch across TUs would be an ODR
+# violation that only shows up as a corrupted object at runtime.
+#
+# The JIT compiler flags (pyoomph/generic/ccompiler.py) are NOT given -fopenmp:
+# generated code is called from INSIDE the parallel region and only has to be
+# reentrant, which it is since commit 25b24ea retired its file-scope globals.
+# ----------------------------------------------------------------------------
+if(PYOOMPH_USE_OPENMP)
+  if(PYOOMPH_USE_OPENMP STREQUAL "AUTO")
+    find_package(OpenMP COMPONENTS CXX)
+  else()
+    find_package(OpenMP REQUIRED COMPONENTS CXX)
+  endif()
+endif()
+if(OpenMP_CXX_FOUND AND PYOOMPH_USE_OPENMP)
+  target_link_libraries(pyoomph_core PUBLIC OpenMP::OpenMP_CXX)
+  target_compile_definitions(pyoomph_core PUBLIC PYOOMPH_HAS_OPENMP)
+  message(STATUS "OpenMP found - parallel element assembly (--omp N) is available")
+elseif(PYOOMPH_USE_OPENMP)
+  message(STATUS "OpenMP NOT found - building without parallel element assembly (pass -DPYOOMPH_USE_OPENMP=ON to make this an error instead)")
+else()
+  message(STATUS "OpenMP disabled by PYOOMPH_USE_OPENMP=OFF - building without parallel element assembly")
 endif()
 
 # ----------------------------------------------------------------------------

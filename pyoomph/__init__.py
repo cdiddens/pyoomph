@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -34,9 +34,43 @@ import os
 import platform
 import sys
 import weakref
-os.environ.setdefault('OPENBLAS_NUM_THREADS', os.environ.get('PYOOMPH_OPENBLAS_NUM_THREADS', '4'))
-os.environ.setdefault('MKL_NUM_THREADS', os.environ.get('PYOOMPH_MKL_NUM_THREADS', '4'))
-# To Deactivate OpenMP parallelization, set PYOOMPH_OPENBLAS_NUM_THREADS=1 and PYOOMPH_MKL_NUM_THREADS=1
+def _num_threads_from_command_line():
+    """Value of a ``--omp N`` on the command line, or None.
+
+    Read here, before anything else is imported, because MKL and PETSc latch their thread counts from
+    the environment at *their* import time - which is long before Problem.parse_cmd_line() would see
+    the switch. The real handling of --omp is in Problem.setup_cmd_line()/parse_cmd_line(); this is
+    only the part that has to happen early.
+    """
+    for i, a in enumerate(sys.argv):
+        if a == "--omp":
+            try:
+                return max(1, int(sys.argv[i + 1]))
+            except (IndexError, ValueError):
+                return None
+        if a.startswith("--omp="):
+            try:
+                return max(1, int(a.split("=", 1)[1]))
+            except ValueError:
+                return None
+    return None
+
+
+_omp_threads = _num_threads_from_command_line()
+_default_blas_threads = str(_omp_threads) if _omp_threads else '4'
+os.environ.setdefault('OPENBLAS_NUM_THREADS', os.environ.get('PYOOMPH_OPENBLAS_NUM_THREADS', _default_blas_threads))
+os.environ.setdefault('MKL_NUM_THREADS', os.environ.get('PYOOMPH_MKL_NUM_THREADS', _default_blas_threads))
+# pyoomph's own element loop takes its thread count from Problem.set_num_threads and passes it on the
+# OpenMP pragma itself, so OMP_NUM_THREADS does not steer it. It is pinned anyway, at 1 unless --omp
+# says otherwise, so that a third-party OpenMP runtime inside the linear solver cannot quietly open a
+# second pool of threads next to ours and oversubscribe the machine.
+os.environ.setdefault('OMP_NUM_THREADS', os.environ.get('PYOOMPH_OMP_NUM_THREADS', str(_omp_threads) if _omp_threads else '1'))
+# The three PYOOMPH_*_NUM_THREADS above are pyoomph-only aliases of the standard variables, for
+# pinning a third-party runtime without also pinning it for everything else on the machine. None of
+# them touches pyoomph's OWN assembly threads: those come from --omp / Problem.set_num_threads and
+# are passed on the pragma's num_threads clause (src/parallel_assembly.cpp), so --omp 1 - not an
+# environment variable - is how the element loop is made serial.
+
 
 
 

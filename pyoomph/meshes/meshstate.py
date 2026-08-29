@@ -55,7 +55,7 @@ import numpy
 from ..generic.mpi import get_mpi_nproc, get_mpi_rank, get_mpi_world_comm
 
 if TYPE_CHECKING:
-    from .mesh import AnySpatialMesh, BulkTemplateMesh
+    from .mesh import AnySpatialMesh, BulkTemplateMesh, InterfaceMesh
     from ..output.states import DumpFile
 
 
@@ -194,10 +194,18 @@ def _local_contribution(mesh: "AnySpatialMesh") -> dict[str, NPAnyArray]:
     flat, stride = mesh.get_element_node_indices()
     elem_nodes = numpy.asarray(flat, dtype=numpy.int64).reshape(nelem, int(stride)) if nelem else numpy.zeros((0, 1), dtype=numpy.int64)
     if numpy.any(elem_keys[:, 0] < 0):
+        # Naming the mesh and the count: which mesh it is decides where the missing call belongs, and
+        # "all of them" versus "a handful" separates a mesh that was never numbered from one whose
+        # elements lost their tree root.
+        bad = int(numpy.count_nonzero(elem_keys[:, 0] < 0))
+        try:
+            where = mesh.get_full_name()
+        except Exception:
+            where = repr(mesh)
         raise StateFileInconsistency(
-            "The mesh has elements without a global base index. assign_global_base_element_indices() must run "
-            "before the problem is distributed - a state file written from rank-local element numbers could only "
-            "be read back by the very run that wrote it")
+            "The mesh '" + where + "' has " + str(bad) + " of " + str(nelem) + " elements without a global base "
+            "index. assign_global_base_element_indices() must run before the problem is distributed - a state "
+            "file written from rank-local element numbers could only be read back by the very run that wrote it")
 
     node_keys = _reconcile_node_keys(mesh, _node_keys(mesh, elem_keys, elem_nodes))
     owned = _owned_elements(mesh)
@@ -255,10 +263,24 @@ def _check_duplicates_agree(keys: NPAnyIntArray, lengths: NPAnyIntArray, data: N
         for m in members[1:]:
             other = data[offsets[m]:offsets[m + 1]]
             if len(other) != len(ref) or not numpy.array_equal(other, ref):
+                # How far apart, not just "different". A handful of entries off by round-off is a halo
+                # that drifted; a value that is simply unrelated means the two records are not the same
+                # entity at all and the KEY is wrong - which is what it turned out to be when
+                # Problem::distribute() re-rooted the refinement tree and 240 of 256 addresses
+                # collided. The message used to name the halo as the cause and sent the reader the
+                # wrong way, so it now reports what was measured and leaves the diagnosis open.
+                if len(other) == len(ref):
+                    diff = numpy.abs(numpy.asarray(other) - numpy.asarray(ref))
+                    worst = int(numpy.argmax(diff))
+                    detail = (": %d of %d entries differ, worst |a-b|=%.3e at index %d (%r vs %r)" %
+                              (int((diff > 0).sum()), len(diff), float(diff[worst]), worst,
+                               ref[worst], other[worst]))
+                else:
+                    detail = ": one reports %d entries, the other %d" % (len(ref), len(other))
                 raise StateFileInconsistency(
                     "Two processes report different values for the same " + what + " " + str(keys[members[0]]) +
-                    " while writing the state file. They are the same " + what + ", so their halo copies were out "
-                    "of sync at this point")
+                    " while writing the state file" + detail + ". Either their halo copies were out of sync, or "
+                    "the two records are different " + what + "s that were given the same key")
 
 
 def _sorted_records(local: dict[str, NPAnyArray], distributed: bool, check: bool) -> dict[str, NPAnyArray] | None:
@@ -299,7 +321,7 @@ def _sorted_records(local: dict[str, NPAnyArray], distributed: bool, check: bool
             "elem_keys": elem_keys, "elem_lens": elem_lens, "elem_data": elem_data}
 
 
-def save_interface_state(mesh: "AnySpatialMesh", state: "DumpFile", check_consistency: bool = True) -> None:
+def save_interface_state(mesh: "InterfaceMesh", state: "DumpFile", check_consistency: bool = True) -> None:
     """Write one interface mesh's element-internal data.
 
     Interface elements carry all of a facet field's degrees of freedom - DL/D0 and the nodal DG spaces
@@ -320,7 +342,7 @@ def save_interface_state(mesh: "AnySpatialMesh", state: "DumpFile", check_consis
     owned = _owned_elements(mesh)
     data, lens = mesh.save_elemental_state()
     my_data, my_lens = _block_gather(data, lens, numpy.flatnonzero(owned))
-    my_keys = keys[owned]
+    my_keys: NPAnyIntArray = keys[owned]
     distributed = _mesh_is_distributed(mesh)
     if distributed:
         gathered = _gather_blocks(my_keys, my_lens, my_data)
@@ -344,7 +366,7 @@ def read_interface_state(state: "DumpFile") -> "tuple[NPAnyIntArray, NPAnyIntArr
     return keys, lens, data
 
 
-def apply_interface_state(mesh: "AnySpatialMesh", keys: "NPAnyIntArray", lens: "NPAnyIntArray",
+def apply_interface_state(mesh: "InterfaceMesh", keys: "NPAnyIntArray", lens: "NPAnyIntArray",
                           data: "NPFloatArray") -> int:
     """Push a read interface record onto a rebuilt interface mesh. Returns how many elements it filled.
 

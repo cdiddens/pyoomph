@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -80,6 +80,7 @@ class MacAccelerateLinearSolver(GenericLinearSystemSolver):
         # this switches itself off, leaving the previous behaviour untouched.
         self.reuse_symbolic_factorization=True
         self._structure_id:int=0
+        self._last_factorize_method:MacAccelerateMethod | None=None # what the cached factorization was built with
 
     def set_method(self,method:MacAccelerateMethod)->None:
         """Select the factorization method used on the next factorize (i.e. the next Newton/time
@@ -95,6 +96,7 @@ class MacAccelerateLinearSolver(GenericLinearSystemSolver):
         if not self.solver.is_factorized():
             raise RuntimeError("refactorize() called before any system was factorized")
         self.solver.refactorize(self.method)
+        self._last_factorize_method=self.method
 
     def resolve(self,b:NPFloatArray)->NPFloatArray:
         """Re-solve against a new right-hand side, reusing the cached factorization."""
@@ -114,13 +116,22 @@ class MacAccelerateLinearSolver(GenericLinearSystemSolver):
             # recomputes only the numbers. problem.jacobian_structure_id promises the pattern is the
             # same; refactorize_values_only() verifies it against the stored indices before acting, so a
             # stale id costs a full factorization rather than a wrong answer.
+            # "ldlt" (not "cholesky": that needs SPD, which the symbolic proof cannot give) when the
+            # matrix is proven symmetric; the C++ side then reads only the upper triangle of the full
+            # CSR, so no triangle extraction is needed here. Users keeping their own method choice do
+            # so via exploit_proven_symmetry=False or by picking a symmetric method themselves.
+            method:MacAccelerateMethod="ldlt" if self._use_symmetric_factorisation_now() else self.method
             structure_id=self.problem.jacobian_structure_id
             if (self.reuse_symbolic_factorization and structure_id!=0 and structure_id==self._structure_id
+                    and method==self._last_factorize_method
                     and self.solver.is_factorized()
                     and self.solver.refactorize_values_only(indptr,indices,data)):
+                # method must match what the factorization was built with: a QR symbolic structure
+                # must not be numerically refreshed as LDLT (or vice versa, after a tracker toggled).
                 return 0
             self._structure_id=structure_id
-            self.solver.factorize(n,n,indptr,indices,data,self.method)
+            self.solver.factorize(n,n,indptr,indices,data,method)
+            self._last_factorize_method=method
         elif op_flag==2:
             if nrhs != 1:
                 raise NotImplementedError("Only single right-hand side is supported")
@@ -173,7 +184,10 @@ class AccelerateArpackEigenSolver(ScipyEigenSolver):
         if shift is None:
             OPinv = None
         else:
-            OPinv = AccelerateInvOp(J, M, sigma=shift,method=self.method)
+            # LDLT (indefinite-safe) when ScipyEigenSolver.solve decided the pencil is proven
+            # symmetric - J-shift*M is then real symmetric. Otherwise the user's configured method.
+            method:MacAccelerateMethod="ldlt" if self.last_symmetry_decision else self.method
+            OPinv = AccelerateInvOp(J, M, sigma=shift,method=method)
         return OPinv
 
 

@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -46,17 +46,25 @@ namespace pyoomph
 		// h-refinement via the OcTree hierarchy is implemented for pure-brick meshes and (branch
 		// mixed_adapt) pure-tetrahedron meshes (a tet refines 1->8, reusing the OcTree's 8-son
 		// bookkeeping, with geometric node-sharing/hanging). Mixed brick+tet is not yet supported.
+		// One cast per element for all five questions: element_family() is cached on the element,
+		// whereas each of the four dynamic_casts this used to do walks the virtual-inheritance diamond
+		// (~1500 cycles a piece) - and it did them twice, once here and once in the allRefinable loop
+		// below, which is now folded into the same pass.
 		bool allQ = true, allT = true, allW = true, allP = true;
+		bool allRefinable = true; // every element is a refineable family: brick/tet/wedge/pyramid
 		for (unsigned int i = 0; i < this->nelement(); i++)
 		{
-			bool is_brick = (dynamic_cast<oomph::BrickElementBase *>(this->element_pt(i)) != NULL);
-			bool is_tet = (dynamic_cast<oomph::TElementBase *>(this->element_pt(i)) != NULL);
-			bool is_wedge = (dynamic_cast<oomph::RefineableWedgeElement *>(this->element_pt(i)) != NULL);
-			bool is_pyramid = (dynamic_cast<oomph::RefineablePyramidElement *>(this->element_pt(i)) != NULL);
+			pyoomph::BulkElementBase *be = dynamic_cast<pyoomph::BulkElementBase *>(this->element_pt(i));
+			BulkElementBase::ElementFamily fam = (be ? be->element_family() : BulkElementBase::EF_OTHER);
+			bool is_brick = (fam == BulkElementBase::EF_BRICK);
+			bool is_tet = (fam == BulkElementBase::EF_SIMPLEX);
+			bool is_wedge = (fam == BulkElementBase::EF_WEDGE);
+			bool is_pyramid = (fam == BulkElementBase::EF_PYRAMID);
 			allQ = allQ && is_brick;
 			allT = allT && is_tet;
 			allW = allW && is_wedge;
 			allP = allP && is_pyramid;
+			allRefinable = allRefinable && (is_brick || is_tet || is_wedge || is_pyramid);
 		}
 		// Pure-brick, pure-tet, or (branch mixed_adapt) pure-wedge meshes refine 1->8 via the OcTree; a
 		// wedge refines its triangular cross-section 1->4 and its extrusion 1->2 (shape-closed). A pure-
@@ -69,15 +77,6 @@ namespace pyoomph
 		// brick meets a pyramid base / wedge side on a QUAD; a tet meets a wedge/pyramid on a TRIANGLE) produce
 		// one shared node, not a torn pair. In a mixed mesh a brick refines through the registry
 		// (build_as_brick_son) rather than oomph-lib's native octree node-reuse.
-		bool allRefinable = true; // every element is a refineable family: brick/tet/wedge/pyramid
-		for (unsigned int i = 0; i < this->nelement(); i++)
-		{
-			bool is_brick = (dynamic_cast<oomph::BrickElementBase *>(this->element_pt(i)) != NULL);
-			bool is_tet = (dynamic_cast<oomph::TElementBase *>(this->element_pt(i)) != NULL);
-			bool is_wedge = (dynamic_cast<oomph::RefineableWedgeElement *>(this->element_pt(i)) != NULL);
-			bool is_pyramid = (dynamic_cast<oomph::RefineablePyramidElement *>(this->element_pt(i)) != NULL);
-			allRefinable = allRefinable && (is_brick || is_tet || is_wedge || is_pyramid);
-		}
 		if (allQ || allT || allW || allP || allRefinable)
 		{
 			return true;
@@ -780,7 +779,7 @@ namespace pyoomph
 			std::set<pyoomph::Node *> key;
 			for (pyoomph::Node *n : el->get_vertex_nodes_of_face(face_id))
 			{
-				if (n->is_a_copy()) n = dynamic_cast<pyoomph::Node *>(n->copied_node_pt());
+				if (n->is_a_copy()) n = static_cast<pyoomph::Node *>(n->copied_node_pt());
 				key.insert(n);
 			}
 			return key;

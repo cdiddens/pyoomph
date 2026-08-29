@@ -212,6 +212,16 @@ class TQMeshTemplate(MeshedMeshTemplate):
     :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.define_geometry` again, where
     :py:meth:`~pyoomph.meshes.mesh.MeshedMeshTemplate.is_remeshing` and
     :py:meth:`~pyoomph.meshes.mesh.MeshedMeshTemplate.get_boundary_coordinates` are available.
+
+    .. warning::
+        Feed a boundary read back that way to :py:meth:`spline` with ``resample=True``. TQMesh takes
+        the points it is given as the boundary edges themselves, whereas gmsh takes them as the
+        geometry only and discretises it by size afterwards - and ``get_boundary_coordinates`` walks
+        the boundary *nodes*, of which a second-order mesh has two per element. Handing all of them
+        over therefore **doubles the boundary discretisation at every remesh**, which multiplies the
+        element count of the whole mesh by four: measured on a unit square with a spline top,
+        40 boundary edges became 80, 160 and 320 over three quality remeshes and 589 elements became
+        30850, while the same loop with ``resample=True`` stayed at 17 edges and ~390 elements.
     """
 
     def __init__(self):
@@ -504,6 +514,9 @@ class TQMeshTemplate(MeshedMeshTemplate):
         still follows the given points, but only the first and the last of them are guaranteed to be mesh vertices.
         Either way, the spline itself is kept as a macro element, so that spatial refinement places new nodes on it
         rather than on the chords of the chain.
+
+        Rebuilding a boundary from :py:meth:`~pyoomph.meshes.mesh.MeshedMeshTemplate.get_boundary_coordinates` on
+        remeshing needs ``resample=True``, and the class docstring says what happens without it.
 
         Args:
             points: The points defining the curve.
@@ -969,7 +982,7 @@ class TQMeshTemplate(MeshedMeshTemplate):
 
     def _transfer_mesh(self, surface: _TQMeshSurface, mesh: Any, color_names: dict[int, str]):
         if self.has_domain(surface.name):
-            collection = self.get_domain(surface.name)
+            collection = self._get_domain(surface.name)
         else:
             collection = self.new_domain(surface.name)
         # add_node_unique() identifies nodes by their position, which is what stitches the domains together: TQMesh

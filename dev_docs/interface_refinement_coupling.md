@@ -2,7 +2,9 @@
 
 Status: **implemented**, serially and under MPI. §1–§11 are the design; **§13 records what building it
 turned up that the design did not predict** — including two defects the design's own reasoning would
-have produced, and one place (§2) where it is simply wrong about distribution.
+have produced, and one place (§2) where it is simply wrong about distribution. **§14 is the mixed
+element-space sweep**: it holds for every space pair on a flat or macro-element-curved interface, and it
+does not hold once the interface geometry is a genuine unknown.
 
 ---
 
@@ -733,3 +735,394 @@ symptom was a check that reported success.
   case raised, the next one in the same `mpi_worker.py` process failed too. Pre-existing (the worker has
   always looped over cases in one process) and not investigated. It matters for reading MPI test output:
   the *first* failing case is the real one.
+
+---
+
+## 14. Mixed element spaces across the interface: what the space matrix measures
+
+Everything above was built and validated with the two domains carrying the **same** element space. Nothing
+in the machinery requires that — it reads only `nvertex_node()` / `get_vertex_nodes_of_face()`, which are
+corner-only and identical for C1 and C2 — and §12's `connect12` has always run a C2/C1 pair. But that pair
+is one cell of a matrix nobody had swept, on a flat static interface, where it cannot fail.
+
+This section is the sweep: every ordered pair from `{C1, C1TB, C2, C2TB}` that a family can carry, across
+quad / tri_left / tri_crossed / mixed / curved / 3d-brick / 3d-tet, serially and under `--distribute`, plus
+the four-domain junction. 108 serial cases + 19 distributed, **one process per case** (§13.10: a failing
+case poisons the ones after it in the same process, and under MPI it would leave the other ranks blocked).
+
+`tests/two_domain_cases.py` grew the axes and the oracles for it: an arbitrary `connect:<lo>/<up>` /
+`move:<lo>/<up>` selector, a `curved` kind, `box_hex`/`box_tet` 3d kinds, four-domain space selectors
+(`four_corner:C1,C2,C2,C1`), and three measurements described below.
+
+### 14.1 The oracle that was missing: `max_vertex_gap`
+
+Every step of the chain identifies "the same place on the interface" by a **quantised Eulerian position** —
+`node_key()` at `1e8`, the KD-tree's `1e-8`, the permutation search's `1e-14`. All of it rests on one
+quantity: the two sides' interface vertices coincide. Nothing measured that. `nonconforming` answers a
+different question ("did the two sides refine the same facets"), and a mesh can pass it while the two
+sides have put the shared facet's new vertex in two different places.
+
+`interface_vertex_gap` measures it directly, after **every** adapt rather than at the end — a divergence
+introduced by one refinement is washed out by the next solve, and the matcher runs in between.
+
+Two details it needed. It reads the vertex nodes of the **interface mesh's elements**, not "every vertex
+node flagged as being on the boundary": in 3d tets those differ, see §14.6. And it keys on the position
+rather than on `id(node)` — nanobind hands out a fresh Python wrapper per call and a freed one's id is
+reused, so an id-keyed dict silently collapsed 9 interface vertices to 3.
+
+### 14.2 On a flat interface every space pair works. That is why nothing had caught this.
+
+42 of 44 `connect` pairs pass with `max_vertex_gap == 0` exactly, and the two failures are §14.5, which is
+not a keying problem. Under `mpirun -n 2 --distribute`, all 19 pairs tried reproduce the serial `ndof`
+exactly.
+
+A **curved** interface passes too, as long as the facets carry a `MeshTemplateCurvedEntity`: 19 of 20, and
+every interface node on both sides sits on the arc to `1.1e-16`. The macro element places the C1 side's
+refinement-created vertices on the curve, exactly where the C2 side's pre-existing midside node already
+was. So curvature by itself is not the problem.
+
+### 14.3 What does break: mixed ORDER, once the geometry is not straight-sided
+
+The `move` family is the configuration that produces it — a moving mesh in both domains with the interface
+shape prescribed on both sides as a curve, which is the geometry a free surface produces:
+
+* the C2 side has its interface midside nodes **on the curve, off the chord**; a refinement promotes one of
+  them to a vertex, still on the curve;
+* the C1 side has no such node and creates its new vertex at the **chord midpoint**.
+
+```
+refinement_coupling.cpp:866: Cannot make the two sides of a coupled interface match.
+  side A facet (0,0.5,0) (0.0625,0.538268,0)  [too fine]
+```
+`0.538268` is on the curve; the C1 side is at `0.535355`. 22 of 44 cases fail, and the 20 that fail here
+(the other 2 are §14.5) are **exactly** the mixed-order pairs:
+
+| lower ↔ upper | result |
+|---|---|
+| C1↔C1, C1↔C1TB, C1TB↔C1TB, C2↔C2, C2↔C2TB, C2TB↔C2TB (same order) | pass, gap 0 |
+| any of {C1,C1TB} against any of {C2,C2TB} | **fail, all 20** |
+
+Both the bubble spaces behave exactly like their non-bubble partner: the bubble is interior and never
+reaches a facet. Order is the only thing that matters.
+
+The error message is misleading here — it blames differing `max_refinement_level` or non-bijective facets,
+and neither is the case. The two sides refined the *same* facet and disagree about where its midpoint is.
+
+**Two configurations that do NOT reproduce it**, both worth recording so they are not tried again:
+
+* driving the moving mesh from an **outer** boundary. `ConnectMeshAtInterface` tests its constraint with
+  the negotiated (lower) space, so the higher side's interface midside nodes are not constrained by it and
+  follow their own domain's smoothing; the interface then stays flat to machine precision. The
+  pre-existing `ale` case does the same thing, which is why the suite has never had a case whose interface
+  actually moves.
+* prescribing the shape on **one** side while coupling the positions. That is over-constrained: the
+  multiplier is redundant on the pinned side and the free side never follows at all, so it fails for
+  *equal* spaces too and measures nothing about spaces.
+
+### 14.4 Junctions: mixed spaces at a cross point are silently WRONG
+
+The four-domain cross point of §13.8, with the four domains given different spaces. Exact solution `u = y`,
+so the nodal error is a direct oracle.
+
+| spaces (A,B,C,D) | ndof | max\|u − y\| |
+|---|---|---|
+| C1,C1,C1,C1 | 138 | 1.3e-15 |
+| C2,C2,C2,C2 | 481 | 1.8e-15 |
+| C1,C1,C1,**C2** | 179 | **1.3e-03** |
+| C2,C1,C1,C2 | 319 | **1.4e-03** |
+| C1,C1,C2,C2 | 252 | **2.0e-03** |
+| four_away C2,C1,C1,C2 | 217 | **1.2e-02** |
+
+No crash, `nonconforming == 0`, Newton converged in one step. A single domain differing from the other
+three is enough. The two-domain mixed pairs are exact (1e-15), so this is the junction, not mixed spaces
+as such.
+
+> **Correction.** The mechanism given below is **wrong**, and §15.4 has the measurement that shows it.
+> The two interfaces do not need to negotiate different spaces for this to happen -- `C1,C1,C1,C2` fails
+> while every multiplier in it is C1. What actually goes wrong is that one multiplier enforces the SUM of
+> two coupling conditions, which is only harmless while the redundancy that makes it so still exists.
+> The table of errors above stands; the explanation of it does not.
+
+**The mechanism is §13.8's shared multiplier name.** An interface field is a nodal value on the bulk node,
+allocated by `Mesh::resolve_interface_dof_id(name)` — keyed on the NAME, once per bulk mesh. Domain A owns
+two interfaces and `ConnectFieldsAtInterface` names both multipliers `_lagr_conn_u_u`, so A's cross-point
+node carries ONE slot serving both. §13.8 established that this sharing is load-bearing: with all domains
+in one space it is what keeps the system non-singular (rank 13/13 against 13/14 with distinct names).
+
+With mixed spaces the two interfaces negotiate **different** multiplier spaces, and one slot cannot be
+both. Forcing the names apart confirms it:
+
+| | max\|u − y\| |
+|---|---|
+| shared name (default) | 1.354e-03 |
+| `use_highest_space=True` | 4.273e-04 |
+| distinct `lagr_mult_prefix` per interface | **1.110e-16** |
+
+So neither option is right: the shared name gives a wrong solution, distinct names give the right solution
+on a Jacobian §13.8 measured as rank-deficient (condition number 1e17, the null space living entirely in
+the multipliers). `use_highest_space` is not a workaround — it only shrinks the error. This needs a real
+fix: the slot has to be keyed on (name, negotiated space) or the junction has to be resolved explicitly.
+
+### 14.5 `C2` against `C1TB` segfaults, and the meet of the space lattice is wrong
+
+Not adaptivity-specific: plain uniform refinement to level 1 is enough, and it happens on every triangular
+kind (flat and curved).
+
+`src/elements_interface.cpp`, `interpolate_newly_constructed_additional_dof(..., space="C1TB")`:
+
+```cpp
+psi.resize(father->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1TB]);
+father->shape_at_s_C1TB(sfather, psi);
+...
+unsigned fnode_index = father->get_nodal_space_index_to_element_index_map()[SPACE_INDEX_C1TB][lf];
+pyoomph::BoundaryNode *bn = dynamic_cast<...>(father->node_pt(fnode_index));   // <-- SIGSEGV
+```
+
+`BulkElementTri2dC2::Nodal_Space_Index_To_Element_Index_Map[SPACE_INDEX_C1TB]` is **`{}`**
+(`src/elements_2d.cpp`) — a C2 triangle has no C1TB space. The index runs off an empty vector and
+`node_pt()` is handed garbage.
+
+It gets there because `get_interface_field_connection_space("C2", "C1TB")` returns `"C1TB"`
+(`pyoomph/equations/generic.py`): its `space_order` is a **total** order in which C1TB sits below C2. But
+C1TB is not a subspace of C2 — a C2 triangle cannot host it. The correct meet is **C1**, the dual of the
+join rule `find_dominant_element_space` already has (`C2 ∪ C1TB → C2TB`, "only space that can hold both").
+Quads are unaffected: their C1TB row is non-empty, so `C2-C1TB-mixed` survives.
+
+In **3d tets** the same negotiation is caught rather than crashing, by the guard in
+`pyoomph/generic/codegen.py`: *"You tried to define a C1TB field at an interface attached to 3d bulk domain
+with element space C1TB ... 3d tetrahedral elements of C1TB do not provide the face bubble node ... adjust
+the facet space to C1"*. Note it fires for **C1TB against C1TB** as well — equal spaces — so in 3d, C1TB is
+simply not usable with `ConnectFieldsAtInterface` at all. Four of the sixteen 3d-tet pairs are lost to it.
+
+### 14.6 Two more things the sweep turned up, both latent
+
+**`Quad2dFaceOrientation::analyze` writes out-of-range opposite-node indices.** It ends with
+
+```cpp
+node_index = node_index_map(orientation, nnode_1d);
+```
+
+using **this** element's `nnode_1d`. A C2 brick face (9 nodes) against a C1 one (4) is therefore left
+holding indices up to 8 into a 4-node element. The 1d line elements handle exactly this mismatch
+explicitly (`elements_concrete.hpp`, *"opposite is C1: no midside node"* → index `-1`), and so do the
+triangular faces (`resize(6, -1)`); the quad face does not. The entries are latent — `box_hex` with
+C2/C1 runs, converges, and reports `nonconforming = 0` — until something dereferences one, at which point
+`opposite_node_pt()` segfaults inside the nanobind caster. `interface_node_pairing` skips that combination
+for exactly this reason and says so.
+
+**In 3d tets, vertex nodes are marked as being on the interface while carrying no facet there** — 3 of them
+with a C1 lower domain, 14 with a C2 one. They come from refining an element that touches the interface
+only along an EDGE: the new node lands on that edge, on the interface plane, and is marked. Conformity is
+stated on facets and is silent about it, and the matcher only looks up facet vertices, so nothing here
+depends on it — but it is a boundary-MEMBERSHIP question (see `boundary_node_membership.md`) that should be
+settled rather than assumed. Counted as `stray_boundary_vertices`; zero in every 2d kind.
+
+### 14.7 Where that leaves the original question
+
+*Is a C1 bulk domain meeting a C2 one supported, with adaptivity?* On a flat interface, and on a curved one
+carrying a curved entity: yes, in 2d and 3d, serially and distributed, for every space pair except the two
+defects above. As soon as the interface geometry is a genuine unknown — the free-surface / FSI case — no:
+the two sides put the same facet's new vertex in different places, and every identity in the coupling
+machinery is a quantised Eulerian position.
+
+The fix for that is a correspondence that does not depend on the current geometry. Lagrangian coordinates
+are **not** available as a basis: remeshing a deformable solid interpolates `xi`, so an FSI pair's two
+sides need not agree on it. What remains is either a topological key — (level-0 facet identity from the
+`MeshTemplate`, plus the dyadic local coordinate within it, composed at every split the way
+`inherit_macro_element_from_father` already composes `Macro_element_vertex_s`) — or making the two sides
+share one geometry at the interface by constraining the higher side's interface positions to the lower
+space. That decision, and the junction fix in §14.4, are the next piece of work.
+
+---
+
+## 15. The fix: one interface space, and a topological identity for its nodes
+
+§14 found four defects. Three of them are one sentence violated three times —
+
+> A coupled interface is one object with one space: the multiplier space is the **meet** of the two bulk
+> spaces, capped by what each bulk element family can carry on a facet.
+
+— and the fourth, §14.3, is not about spaces at all but about **identity**: the machinery asked *where*
+a node is when it should have asked *which* node it is.
+
+### 15.1 The meet of the space lattice (§14.5, §14.4's 3d twin)
+
+`{C1, C1TB, C2, C2TB}` is a lattice, not a chain: `C1 < C1TB < C2TB` and `C1 < C2 < C2TB`, with **C1TB
+and C2 incomparable** — a C2 element has no bubble node, a C1TB element has no midside ones.
+`find_dominant_element_space` has always known the join (`C2 ∪ C1TB → C2TB`, *"only space that can hold
+both"*); `get_interface_field_connection_space` walked a total order instead and returned "the one further
+down the list", which is not the meet. `find_subordinate_element_space` in
+`pyoomph/expressions/generic.py` is the dual, and the negotiation now uses it.
+
+**Then the meet is capped by what the inner domain can carry on a facet**, because the multiplier is a
+nodal value on that domain's bulk nodes. `largest_facet_space(parent_space, parent_dim)` states the rule:
+a bubble space needs a bubble *node*, so C1TB/D1TB requires a `C1TB` or `C2TB` parent, and in 3d only
+`C2TB` (a tet facet needs a *face* bubble, which a C1TB tet does not have — it carries only a cell one).
+
+Two consequences beyond the segfault. `C2` against `C1TB` on a triangle now negotiates **C1** and runs
+(previously: an empty `Nodal_Space_Index_To_Element_Index_Map` row indexed off its end). And **C1TB
+against C1TB on 3d tets** now runs too — it used to throw for *equal* spaces, because the negotiation
+asked the facet for a space the tet cannot put there.
+
+The guard in `_internal_define_scalar_field` that used to be the only check is kept as a backstop and
+corrected: it permitted C1TB on a 2d C2 parent, which is exactly the case that segfaulted. And a real
+backstop now exists in C++, at the one place the binding is made — `InterfaceElementBase::add_interface_dofs`
+refuses any space whose map row is empty on the bulk element, which covers the ~20 sites that index one.
+**A wrong space must never again be a segfault.**
+
+### 15.2 The identity: what a node IS, not where it is (§14.3)
+
+Every step of the chain — `node_key()` in `refinement_coupling.cpp`, the KD-tree in
+`connect_interface_elements_by_kdtree`, the permutation search in `analyze_opposite_orientation` — used a
+quantised Eulerian position. That rests on the two sides' interface vertices coinciding, and at a
+mixed-order interface they do not: refinement promotes the C2 side's off-chord midside node to a vertex
+while the C1 side creates one on the chord.
+
+`pyoomph::Node::interface_topological_id` is a 128-bit digest of what the two domains actually share,
+which is the `MeshTemplate`. It is the cross-domain extension of `refinement_generating_key`, which had
+already made this move *within* a mesh and says why: matching by position is only as good as the positions
+are. Two ingredients:
+
+* **level 0** — a generated node is stamped with the identity of its template node. A corner is its own
+  index; an **intermediate** node (edge mid-point, face or cell centre) is the C1 combination of the
+  entity's corners, which `MeshTemplate::intermediate_node_map` already records, keyed by the corner set
+  precisely because *"that set — not the node's position — is its identity"*.
+* **refinement** — a new node is the C1 interpolation of its father's vertex nodes at a dyadic local
+  coordinate, from `get_nodal_s_in_father` (implemented for every refineable family, wedges and pyramids
+  included) and `shape_at_s_C1`.
+
+Filled in by `Mesh::assign_interface_topological_ids()`, one sweep in order of increasing refinement
+level. No MPI: pre-distribution ids travel with the nodes (the same argument that carries
+`global_root_index`), and later ones are born of a refinement this rank performed, halo elements included.
+
+**The identity must be flattened to the template basis, and that is the part the design got wrong.**
+Digesting the *immediate* parents is not canonical. A point a quarter of the way along a level-0 edge is
+reached by a C2 domain as "the midside node of a level-1 element" — weights 3/4, 1/4 over two level-0
+corners — and by a C1 domain as "the midpoint of a level-1 edge" — weights 1/2, 1/2 over a level-0 corner
+and the level-0 midpoint. Both describe the same point, and the two digests differed. The symptom was
+sharp and misleading: uniform refinement to any level conformed perfectly, and only *asymmetric*
+refinement past level 1 failed, because that is the first time a node is reached by two different routes.
+`Node::interface_topological_expansion` therefore carries the full (template index, weight) expansion,
+merged and sorted, and the digest is taken of that. The weights are dyadic, hence exact in double.
+
+**Bubble nodes are the exception, and they must not throw.** A centroid bubble's C1 weights are thirds
+or sixths — not dyadic, not even exact in double, and nothing a refinement ever produces. Those get an
+*opaque* identity: deterministic, but outside the comparable set. That is safe because only C1 **corners**
+ever enter an expansion or a facet key, and a bubble is never one. The first version threw on a non-dyadic
+weight and took every C2TB/C1TB pair with it.
+
+### 15.3 Where it is used, and where it deliberately is not
+
+| site | change |
+|---|---|
+| `refinement_coupling.cpp` `node_key()` | reads the digest; the facet sets, `facet_is_too_coarse`, the `Allgatherv`, the flag reconciliation and the vertex-balance closure are untouched |
+| `InterfaceMesh::connect_interface_elements_topologically` | the same vertex-set pairing on an exact `std::map` instead of a KD-tree with an epsilon |
+| `InterfaceElementBase::vertex_match_distance2` | the permutation search returns 0/1 on identity rather than a squared distance — with two genuinely different surfaces the nearest miss is not a match |
+
+The decision is made **per connection, once**, by `pair_is_topological()`: both sides must carry a
+complete set of ids, and the connection must be **coincident**. A periodic or translated pair relates two
+*different* template facets, which no topological identity can bridge, so those keep the positions and
+their offset — as does a user-supplied `matchfunc` and any mesh not built from a `MeshTemplate`. A mesh
+read in at second order is the other limitation: its midside nodes never passed through
+`add_intermediate_node_unique`, so `intermediate_node_map` has never seen them and their entity is not
+recoverable; they fall back to an index identity, which is consistent within the mesh but cannot match a
+neighbour's refinement node.
+
+`PYOOMPH_DISABLE_TOPOLOGICAL_INTERFACE_KEYS=1` reverts to the positions everywhere. The setting is
+re-read once per mesh per adaptation rather than cached forever, so an in-process `monkeypatch` reaches
+it — without that the negative tests silently measured the wrong build.
+
+### 15.4 The junction (§14.4): diagnosed, not fixed
+
+§14.4 attributed the wrong answer at a mixed-space cross point to one multiplier slot being asked to be
+two different spaces. **The measurements do not support that.** Assembling the Jacobian on a 2x2
+four-domain mesh and taking its SVD:
+
+| spaces A,B,C,D | shared multiplier name (today) | distinct name per interface |
+|---|---|---|
+| C1,C1,C1,C1 | ndof 13, rank **13**, cond 7.5e1, err 1.1e-16 | ndof 14, rank **13**, cond 1.1e17, err 1.1e-16 |
+| C1,C1,C1,C2 | ndof 17, rank **17**, cond 4.1e2, **err 2.6e-2** | ndof 18, rank **18**, cond 2.2e3, err 1.1e-16 |
+| C2,C1,C1,C2 | ndof 21, rank **21**, cond 4.0e2, **err 4.2e-2** | ndof 22, rank **22**, cond 1.0e3, err 2.2e-16 |
+
+The shared-name system is **full rank and wrong** — not singular, but a well-posed system imposing a
+different condition. A domain owning two interfaces has one multiplier on the node where they meet, so
+its residual enforces the **sum** of the two coupling conditions rather than each. With equal spaces the
+remaining multipliers still force them individually — that redundancy is real, and merging is what keeps
+the cross point full rank. With a mixed space the redundancy **disappears** (distinct names go from rank
+13/14 to 18/18) and the merged system is no longer equivalent.
+
+Note `C1,C1,C1,C2` fails while *every* multiplier in it negotiates C1, so no space conflict exists at
+all — and A, which owns both slots, touches only B and C, all three C1. It is **D**, which meets A at the
+cross point and nowhere else, that breaks it. Any criterion stated over a domain's own partners misses it.
+
+`Problem._check_coupled_interface_junctions()` therefore **refuses** the configuration: it reconstructs
+each junction by connecting the boundaries that meet pairwise, and throws when a domain's interfaces share
+a multiplier name there while the domains at that junction do not share an element space. A distinct
+`lagr_mult_prefix` per interface is correct in every configuration measured, at the price of the singular
+Jacobian above should the junction later become homogeneous; `with_removed_overconstraining()` is the
+other escape hatch. Making that trade automatic needs the redundancy counted from the junction topology —
+where *k* domains meet with *m* pairwise couplings only *k−1* conditions are independent — which is its
+own piece of work. `use_highest_space=True` is **not** a workaround: measured, it only shrinks the error
+from 1.354e-03 to 4.273e-04.
+
+### 15.5 The quad-face out-of-bounds (§14.6)
+
+`Quad2dFaceOrientation::analyze` built `opposite_node_index` at **this** element's `nnode_1d`, so a C2
+brick face (9 nodes) held indices up to 8 into a 4-node C1 face. It now builds the map at the opposite
+side's `nnode_1d` and writes `-1` where this side has a node the other does not — what the 1d line
+elements and the triangular faces have always done.
+
+### 15.6 What mixed order still costs, and it is not a bug
+
+With the identity fixed, the two sides pair up correctly — but they still integrate the coupling over
+**different surfaces**, because a C2 side's interface is a quadratic curve where a C1 side's is the chord.
+On a *curved* interface that shows up directly in the answer. Measured on `curved`/`curved_tri` with the
+exact solution `u = y`:
+
+```
+same order (C1-C1, C1-C1TB, C2-C2, C2TB-C2TB, ...)   max|u-y| ~ 1e-14
+mixed order (C1-C2, C2-C1, C1TB-C2, C2TB-C1, ...)    max|u-y| ~ 1e-4 ... 1e-3
+```
+
+That is an O(h²) consistency error, not a defect of the coupling machinery, and it is the price of the
+decision recorded in §15.7. On a flat interface it vanishes, which is why §14.2 saw nothing.
+
+A separate, pre-existing effect in the same family: a coupling whose **outer** side is richer than the
+multiplier leaves that side's extra facet dofs carrying an unconstrained reaction. Measured on 3d tets,
+`C1` against `C2TB` gives `max|u-y| = 4.09e-3` on a flat interface, and `C1TB` against `C2TB` now joins it
+(it used to throw). Not introduced here, and not addressed here.
+
+### 15.7 What the sweeps say now
+
+The §14 matrix, re-run against the fix. Same harness, same one-process-per-case discipline.
+
+| sweep | before (§14) | after |
+|---|---|---|
+| `connect`, flat, 2d, all space pairs | 42 ok, **2 segfault** | **44 ok** |
+| `curved` / `curved_tri`, curved entity | 19 ok, **1 segfault** | **20 ok** |
+| `box_hex` / `box_tet`, 3d | 16 ok, **4 throw** (every C1TB pair) | **20 ok** |
+| `move`, curved+moving interface | 22 ok, **22 fail** (20 conformity throws + 2 segfaults) | **44 ok** |
+| `connect` under `mpirun -n 2 --distribute` | 19 ok (C2/C1TB excluded: it segfaulted) | **20 ok**, `ndof` identical to serial |
+| `move` under `mpirun -n 2 --distribute` | — | 19 ok, `ndof` identical to serial |
+
+The 20 `move` cases that used to throw are exactly the mixed-order pairs, and they are exactly the ones
+that fail again under `PYOOMPH_DISABLE_TOPOLOGICAL_INTERFACE_KEYS=1`
+(`test_mixed_order_needs_the_topological_identity`).
+
+One distributed case does not converge: `move:C2TB/C2TB` on `tri_left` under two ranks fails in the Newton
+solver. It is **not** a coupling failure -- it converges serially, the interface machinery gets all the way
+to the solve, and it fails identically with the topological identity switched off. A C2TB-triangle moving
+mesh with a prescribed curved interface is simply a hard problem for that partition; recorded here rather
+than hidden, and excluded from nothing.
+
+### 15.8 Rejected, with the reason
+
+**Constraining the higher side's interface geometry to the meet**, via the existing
+`ConstrainPositionsToC1Space` / `additional_dof_constraints` machinery. It would have made the two sides
+share one surface, removed §15.6's error at source, and left every Eulerian key working untouched — at the
+price of a C2 domain no longer being able to curve at a coupled interface. That price was judged too high.
+The machinery is there, and is re-applied after every adaptation through `reapply_boundary_conditions`,
+should the trade ever look different.
+
+**Lagrangian coordinates as the identity.** Remeshing a deformable solid interpolates `xi`, so an FSI
+pair's two sides need not agree on it.

@@ -1,4 +1,30 @@
 #  @file
+#  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
+#
+#  @section LICENSE
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+#  The main author may be contacted at c.diddens@utwente.nl
+#
+# ========================================================================
+
 #  Mesh point location and mesh-to-mesh transfer (dev_docs/mesh_point_locator.md).
 #
 #  Guards the campaign that replaced oomph::MeshAsGeomObject with pyoomph's own MeshPointLocator and
@@ -330,7 +356,14 @@ def test_interface_dl_reproduces_a_linear_field_across_adaptation():
         before = float(p.get_mesh("domain/top").evaluate_all_observables()["err"])
         p.refine_uniformly()
         after = float(p.get_mesh("domain/top").evaluate_all_observables()["err"])
-    assert before < 1e-20, f"the field was not set up exactly to begin with: {before}"
+    # Not machine zero any more, and deliberately so: setup_initial_conditions used to build the DL
+    # coefficients as a midpoint value plus a finite difference along each local coordinate, which is
+    # exact for a linear field on an affine quad and left this solve with nothing to do. It was also
+    # wrong in general - wrong basis, and a Lagrangian IC evaluated at the origin - so it is a
+    # least-squares fit onto the real DL basis now, exact only up to the normal-equation round-off it
+    # seeds this projection solve with. 2.3e-18 here against 5e-3 for a fit that collapses to a
+    # constant, i.e. fifteen orders of margin on what this guard is actually for.
+    assert before < 1e-16, f"the field was not set up exactly to begin with: {before}"
     # ~1e-8 RMS, not machine zero: the fit is least-squares over points the locator projected onto
     # the new interface, so it inherits the projection's local-coordinate round-off. A fit that
     # collapsed to a constant, or drew points from the neighbouring element, lands near 5e-3 - four

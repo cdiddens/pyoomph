@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -60,7 +60,7 @@ namespace pyoomph
     using namespace oomph::QuadTreeNames;
 
     // Setup the neighbours
-    find_neighbours();
+    DynamicQuadTreeForest::find_neighbours(); // qualified: called from the constructor
 
     // Construct the rotation scheme, note that all neighbour pointers must
     // be set before the constructor is called
@@ -220,12 +220,14 @@ namespace pyoomph
       // MIXED quad+tri meshes: every element (quad or tri) refines 1->4 on the shared QuadTree 4-son
       // bookkeeping, and DynamicQuadTreeForest::find_neighbours resolves quad<->tri root neighbours
       // topologically (shared corner nodes). Any OTHER element type disables adaptation.
+      // One cast per element, not one per element per shape family: element_family() is cached on the
+      // element, whereas each dynamic_cast here walks the virtual-inheritance diamond (~1500 cycles).
       bool all_refineable = true;
       for (unsigned int i = 0; i < this->nelement(); i++)
       {
-        bool is_quad = (dynamic_cast<oomph::QuadElementBase *>(this->element_pt(i)) != NULL);
-        bool is_tri = (dynamic_cast<oomph::TElementBase *>(this->element_pt(i)) != NULL);
-        if (!is_quad && !is_tri) { all_refineable = false; break; }
+        pyoomph::BulkElementBase *be = dynamic_cast<pyoomph::BulkElementBase *>(this->element_pt(i));
+        BulkElementBase::ElementFamily fam = (be ? be->element_family() : BulkElementBase::EF_OTHER);
+        if (fam != BulkElementBase::EF_QUAD && fam != BulkElementBase::EF_SIMPLEX) { all_refineable = false; break; }
       }
       if (all_refineable)
       {
@@ -342,9 +344,8 @@ namespace pyoomph
   // Used for local subdivision of triangular meshes (which cannot be tree-refined, see refinement_possible()).
   unsigned TemplatedMeshBase2d::add_tri_C1(Node* & n1, Node* & n2, Node* & n3)
   {
-    BulkElementBase::__CurrentCodeInstance = codeinst;
+    BulkElementBase::JITCodeScope __jit_scope1(jitcode);
     unsigned res=this->add_new_element(new BulkElementTri2dC1(),{n1,n2,n3});
-    BulkElementBase::__CurrentCodeInstance = NULL;
     return res;
   }
 
@@ -355,10 +356,10 @@ namespace pyoomph
   // sub-triangles sharing this new node.
   unsigned TemplatedMeshBase2d::add_tri_C1TB(Node* & n1, Node* & n2, Node* & n3, Node* & n4)
   {
-    BulkElementBase::__CurrentCodeInstance = codeinst;
+    BulkElementBase::JITCodeScope __jit_scope2(jitcode);
     if (!n4)
     {
-      auto * functable=codeinst->get_func_table();
+      auto * functable=jitcode->get_func_table();
       unsigned ntot = functable->total_num_fields_basebulk;
       n4=new pyoomph::BoundaryNode(n1->time_stepper_pt(),n1->nlagrangian(), n1->nlagrangian_type(), n1->ndim(), n1->nposition_type(), ntot);
       for (unsigned t=0;t<n1->time_stepper_pt()->ntstorage();t++)
@@ -375,7 +376,6 @@ namespace pyoomph
       this->add_node_pt(n4);
     }
     unsigned res=this->add_new_element(new BulkElementTri2dC1TB(),{n1,n2,n3,n4});
-    BulkElementBase::__CurrentCodeInstance = NULL;
     return res;
   }
 
@@ -1137,7 +1137,7 @@ namespace pyoomph
 					 // around silently.
 					 if (!adj)
 					 {
-					   if (!be->is_halo()) throw_runtime_error("Interior facet of a non-halo element has no neighbouring element: the halo layer is incomplete");
+					   if (!element_is_halo(be)) throw_runtime_error("Interior facet of a non-halo element has no neighbouring element: the halo layer is incomplete");
 					   continue;
 					 }
 

@@ -11,7 +11,7 @@ As an example of such a movie, refer to :numref:`secadvstabrisingbubble`, where 
 
 	.. raw:: html 
 
-		<figure class="align-center" id="vidrisingbubble"><video autoplay="True" preload="auto" width="60%" loop=""><source src="../../_static/rising_bubble.mp4" type="video/mp4"></video><figcaption><p><span class="caption-text">Example of the eigendynamics of the rising bubble case.</span> </span></p></figcaption></figure>
+		<figure class="align-center" id="vidrisingbubble"><video autoplay="True" muted="" playsinline="" controls="" preload="auto" width="60%" loop=""><source src="../../_static/rising_bubble.mp4" type="video/mp4"></video><figcaption><p><span class="caption-text">Example of the eigendynamics of the rising bubble case.</span> </span></p></figcaption></figure>
 
 We first start by importing the problem class from :download:`rising_bubble.py` and defining a conventional plotter class. We don't have to do anything regarding the eigendynamics here. This plotter can therefore be also used for the base state, as done in the previous examples.
 

@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -31,7 +31,7 @@ from ..typings import *
 import numpy
 
 from ..generic.problem import *
-from ..meshes.mesh import ODEStorageMesh
+from ..meshes.mesh import ODEStorageMesh, InterfaceMesh
 from .. import _pyoomph_core as _pyoomph
 
 
@@ -50,6 +50,29 @@ class BaseMeshToMeshInterpolator:
     def __init__(self, old:"AnyMesh", new:"AnyMesh"):
         self.old = old
         self.new = new
+        #: Every interpolator of the transfer this one belongs to, keyed by domain name, filled by
+        #: :py:meth:`~pyoomph.generic.problem.Problem.force_remesh` before any
+        #: ``_before_mesh_to_mesh_interpolation`` hook runs. One interpolator is created per domain
+        #: and each hook is dispatched with its own, so an equation living on a boundary that two
+        #: domains SHARE - a free surface between two phases - can only configure the far side's
+        #: transfer through this.
+        self.remesh_group:dict[str,"BaseMeshToMeshInterpolator"]={}
+        #: Full names ("liquid/interface") of interface meshes whose zeta chart is written by
+        #: somebody else. Read by :py:class:`~pyoomph.meshes.zeta.AssignZetaCoordinatesBase`, which
+        #: then leaves them alone instead of overwriting a chart it could not have produced; the
+        #: interpolation itself does not consult it.
+        self.zeta_overridden_boundaries:set[str]=set()
+        #: Boundary names whose nodes are transferred by locating them in the old BULK mesh instead
+        #: of through the old interface mesh. See :py:meth:`InternalInterpolator.interpolate`.
+        self.bulk_locate_boundaries:set[str]=set()
+        #: Boundary names whose zeta chart governs the INTERFACE-ONLY dofs alone, everything else
+        #: being matched geometrically. For a chart that deliberately does not follow the geometry;
+        #: see :py:meth:`InternalInterpolator.interpolate`.
+        self.zeta_for_interface_fields_only:set[str]=set()
+        #: How far a codimension-2 match may reach, per ``"interface/subboundary"`` key, in the
+        #: NONDIMENSIONAL coordinates the nodes are stored in. Anything further away is left alone
+        #: rather than snapped to a corner that a topological change has moved somewhere else.
+        self.boundary_max_distances:dict[str,float]={}
 
     def interpolate(self)->None:
         raise NotImplementedError()
@@ -68,6 +91,7 @@ def _transfer_internal_facet_fields(old:"AnySpatialMesh", new:"AnySpatialMesh")-
     new_skel = new.get_mesh("_internal_facets_", return_None_if_not_found=True)
     if new_skel is None:
         return
+    assert isinstance(new_skel, InterfaceMesh)
     old_skel = old.get_mesh("_internal_facets_", return_None_if_not_found=True)
     if old_skel is None:
         # The skeleton is new (i.e. the equations changed along with the mesh, redefine_problem).
@@ -90,11 +114,12 @@ class ProjectionInternalInterpolator(BaseMeshToMeshInterpolator):
     remaining performance work is (see dev_docs/mesh_point_locator.md phase 4b).
     """
 
-    #: (old,new) mesh pairs whose integration points have been mapped, filled by every instance's
-    #: constructor before any of them runs :py:meth:`interpolate`. The projection is a single global
-    #: solve over all of them - solving one mesh at a time would leave the others assembling their
-    #: physical equations, so the "projection" would be fighting the physics everywhere else.
-    _pending:list[tuple["AnySpatialMesh","AnySpatialMesh"]]=[]
+    #: The instances whose integration points have been mapped, filled by every constructor before
+    #: any of them runs :py:meth:`interpolate`. The projection is a single global solve over all of
+    #: them - solving one mesh at a time would leave the others assembling their physical equations,
+    #: so the "projection" would be fighting the physics everywhere else. The instances rather than
+    #: their mesh pairs, so that the seeding nodal transfer below can be configured per domain.
+    _pending:list["ProjectionInternalInterpolator"]=[]
 
     #: Residual below which a history level counts as projected.
     projection_tolerance:float=1e-11
@@ -110,11 +135,12 @@ class ProjectionInternalInterpolator(BaseMeshToMeshInterpolator):
         # integration points in itself, which is a no-op mapping.
         old.prepare_interpolation()
         new.prepare_zeta_interpolation(old)
-        ProjectionInternalInterpolator._pending.append((old,new))
+        ProjectionInternalInterpolator._pending.append(self)
 
     def interpolate(self):
         cls=ProjectionInternalInterpolator
-        pairs=[(o,n) for o,n in cls._pending if n._has_zeta_projection_prepared()]
+        instances=[i for i in cls._pending if i.new._has_zeta_projection_prepared()]
+        pairs=[(i.old,i.new) for i in instances]
         meshes=[n for _,n in pairs]
         if not meshes:
             return   # another instance already ran the global solve
@@ -123,11 +149,9 @@ class ProjectionInternalInterpolator(BaseMeshToMeshInterpolator):
         # During remeshing neither mesh is guaranteed to have its problem pointer set - get_problem()
         # raises rather than returning None - so try the equation trees as well before giving up.
         problem=None
-        # via get_equations(): EquationTree itself has no get_problem, so the tree fallbacks used to
-        # raise AttributeError and be swallowed by the except below, i.e. never fall back at all.
         for getter in (lambda: self.old.get_problem(), lambda: self.new.get_problem(),
-                       lambda: self.old.get_eqtree().get_equations().get_problem(),
-                       lambda: self.new.get_eqtree().get_equations().get_problem()):
+                       lambda: self.old.get_eqtree().get_problem(),
+                       lambda: self.new.get_eqtree().get_problem()):
             try:
                 problem=getter()
             except Exception:
@@ -188,8 +212,15 @@ class ProjectionInternalInterpolator(BaseMeshToMeshInterpolator):
         # The nodal interpolator already puts fields, positions and history within interpolation
         # error of the answer, so the projection begins essentially converged and only has to move
         # the fields onto their L2-best values.
-        for old_mesh,new_mesh in pairs:
-            InternalInterpolator(old_mesh,new_mesh).interpolate()
+        for inst in instances:
+            seed=InternalInterpolator(inst.old,inst.new)
+            # Configured the way its own domain's projection interpolator was: whatever told that one
+            # that a boundary needs the bulk-locate path, or how far a boundary match may reach, was
+            # talking about the nodal transfer, which is exactly what runs here.
+            seed.bulk_locate_boundaries=set(inst.bulk_locate_boundaries)
+            seed.zeta_for_interface_fields_only=set(inst.zeta_for_interface_fields_only)
+            seed.boundary_max_distances=dict(inst.boundary_max_distances)
+            seed.interpolate()
 
         import scipy.sparse.linalg
         factorisation=None
@@ -274,7 +305,6 @@ class InternalInterpolator(BaseMeshToMeshInterpolator):
         super(InternalInterpolator, self).__init__(old, new)
         self.old:AnySpatialMesh=old
         self.new:AnySpatialMesh=new
-        self.boundary_max_distances:dict[str,float]={}
         self.try_to_use_zeta_on_boundary:bool=True
         #: On a boundary with no zeta defined, match interface nodes by projecting them onto the old
         #: interface geometry instead of blending the two nearest old nodes. Set False to get the old
@@ -293,12 +323,28 @@ class InternalInterpolator(BaseMeshToMeshInterpolator):
         for bn in self.new.get_boundary_names():
             
             bi_new = self.new.get_boundary_index(bn)
+            if bn in self.bulk_locate_boundaries:
+                # Ask the old BULK mesh, not the old boundary. After a topological change the fresh
+                # nodes on this boundary - the symmetry axis inside a gap a pinch-off just opened,
+                # say - lie in the old bulk of the correct phase, while the old boundary of the same
+                # name either did not reach there at all or ran through material that now belongs to
+                # the other phase; the interface-pair passes below would pair them with that.
+                # Deliberately before get_boundary_index() on the OLD mesh, which throws for a
+                # boundary that only the new mesh has; node_is_in_scope() only ever uses bi_new.
+                self.new.nodal_interpolate_from(self.old,bi_new)
+                continue
             bi_old = self.old.get_boundary_index(bn)
             intermesh_new=self.new.get_mesh(bn,return_None_if_not_found=True)
             intermesh_old = self.old.get_mesh(bn, return_None_if_not_found=True)
             if intermesh_old is None and intermesh_new is None:
-                #print("No interface mesh for boundary",bn,"in old and new mesh, skipping interpolation")                                
-                self.new.nodal_interpolate_from(self.old,bi_old)
+                #print("No interface mesh for boundary",bn,"in old and new mesh, skipping interpolation")
+                # bi_NEW: the index selects which of THIS (i.e. the new) mesh's nodes the pass is
+                # responsible for (Mesh::node_is_in_scope), so it is evaluated on the destination.
+                # Boundary indices are assigned per mesh in the order the nodes are visited, so the
+                # old and the new mesh need not agree on them; passing bi_old then left the nodes of
+                # this boundary without any pass of their own - they kept whatever they were built
+                # with, since the bulk pass skips every boundary node.
+                self.new.nodal_interpolate_from(self.old,bi_new)
                 continue # Happens e.g. on corners to another domain
             assert intermesh_old is not None, "Old interface mesh "+bn+" of "+self.old.get_name()+" not found. Index: "+str(bi_old)
             assert intermesh_new is not None, "New interface mesh "+bn+" of "+self.new.get_name()+" not found. Index: "+str(bi_new)
@@ -307,7 +353,19 @@ class InternalInterpolator(BaseMeshToMeshInterpolator):
             if self.try_to_use_zeta_on_boundary and self.old.is_boundary_coordinate_defined(bi_old):
                 if not self.new.is_boundary_coordinate_defined(bi_new):
                     raise RuntimeError("Boundary coordinate along "+bn+" is defined on the old, but not the new mesh")
-                intermesh_new.nodal_interpolate_from(intermesh_old,bi_new)
+                if bn in self.zeta_for_interface_fields_only:
+                    # Two passes, geometry first and the chart on top of it. zeta answers "which
+                    # point of the old interface does this node CORRESPOND to", which is the same
+                    # question as "where in the old mesh is it" only as long as the chart follows the
+                    # geometry. Across a topological change it deliberately does not - the fresh cap
+                    # of a pinch-off is charted onto the old interface near the waist, which is where
+                    # its surface fields come from but not where a bulk field sampled at the cap
+                    # does, nor where its position history is. So the ordinary projection pass keeps
+                    # governing those and the chart governs the interface-only dofs alone.
+                    intermesh_new.nodal_interpolate_from(intermesh_old,bi_new,False)
+                    intermesh_new.nodal_interpolate_from(intermesh_old,bi_new,True,True)
+                else:
+                    intermesh_new.nodal_interpolate_from(intermesh_old,bi_new)
             elif self.project_on_boundary_without_zeta:
                 # No zeta along this boundary. Rather than the nearest-node blend below - which is
                 # not an interpolation and is quadratic in the mesh size - match each new interface
@@ -318,7 +376,7 @@ class InternalInterpolator(BaseMeshToMeshInterpolator):
                 intermesh_new.nodal_interpolate_from(intermesh_old,bi_new,False)
             else:
                 self.new.nodal_interpolate_along_boundary(self.old, bi_new, bi_old, intermesh_new,intermesh_old,boundary_interpolation_max_dist)
-            
+
         # Now also go over all corners etc
         for iname,imsh in self.new._interfacemeshes.items(): 
             for bn in imsh.get_boundary_names():
@@ -336,7 +394,12 @@ class InternalInterpolator(BaseMeshToMeshInterpolator):
                         #print(imsh.nboundary_element(bi_new))
                         boundary_interpolation_max_dist=max(self.boundary_max_distances.get(iname+'/'+bn,0.0),self.boundary_max_distances.get(bn+'/'+iname,0.0))
                         #print("BMAXDIST",boundary_interpolation_max_dist,self.boundary_max_distances)
-                        imsh.nodal_interpolate_along_boundary(imsh_old, bi_new, bi_old, codim2mesh_new,codim2mesh_old, boundary_interpolation_max_dist)
+                        # Interface fields only: the per-boundary passes above have already put
+                        # interpolated bulk values on these very nodes, and this call matches by
+                        # nearest node instead - it would replace them by a two-node blend, which on
+                        # a corner that moved is simply the old corner's value. All this pass is here
+                        # for is the dofs the codim-2 mesh adds on top of them.
+                        imsh.nodal_interpolate_along_boundary(imsh_old, bi_new, bi_old, codim2mesh_new,codim2mesh_old, boundary_interpolation_max_dist, only_interface_fields=True)
 
                     if len(codim2mesh_new._interfacemeshes) > 0:
                         raise RuntimeError("Codim 3 interpolation")

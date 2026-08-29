@@ -2,24 +2,24 @@
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -35,8 +35,71 @@ if TYPE_CHECKING:
 
 no_mpi_file=pathlib.Path(__file__).parent.parent.joinpath("NO_MPI").resolve()
 
+# Environment variables through which the common launchers announce the size of the run, checked
+# BEFORE anything MPI-related is touched: in a build without MPI there is no communicator to ask, and
+# every rank would otherwise happily believe it is the only process there is. One per launcher family,
+# since a job may well be started by a launcher whose runtime is not the one pyoomph was built for.
+# SLURM is deliberately represented by SLURM_STEP_NUM_TASKS rather than SLURM_NTASKS: the latter is
+# set for the whole allocation, so a plain serial `python` inside an `sbatch --ntasks=4` script would
+# look like a 4-rank run, while the step variable only appears for a step actually launched by srun.
+_MPI_LAUNCHER_SIZE_ENV = ("OMPI_COMM_WORLD_SIZE", "PMI_SIZE", "MV2_COMM_WORLD_SIZE",
+                          "SLURM_STEP_NUM_TASKS", "PALS_NRANKS")
+# Same launchers, their rank variables. Only used to keep the refusal below from printing the same
+# paragraph once per rank.
+_MPI_LAUNCHER_RANK_ENV = ("OMPI_COMM_WORLD_RANK", "PMI_RANK", "MV2_COMM_WORLD_RANK",
+                          "SLURM_PROCID", "PALS_RANKID")
+
+
+def _launcher_rank() -> int:
+	"""The rank an MPI launcher advertises, or 0 if it does not say (then everyone reports)."""
+	for name in _MPI_LAUNCHER_RANK_ENV:
+		try:
+			return int(os.environ.get(name, ""))
+		except ValueError:
+			continue
+	return 0
+
+
+def _launcher_world_size() -> "tuple[str,int] | None":
+	"""The (variable, size) an MPI launcher advertises, or None if this is not a launched run."""
+	for name in _MPI_LAUNCHER_SIZE_ENV:
+		val = os.environ.get(name, "")
+		try:
+			size = int(val)
+		except ValueError:
+			continue
+		if size > 1:
+			return name, size
+	return None
+
+
 if no_mpi_file.exists():
 	import sys
+	# Refuse a multi-rank launch of a build that has no MPI. Without this the run does not fail, which
+	# is the problem: every rank runs the WHOLE simulation, none of them aware of the others, all of
+	# them writing into the same output directory. That looks like a parallel run, takes as long as the
+	# serial one, and leaves output files written by several processes at once.
+	_launched = _launcher_world_size()
+	if _launched is not None and os.environ.get("PYOOMPH_ALLOW_SERIAL_UNDER_MPIRUN", "") in ("", "0", "off", "false", "False"):
+		_var, _size = _launched
+		if _launcher_rank() != 0:
+			# The full explanation once is enough; N copies of it bury the one that is read.
+			raise RuntimeError("pyoomph was compiled WITHOUT MPI support and cannot be run with "
+							   + str(_size) + " ranks -- see the message from rank 0.")
+		raise RuntimeError(
+			"pyoomph was compiled WITHOUT MPI support, but this process was started by an MPI launcher "
+			"with " + str(_size) + " ranks (" + _var + "=" + str(_size) + ").\n"
+			"Each rank would run the entire simulation on its own, unaware of the others, and all of them "
+			"would write into the same output directory: " + str(_size) + " identical runs, no speed-up, "
+			"and output files written by several processes at once.\n"
+			"To run in parallel, build pyoomph from source with MPI support (the wheels on PyPI are built "
+			"without it) and install mpi4py:\n"
+			"    python -m pip install --no-build-isolation -e . "
+			"--config-settings=cmake.define.PYOOMPH_USE_MPI=ON\n"
+			"See https://pyoomph.readthedocs.io/en/latest/tutorial/parallel/mpi.html for the details, and "
+			"`python -m pyoomph check mpi` to verify the result.\n"
+			"If you meant to start " + str(_size) + " INDEPENDENT serial runs, set "
+			"PYOOMPH_ALLOW_SERIAL_UNDER_MPIRUN=1 -- each rank must then be given its own output directory.")
 	from .. import _pyoomph_core as _pyoomph
 	_pyoomph.InitMPI(sys.argv)
 	
@@ -73,6 +136,9 @@ if no_mpi_file.exists():
 
 	def get_mpi_any_list(flags, comm=None): #type:ignore
 		return [bool(f) for f in flags] #type:ignore
+
+	def get_mpi_elementwise_max(arr, comm=None): #type:ignore
+		return arr #type:ignore
 
 	def get_mpi_bcast(value, root:int=0, comm=None): #type:ignore
 		return value #type:ignore
@@ -129,6 +195,15 @@ else:
 		# rank-independent order.
 		gathered=comm.allgather([bool(f) for f in flags]) #type:ignore
 		return [any(votes) for votes in zip(*gathered)] #type:ignore
+
+	def get_mpi_elementwise_max(arr, comm=MPI.COMM_WORLD): #type:ignore
+		# Elementwise MAX over a numpy array of the same length and meaning on every rank - indexed
+		# by something rank-independent, a global equation number say. Reduced in place (and the
+		# array returned), so the caller must not hand in a view it still needs unreduced.
+		import numpy
+		out=numpy.ascontiguousarray(arr) #type:ignore
+		comm.Allreduce(MPI.IN_PLACE, out, op=MPI.MAX) #type:ignore
+		return out #type:ignore
 
 	def get_mpi_bcast(value, root:int=0, comm=MPI.COMM_WORLD): #type:ignore
 		# For data that MUST be identical on every rank but is not by construction - anything drawn

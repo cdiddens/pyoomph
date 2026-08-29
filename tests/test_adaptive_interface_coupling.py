@@ -1,5 +1,7 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #
 #  @section LICENSE
 #
@@ -329,3 +331,86 @@ def test_vertex_balance_closure_is_what_closes_it(kind, tmp_path, monkeypatch):
     assert res["vertex_jump"] > 1, \
         "%s: no vertex-only element lags behind the interface even with the closure disabled, so " \
         "test_vertex_connected_elements_follow_the_forced_interface cannot be measuring it" % kind
+
+
+# --- The mixed-element-space matrix (dev_docs/interface_refinement_coupling.md section 14) ------------
+#
+# The tests above run the two domains in the same space, or in the one hard-coded C2/C1 pair of
+# "connect12". These sweep the space axis itself, and they pin BOTH outcomes: what works today, and what
+# does not, so that a fix has something to flip.
+
+_FLAT_PAIRS = [("C1", "C2"), ("C2", "C1"), ("C1", "C2TB"), ("C2TB", "C1"),
+               ("C1TB", "C2"), ("C1TB", "C2TB"), ("C2TB", "C1TB")]
+
+
+@pytest.mark.parametrize("lo,up", _FLAT_PAIRS)
+def test_mixed_spaces_conform_on_a_flat_interface(lo, up, tmp_path):
+    # On a flat interface a C1 domain and a C2 one place a refinement node in exactly the same spot: the
+    # C2 side promotes its midside node, which sits at the chord midpoint, and the C1 side creates one
+    # there. max_vertex_gap states that directly instead of inferring it from the absence of a crash.
+    res = _solve("tri_left", "connect:%s/%s" % (lo, up), (1, 2, "estimator"), tmp_path)
+    assert res["nonconforming"] == 0
+    assert res["max_vertex_gap"] == 0.0, \
+        "%s/%s: the two sides' interface vertices are %.3e apart" % (lo, up, res["max_vertex_gap"])
+
+
+@pytest.mark.parametrize("lo,up", [("C1", "C1"), ("C2", "C2"), ("C1TB", "C1TB"), ("C2", "C2TB")])
+def test_same_order_spaces_survive_a_curved_moving_interface(lo, up, tmp_path):
+    # The "move" family prescribes the interface as a CURVE on both sides -- the geometry a free surface
+    # produces. Two domains of the same order agree about it, whether or not they carry a bubble.
+    res = _solve("quad" if lo in ("C1", "C2") else "tri_left",
+                 "move:%s/%s" % (lo, up), (1, 2, "estimator"), tmp_path)
+    assert res["nonconforming"] == 0
+    assert res["max_vertex_gap"] == 0.0
+
+
+@pytest.mark.parametrize("lo,up", [("C2", "C1"), ("C1", "C2")])
+def test_mixed_order_on_a_curved_moving_interface(lo, up, tmp_path):
+    # The case the topological identity exists for. On a curved interface the C2 side promotes its
+    # midside node -- which sits ON the curve -- to a vertex, while the C1 side creates its new vertex at
+    # the chord midpoint. The two sides refine the SAME facet and disagree about where its midpoint is,
+    # so every quantised-Eulerian key in the machinery used to report "the coarser side could not be
+    # refined any further". Matching on pyoomph::Node::interface_topological_id does not care where the
+    # node ended up. Its negative twin is below.
+    res = _solve("quad", "move:%s/%s" % (lo, up), (1, 2, "estimator"), tmp_path)
+    assert res["nonconforming"] == 0
+
+
+@pytest.mark.parametrize("lo,up", [("C2", "C1"), ("C1", "C2")])
+def test_mixed_order_needs_the_topological_identity(lo, up, tmp_path, monkeypatch):
+    # ... and with the identity switched off it must fail again, or the test above is measuring nothing.
+    monkeypatch.setenv("PYOOMPH_DISABLE_TOPOLOGICAL_INTERFACE_KEYS", "1")
+    with pytest.raises(RuntimeError):
+        _solve("quad", "move:%s/%s" % (lo, up), (1, 2, "estimator"), tmp_path)
+
+
+@pytest.mark.parametrize("spaces", ["C1,C1,C1,C2", "C2,C1,C1,C2", "C1,C1,C2,C2"])
+def test_mixed_spaces_at_a_four_domain_junction_are_refused(spaces, tmp_path):
+    # At a junction ConnectFieldsAtInterface gives both of a domain's interfaces the same multiplier
+    # NAME, so they share one slot on the cross-point node and the multiplier enforces the SUM of the two
+    # coupling conditions. That is exact when every domain there carries the same space (the remaining
+    # multipliers still force each condition individually -- rank 13 of 13 shared against 13 of 14 with
+    # distinct names) and WRONG as soon as one of them does not: measured max|u-y| 2.6e-2 against
+    # 1.1e-16, full rank, Newton converging, nonconforming == 0. Nothing downstream can see it, so it is
+    # refused rather than left to be discovered. See dev_docs/interface_refinement_coupling.md 14.4.
+    with pytest.raises(RuntimeError, match="share ONE multiplier slot"):
+        _solve("four_corner:" + spaces, "connect1", (1, 2, "level"), tmp_path)
+
+
+@pytest.mark.parametrize("kind", two_domain_cases.FOUR_DOMAIN_KINDS)
+def test_homogeneous_four_domain_junctions_are_not_refused(kind, tmp_path):
+    # The negative twin of the test above: the refusal must be triggered by the SPACES at the junction,
+    # not by the junction itself, or every four-domain case in the suite would stop running.
+    res = _solve(kind, "connect1", (1, 2, "level"), tmp_path)
+    assert res["maxuerr"] < _U_TOL
+
+
+@pytest.mark.parametrize("kind", ["tri_left", "tri_crossed", "curved_tri"])
+def test_c2_against_c1tb(kind, tmp_path):
+    # This SEGFAULTED, on any refinement at all. get_interface_field_connection_space walked a total
+    # order in which C1TB sat below C2 and returned C1TB -- but a C2 triangle has no bubble node, its
+    # C1TB row of Nodal_Space_Index_To_Element_Index_Map is empty, and
+    # interpolate_newly_constructed_additional_dof indexed off the end of it. C1TB and C2 are
+    # incomparable; their meet is C1. See dev_docs/interface_refinement_coupling.md section 14.5.
+    res = _solve(kind, "connect:C2/C1TB", (1, 2, "estimator"), tmp_path)
+    assert res["nonconforming"] == 0

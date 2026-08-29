@@ -39,7 +39,7 @@ telling the user to reorder their imports when it lost that race.
 import matplotlib.text
 from matplotlib.figure import Figure
 
-from .model import AXIS_OBSERVABLE
+from .model import AXIS_OBSERVABLE, BRANCH_LOCUS, BRANCH_ORBIT
 
 from pathlib import Path
 import numpy
@@ -80,21 +80,22 @@ class BifurcationDiagramPlotter:
     def set_yscale(self,scale): self.axes.set_yscale(scale)
 
     def initialise_view(self,controller):
-        """Set the starting window once, from the explicit initial view or around the first point.
+        """Set the starting window once, from the explicit initial view or from the controller.
 
-        The tiny 1e-4 box around the first point is deliberate: the multistep sweep stops at the
-        axes border, so a fresh diagram starts zoomed in and the user zooms out to sweep further.
+        The box comes from BifurcationController.initial_view_box(): a few ds ahead of the first point
+        along the parameter axis, and still the tiny 1e-4 box across it, since nothing is known about
+        the observable's scale until something has been solved. The view only ever grows from here.
         """
         if self._view_initialised:
             return
         self._view_initialised=True
-        cp=controller._get_current_point().get_coordinate(controller.y_axis,xspec=controller.x_axis)
         if controller._initial_view is not None:
             self.axes.set_xlim(controller._initial_view[0],controller._initial_view[1])
             self.axes.set_ylim(controller._initial_view[2],controller._initial_view[3])
         else:
-            self.axes.set_xlim(cp[0]-1e-4,cp[0]+1e-4)
-            self.axes.set_ylim(cp[1]-1e-4,cp[1]+1e-4)
+            xmin,xmax,ymin,ymax=controller.initial_view_box()
+            self.axes.set_xlim(xmin,xmax)
+            self.axes.set_ylim(ymin,ymax)
 
     def apply_saved_view(self,fullinfo:dict):
         """Restore limits and scales from a state.json dict."""
@@ -131,6 +132,14 @@ class BifurcationDiagramPlotter:
         for t in list(gca.texts):
             try:
                 t.remove()
+            except Exception:
+                pass
+        # Collections, for the same reason and in the same defensive form. fill_between (the orbit
+        # min/max band) returns one, and none of the loops above reaches it - so without this the
+        # bands accumulate one per redraw and the shading darkens on every keystroke.
+        for c in list(gca.collections):
+            try:
+                c.remove()
             except Exception:
                 pass
 
@@ -195,7 +204,7 @@ class BifurcationDiagramPlotter:
             # bifurcation sits for every value of the second parameter. Every point of it IS the
             # bifurcation, which is also why the stability segmentation is bypassed - it would see a
             # zero real part at every point and alternate the line style from one to the next.
-            if b.kind=="locus":
+            if b.kind==BRANCH_LOCUS:
                 self._draw_locus_branch(b,xaxis,yaxis,current=b is controller.current_branch)
                 continue
             # A branch from another slice of parameter space is a different physical result. It is
@@ -207,6 +216,19 @@ class BifurcationDiagramPlotter:
                 self._draw_faint_branch(b,xaxis,yaxis)
                 continue
             color="red" if b == controller.current_branch else "grey"
+
+            # An orbit branch: the line below shows the cycle's AVERAGE, so the extremes are drawn
+            # under it as a shaded band. One polygon for the whole branch, not one per stability
+            # segment - the segments overlap by a point at every change of stability, and a
+            # per-segment band would darken visibly at each join.
+            if b.kind==BRANCH_ORBIT:
+                band=b.orbit_band(yaxis,xspec=xaxis,smooth=controller.interpolated_splines)
+                if band is not None:
+                    x,lo,hi=band
+                    # zorder 0.5: under every line (2) and marker, over the faint context branches (0).
+                    gca.fill_between(x,lo,hi,color=color,alpha=0.18,linewidth=0,zorder=0.5)
+                    # Deliberately NOT extend_lims: a branch does not grow the view here either, and
+                    # the band is part of the branch. Autoscaling picks it up through axis_range().
 
             if controller.interpolated_splines:
                 segs,stabs=b.smooth_branch_stab_list(yaxis,xspec=xaxis,
@@ -269,7 +291,10 @@ class BifurcationDiagramPlotter:
                 gca.plot([pc[0]],[pc[1]], marker='o', markersize=5,color="green" )
                 x0=numpy.array([pc[0],pc[1]])
                 xy_start=(float(x0[0]),float(x0[1]))
-                tang=controller._tangs.get(tang_key) if tang_key is not None else None
+                # Not _tangs directly: on a fresh branch there is no tangent yet and the controller
+                # falls back to the parameter axis, so the arrow says which way Step will go before
+                # any step has been taken. See BifurcationController.plotted_tangent.
+                tang=controller.plotted_tangent()
                 if tang is not None and controller._last_ds is not None:
                     dx=controller._last_ds*tang
                     xy_end=(float(x0[0]+dx[0]),float(x0[1]+dx[1]))

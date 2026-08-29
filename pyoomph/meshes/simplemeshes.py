@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -47,11 +47,13 @@ class LineMesh(MeshTemplate):
         left_name: The name of the left boundary.
         right_name: The name of the right boundary.
         nodal_dimension: The nodal dimension of the mesh, can be used to curve the mesh later on.
-        periodic: Whether the mesh is periodic.
+
+    For a periodic line, add :py:class:`~pyoomph.equations.generic.PeriodicBC` to the equations, e.g.
+    ``PeriodicBC("right", offset=[L]) @ "left"``.
     """
 
     def __init__(self, N: int = 10, size: ExpressionOrNum = 1.0, minimum: ExpressionOrNum = 0.0, name: str | Callable[[float], str] = "domain", left_name: str = "left", right_name: str = "right",
-                 nodal_dimension: int | None = None, periodic: bool = False):
+                 nodal_dimension: int | None = None):
         super(LineMesh, self).__init__()
         self.N = N
         self.size = size
@@ -60,7 +62,6 @@ class LineMesh(MeshTemplate):
         self.left_name = left_name
         self.right_name = right_name
         self.nodal_dimension = nodal_dimension
-        self.periodic = periodic
 
     def define_geometry(self):
         """
@@ -106,8 +107,6 @@ class LineMesh(MeshTemplate):
         self.add_facet_to_boundary(self.left_name, [pleft])
         #self.add_nodes_to_boundary(self.right_name, [pright])
         self.add_facet_to_boundary(self.right_name, [pright])
-        if self.periodic:
-            self.add_periodic_node_pair(pleft, pright)
 
 
 ###################################
@@ -122,24 +121,21 @@ class RectangularQuadMesh(MeshTemplate):
         size: The size of the mesh, either by a single value (for both directions) or by two values (for x and y directions).            
         N: The number of elements in each dimension.. Can be a single value or a list of two values for x and y dimensions respectively.
         lower_left: The coordinates of the lower-left corner of the mesh, i.e. the mesh ranges from ``lower_left[0]`` to ``lower_left[0] + size[0]`` in x-direction and ``lower_left[1]`` to ``lower_left[1] + size[1]]`` in y-direction. Can be set to ``"centered"`` to automatically center the mesh around the origin.            
-        periodic: Whether the mesh is periodic, either in both directions or in x and y directions separately.
         split_in_tris: Split the quadrilateral elements into triangles.
         split_scott_vogelius: Whether to use splitting into Scott-Vogelius elements.
         boundary_names: A dictionary mapping boundary names ``"left"``, ``"right"``, ``"top"``, ``"bottom"`` to their corresponding names. Alternatively a function, which also takes the center coordinates of each element as input, can be used to define the boundary names.            
         nodal_dimension: The nodal dimension of the mesh, can be used to curve the mesh later on.
+
+    For a periodic mesh, add :py:class:`~pyoomph.equations.generic.PeriodicBC` to the equations, e.g.
+    ``PeriodicBC("right", offset=[Lx, 0]) @ "left"``, and likewise for ``"bottom"``/``"top"``.
     """
     
-    def __init__(self, *, name:str | Callable[[float, float], str]="domain", size:ExpressionOrNum | list[ExpressionOrNum]=1.0, N:int | list[int]=10, lower_left:ExpressionOrNum | list[ExpressionOrNum] | Literal["centered"]=[0, 0], periodic:bool | list[bool]=False, split_in_tris:Literal[False, "alternate_left", "alternate_right", "left", "right", "crossed"]=False,split_scott_vogelius:bool=False, boundary_names:dict[str,str | Callable[[float], str]]={},nodal_dimension:int | None=None):
+    def __init__(self, *, name:str | Callable[[float, float], str]="domain", size:ExpressionOrNum | list[ExpressionOrNum]=1.0, N:int | list[int]=10, lower_left:ExpressionOrNum | list[ExpressionOrNum] | Literal["centered"]=[0, 0], split_in_tris:Literal[False, "alternate_left", "alternate_right", "left", "right", "crossed"]=False,split_scott_vogelius:bool=False, boundary_names:dict[str,str | Callable[[float], str]]={},nodal_dimension:int | None=None):
         super().__init__()
         self.name:str | Callable[[float, float], str] = name
         self.size = size
         self.N = N
         self.lower_left:ExpressionOrNum | list[ExpressionOrNum] | Literal["centered"] = lower_left
-
-        if isinstance(periodic, bool):
-            self.periodic = [periodic, periodic]
-        else:
-            self.periodic = periodic
         self.split_in_tris = split_in_tris
         self.remesher = Remesher2d(self)
         self.boundary_names=boundary_names
@@ -312,25 +308,6 @@ class RectangularQuadMesh(MeshTemplate):
                 if iy == 0:  add_to_bound("bottom", [n00, n10],(ix + 0.5) * size[0] / nN[0] + lower_left[0])
                 if iy == nN[1] - 1:  add_to_bound("top", [n01, n11],(ix + 0.5) * size[0] / nN[0] + lower_left[0])
 
-        if self.periodic[0]:
-            xl = lower_left[0]
-            xr = size[0] + lower_left[0]
-            for iy in range(nN[1] + 1):
-                y = iy * size[1] / nN[1] + lower_left[1]
-                nl = self.add_node_unique(xl, y)
-                nr = self.add_node_unique(xr, y)
-                print(y, nl, nr)
-                self.add_periodic_node_pair(nl, nr)
-
-        if self.periodic[1]:
-            yb = lower_left[1]
-            yt = size[1] + lower_left[1]
-            for ix in range(nN[0] + 1):
-                x = ix * size[0] / nN[0] + lower_left[0]
-                nb = self.add_node_unique(x, yb)
-                nt = self.add_node_unique(x, yt)
-                self.add_periodic_node_pair(nb, nt)
-
         if not callable(self.name):
             self._fntrunk = "RectangularQuadMesh_" + self.name
         else:
@@ -485,12 +462,10 @@ class CuboidBrickMesh(MeshTemplate):
         self.size=size
         self.N=N
         self.lower_left=lower_left
-        self.periodic:bool=False
         self.domain_name=domain_name
 
     def define_geometry(self):
         size = self.nondim_size(self.size)
-        periodic=self.periodic
         N=self.N
         lower_left=self.lower_left
         if isinstance(size, int) or isinstance(size, float):
@@ -506,11 +481,6 @@ class CuboidBrickMesh(MeshTemplate):
         if not (isinstance(size[2], int) or isinstance(size[2], float)): #type:ignore
             raise ValueError("Argument size[2] must be a number, but got size=" + str(size))
 
-
-        if isinstance(periodic, bool): #type:ignore
-            periodic = [periodic, periodic, periodic]
-        if True in periodic:
-            raise RuntimeError("Periodic not implemented")
 
         if isinstance(N, int) :
             N = [N, N, N] #type:ignore

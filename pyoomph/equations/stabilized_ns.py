@@ -250,7 +250,7 @@ class StabilizedNavierStokes(NavierStokesEquations):
         # Laplace form. -p I is kept exactly as the base class writes it, including pressure_factor
         # and pressure_sign_flip, so that only the viscous part changes.
         if self.stress_tensor is not None:
-            return self.stress_tensor
+            return convert_to_expression(self.stress_tensor)
         u, p = var(self.velocity_name), var(self.pressure_name)
         return (convert_to_expression(self.dynamic_viscosity) * grad(u)
                 - identity_matrix() * self.pressure_factor * p * (-1 if self.pressure_sign_flip else 1))

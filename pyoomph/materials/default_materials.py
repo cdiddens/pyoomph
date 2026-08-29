@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -48,6 +48,18 @@ class PureLiquidWater(PureLiquidProperties):
         self.dynamic_viscosity = subexpression(
             2.414e-5 * (10 ** (247.8 / (TKelvin - 140))) * pascal * second
         )
+
+        # Malmberg & Maryott, J. Res. Natl. Bur. Stand. 56 (1956) 1, valid 0-100 C. 78.36 at 25 C.
+        TCelsius = TKelvin - 273.15
+        self.relative_permittivity = subexpression(
+            87.740 - 0.40008 * TCelsius + 9.398e-4 * TCelsius ** 2 - 1.410e-6 * TCelsius ** 3
+        )
+
+        # Pure water is not an insulator but very nearly one: this is the self-dissociation
+        # conductivity of ultrapure water at 25 C. Any real electrolyte overwhelms it by orders of
+        # magnitude, so set it from the dissolved ions (see
+        # BaseLiquidProperties.set_electric_conductivity_from_ions) rather than relying on this.
+        self.electric_conductivity = 5.5e-6 * siemens / meter
 
         # https://www.thecalculator.co/others/Water-Density-Calculator-629.html
         self.mass_density = subexpression(
@@ -99,6 +111,11 @@ class PureLiquidGlycerol(PureLiquidProperties):
         super().__init__()
         # https://en.wikipedia.org/wiki/Glycerol
         self.molar_mass = 92.094 * gram / mol
+
+        # Malmberg & Maryott, J. Res. Natl. Bur. Stand. 56 (1956) 1: 42.5 at 25 C. Not set as a
+        # correlation because the temperature dependence is not needed here; a mixture does not
+        # average this automatically, see get_absolute_permittivity.
+        self.relative_permittivity = 42.5
 
         self.dynamic_viscosity = 1 * pascal * second  ##TODO Correct ones here
 
@@ -429,6 +446,11 @@ class PureGasAir(PureGasProperties):
         TKelvin = var("temperature") / kelvin
 
         self.set_mass_density_from_ideal_gas_law()
+
+        # Dry air at ambient conditions. It is 1.00059, and the difference from vacuum matters for
+        # essentially nothing -- but having it set means a gas domain can be handed to the
+        # electrostatics as a fluid_props like any other phase.
+        self.relative_permittivity = 1.00059
 
         # Fit from data at https://www.engineeringtoolbox.com/dry-air-properties-d_973.html
         self.dynamic_viscosity = (

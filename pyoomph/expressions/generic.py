@@ -3,30 +3,31 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
  
+from .._deprecation import deprecated_kwargs as _deprecated_kwargs
 import math
 from ..typings import *
 
@@ -55,6 +56,12 @@ SingleOrMultipleExpressions:TypeAlias=Expression|tuple[Expression,...]
 OptionalCoordinateSystem:TypeAlias=_pyoomph.CustomCoordinateSystem|None
 TimeSteppingScheme:TypeAlias=Literal["BDF1","BDF2","Newmark2","TPZ","MPT","Simpson","Boole","trapezoidal","Kepler","Milne","midpoint"]
 OptionalTimeSteppingScheme:TypeAlias=TimeSteppingScheme|None
+#: The schemes :py:func:`~pyoomph.expressions.time_derivative_of_integral` actually honours. A
+#: different set from :py:data:`TimeSteppingScheme`: the ``_degr`` variants exist only here, and the
+#: quadrature-style names of that alias are silently downgraded to ``"BDF1"`` by that function, since
+#: they are not linear multistep methods. Conversely ``time_scheme()`` rejects the ``_degr`` names, so
+#: an equation offering both needs two separate arguments.
+IntegralTimeSteppingScheme:TypeAlias=Literal["BDF1","BDF2","Newmark2","BDF2_degr","Newmark2_degr"]
 
 FiniteElementSpaceEnum:TypeAlias=Literal["C1","C1TB","C2","C2TB","D1","D1TB","D2","D2TB","DL","D0"]
 def assert_valid_finite_element_space(inp:str)->FiniteElementSpaceEnum:
@@ -93,7 +100,7 @@ def get_order_of_space(space:FiniteElementSpaceEnum)->int:
 	else:
 		raise RuntimeError("Unknown space: "+str(space))
 
-def find_dominant_element_space(*spaces:FiniteElementSpaceEnum):
+def find_dominant_element_space(*spaces:FiniteElementSpaceEnum)->FiniteElementSpaceEnum:
 	res=""
 	for space in spaces:
 		# str, not the space enum: the discontinuous spaces are compared through their continuous
@@ -120,7 +127,75 @@ def find_dominant_element_space(*spaces:FiniteElementSpaceEnum):
 		space_in_order=["C1","C1TB","C2","C2TB"]
 		if space_in_order.index(r)>space_in_order.index(res):
 			res=r
-	return res
+	return cast(FiniteElementSpaceEnum,res)
+
+def find_subordinate_element_space(*spaces:FiniteElementSpaceEnum)->FiniteElementSpaceEnum:
+	"""The MEET of the given spaces, i.e. the largest space contained in all of them.
+
+	The dual of find_dominant_element_space, and it has to be written as a lattice rather than as a
+	position in a list, for the same reason the join above needs its special case: the order is
+	C1 < C1TB < C2TB and C1 < C2 < C2TB, and C1TB and C2 are INCOMPARABLE -- a C2 element has no bubble
+	node, a C1TB element has no midside ones. Their join is C2TB ("only space that can hold both") and
+	their meet is C1.
+
+	Getting this wrong is not academic: get_interface_field_connection_space used to walk a total order
+	in which C1TB sat below C2, so a C2 domain coupled to a C1TB one negotiated a C1TB multiplier -- a
+	space the C2 element cannot carry at all, whose Nodal_Space_Index_To_Element_Index_Map row is empty.
+	The result was a segfault, not an error. See dev_docs/interface_refinement_coupling.md section 14.5.
+	"""
+	res=""
+	for space in spaces:
+		# Same conventions as find_dominant_element_space: compare the discontinuous spaces through
+		# their continuous counterpart, and treat "" as the not-yet-set sentinel.
+		r:str=space
+		if r=="":
+			continue
+		if r=="D0" or r=="DL":
+			r="C1"
+		elif r[0]=="D":
+			r="C"+r[1:]
+		if res=="":
+			res=r
+			continue
+		if (r=="C2" and res=="C1TB") or (r=="C1TB" and res=="C2"):
+			res="C1" # The only space contained in both
+			continue
+		space_in_order=["C1","C1TB","C2","C2TB"]
+		if space_in_order.index(r)<space_in_order.index(res):
+			res=r
+	return cast(FiniteElementSpaceEnum,res)
+
+def largest_facet_space(parent_space:str,parent_dim:int)->FiniteElementSpaceEnum:
+	"""The largest space a field on a FACET of a bulk domain can use, given the bulk domain's own space.
+
+	A facet does not inherit everything the bulk element has. The bubble spaces are the interesting case,
+	and the rule is not "the parent's space" but "does the parent element actually own a node there":
+
+	  * C1TB/C2TB need a bubble node. A C2 element has none -- BulkElementTri2dC2's C1TB row of
+	    Nodal_Space_Index_To_Element_Index_Map is literally empty (src/elements_2d.cpp). Asking for a
+	    C1TB field on such an interface used to index off the end of that empty row and SEGFAULT
+	    (dev_docs/interface_refinement_coupling.md section 14.5).
+	  * in 3d the facet is a 2d face, and a C1TB tet carries only a CELL bubble, not a face one. Only a
+	    C2TB tet provides the face bubble a C1TB facet field would need.
+
+	On the tensor-product families the TB variants are degenerate anyway (a quad's C1TB node map equals
+	its C1 one), so reducing C1TB to C1 there costs nothing and keeps this rule family-independent.
+	"""
+	if parent_space=="" or parent_space is None:
+		# "" is the not-yet-set sentinel these space helpers pass around, not a real space
+		return cast(FiniteElementSpaceEnum,"")
+	p:str=parent_space
+	if p=="D0" or p=="DL":
+		p="C1"
+	elif p[0]=="D":
+		p="C"+p[1:]
+	if p=="C1":
+		return "C1"
+	if p=="C1TB":
+		return "C1" if parent_dim>=3 else "C1TB"
+	if p=="C2":
+		return "C2"
+	return "C2TB"
 
 if TYPE_CHECKING:
 	from ..generic.codegen import FiniteElementCodeGenerator
@@ -424,7 +499,8 @@ def set_weak_conjugate_second_argument(conjugate:bool):
 	_weak_mode_conjugate_second_arg=conjugate
 
 
-def weak(a:ExpressionOrNum,b:ExpressionOrNum,*,dimensional_dx:bool=False,lagrangian:bool=False,coordinate_system:OptionalCoordinateSystem=None)->Expression:
+@_deprecated_kwargs(coordinate_system="coordsys")
+def weak(a:ExpressionOrNum,b:ExpressionOrNum,*,dimensional_dx:bool=False,lagrangian:bool=False,coordsys:OptionalCoordinateSystem=None)->Expression:
 	"""
 	Construct a term of a weak form, i.e. (a,b)=integral_Omega a*b dOmega where Omega is the domain.
 	a is usually an expression depending on unknowns and b is usually a test function or spatial differentiations thereof.
@@ -434,17 +510,17 @@ def weak(a:ExpressionOrNum,b:ExpressionOrNum,*,dimensional_dx:bool=False,lagrang
 		b (ExpressionOrNum): A testfunction or any linear function/operator applied on a testfunction.
 		dimensional_dx (bool, optional): Flag indicating whether consider spatial integration units (e.g. m, m^2, m^3). Defaults to False.
 		lagrangian (bool, optional): Flag indicating whether to integrate with respect to the Lagrangian coordinates and domain. Defaults to False.
-		coordinate_system (OptionalCoordinateSystem, optional): The coordinate system to use. Defaults to None, meaning the coordinate system at equation level, parent equation level or problem level.
+		coordsys (OptionalCoordinateSystem, optional): The coordinate system to use. Defaults to None, meaning the coordinate system at equation level, parent equation level or problem level. The former name ``coordinate_system`` is deprecated, but still accepted.
 
 	Returns:
 		Expression: A weak form that can be further used in expressions or added to the residuals of equations by the method add_residual.
 	"""
 
 	flags=0
-	if coordinate_system is None:
-		coordsys=_pyoomph.Expression(0)
+	if coordsys is None:
+		coordsys_expr=_pyoomph.Expression(0)
 	else:
-		coordsys = 0 + _pyoomph.GiNaC_wrap_coordinate_system(coordinate_system)
+		coordsys_expr = 0 + _pyoomph.GiNaC_wrap_coordinate_system(coordsys)
 	if dimensional_dx:
 		flags+=2
 	if lagrangian:
@@ -456,18 +532,22 @@ def weak(a:ExpressionOrNum,b:ExpressionOrNum,*,dimensional_dx:bool=False,lagrang
 	if _weak_mode_conjugate_second_arg:
 		b=_pyoomph.GiNaC_get_real_part(b)-_pyoomph.GiNaC_imaginary_i()*_pyoomph.GiNaC_get_imag_part(b)
 		#a = _pyoomph.GiNaC_get_real_part(a) - _pyoomph.GiNaC_imaginary_i() * _pyoomph.GiNaC_get_imag_part(a)
-	return _pyoomph.GiNaC_weak(a,b,_pyoomph.Expression(flags),coordsys)
+	return _pyoomph.GiNaC_weak(a,b,_pyoomph.Expression(flags),coordsys_expr)
 
 # Lagrangian weak
-def Weak(a:ExpressionOrNum,b:ExpressionOrNum,*,dimensional_dx:bool=False,coordinate_system:OptionalCoordinateSystem=None)->Expression:
+@_deprecated_kwargs(coordinate_system="coordsys")
+def Weak(a:ExpressionOrNum,b:ExpressionOrNum,*,dimensional_dx:bool=False,coordsys:OptionalCoordinateSystem=None)->Expression:
 	"""
-	Shortcut for weak(a,b,dimensional_dx=dimensional_dx,lagrangian=True,coordinate_system=coordinate_system)
+	Shortcut for weak(a,b,dimensional_dx=dimensional_dx,lagrangian=True,coordsys=coordsys).
+
+	The argument ``coordinate_system`` is a deprecated alias for ``coordsys``.
 	"""
-	return weak(a,b,dimensional_dx=dimensional_dx,lagrangian=True,coordinate_system=coordinate_system)
+	return weak(a,b,dimensional_dx=dimensional_dx,lagrangian=True,coordsys=coordsys)
 
 
 
-def minimize_functional_derivative(F:ExpressionOrNum,only_with_respect_to:Expression | set[Expression] | list[Expression] | tuple[Expression, ...] | None=None,*,coordinate_system:OptionalCoordinateSystem=None,lagrangian:bool=False,dimensional_dx:bool=False,dimensional_testfunctions:bool=True)->Expression:
+@_deprecated_kwargs(coordinate_system="coordsys")
+def minimize_functional_derivative(F:ExpressionOrNum,only_with_respect_to:Expression | set[Expression] | list[Expression] | tuple[Expression, ...] | None=None,*,coordsys:OptionalCoordinateSystem=None,lagrangian:bool=False,dimensional_dx:bool=False,dimensional_testfunctions:bool=True)->Expression:
     if only_with_respect_to is None:
         only_with_respect_to=[]
     elif isinstance(only_with_respect_to,(set,tuple,list)):
@@ -476,10 +556,10 @@ def minimize_functional_derivative(F:ExpressionOrNum,only_with_respect_to:Expres
         only_with_respect_to=[only_with_respect_to]
         
     flags=0
-    if coordinate_system is None:
+    if coordsys is None:
         coordsys_expr=_pyoomph.Expression(0)
     else:
-        coordsys_expr = 0 + _pyoomph.GiNaC_wrap_coordinate_system(coordinate_system)
+        coordsys_expr = 0 + _pyoomph.GiNaC_wrap_coordinate_system(coordsys)
     # Must agree with weak(a,b) flags
     if dimensional_dx:
         flags+=2
@@ -1234,7 +1314,7 @@ def delayed_lambda_expansion(func:Callable[[],Expression])->Expression:
 	return 0+_pyoomph.GiNaC_delayed_expansion(wrapped)
 
 
-def evaluate_in_domain(expr:ExpressionOrNum,domain:str | _pyoomph.FiniteElementCode | None):
+def evaluate_in_domain(expr:ExpressionOrNum,domain:str | _pyoomph.FiniteElementCode | None)->Expression:
 	"""
 	Evaluates the given expression within the specified domain. Each var inside the expression will be evaluated in the given domain. Useful to e.g. evaluate the expression in the bulk (domain="``..``") when at an boundary element, or at the opposite side of the interface (domain="``|.``")
 

@@ -866,12 +866,23 @@ transient without trouble.
 * **Tet per-element hanging inside `adapt_mesh`.** The tet driver runs in `post_adapt` (a mesh loop), not
   in `adapt_mesh`'s per-element hooks, because the chain flatten inherently needs an all-elements-done
   post-pass. Consequence: a `refine_selected` / `custom_adapt` hanging gap.
-* **Distributed eigensolves.** `--distribute` with SLEPc segfaults in oomph's
-  `Problem::parallel_sparse_assemble` reached via `get_eigenproblem_matrices`, *including on a
-  non-adaptive mesh with zero hanging nodes* — a general distributed-eigen-assembly defect, not an
-  adaptivity one. Enabling them is: (1) fix that crash; (2) extend the §8.3 hanging-value collapse to
-  `assemble_eigenproblem_matrices` and to the eigenvector→node output path; (3) fix the
-  `get_eigenfunction` bindings, which index a distributed `Vector<DoubleVector>` the way §8.4 describes.
+* ~~**Distributed eigensolves.**~~ **All three parts of this item are closed**, and it is kept only
+  because the middle one was re-opened on paper in 2026-08 by reading the call sites rather than
+  measuring, which is worth not repeating. (1) The crash is fixed; distributed eigensolving works and
+  is tested ([mpi_eigenproblems.md](mpi_eigenproblems.md)). (2) The §8.3 hanging-value collapse is
+  indeed *not* called from `assemble_eigenproblem_matrices` — `sync_hanging_values_if_parallel` sits
+  in `Problem::get_residuals`/`get_jacobian` only — but that does not matter, and the reason is worth
+  writing down: the eigen element loop calls each element's own `interpolate_hang_values()` anyway, and
+  the masters it reads are current because every route that writes the dofs (`set_current_dofs`, the
+  Newton step) ends in `synchronise_all_dofs()`. **Measured** on a nonlinear adapted problem (48 hanging
+  nodes, `(1+u²)∇u` and `exp(u)` so that J and M genuinely depend on the state): forcing an explicit
+  `collapse_hanging_node_values()`/`interpolate_hanging_values()` immediately before
+  `solve_eigenproblem` moves no eigenvalue, at 1 rank, at 2 replicated and at 2 distributed. A linear
+  problem cannot show anything here at all, since its eigen matrices never read the state. (3) The
+  handlers' `get_eigenfunction` are fine: all four (`MyFoldHandler`, `MyHopfHandler`,
+  `MyPitchForkHandler`, `AzimuthalSymmetryBreakingHandler`) redistribute onto a globally replicated
+  `LinearAlgebraDistribution` before the binding indexes them, so the binding's `Ndof`-long loop is in
+  bounds.
 * **Curvilinear macro-element mapping for simplices/wedges/pyramids** where curved boundaries meet
   refinement — see [macro_elements.md](macro_elements.md).
 * **Coverage that was chosen, not blocked.** The refinement-criterion axis is swept distributed in 2D

@@ -1,3 +1,30 @@
+#  @file
+#  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
+#
+#  @section LICENSE
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+#  The main author may be contacted at c.diddens@utwente.nl
+#
+# ========================================================================
+
 from pathlib import Path
 import sys,os
 import argparse
@@ -9,6 +36,7 @@ parser.add_argument("--no-petsc", help="Do not select a PETSc build at all: skip
 parser.add_argument("--keep-logs", help="Keep log files also of successful tests", action="store_true")
 parser.add_argument("--keep-outdirs", help="Do not delete each script's output directory after it runs. Useful for comparing generated code across repeated runs (e.g. for determinism testing)", action="store_true")
 parser.add_argument("--mpirun", type=int, default=0, metavar="N", help="Run each script under 'mpirun -n N' instead of directly. Default 0, i.e. no mpirun")
+parser.add_argument("--omp", type=int, default=0, metavar="N", help="Pass '--omp N' to each script, i.e. assemble the elements on N threads. Default 0, i.e. leave each script on the serial element loop. Composes with --mpirun, which is threads per rank then")
 parser.add_argument("--distribute", help="Pass --distribute to each script, i.e. distribute the mesh over the ranks. Only meaningful together with --mpirun", action="store_true")
 # Folders to skip used to be read from sys.argv directly, which stopped working when argparse was
 # added - argparse rejects any positional argument it does not know about.
@@ -90,7 +118,17 @@ def simulation_seconds(started_at):
 # reported as a skip instead, by name, and listed again at the end where the nightly picks it up.
 # Nothing else is forgiven: a ModuleNotFoundError for anything not on this list is a real failure.
 _OPTIONAL_MODULES={"precice":"preCICE (pip install pyprecice, plus a libprecice built for this "
-                             "distribution's release)"}
+                             "distribution's release)",
+                   "shapely":"shapely (pip install pyoomph[topology]), which plans the axisymmetric "
+                             "pinch-off and coalescence surgery"}
+# Scripts that open a window and wait for the user. tkinter's mainloop never returns on its own, so
+# under this harness they would either hang forever or - on a headless nightly - die on "no display
+# name and no $DISPLAY environment variable", neither of which says anything about pyoomph. They are
+# skipped here and listed again at the end, alongside the preCICE reminder, because they still have
+# to be run by hand before a release. The GUI's own logic is covered headlessly by the worker scripts
+# in tests/ (tests/*_worker.py drive the model without ever mapping a window).
+_MANUAL_GUI_SCRIPTS={"thin_film_bifurcation_gui.py":"opens the interactive bifurcation GUI"}
+
 _MISSING_MODULE=re.compile(rb"ModuleNotFoundError: No module named '([A-Za-z0-9_.]+)'")
 _BROKEN_IMPORT=re.compile(rb"^ImportError: (.*)$")
 _TRACEBACK_FRAME=re.compile(rb'^  File "([^"]+)"')
@@ -262,6 +300,7 @@ all_okay=not problems # inconsistent duplicated scripts already count as a failu
 
 skips=args.skips
 skipped_for_missing=[]
+manual_gui=[]      # (folder, script) of the GUI scripts nobody can test unattended
 timings=[]  # (folder, script, seconds, number of log files, whether the script failed)
 untimed=[]  # ran, but left no "Elapsed time" footer anywhere
 
@@ -278,22 +317,13 @@ for d in glob.glob("./*/"):
     if f=="bifurcation_fold_param_change.py":
       # This is meant to crash when the parameter is changed, so it is not a regression test.
       continue
+    if f in _MANUAL_GUI_SCRIPTS:
+      print("   SKIPPING",f,"--",_MANUAL_GUI_SCRIPTS[f],"and must be checked manually")
+      manual_gui.append((d.strip("/").strip("./"),f))
+      continue
     if args.mpirun>0 and f=="parallel_running.py":
       # This one spawns its own mpirun, so launching it under one already gives nested MPI.
       print("   SKIPPING",f,"-- it is just as spawner of other scripts")
-      continue
-    if args.mpirun>0 and (f=="deflated_solve.py" or f=="deflated_continuation.py"):
-      # The deflation these two drive is a custom assembly handler, which has no MPI path yet.
-      print("   SKIPPING",f,"-- custom assemblers not MPI capable yet")
-      continue
-    if args.mpirun>0 and not args.distribute and f=="cr_static_condensation.py":
-      # Not a defect of the script: its selection pairs the bubble velocity (nodal) with the pressure
-      # gradients (element-internal), and oomph-lib numbers every nodal value before any internal one,
-      # so in a REPLICATED run the two halves of a block land on different ranks' rows and no rank can
-      # eliminate it. pyoomph says exactly that and refuses (src/problem.cpp), and the tutorial says it
-      # too. With --distribute the dofs are renumbered per rank and the script runs, so it is only this
-      # pass that has to leave it out.
-      print("   SKIPPING",f,"-- CR condensation needs --distribute under MPI, see the tutorial")
       continue
     env=None if args.no_petsc else (env_complex if needs_complex_petsc(f) else env_real)
     print("   Testing",f,"-- with the complex PETSc" if env is not None and env is env_complex else "")
@@ -306,6 +336,8 @@ for d in glob.glob("./*/"):
       cmd.append("--tcc")
     if args.distribute:
       cmd.append("--distribute")
+    if args.omp>0:
+      cmd+=["--omp",str(args.omp)]
     started_at=time.time()
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
     #proc = subprocess.Popen([sys.executable, '-u', f], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -357,6 +389,13 @@ if skipped_for_missing:
     print("   %s/%s needs %s, which %s"%(folder,script,_OPTIONAL_MODULES[mod],why))
   print()
 
+if manual_gui:
+  print()
+  print("NOT RUN, CHECK MANUALLY (interactive GUI scripts):")
+  for folder,script in manual_gui:
+    print("   %s/%s %s"%(folder,script,_MANUAL_GUI_SCRIPTS[script]))
+  print()
+
 # Slowest first, since that is the end of the list one reads. The fixed "TIME" prefix is what the
 # nightly greps for (see citools/nightly_develop.sh), so keep the column layout if you touch this.
 if timings:
@@ -371,7 +410,7 @@ if timings:
   print()
 
 if all_okay:
-  print("ALL TESTS PASSED -- But please check e.g. preCICE runs manually")
+  print("ALL TESTS PASSED -- But please check e.g. preCICE and the interactive GUI scripts manually")
 else:
   print("SOME TESTS FAILED")
   

@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -244,13 +244,15 @@ class MeshHandle : public MeshHandleBase
 {
 public:
 	std::unique_ptr<T> obj;
+	// Qualified in both: neither a constructor nor a destructor can dispatch to an override, and
+	// the registry must be keyed by exactly this handle's own mesh pointer in either direction.
 	MeshHandle() : obj(new T())
 	{
-		pyoomph_mesh_handle_registry()[mesh()] = this;
+		pyoomph_mesh_handle_registry()[MeshHandle::mesh()] = this;
 	}
 	~MeshHandle() override
 	{
-		pyoomph_mesh_handle_registry().erase(mesh());
+		pyoomph_mesh_handle_registry().erase(MeshHandle::mesh());
 	}
 	T *get() const { return obj.get(); }
 	pyoomph::Mesh *mesh() const override { return dynamic_cast<pyoomph::Mesh *>(obj.get()); }
@@ -458,7 +460,7 @@ void PyReg_Mesh(nb::module_ &m)
 				oomph::HangInfo *h = n->hanging_pt(index);
 				if (!h) return res;
 				for (unsigned k = 0; k < h->nmaster(); k++)
-					res.push_back(std::make_pair(dynamic_cast<pyoomph::Node *>(h->master_node_pt(k)), h->master_weight(k)));
+					res.push_back(std::make_pair(static_cast<pyoomph::Node *>(h->master_node_pt(k)), h->master_weight(k)));
 				return res;
 			},
 			nb::rv_policy::reference, "index"_a = -1,
@@ -503,6 +505,10 @@ void PyReg_Mesh(nb::module_ &m)
 			for(unsigned int i=0;i<zeta.size();i++){zeta[i]=zeta_prime[i];};
 			return zeta;
 		}, nb::arg("boundary_index"), "Returns the intrinsic boundary coordinate(s) zeta of this node on the given mesh boundary")
+		.def("is_a_copy", [](pyoomph::Node *n)
+			 { return n->is_a_copy(); }, "Returns True if this node is a periodic copy of another node, i.e. if it shares that node's values and equation numbers instead of owning any")
+		.def("copied_node_pt", [](pyoomph::Node *n)
+			 { return dynamic_cast<pyoomph::Node*>(n->copied_node_pt()); }, nb::rv_policy::reference, "Returns the master node this node is a periodic copy of, or None if it is not a copy")
 		// Ties a slave node to a master node so they share the same degrees of freedom (used for periodic boundaries).
 		// Resolves any pre-existing copy-master relations first and raises an error if that leads to an inconsistency.
 		.def("_make_periodic", [](pyoomph::Node *slv, pyoomph::Node *mst, MeshHandleBase *mesh_h)
@@ -537,7 +543,7 @@ void PyReg_Mesh(nb::module_ &m)
 	    slv->make_periodic(mst);
 	    mesh->store_copy_master(slv,mst); }, nb::arg("master"), nb::arg("mesh"))
 		// Currently disabled: was meant to suppress a node's residual contribution for a specific dof index.
-		.def("_nullify_residual_contribution", [](pyoomph::Node *n, pyoomph::DynamicBulkElementInstance *for_ci, int index)
+		.def("_nullify_residual_contribution", [](pyoomph::Node *n, pyoomph::DynamicJITCode *for_ci, int index)
 			 {
 		 throw_runtime_error("Nullified dofs are deactivated for now... Never used so far");
 		 /*
@@ -596,7 +602,7 @@ void PyReg_Mesh(nb::module_ &m)
 			if (!be) return 0;
 			return be->refinement_level(); }, "Returns the refinement level of this element in the adaptive mesh refinement tree (0 for the coarsest/un-refined elements)")
 		.def("is_halo", [](oomph::GeneralisedElement *self) -> bool
-			 { return self->is_halo(); },
+			 { return pyoomph::element_is_halo(self); },
 			 "Whether this element is a halo copy of an element owned by another process. Always False in serial or on a non-distributed mesh. Anything that counts or reduces over elements has to skip these, or every shared element is counted once per process that holds a copy.")
 		.def("ncont_interpolated_values", [](oomph::GeneralisedElement *self) -> unsigned int
 			 {
@@ -614,6 +620,15 @@ void PyReg_Mesh(nb::module_ &m)
 			#endif
 			}, "In parallel (MPI) runs, returns the rank of the processor that actually owns this element if it is a halo copy, or -1 if it is not a halo element or MPI is disabled")
 
+		.def("set_halo_owner", [](oomph::GeneralisedElement *self,int owner)
+			 {
+			#ifdef OOMPH_HAS_MPI
+			// owner<0 clears the halo mark (this rank owns the element), otherwise this copy becomes a
+			// halo of the one on rank `owner`.
+			if (owner<0) self->set_nonhalo();
+			else self->set_halo((unsigned)owner);
+			#endif
+			}, nb::arg("owner"), "In parallel (MPI) runs, declare who owns this element: -1 makes the calling process the owner, any other value marks this copy as a halo of the element on that process")
 		.def("set_must_be_kept_as_halo", [](oomph::GeneralisedElement *self,bool halo)
 			 {
 			#ifdef OOMPH_HAS_MPI
@@ -645,12 +660,12 @@ void PyReg_Mesh(nb::module_ &m)
 	   if (!be) return -1;
 	   return be->get_nodal_index_by_name(n,name); }, nb::arg("node"), nb::arg("field_name"), "Returns the nodal value index of the given field name at the given node of this element, or -1 if not present")
 		.def(
-			"get_code_instance", [](oomph::GeneralisedElement *self) -> pyoomph::DynamicBulkElementInstance *
+			"get_jit_code", [](oomph::GeneralisedElement *self) -> pyoomph::DynamicJITCode *
 			{
 			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);
 			if (!be) return NULL;
-			return be->get_code_instance(); },
-			nb::rv_policy::reference, "Returns the compiled equation/code instance (generated from the Python equation definitions) associated with this element")
+			return be->get_jit_code(); },
+			nb::rv_policy::reference, "Returns the JIT-compiled equation code (generated from the Python equation definitions) backing this element")
 		.def("get_macro_element_coordinate_at_s",[](oomph::GeneralisedElement *self, std::vector<double> s) -> std::vector<double>
 		   {
 			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);
@@ -686,7 +701,7 @@ void PyReg_Mesh(nb::module_ &m)
 			{
 			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);
 			if (!be) return NULL;
-			return dynamic_cast<pyoomph::Node*>(be->node_pt(i)); },
+			return static_cast<pyoomph::Node*>(be->node_pt(i)); },
 			nb::rv_policy::reference, nb::arg("local_node_index"), "Returns the node at the given local node index of this element")
 		.def("nodes",[](oomph::GeneralisedElement *self)
 			{
@@ -694,7 +709,7 @@ void PyReg_Mesh(nb::module_ &m)
 			std::vector<pyoomph::Node*> nodes;
 			if (be)
 			{
-				for (unsigned int i=0;i<be->nnode();i++) nodes.push_back(dynamic_cast<pyoomph::Node*>(be->node_pt(i)));
+				for (unsigned int i=0;i<be->nnode();i++) nodes.push_back(static_cast<pyoomph::Node*>(be->node_pt(i)));
 			}
 			return nodes;
 			},nb::rv_policy::reference, "Returns the list of all nodes of this element")
@@ -706,11 +721,11 @@ void PyReg_Mesh(nb::module_ &m)
 			{		
 				if (boundary_index<0)	
 				{
-					for (unsigned int i=0;i<be->nnode();i++) if (be->node_pt(i)->is_on_boundary()) nodes.push_back(dynamic_cast<pyoomph::Node*>(be->node_pt(i)));
+					for (unsigned int i=0;i<be->nnode();i++) if (be->node_pt(i)->is_on_boundary()) nodes.push_back(static_cast<pyoomph::Node*>(be->node_pt(i)));
 				}
 				else
 				{
-					for (unsigned int i=0;i<be->nnode();i++) if (be->node_pt(i)->is_on_boundary(boundary_index)) nodes.push_back(dynamic_cast<pyoomph::Node*>(be->node_pt(i)));
+					for (unsigned int i=0;i<be->nnode();i++) if (be->node_pt(i)->is_on_boundary(boundary_index)) nodes.push_back(static_cast<pyoomph::Node*>(be->node_pt(i)));
 				}
 			}
 			return nodes;
@@ -721,7 +736,7 @@ void PyReg_Mesh(nb::module_ &m)
 			std::vector<pyoomph::Node*> nodes;
 			if (be)
 			{
-				for (unsigned int i=0;i<be->nvertex_node();i++) if (be->vertex_node_pt(i)->is_on_boundary(boundary_index)) nodes.push_back(dynamic_cast<pyoomph::Node*>(be->vertex_node_pt(i)));
+				for (unsigned int i=0;i<be->nvertex_node();i++) if (be->vertex_node_pt(i)->is_on_boundary(boundary_index)) nodes.push_back(static_cast<pyoomph::Node*>(be->vertex_node_pt(i)));
 			}
 			return nodes;
 			},nb::rv_policy::reference, nb::arg("boundary_index"), "Returns the list of vertex (corner) nodes of this element that lie on the given mesh boundary")
@@ -761,7 +776,7 @@ void PyReg_Mesh(nb::module_ &m)
 			{
 			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);
 			if (!be) return NULL;
-			return dynamic_cast<pyoomph::Node*>(be->vertex_node_pt(i)); },
+			return static_cast<pyoomph::Node*>(be->vertex_node_pt(i)); },
 			nb::rv_policy::reference, nb::arg("local_vertex_index"), "Returns the vertex (corner) node at the given local vertex index of this element")
 		.def("ndof", [](oomph::GeneralisedElement *self) -> int
 			 {
@@ -919,20 +934,20 @@ void PyReg_Mesh(nb::module_ &m)
 			{
 			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);
 			if (!be) return 0;
-			return dynamic_cast<pyoomph::Node*>(be->boundary_node_pt(dir,index)); },
+			return static_cast<pyoomph::Node*>(be->boundary_node_pt(dir,index)); },
 			nb::rv_policy::reference, nb::arg("direction"), nb::arg("index"), "Returns the node at the given index along the given local edge/face direction of this element")
 		.def("_ode_elem_to_numpy", [](oomph::GeneralisedElement *self)
 			 {
 
 			 pyoomph::BulkElementODE0d * ode=dynamic_cast<pyoomph::BulkElementODE0d *>(self);
 			 if (!ode) { throw_runtime_error("Not an ODE element"); }
-			 unsigned ndata=ode->get_code_instance()->get_func_table()->info_D0.numfields;
+			 unsigned ndata=ode->get_jit_code()->get_func_table()->info_D0.numfields;
 			 double *dbuf = new double[ndata];
 			 ode->to_numpy(dbuf);
 			 nb::capsule owner(dbuf, [](void *p) noexcept { delete[] (double *) p; });
 			 nb::ndarray<nb::numpy, double> data(dbuf, {(size_t)ndata}, owner);
 			 std::map<std::string,unsigned> field_desc;
-			 auto  nfd=ode->get_code_instance()->get_elemental_field_indices();
+			 auto  nfd=ode->get_jit_code()->get_elemental_field_indices();
 			 for (auto & nf : nfd)
 			 {
 				field_desc[nf.first]=nf.second;
@@ -975,7 +990,7 @@ void PyReg_Mesh(nb::module_ &m)
 			std::vector<std::vector<bool>> jac, mass;
 			if (be)
 			{
-				auto *ft=be->get_code_instance()->get_func_table();
+				auto *ft=be->get_jit_code()->get_func_table();
 				int r=ft->current_res_jac;
 				for (unsigned i=0;i<ft->contribution_entries_size;i++) names.push_back(ft->contribution_names[i]);
 				if (r>=0 && ft->contributes_to_jacobian && ft->contributes_to_mass_matrix)
@@ -1003,7 +1018,7 @@ void PyReg_Mesh(nb::module_ &m)
 			std::vector<std::vector<int>> jac, mass;
 			if (be)
 			{
-				auto *ft=be->get_code_instance()->get_func_table();
+				auto *ft=be->get_jit_code()->get_func_table();
 				int r=ft->current_res_jac;
 				if (r>=0 && ft->jacobian_block_flags && ft->mass_matrix_block_flags && ft->jacobian_block_flags[r] && ft->mass_matrix_block_flags[r])
 				{
@@ -1176,7 +1191,7 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("resolve_copy_master_node",oomph_mesh_method([](oomph::Mesh *self, pyoomph::Node *n)->pyoomph::Node *
 			 {
 				if (!dynamic_cast<pyoomph::Mesh*>(self)) return NULL;
-				return dynamic_cast<pyoomph::Node *>(dynamic_cast<pyoomph::Mesh*>(self)->resolve_copy_master(n));
+				return static_cast<pyoomph::Node *>(dynamic_cast<pyoomph::Mesh*>(self)->resolve_copy_master(n));
 			}),nb::rv_policy::reference, nb::arg("node")
 			, "If the given node is a copy (e.g. due to periodic boundaries), returns its master node; otherwise returns None"
 			)
@@ -1194,6 +1209,11 @@ void PyReg_Mesh(nb::module_ &m)
 			pyoomph::Mesh* mesh =dynamic_cast<pyoomph::Mesh*>(self);
 			if (mesh) mesh->interpolated_lagrangian_coordinates_at_remeshing=lagr;
 			 }), nb::arg("interpolate"), "Controls whether the Lagrangian (undeformed) coordinates of new nodes are interpolated from the old mesh when remeshing")
+		.def("_set_discontinuous_fields_need_no_transfer",oomph_mesh_method([](oomph::Mesh *self, bool skip)
+			 {
+			pyoomph::Mesh* mesh =dynamic_cast<pyoomph::Mesh*>(self);
+			if (mesh) mesh->discontinuous_fields_need_no_transfer=skip;
+			 }), nb::arg("skip"), "Set on the destination mesh to let a remesh skip its discontinuous (DG/DL/D0) fields instead of refusing the transfer. Only correct for fields that the new mesh recomputes from scratch, e.g. a DisjunctDomainMarker's component numbering.")
 		.def("get_elemental_errors",oomph_mesh_method([](oomph::Mesh *self)
 			 {
 			oomph::Vector<double> elerrs(self->nelement(),0.0);
@@ -1214,11 +1234,11 @@ void PyReg_Mesh(nb::module_ &m)
 			return vector_to_ndarray(res); }), "Returns the per-element spatial error estimate (as used by adaptive mesh refinement) for every element in this mesh; zero everywhere if adaptation is disabled")
 		.def(
 			"node_pt",oomph_mesh_method([](oomph::Mesh *self, unsigned int i) -> pyoomph::Node *
-			{ return dynamic_cast<pyoomph::Node *>(self->node_pt(i)); }),
+			{ return static_cast<pyoomph::Node *>(self->node_pt(i)); }),
 			nb::rv_policy::reference, nb::arg("node_index"), "Returns the node at the given index in this mesh")
 		.def(
 			"boundary_node_pt",oomph_mesh_method([](oomph::Mesh *self, const unsigned &b, const unsigned &n)
-			{ return dynamic_cast<pyoomph::Node *>(self->boundary_node_pt(b, n)); }),
+			{ return static_cast<pyoomph::Node *>(self->boundary_node_pt(b, n)); }),
 			nb::rv_policy::reference, nb::arg("boundary_index"), nb::arg("node_index"), "Returns the node at the given index among the nodes on the given mesh boundary")
 		// pyoomph's own mesh-level functionality, adding boundary/interface handling, adaptive
 		// refinement control, (de)serialization of the mesh state and various evaluation helpers.
@@ -1244,8 +1264,8 @@ void PyReg_Mesh(nb::module_ &m)
 			 {std::ostringstream oss;self->describe_my_dofs(oss,in);return oss.str(); }), nb::arg("indent")="", "Returns a human-readable description of all degrees of freedom of this mesh, useful for debugging")
 		.def("_pin_all_my_dofs",mesh_method([](pyoomph::Mesh *self, std::set<std::string> only_dofs, std::set<std::string> ignore_dofs, std::set<unsigned> ignore_continuous_at_interfaces)
 			 { self->pin_all_my_dofs(only_dofs, ignore_dofs, ignore_continuous_at_interfaces); }), nb::arg("only_dofs"), nb::arg("ignore_dofs"), nb::arg("ignore_continuous_at_interfaces"), "Pins (Dirichlet-constrains) all degrees of freedom of this mesh, optionally restricted to only_dofs or excluding ignore_dofs/ignore_continuous_at_interfaces")
-		.def("generate_interface_elements",mesh_method([](pyoomph::Mesh *m, const std::string &bn, MeshHandleBase *im, pyoomph::DynamicBulkElementInstance *jitcode)
-			 { m->generate_interface_elements(bn, im->mesh(), jitcode); }), nb::arg("boundary_name"), nb::arg("interface_mesh"), nb::arg("code_instance"), "Creates interface elements attached to the given boundary of this (bulk) mesh, using the given compiled equation code, and adds them to the given interface mesh")
+		.def("generate_interface_elements",mesh_method([](pyoomph::Mesh *m, const std::string &bn, MeshHandleBase *im, pyoomph::DynamicJITCode *jitcode)
+			 { m->generate_interface_elements(bn, im->mesh(), jitcode); }), nb::arg("boundary_name"), nb::arg("interface_mesh"), nb::arg("jitcode"), "Creates interface elements attached to the given boundary of this (bulk) mesh, using the given compiled equation code, and adds them to the given interface mesh")
 		.def("is_mesh_distributed",mesh_method([](pyoomph::Mesh *m)
 			 { return m->is_mesh_distributed(); }), "Returns whether this mesh is distributed across multiple MPI processes")
 		.def("assign_global_base_element_indices",mesh_method([](pyoomph::Mesh *m)
@@ -1329,8 +1349,8 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("_interpolate_hanging_values",mesh_method(&pyoomph::Mesh::interpolate_hanging_values), "Writes each hanging node's master-interpolated position AND values into its own raw storage. Unlike _collapse_hanging_node_values this also covers the nodal positions, so it repairs the node geometry after the dof vector has been written from outside the Newton solver")
 		.def("clear_additional_dof_constraints",mesh_method(&pyoomph::Mesh::clear_additional_dof_constraints), "Clears any additional dof constraints (e.g. from remeshing) that have been applied to this mesh's nodes")
 		.def("apply_additional_dof_constraints",mesh_method(&pyoomph::Mesh::apply_additional_dof_constraints), "Applies any additional dof constraints that have been registered on this mesh's nodes")
-		.def("nodal_interpolate_from",mesh_method([](pyoomph::Mesh *self, MeshHandleBase *old_mesh, int boundary_index, bool use_boundary_coordinate){ self->nodal_interpolate_from(old_mesh->mesh(), boundary_index, use_boundary_coordinate); }), nb::arg("old_mesh"), nb::arg("boundary_index")=-1, nb::arg("use_boundary_coordinate")=true, "Interpolates all nodal field values of this mesh from the given old mesh (e.g. after adaptive remeshing), optionally restricted to a single boundary. On a boundary, use_boundary_coordinate=False matches by projecting onto the old interface geometry instead of through its zeta coordinate, which is what a 2d interface in 3d requires since it has no chart.")
-		.def("nodal_interpolate_along_boundary",mesh_method([](pyoomph::Mesh *self, MeshHandleBase *old_mesh, int bind, int oldbind, MeshHandleBase *imesh, MeshHandleBase *oldimesh, double boundary_max_dist){ self->nodal_interpolate_along_boundary(old_mesh->mesh(), bind, oldbind, imesh->mesh(), oldimesh->mesh(), boundary_max_dist); }), nb::arg("old_mesh"), nb::arg("boundary_index"), nb::arg("old_boundary_index"), nb::arg("interface_mesh"), nb::arg("old_interface_mesh"), nb::arg("boundary_max_dist"), "Interpolates the nodal field values of the nodes on a boundary of this mesh from the corresponding boundary of an old mesh, using the interface meshes to also interpolate interface-only fields; boundary_max_dist limits how far a node may be from the boundary line/surface to still be considered")
+		.def("nodal_interpolate_from",mesh_method([](pyoomph::Mesh *self, MeshHandleBase *old_mesh, int boundary_index, bool use_boundary_coordinate, bool only_interface_fields){ self->nodal_interpolate_from(old_mesh->mesh(), boundary_index, use_boundary_coordinate, only_interface_fields); }), nb::arg("old_mesh"), nb::arg("boundary_index")=-1, nb::arg("use_boundary_coordinate")=true, nb::arg("only_interface_fields")=false, "Interpolates all nodal field values of this mesh from the given old mesh (e.g. after adaptive remeshing), optionally restricted to a single boundary. On a boundary, use_boundary_coordinate=False matches by projecting onto the old interface geometry instead of through its zeta coordinate, which is what a 2d interface in 3d requires since it has no chart. With only_interface_fields=True, only the dofs the interface adds on top of the bulk are written and the bulk fields, position history and Lagrangian coordinates are left alone - for a chart that deliberately does not follow the geometry, such as the one carrying surface fields across a pinch-off.")
+		.def("nodal_interpolate_along_boundary",mesh_method([](pyoomph::Mesh *self, MeshHandleBase *old_mesh, int bind, int oldbind, MeshHandleBase *imesh, MeshHandleBase *oldimesh, double boundary_max_dist, bool only_interface_fields){ self->nodal_interpolate_along_boundary(old_mesh->mesh(), bind, oldbind, imesh->mesh(), oldimesh->mesh(), boundary_max_dist, only_interface_fields); }), nb::arg("old_mesh"), nb::arg("boundary_index"), nb::arg("old_boundary_index"), nb::arg("interface_mesh"), nb::arg("old_interface_mesh"), nb::arg("boundary_max_dist"), nb::arg("only_interface_fields")=false, "Interpolates the nodal field values of the nodes on a boundary of this mesh from the corresponding boundary of an old mesh, using the interface meshes to also interpolate interface-only fields; boundary_max_dist limits how far a node may be from the boundary line/surface to still be considered. With only_interface_fields=True, only the dofs the interface mesh adds on top of the bulk are transferred and the bulk fields are left untouched - what the codimension-2 pass needs, since the per-boundary passes have already interpolated the bulk fields on those nodes and this routine matches by nearest node rather than interpolating.")
 		.def("_evaluate_integral_function",mesh_method([](pyoomph::Mesh *m, const std::string &n)
 			 { return m->evaluate_integral_function(n); }), nb::arg("name"), "Evaluates the integral observable function with the given name over this mesh")
 		.def("_evaluate_extremum",mesh_method([](pyoomph::Mesh *m, const std::string &n,int sign,unsigned flags)
@@ -1348,6 +1368,10 @@ void PyReg_Mesh(nb::module_ &m)
 			 { m->ensure_external_data(); }), "Ensures that all external Data dependencies (dofs owned by other elements/meshes) required by this mesh's elements are properly registered")
 		.def("ensure_halos_for_periodic_boundaries",mesh_method([](pyoomph::Mesh *m)
 			 { m->ensure_halos_for_periodic_boundaries(); }), "In parallel (MPI) runs, ensures that the required halo elements/nodes are present so periodic boundary conditions also work across processor boundaries")
+		.def("has_periodic_nodes",mesh_method([](pyoomph::Mesh *m)
+			 { return m->has_periodic_nodes(); }), "Returns True if any node of this mesh is a periodic copy of another node, i.e. if a PeriodicBC or a periodic mesh template is in use")
+		.def("has_periodic_position_dofs",mesh_method([](pyoomph::Mesh *m)
+			 { return m->has_periodic_position_dofs(); }), "Returns True if a periodic copy node of this mesh has unknown (unpinned) positions, i.e. if periodic boundaries are combined with a moving mesh. Only meaningful after the equation numbers have been assigned")
 		.def("nroot_halo_element",mesh_method([](pyoomph::Mesh *m)
 			 {
 				#ifdef OOMPH_HAS_MPI
@@ -1391,13 +1415,13 @@ void PyReg_Mesh(nb::module_ &m)
 		.def_static("set_report_interpolation_timing",[](bool yesno) { pyoomph::Mesh::report_interpolation_timing=yesno; }, nb::arg("yesno"), "Print how long the point-location phase of each mesh-to-mesh interpolation took, and how its candidate sets were found. Off by default.")
 		.def("set_boundary_zeta_period",mesh_method(&pyoomph::Mesh::set_boundary_zeta_period), nb::arg("boundary_index"), nb::arg("period"), "Declare the intrinsic boundary coordinate along this boundary periodic with the given period (0 to clear). Required for a closed interface loop, whose zeta otherwise has a seam element spanning the entire range.")
 		.def("get_boundary_zeta_period",mesh_method(&pyoomph::Mesh::get_boundary_zeta_period), nb::arg("boundary_index"), "Period of the intrinsic boundary coordinate along this boundary, or 0 if it is not periodic.")
-		.def("boundary_coordinate_bool",mesh_method(&pyoomph::Mesh::boundary_coordinates_bool), nb::arg("boundary_index"), "Returns whether an intrinsic boundary coordinate has been set up for the given mesh boundary")
+		.def("boundary_coordinate_bool",mesh_method(&pyoomph::Mesh::boundary_coordinates_bool), nb::arg("boundary_index"), nb::arg("value")=true, "Declares that an intrinsic boundary coordinate has been set up for the given mesh boundary. Pass value=False to take the declaration back. (This SETS the flag; is_boundary_coordinate_defined reads it.)")
 		.def("is_boundary_coordinate_defined",mesh_method(&pyoomph::Mesh::is_boundary_coordinate_defined), nb::arg("boundary_index"), "Returns whether an intrinsic boundary coordinate is defined and up to date for the given mesh boundary")
 		.def("fill_node_index_to_node_map",mesh_method([](pyoomph::Mesh *self)
 			{std::map<oomph::Node *, unsigned> node2index;
 			self->fill_node_map(node2index);
 			std::vector<pyoomph::Node *> index2node(node2index.size(),NULL);;
-			for (auto & n2i : node2index){index2node[n2i.second]=dynamic_cast<pyoomph::Node*>(n2i.first);}
+			for (auto & n2i : node2index){index2node[n2i.second]=static_cast<pyoomph::Node*>(n2i.first);}
 			return index2node;
 			}), nb::rv_policy::reference, "Returns the list of all nodes of this mesh, ordered consistently with the internal node-to-index map")
 		.def("setup_interior_boundary_elements",mesh_method([](pyoomph::Mesh *self, unsigned bindex)
@@ -1450,7 +1474,7 @@ void PyReg_Mesh(nb::module_ &m)
 	    oomph::Vector<oomph::Node*> nodes;
 	    self->get_node_reordering(nodes,old_ordering);
 	    std::vector<pyoomph::Node*> result(nodes.size());
-	    for (unsigned int i=0;i<result.size();i++) result[i]=dynamic_cast<pyoomph::Node*>(nodes[i]);
+	    for (unsigned int i=0;i<result.size();i++) result[i]=static_cast<pyoomph::Node*>(nodes[i]);
 	    return result; }),
 			nb::rv_policy::reference, nb::arg("old_ordering"), "Returns the nodes of this mesh in the (potential) reordering used by reorder_nodes, without actually reordering the internal storage")
 		.def("evaluate_local_expression_at_nodes",mesh_method([](pyoomph::Mesh *self, unsigned index, bool nondimensional,bool discontinuous)
@@ -1475,7 +1499,7 @@ void PyReg_Mesh(nb::module_ &m)
 			 	int my_rank = self->communicator_pt()->my_rank();
       			int n_proc = self->communicator_pt()->nproc();
 				// A mesh with no local element still has to describe its fields, so borrow the
-				// element code instance from a neighbour's haloed element. Silently: this is an
+				// element code from a neighbour's haloed element. Silently: this is an
 				// ordinary situation on a distributed mesh (an interface lying entirely in another
 				// partition), it is not quiet()-able, and it printed once per rank per call.
 				for (int nrnk=0;nrnk<n_proc;nrnk++)
@@ -1498,7 +1522,7 @@ void PyReg_Mesh(nb::module_ &m)
 			 unsigned ncontfields=(be ? be->ncont_interpolated_values() : 0);
 			 unsigned nDGfields=(be ? be->num_DG_fields(false) :0);
 			 unsigned nadd_interf=0;
-			 auto *ft=be->get_code_instance()->get_func_table();
+			 auto *ft=be->get_jit_code()->get_func_table();
 			 for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
 			 {
 				nadd_interf+=ft->present_continuous_spaces[si]->numfields-ft->present_continuous_spaces[si]->numfields_basebulk;
@@ -1517,8 +1541,8 @@ void PyReg_Mesh(nb::module_ &m)
 			 int *elem_node_inds_buf=new int[(size_t)nelem*numelem_indices];
 			 nb::capsule elem_node_inds_owner(elem_node_inds_buf, [](void *p) noexcept { delete[] (int *) p; });
 			 nb::ndarray<nb::numpy, int> elem_node_inds(elem_node_inds_buf, {(size_t)nelem,(size_t)numelem_indices}, elem_node_inds_owner);
-			 unsigned numD0=be->get_code_instance()->get_func_table()->info_D0.numfields;
-			 unsigned numDL=be->get_code_instance()->get_func_table()->info_DL.numfields;
+			 unsigned numD0=be->get_jit_code()->get_func_table()->info_D0.numfields;
+			 unsigned numDL=be->get_jit_code()->get_func_table()->info_DL.numfields;
 			 unsigned DL_stride=(be->dim()+1);
 			 unsigned D0_rows=(discontinuous ? nnode : nelem);
 			 double *D0_data_buf=new double[(size_t)D0_rows*numD0];
@@ -1542,7 +1566,7 @@ void PyReg_Mesh(nb::module_ &m)
 			 std::map<std::string,unsigned> nodal_field_desc;
 			 if (nodal_dim>0) {nodal_field_desc["coordinate_x"]=0; if (nodal_dim>1) {nodal_field_desc["coordinate_y"]=1;} if (nodal_dim>2) {nodal_field_desc["coordinate_z"]=2;}}
 			 if (nlagrange>0) {nodal_field_desc["lagrangian_x"]=nodal_dim; if (nlagrange>1) {nodal_field_desc["lagrangian_y"]=nodal_dim+1; if (nlagrange>2) {nodal_field_desc["lagrangian_z"]=nodal_dim+2; }}}
-			 auto  nfd=be->get_code_instance()->get_nodal_field_indices();
+			 auto  nfd=be->get_jit_code()->get_nodal_field_indices();
 			 for (auto & nf : nfd)
 			 {
 				nodal_field_desc[nf.first]=nlagrange+nodal_dim+nf.second;
@@ -1553,7 +1577,7 @@ void PyReg_Mesh(nb::module_ &m)
 			   nodal_field_desc["normal_"+dir[nn]]=nlagrange+nodal_dim+nfd.size()+nn;
 			 }
 			 std::map<std::string,unsigned> elemental_field_desc;
-			 auto  efd=be->get_code_instance()->get_elemental_field_indices();
+			 auto  efd=be->get_jit_code()->get_elemental_field_indices();
 			 for (auto & ef : efd)
 			 {
 				elemental_field_desc[ef.first]=ef.second;
@@ -1580,14 +1604,14 @@ void PyReg_Mesh(nb::module_ &m)
 		   pyoomph::BulkElementBase* el=dynamic_cast<pyoomph::BulkElementBase*>(self->element_pt(0));
 			std::map<std::string,unsigned> descs;
 			if (nodal_dim>0) {descs["coordinate_x"]=0; if (nodal_dim>1) {descs["coordinate_y"]=1;} if (nodal_dim>2) {descs["coordinate_z"]=2;}}
-			auto  nfd=el->get_code_instance()->get_nodal_field_indices();
+			auto  nfd=el->get_jit_code()->get_nodal_field_indices();
 			unsigned offset=nodal_dim;
 			for (auto & nf : nfd)
 			{
 				descs[nf.first]=nodal_dim+nf.second;
 				if (nodal_dim+nf.second>=offset) offset=nodal_dim+nf.second+1;
 			}
-			auto  efd=el->get_code_instance()->get_elemental_field_indices();
+			auto  efd=el->get_jit_code()->get_elemental_field_indices();
 			for (auto & ef : efd)
 			{
 				descs[ef.first]=offset+ef.second;
@@ -1599,8 +1623,8 @@ void PyReg_Mesh(nb::module_ &m)
 	 std::vector<int> types;
 	 std::vector<std::string> names;
 	 self->describe_global_dofs(types,names);
-	 return std::make_tuple(vector_to_ndarray(types),names); }), "Returns, for every global degree of freedom associated with this mesh, its dof type and a human-readable name")
-		.def("set_output_scale",mesh_method(&pyoomph::Mesh::set_output_scale), nb::arg("name"), nb::arg("scale"), nb::arg("code_instance"), "Sets an output (dimensional rescaling) factor for the field of the given name, used e.g. when exporting to numpy/VTK")
+	 return std::make_tuple(vector_to_ndarray(types),names); }), "Returns a classification of the problem's degrees of freedom by this mesh: one entry per global equation number giving the index of its dof type on this mesh (-1 for the dofs this mesh does not carry), plus the human-readable type names those indices refer to. Under MPI only the dofs this rank's own elements reach are classified, but the type names come from the mesh's own code and are therefore the same on every rank, including one that holds no element of this mesh at all")
+		.def("set_output_scale",mesh_method(&pyoomph::Mesh::set_output_scale), nb::arg("name"), nb::arg("scale"), nb::arg("jitcode"), "Sets an output (dimensional rescaling) factor for the field of the given name, used e.g. when exporting to numpy/VTK")
 		.def("get_output_scale",mesh_method(&pyoomph::Mesh::get_output_scale), nb::arg("name"), "Returns the output (dimensional rescaling) factor previously set for the field of the given name")
 		.def("get_element_dimension",mesh_method(&pyoomph::Mesh::get_element_dimension), "Returns the spatial dimension of the elements of this mesh")
 		.def("set_initial_condition",mesh_method(&pyoomph::Mesh::set_initial_condition), nb::keep_alive<1, 3>(), nb::arg("fieldname"), nb::arg("expression"), "Sets the initial condition expression for the given field on this mesh")
@@ -1647,6 +1671,14 @@ void PyReg_Mesh(nb::module_ &m)
 			 {
 	   pyoomph::TemplatedMeshBase *tm=dynamic_cast<pyoomph::TemplatedMeshBase*>(self);
 	   if (tm) tm->adapt_finalise(); }), "Restores 2:1 balancing and rebuilds the shape-specific hanging nodes after _adapt_execute")
+		.def("_assign_interface_topological_ids",mesh_method(&pyoomph::Mesh::assign_interface_topological_ids),
+			 "Fills in the cross-domain topological identity of every node that does not have one yet (see "
+			 "pyoomph::Node::interface_topological_id). Idempotent; called automatically after every adaptation, "
+			 "and from Python once the mesh has been generated and initially refined")
+		.def("_has_complete_interface_topological_ids",mesh_method([](pyoomph::Mesh *self)
+			 { return self->has_complete_interface_topological_ids(); }),
+			 "Whether every node of this mesh carries a topological identity. False makes the coupled-interface "
+			 "machinery fall back to matching by position")
 		.def("_adapt_pending_counts",mesh_method([](pyoomph::Mesh *self)
 			 {
 	   pyoomph::TemplatedMeshBase *tm=dynamic_cast<pyoomph::TemplatedMeshBase*>(self);
@@ -1688,25 +1720,25 @@ void PyReg_Mesh(nb::module_ &m)
 			nb::rv_policy::reference)
 		.def("to_numpy", [](pyoomph::BulkElementODE0d *self)
 			 {
-			 unsigned ndata=self->get_code_instance()->get_func_table()->numfields_D0;
+			 unsigned ndata=self->get_jit_code()->get_func_table()->numfields_D0;
 			 auto data=py::array_t<double>({ndata});
 			 self->to_numpy((double*)data.request().ptr);
 			 std::map<std::string,unsigned> field_desc;
-			 auto  nfd=self->get_code_instance()->get_elemental_field_indices();
+			 auto  nfd=self->get_jit_code()->get_elemental_field_indices();
 			 for (auto & nf : nfd)
 			 {
 				field_desc[nf.first]=nf.second;
 			 }
 			 return std::make_tuple(data,field_desc); })
 		.def_static("construct_new", &pyoomph::BulkElementODE0d::construct_new, nb::rv_policy::reference)
-		.def(nb::init<pyoomph::DynamicBulkElementInstance *, oomph::TimeStepper *>()); // Constructor does not work
+		.def(nb::init<pyoomph::DynamicJITCode *, oomph::TimeStepper *>()); // Constructor does not work
 */
 	// A special mesh consisting of a single ODE (0-dimensional) element, used to store the degrees
 	// of freedom of ODE-based equations (e.g. global ODEs not tied to any spatial domain).
 	nb::class_<ODEStorageMeshHandle, MeshHandleBase>(m, "ODEStorageMesh", "A mesh holding a single ODE element, used to store degrees of freedom that are not associated with a spatial mesh")
 		.def(nb::init<>())
-		.def("_set_problem", [](ODEStorageMeshHandle *self, pyoomph::Problem *p, pyoomph::DynamicBulkElementInstance *inst)
-			 { self->get()->_set_problem(p, inst); }, nb::arg("problem").none(), nb::arg("code_instance").none())
+		.def("_set_problem", [](ODEStorageMeshHandle *self, pyoomph::Problem *p, pyoomph::DynamicJITCode *inst)
+			 { self->get()->_set_problem(p, inst); }, nb::arg("problem").none(), nb::arg("jitcode").none())
 		.def(
 			"_get_problem", [](ODEStorageMeshHandle *self)
 			{ return self->get()->get_problem(); },
@@ -1752,7 +1784,7 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("get_element_dimension", &pyoomph::MeshTemplateElementCollection::get_element_dimension, "Returns the spatial dimension of the elements in this domain")
 		.def("get_adjacent_boundary_names", &pyoomph::MeshTemplateElementCollection::get_adjacent_boundary_names, "Returns the names of all mesh boundaries adjacent to this domain")
 		.def("set_all_nodes_as_boundary_nodes",&pyoomph::MeshTemplateElementCollection::set_all_nodes_as_boundary_nodes, "Marks every node of this domain as a boundary node, e.g. for domains that consist purely of interface elements")
-		.def("set_element_code", &pyoomph::MeshTemplateElementCollection::set_element_code, nb::arg("code_instance"), "Assigns the compiled equation code instance used to create the elements of this domain").
+		.def("set_element_code", &pyoomph::MeshTemplateElementCollection::set_element_code, nb::arg("jitcode"), "Assigns the compiled equation code used to create the elements of this domain").
 		doc()="A collection of bulk elements, i.e. a bulk domain of a mesh. Must be created as part of a :py:class:`~pyoomph.meshes.mesh.MeshTemplate` by :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.new_domain`";
 
 	nb::class_<pyoomph::MeshTemplate, pyoomph::PyMeshTemplateTrampoline>(m, "MeshTemplate")
@@ -1760,7 +1792,7 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("_set_problem", &pyoomph::MeshTemplate::_set_problem, nb::arg("problem").none(), "Associates this mesh template with the given Problem (or None to clear it)")
 		.def("_get_problem", &pyoomph::MeshTemplate::get_problem, nb::rv_policy::reference, "Return the Problem this mesh template is associated with (or None if not yet set)")
 		.def("get_node_position", &pyoomph::MeshTemplate::get_node_position, nb::arg("node_index"), "Returns the position [x, y, z] of the node at the given index of this template")
-		.def("new_bulk_element_collection", &pyoomph::MeshTemplate::new_bulk_element_collection, nb::rv_policy::reference, nb::arg("name"), "Creates a new named bulk element domain (MeshTemplateElementCollection) within this template")
+		.def("_new_bulk_element_collection", &pyoomph::MeshTemplate::new_bulk_element_collection, nb::rv_policy::reference, nb::arg("name"), "Internal: creates a new named bulk element domain (MeshTemplateElementCollection). Use MeshTemplate.new_domain instead, which also registers the domain in the template")
 		// keep_alive<1,5>: the curved entity is stored as a bare borrowed pointer in MeshTemplateFacet
 		// (and later in the MacroElements built from it), so without this the Python object may be
 		// collected as soon as the caller's local goes out of scope -- which segfaults the macro map
@@ -1772,7 +1804,7 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("add_facet_to_curve_entity",[](pyoomph::MeshTemplate & self, const std::vector<pyoomph::nodeindex_t> &ni, pyoomph::MeshTemplateCurvedEntity *curved=nullptr){ throw_runtime_error("add_facet_to_curve_entity is deprecated. Use add_facet_to_boundary instead"); }, nb::arg("node_indices"), nb::arg("curved_entity")=nullptr)
 		.def("_find_opposite_interface_connections", &pyoomph::MeshTemplate::_find_opposite_interface_connections, "Finds, for every pair of boundaries registered as mutually opposite interfaces, the corresponding node/facet connections between them (used for e.g. two-sided interfaces)")
 		.def("_find_interface_intersections", &pyoomph::MeshTemplate::_find_interface_intersections, "Finds the set of boundary names where two or more interfaces intersect (e.g. contact lines/triple points)")
-		.def("add_periodic_node_pair", &pyoomph::MeshTemplate::add_periodic_node_pair, "n_mst"_a, "n_slv"_a, "Registers the node at index n_slv as periodic copy of the node at index n_mst")
+		.def("_add_periodic_node_pair", &pyoomph::MeshTemplate::add_periodic_node_pair, "n_mst"_a, "n_slv"_a, "Internal low-level periodicity: registers the node at index n_slv as periodic copy of the node at index n_mst. Prefer the PeriodicBC equation; this route cannot patch the mid-side corner nodes of a doubly periodic mesh")
 		.def("add_node_unique", &pyoomph::MeshTemplate::add_node_unique, "x"_a, "y"_a = 0.0, "z"_a = 0.0,"Adds a node at the given position. If there is already a node at this position,no new node is created")
 		.def("add_node", &pyoomph::MeshTemplate::add_node, "x"_a, "y"_a = 0.0, "z"_a = 0.0,"Adds a node at the given position. Creates overlapping nodes, if there is already a node at this position.")
 		.def("_reset", &pyoomph::MeshTemplate::reset, "Clears all nodes, domains and boundary information of this mesh template, so it can be rebuilt from scratch")
@@ -1782,8 +1814,8 @@ void PyReg_Mesh(nb::module_ &m)
 	// adaptive-refinement and boundary-setup machinery specific to one spatial dimension.
 	nb::class_<TemplatedMeshBase1dHandle, MeshHandleBase>(m, "TemplatedMeshBase1d")
 		.def(nb::init<>())
-		.def("_set_problem",handle_method<TemplatedMeshBase1dHandle>([](pyoomph::TemplatedMeshBase1d *self, pyoomph::Problem *p, pyoomph::DynamicBulkElementInstance *inst)
-			 { self->_set_problem(p, inst); }), nb::arg("problem"), nb::arg("code_instance").none())
+		.def("_set_problem",handle_method<TemplatedMeshBase1dHandle>([](pyoomph::TemplatedMeshBase1d *self, pyoomph::Problem *p, pyoomph::DynamicJITCode *inst)
+			 { self->_set_problem(p, inst); }), nb::arg("problem"), nb::arg("jitcode").none())
 		.def(
 			"_get_problem",handle_method<TemplatedMeshBase1dHandle>([](pyoomph::TemplatedMeshBase1d *self)
 			{ return self->get_problem(); }),
@@ -1817,8 +1849,8 @@ void PyReg_Mesh(nb::module_ &m)
 	// quadtree-based adaptive-refinement and boundary-setup machinery.
 	nb::class_<TemplatedMeshBase2dHandle, MeshHandleBase>(m, "TemplatedMeshBase2d")
 		.def(nb::init<>())
-		.def("_set_problem",handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *self, pyoomph::Problem *p, pyoomph::DynamicBulkElementInstance *inst)
-			 { self->_set_problem(p, inst); }), nb::arg("problem"), nb::arg("code_instance").none())
+		.def("_set_problem",handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *self, pyoomph::Problem *p, pyoomph::DynamicJITCode *inst)
+			 { self->_set_problem(p, inst); }), nb::arg("problem"), nb::arg("jitcode").none())
 		.def(
 			"_get_problem",handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *self)
 			{ return self->get_problem(); }),
@@ -1855,8 +1887,8 @@ void PyReg_Mesh(nb::module_ &m)
 	// octree-based adaptive-refinement and boundary-setup machinery.
 	nb::class_<TemplatedMeshBase3dHandle, MeshHandleBase>(m, "TemplatedMeshBase3d")
 		.def(nb::init<>())
-		.def("_set_problem",handle_method<TemplatedMeshBase3dHandle>([](pyoomph::TemplatedMeshBase3d *self, pyoomph::Problem *p, pyoomph::DynamicBulkElementInstance *inst)
-			 { self->_set_problem(p, inst); }), nb::arg("problem"), nb::arg("code_instance").none())
+		.def("_set_problem",handle_method<TemplatedMeshBase3dHandle>([](pyoomph::TemplatedMeshBase3d *self, pyoomph::Problem *p, pyoomph::DynamicJITCode *inst)
+			 { self->_set_problem(p, inst); }), nb::arg("problem"), nb::arg("jitcode").none())
 		.def(
 			"_get_problem",handle_method<TemplatedMeshBase3dHandle>([](pyoomph::TemplatedMeshBase3d *self)
 			{ return self->get_problem(); }),
@@ -1919,17 +1951,19 @@ void PyReg_Mesh(nb::module_ &m)
 			"_get_problem",handle_method<InterfaceMeshHandle>([](pyoomph::InterfaceMesh *self)
 			{ return self->get_problem(); }),
 			nb::rv_policy::reference)
-		.def("_set_problem",handle_method<InterfaceMeshHandle>([](pyoomph::InterfaceMesh *self, pyoomph::Problem *p, pyoomph::DynamicBulkElementInstance *inst)
-			 { self->_set_problem(p, inst); }), nb::arg("problem"), nb::arg("code_instance").none())
+		.def("_set_problem",handle_method<InterfaceMeshHandle>([](pyoomph::InterfaceMesh *self, pyoomph::Problem *p, pyoomph::DynamicJITCode *inst)
+			 { self->_set_problem(p, inst); }), nb::arg("problem"), nb::arg("jitcode").none())
 		//  .def(nb::init<pyoomph::Problem*>());
 		.def(nb::init<>());
 
+	m.def("jit_library_is_loaded", &pyoomph::jit_library_is_loaded, nb::arg("filename"),
+		  "Whether some Problem in this process currently has the named JIT-compiled shared library loaded. dlopen dedupes by inode, so a second Problem that resolves an element code to an already-loaded path silently gets the first Problem's compiled equations; ask this before compiling and choose a different path instead.");
 	m.def("set_tolerance_for_singular_jacobian", [](double tol)
 		  { oomph::FiniteElement::Tolerance_for_singular_jacobian = tol; }, nb::arg("tolerance"), "Sets the tolerance below which the local coordinate-to-Eulerian Jacobian of an element is considered singular (raising an error)");
-	m.def("set_interpolate_new_interface_dofs", [](bool on)
-		  { pyoomph::InterfaceElementBase::interpolate_new_interface_dofs = on; }, nb::arg("on"), "Globally controls whether newly created interface degrees of freedom (e.g. after refinement) are interpolated from the neighbouring nodes or initialized to zero");
-	m.def("set_use_eigen_Z2_error_estimators", [](bool on)
-		  { pyoomph::BulkElementBase::use_eigen_error_estimators = on; }, nb::arg("on"), "Globally controls whether the Eigen-based implementation is used for the Zienkiewicz-Zhu (Z2) spatial error estimator");
+	// set_interpolate_new_interface_dofs and set_use_eigen_Z2_error_estimators used to write a
+	// process-wide static and are now Problem methods (see Problem.set_* in nanobind/problem.cpp):
+	// Problem.remesh_handler_during_multistep switches interface-dof interpolation off and on again
+	// around its remesh, which with two Problems alive also switched it for the other one.
 	m.def("set_detect_inverted_elements", [](bool on)
 		  { pyoomph::BulkElementBase::detect_inverted_elements = on; }, nb::arg("on"), "Globally controls whether an element that has turned inside out raises an error while its shape buffer is filled, i.e. whether the signed determinant of the Eulerian mapping dx/ds is required to be strictly positive at every integration point. Only applies where that mapping is square (element dimension equal to nodal dimension); interface elements have no orientation and are skipped. Off by default. When on, adaptive time stepping and arclength continuation catch the error and retry with a smaller step instead of continuing on a folded mesh; the check costs roughly 2% of the assembly time while enabled and nothing while disabled");
 	m.def("get_detect_inverted_elements", []()

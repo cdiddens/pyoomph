@@ -1,3 +1,29 @@
+#  @file
+#  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
+#
+#  @section LICENSE
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+#  The main author may be contacted at c.diddens@utwente.nl
+#
+# ========================================================================
 """
 The rarer generic equation classes, deliberately kept out of the top-level namespace. Unlike
 :py:mod:`pyoomph.equations.generic`, this module is *not* pulled in by ``from pyoomph import *``
@@ -44,9 +70,11 @@ from __future__ import annotations
 #
 # ========================================================================
 
+from .._deprecation import deprecated_kwargs as _deprecated_kwargs, deprecated_attribute_alias as _deprecated_attribute_alias
 from ..generic.codegen import Equations, BaseEquations, InterfaceEquations, FiniteElementCodeGenerator
 from .generic import DirichletBC, PinWhere
 from ..utils.smallest_circle import make_circle
+from ..generic.mpi import get_mpi_nproc, get_mpi_world_comm
 from ..expressions.generic import Expression, ExpressionOrNum, FiniteElementSpaceEnum, weak, var
 
 from ..typings import *
@@ -89,7 +117,7 @@ class RefineMaxElementSize(Equations):
         super(RefineMaxElementSize, self).__init__()
         self.max_nondim_size=max_nondim_cartesian_size
 
-    def register_refinement_directives(self,codegen):
+    def _register_refinement_directives(self,codegen):
         mesh=codegen._mesh
         assert mesh is not None
         # A C++ refinement directive, for the same reason as RefineToLevel: it is a pure function of the
@@ -97,7 +125,7 @@ class RefineMaxElementSize(Equations):
         mesh._add_refinement_directive_max_element_size(float(self.max_nondim_size))
 
     def after_compilation(self,codegen):
-        self.register_refinement_directives(codegen)
+        self._register_refinement_directives(codegen)
 
 
 
@@ -166,15 +194,26 @@ class EquationCompilationFlags(BaseEquations):
     Args:
         analytical_position_jacobian: Whether to derive the moving-mesh (nodal position) Jacobian symbolically.
         analytical_jacobian: Whether to derive the Jacobian symbolically instead of by finite differences.
-        warn_on_large_numerical_factor: Warn when a numerical coefficient in the expanded residual exceeds this threshold, which usually means a scale is off.
+        warn_on_large_numerical_factor: Report a numerical coefficient in the expanded residual exceeding this magnitude, which usually means a scale is off. A positive value warns, a negative one raises, 0 switches the check off.
         debug_jacobian_epsilon: Assemble both the analytical and the finite-difference Jacobian and report entries differing by more than this. For debugging only - it is expensive.
         ccode_expression_mode: How the generated C expressions are rearranged: ``"expand"``, ``"normal"``, ``"collect_common_factors"`` or ``"factor"``.
         with_adaptivity: Whether to generate the code required for spatial adaptivity.
+        jacobian_hoist_min_cost: How large a Jacobian/Hessian coefficient must be before it is named above the trial loop. ``-1`` follows the global setting.
+        split_rjm_by_flag: Whether the residual/Jacobian/mass function is emitted once per assembly mode instead of one body branching at runtime.
+        split_rjm_by_hang: Whether the residual/Jacobian/mass function additionally gets a twin without the hanging-node machinery, used for elements in which nothing hangs. Requires ``split_rjm_by_flag`` and ``with_adaptivity``.
 
-    Every argument defaults to ``None``, which leaves the corresponding setting as it is - only the
-    ones you pass are overridden.
-    """    
-    def __init__(self,analytical_position_jacobian:bool | None=None,analytical_jacobian:bool | None=None,warn_on_large_numerical_factor:bool | None=None,debug_jacobian_epsilon:float | None=None,ccode_expression_mode:str | None=None,with_adaptivity:bool | None=None):
+    Every argument defaults to ``None``, which means "inherit": the setting is then taken from the
+    domain this one is nested in, and eventually from :py:attr:`~pyoomph.generic.problem.Problem.equation_compilation_flags`.
+    Adding e.g. ``EquationCompilationFlags(analytical_jacobian=False)`` to a bulk domain therefore
+    also disables the analytical Jacobian on all its interfaces, while everything else stays as set
+    on the problem.
+    """
+
+    #: The settings controlled here. Each one is a read/write property of the code generator of the
+    #: same name, so they can be transferred generically.
+    _flag_names = ("analytical_position_jacobian", "analytical_jacobian", "warn_on_large_numerical_factor", "debug_jacobian_epsilon", "ccode_expression_mode", "with_adaptivity", "jacobian_hoist_min_cost", "split_rjm_by_flag", "split_rjm_by_hang")
+
+    def __init__(self,analytical_position_jacobian:bool | None=None,analytical_jacobian:bool | None=None,warn_on_large_numerical_factor:float | None=None,debug_jacobian_epsilon:float | None=None,ccode_expression_mode:str | None=None,with_adaptivity:bool | None=None,jacobian_hoist_min_cost:int | None=None,split_rjm_by_flag:bool | None=None,split_rjm_by_hang:bool | None=None):
         super(EquationCompilationFlags, self).__init__()
         self.analytical_position_jacobian=analytical_position_jacobian
         self.analytical_jacobian=analytical_jacobian
@@ -182,24 +221,33 @@ class EquationCompilationFlags(BaseEquations):
         self.debug_jacobian_epsilon=debug_jacobian_epsilon
         self.ccode_expression_mode=ccode_expression_mode
         self.with_adaptivity=with_adaptivity
+        self.jacobian_hoist_min_cost=jacobian_hoist_min_cost
+        self.split_rjm_by_flag=split_rjm_by_flag
+        self.split_rjm_by_hang=split_rjm_by_hang
 
-    def before_compilation(self,codegen:"FiniteElementCodeGenerator"):
-        if self.analytical_position_jacobian is not None:
-            codegen.analytical_position_jacobian=self.analytical_position_jacobian
-        if self.analytical_jacobian is not None:
-            codegen.analytical_jacobian=self.analytical_jacobian
-        if self.debug_jacobian_epsilon is not None:
-            codegen.debug_jacobian_epsilon=self.debug_jacobian_epsilon
-        if self.ccode_expression_mode is not None:
-            codegen.ccode_expression_mode=self.ccode_expression_mode        
-        if self.with_adaptivity is not None:
-            codegen.with_adaptivity=self.with_adaptivity
+    def with_defaults_from(self,fallback:"EquationCompilationFlags | None")->"EquationCompilationFlags":
+        """Returns a copy of these flags where every setting left at ``None`` is taken from ``fallback``."""
+        if fallback is None:
+            return self
+        res=EquationCompilationFlags()
+        for n in self._flag_names:
+            own=getattr(self,n)
+            setattr(res,n,getattr(fallback,n) if own is None else own)
+        return res
 
+    def apply_to_codegen(self,codegen:"FiniteElementCodeGenerator"):
+        """Writes every setting that is not ``None`` to the code generator, leaving the others alone."""
+        for n in self._flag_names:
+            v=getattr(self,n)
+            if v is not None:
+                setattr(codegen,n,v)
 
-
-
+    def _before_compilation(self,codegen:"FiniteElementCodeGenerator"):
+        self.apply_to_codegen(codegen)
 
     def define_fields(self):
+        # Also set in _before_compilation, but the warning fires while the residuals are assembled,
+        # i.e. long before that.
         if self.warn_on_large_numerical_factor is not None:
             self.get_current_code_generator().warn_on_large_numerical_factor=self.warn_on_large_numerical_factor
 
@@ -209,15 +257,18 @@ class SetCoordinateSystem(Equations):
     Set the default coordinate system for the current equations. It will override the coordinate system set on the problem level.
 
     Args:
-        coord_sys: A coordinate system instance from :py:mod:`pyoomph.expressions.coordsys`, e.g. ``axisymmetric``.
+        coordsys: A coordinate system instance from :py:mod:`pyoomph.expressions.coordsys`, e.g. ``axisymmetric``. The former name ``coord_sys`` is deprecated, but still accepted.
     """
-    def __init__(self,coord_sys:"BaseCoordinateSystem"):
+    coord_sys = _deprecated_attribute_alias("coord_sys","coordsys")
+
+    @_deprecated_kwargs(coord_sys="coordsys")
+    def __init__(self,coordsys:"BaseCoordinateSystem"):
         super(SetCoordinateSystem, self).__init__()
-        self.coord_sys=coord_sys
+        self.coordsys=coordsys
 
     def define_fields(self):
-        master = self._get_combined_element()
-        master._coordinate_system=self.coord_sys
+        master = self._master()
+        master._coordinate_system=self.coordsys
 
 
 class ApplyMappingOnAddedResidual(BaseEquations):    #
@@ -234,7 +285,7 @@ class ApplyMappingOnAddedResidual(BaseEquations):    #
         self.mapping=mapping
 
     def define_fields(self):
-        master=self._get_combined_element()
+        master=self._master()
         master._residual_mapping_functions.append(self.mapping)
 
 
@@ -354,7 +405,7 @@ class AxisymmetryBCForScalarD0Field(InterfaceEquations):
             for ie in eqtree._mesh.elements():
                 be=ie.get_bulk_element()
                 for f in self.fields:
-                    fi=be.get_code_instance().get_discontinuous_field_index(f)
+                    fi=be.get_jit_code().get_discontinuous_field_index(f)
                     if fi<0:
                         raise RuntimeError("Discontinuous parent field '"+str(f)+"' not known here")                
                     eqs.add(be.internal_data_pt(fi).eqn_number(0))
@@ -367,28 +418,55 @@ class PinMeshAtDistanceToInterface(PinWhere):
     i.e. lets the mesh move only in a band around them. The distance is measured against the smallest
     circle enclosing the interfaces, re-fitted whenever the conditions are applied.
 
+    Collective on a distributed mesh: see :py:meth:`_build_where_func`.
+
     Args:
         interface_names: Name(s) of the interfaces to measure the distance from.
         distance: Beyond this distance the mesh is frozen.
         mode: How the interface is approximated. Only ``"smallest_circle"`` is implemented.
     """
-    def __init__(self, interface_names:str | set[str], distance:ExpressionOrNum, mode:str="smallest_circle"):
+    def __init__(self, interface_names:"str | Iterable[str]", distance:ExpressionOrNum, mode:str="smallest_circle"):
         super(PinMeshAtDistanceToInterface, self).__init__(where=lambda : False, mesh_x=True, mesh_y=True)
+        # A sorted list, not a set: the point order below decides the smallest enclosing circle at
+        # round-off, and a set of names iterates in an order randomized per process by
+        # PYTHONHASHSEED. Two MPI ranks then pinned slightly different mesh nodes. (It also used to
+        # read set(self.interface_names) here, i.e. an attribute that does not exist yet.)
         if isinstance(interface_names, str):
-            self.interface_names = {interface_names}
+            self.interface_names = [interface_names]
         else:
-            self.interface_names = set(self.interface_names)
+            self.interface_names = sorted(interface_names)
         self.distance = distance
         self._circle_x = 0
         self._circle_y = 0
         self._circle_radius = 0
 
     def _build_where_func(self):
+        """Re-fit the enclosing circle and turn it into the ``where`` predicate.
+
+        Collective on a distributed mesh, and a plain local computation otherwise. Under
+        ``--distribute`` each rank holds only its share of the interface, so a circle fitted from
+        the local points alone is a different - and always too small - circle on every rank. The
+        pinning that follows is a geometric statement about the whole mesh, not about a partition:
+        every rank has to reach the same verdict for a node it shares with another one, or a halo
+        node ends up pinned on its owner and free on its copy. One allgather of the interface
+        coordinates gives that; it arrives in rank order, so every rank feeds make_circle the very
+        same list. Without MPI, or with a replicated mesh, every rank already sees all the points
+        and no collective is needed - which also keeps a rank that never reaches this method (the
+        equation is not on its domains at all) from being waited for.
+        """
         assert self.mesh is not None
         pts:list[tuple[float,float]] = []
         for inter in self.interface_names:
             for n in self.mesh.boundary_nodes(inter):
                 pts.append((n.x(0), n.x(1),))
+        if get_mpi_nproc()>1 and self.mesh.is_mesh_distributed():
+            comm=get_mpi_world_comm()
+            assert comm is not None  # more than one process means mpi4py is there
+            pts=[p for share in comm.allgather(pts) for p in share]   # duplicated halo points do not bother a circle fit
+        if not pts:
+            raise RuntimeError("PinMeshAtDistanceToInterface found no node at all on the interface(s) "+
+                               ", ".join(self.interface_names)+" of the domain '"+self.mesh.get_full_name()+
+                               "', so there is nothing to measure a distance from.")
         self._circle_x, self._circle_y, self._circle_radius = make_circle(pts)
         self._circle_radius += float(self.distance / self.mesh.get_problem().get_scaling("spatial"))
         self.where:Callable[[float,float],bool] = lambda x, y: (x - self._circle_x) ** 2 + (y - self._circle_y) ** 2 > self._circle_radius ** 2

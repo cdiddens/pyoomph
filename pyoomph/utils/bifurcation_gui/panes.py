@@ -414,10 +414,22 @@ class PlotterPaneSet:
             return "{:s} - eigenvector {:d} ({:s})".format(name,plotter.eigenvector,plotter.eigenmode)
         return name if len(self.source_plotters())<2 else "{:s} #{:d}".format(name,index)
 
-    def _build(self):
+    def destroy_all(self):
+        """Destroy every pane, closing its pyplot figure.
+
+        The figures are pyplot-managed (see the module docstring), i.e. registered in matplotlib's
+        process-wide ``Gcf``. Dropping the panes without closing them leaves each plotter - and
+        through it the problem, its meshes and the mesh data cache - reachable from that global
+        registry for the rest of the process, which is one of the two ways a closed window used to
+        keep pyoomph's C++ objects alive until nanobind reported them as leaked at exit. The other is
+        the window itself; see :py:meth:`~pyoomph.utils.bifurcation_gui.tkapp.BifurcationTkApp.teardown`.
+        """
         for p in self.panes:
             p.destroy()
         self.panes=[]
+
+    def _build(self):
+        self.destroy_all()
         sources=self.source_plotters()
         for i,src in enumerate(sources):
             # The problem's own plotter object is used as it is, so what is on screen is exactly what

@@ -1,5 +1,7 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #
 #  @section LICENSE
 #
@@ -68,7 +70,7 @@ class _Carrier(Equations):
 
 
 def _set_nodal(mesh, fn, name="w"):
-    idx = mesh.element_pt(0).get_code_instance().get_nodal_field_indices()[name]
+    idx = mesh.element_pt(0).get_jit_code().get_nodal_field_indices()[name]
     for n in mesh.nodes():
         n.set_value(idx, fn(*[n.x(i) for i in range(n.ndim())]))
 
@@ -296,7 +298,7 @@ def test_laplace_beltrami_on_a_curved_interface():
 # ---------------------------------------------------------------------------------------------
 
 def test_moving_mesh_position_jacobian_of_a_strong_laplacian():
-    """debug_jacobian_by_fd_epsilon compares the analytic elemental Jacobian against a finite
+    """equation_compilation_flags.debug_jacobian_epsilon compares the analytic elemental Jacobian against a finite
     difference one and raises on a mismatch. The mesh is distorted on purpose: on a uniform
     Cartesian mesh enough terms vanish to hide a sign error."""
     from pyoomph.equations.ALE import LaplaceSmoothedMesh
@@ -317,7 +319,7 @@ def test_moving_mesh_position_jacobian_of_a_strong_laplacian():
             for b in ("top", "bottom", "left", "right"):
                 eqs += DirichletBC(mesh_x=True, mesh_y=True) @ b
             self.add_equations(eqs @ "domain")
-            self.debug_jacobian_by_fd_epsilon = 1e-7
+            self.equation_compilation_flags.debug_jacobian_epsilon = 1e-7
 
     import io
     import contextlib
@@ -584,7 +586,7 @@ def _moving_interface_problem(hessian):
             self.add_equations(eqs @ "domain")
             self.add_equations(Surf() @ "domain/bottom")
             if not hessian:
-                self.debug_jacobian_by_fd_epsilon = 1e-5
+                self.equation_compilation_flags.debug_jacobian_epsilon = 1e-5
 
     p = P()
     if hessian:
@@ -644,7 +646,7 @@ def test_dl_second_derivative_on_a_moving_mesh():
             for b in ("top", "bottom", "left", "right"):
                 eqs += DirichletBC(mesh_x=True, mesh_y=True) @ b
             self.add_equations(eqs @ "domain")
-            self.debug_jacobian_by_fd_epsilon = 1e-5
+            self.equation_compilation_flags.debug_jacobian_epsilon = 1e-5
 
     buf = io.StringIO()
     with P() as p:

@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -21,6 +21,7 @@ The main author may be contacted at c.diddens@utwente.nl
 
 
 #pragma once
+#include <functional> // for the visit_global_dofs callback
 #include "oomph_lib.hpp"
 #include "nodes.hpp"
 #include "exception.hpp"
@@ -37,7 +38,7 @@ namespace pyoomph
 	class MeshTemplateElementCollection;
 	class Problem;
 	class BulkElementBase;
-	class DynamicBulkElementInstance;
+	class DynamicJITCode;
 
 	class Mesh;
 
@@ -67,10 +68,17 @@ namespace pyoomph
 	// Base class for all pyoomph meshes. Wraps an oomph-lib (Refineable)Mesh and adds
 	// everything pyoomph needs on top: named boundaries, per-field initial/Dirichlet
 	// conditions, output scaling, interface-dof bookkeeping, JIT-compiled element code
-	// binding (codeinst) and helpers for interpolation/projection between meshes.
+	// binding (jitcode) and helpers for interpolation/projection between meshes.
 	class Mesh : public virtual oomph::RefineableMeshBase, public virtual oomph::Mesh
 	{
 	protected:
+		// See has_complete_interface_topological_ids().
+		bool interface_topological_ids_complete = false;
+		// (nnode, nelement) at the last completed sweep. Nodes are only ever created by generation or by
+		// refinement, both of which change these, so an unchanged pair means there is nothing to do --
+		// which matters because pair_is_topological() asks once per pair per repair round.
+		unsigned long topo_ids_at_nnode = 0, topo_ids_at_nelement = 0;
+
 		Problem *problem; // Owning Problem (non-owning pointer)
 		std::string domainname; // Name of the domain this mesh represents, e.g. as used in the Python interface
 		std::vector<std::string> boundary_names; // Names of the boundaries, indexed like oomph-lib's boundary indices
@@ -81,10 +89,15 @@ namespace pyoomph
 		std::vector<bool> dirichlet_active; // Whether each Dirichlet condition (by index) is currently active
 		std::map<pyoomph::Node *, pyoomph::Node *> copied_masters; // Maps a copied node to its master node (see resolve_copy_master)
 		unsigned long topology_generation = 0; // Bumped whenever cached element pointers/coordinates go stale, see bump_topology_generation()
-		DynamicBulkElementInstance *codeinst = NULL; // JIT-compiled element code instance backing the elements of this mesh
+		DynamicJITCode *jitcode = NULL; // JIT-compiled element code backing the elements of this mesh
 
 	public:
 		bool interpolated_lagrangian_coordinates_at_remeshing=false;
+		// Set on the DESTINATION mesh to let nodal_interpolate_from() skip its discontinuous (DG/DL/D0)
+		// fields instead of refusing the transfer outright. Only for fields that are recomputed from
+		// scratch on the new mesh anyway - DisjunctDomainMarker's component numbering is the case it
+		// was added for - since nothing is carried across for them.
+		bool discontinuous_fields_need_no_transfer=false;
 		// Given a node that is a "copy" (e.g. periodic/interface copy) of another node, return its master.
 		// Follows copied_masters; typically returns cpy itself if it is not a copy.
 		virtual pyoomph::Node *resolve_copy_master(pyoomph::Node *cpy);
@@ -104,6 +117,53 @@ namespace pyoomph
 		// Pin all dofs of this mesh's elements, optionally restricted to only_dofs / excluding ignore_dofs.
 		// ignore_continuous_at_interfaces lists dof indices that must stay unpinned where continuous across an interface.
 		virtual void pin_all_my_dofs(std::set<std::string> only_dofs, std::set<std::string> ignore_dofs, std::set<unsigned> ignore_continuous_at_interfaces);
+		// What visit_global_dofs reports for one dof: WHERE it is stored, not what it should be called.
+		// The two consumers label the same dof differently - describe_global_dofs appends the position
+		// types after the field types under their mesh_* spelling, while
+		// fill_dof_to_global_field_index_buffer uses the reserved coordinate_* slots - so the label is
+		// deliberately not part of this struct. What is shared is the walk.
+		enum class DofKind
+		{
+			NodalPosition,	  // variable_position_pt(), value_index = the dimension
+			NodalContinuous,  // a base-bulk continuous field, value_index = its field index
+			NodalInterface,   // an interface-only continuous value assigned by a face element
+			DG,				  // a discontinuous space, see space_index/field_in_space
+			DL,				  // element-internal, one value per DL node
+			D0				  // element-internal, one value per element
+		};
+		struct DofVisit
+		{
+			long eqn;					   // always >= 0; pinned/constrained/halo dofs are not reported
+			DofKind kind;
+			oomph::Data *data;			   // the storage the value lives in
+			unsigned value_index;		   // which value of that Data
+			unsigned field_index;		   // field within its space/kind (the DL/D0/interface/continuous index)
+			unsigned space_index;		   // DG only: index into ft->dg_spaces
+			unsigned field_in_space;	   // DG only: field index within that space
+			pyoomph::Node *node;		   // the owning node, or null for DG/DL/D0 internal data
+			BulkElementBase *element;	   // the element that reported it
+			unsigned element_index;		   // its index in THIS mesh's element_pt
+			bool element_is_interface;	   // whether that element is an interface element
+			// DG only. A DG Data belongs to a bulk element but is reported by every element that can
+			// reach it, and a facet element reaches only the values sitting on its own facet - that is
+			// what get_DG_node_index() maps. True when this value is one of them. describe_global_dofs
+			// labels only those (so a facet element does not claim its neighbour's interior values),
+			// fill_dof_to_global_field_index_buffer labels all of them; the walk reports every value
+			// either way, because a consumer that has to see each dof exactly once must not have any
+			// of them filtered out underneath it.
+			bool dg_on_own_facet;
+		};
+		// Walk every dof this mesh's elements can reach and report it once per reporting element. A
+		// node shared by several elements is therefore reported several times - the callers either
+		// write into a per-equation array (idempotent) or claim each equation once.
+		//
+		// One walk rather than one per consumer: describe_global_dofs and
+		// fill_dof_to_global_field_index_buffer were copies of the same nested loop that had already
+		// drifted apart in three places (positions first vs last, the interface branch guarded
+		// differently, and a different DG buffer index), and a third copy for the dof ordering would
+		// have drifted again. The drift is preserved, not resolved: it lives in the two lambdas, where
+		// it is visible side by side instead of a hundred lines apart.
+		virtual void visit_global_dofs(const std::function<void(const DofVisit &)> &visit);
 		// Fill doftype/typnames with a description of each global dof (used for debugging/introspection).
 		virtual void describe_global_dofs(std::vector<int> &doftype, std::vector<std::string> &typnames);
 		virtual void describe_my_dofs(std::ostream &os, const std::string &in) { this->describe_local_dofs(os, in); }
@@ -128,6 +188,13 @@ namespace pyoomph
 		// Print how long the point-location phase of nodal_interpolate_from took, and how the
 		// candidate sets were arrived at. Off by default; interpolation is called often enough that
 		// unconditional timing output would be noise.
+		//
+		// Deliberately still process-wide, unlike interpolate_new_interface_dofs and
+		// use_eigen_error_estimators, which moved onto Problem because switching them for one Problem
+		// silently switched them for every other one. This one only prints: the worst a second
+		// Problem suffers is diagnostics it did not ask for. It is also switched on BEFORE the
+		// Problem that will report exists (see tests/test_mesh_point_locator.py), which a per-Problem
+		// setting could not express.
 		static bool report_interpolation_timing;
 		virtual void set_time_level_for_projection(unsigned time_level);
 		// Turn the zeta-projection residual on or off for every element of this mesh. It has to stay
@@ -191,7 +258,12 @@ namespace pyoomph
 		// the intrinsic boundary coordinate (zeta) when one is defined, or - when it is not - by
 		// projecting each node onto the old interface geometry, which needs no chart and is therefore
 		// the only option for a 2d interface in 3d. See dev_docs/mesh_point_locator.md.
-		virtual void nodal_interpolate_from(Mesh *from, int boundary_index, bool use_boundary_coordinate = true);
+		// only_interface_fields transfers just the dofs an interface adds on top of the bulk (the
+		// inter_field_map ones), leaving the bulk fields, the position history and the Lagrangian
+		// coordinates as they are. That is what lets a chart that deliberately does NOT follow the
+		// geometry - the zeta of a pinch-off, which maps a fresh cap onto the old interface near the
+		// waist - govern the surface fields alone, while the geometry keeps governing everything else.
+		virtual void nodal_interpolate_from(Mesh *from, int boundary_index, bool use_boundary_coordinate = true, bool only_interface_fields = false);
 		// Whether nodal_interpolate_from(from) is a transfer OUT of a distributed mesh INTO a replicated
 		// one, which is what remeshing a distributed problem does: the new mesh is rebuilt in full on
 		// every rank (see Problem._redistribute_after_remeshing), while the old one is still partitioned.
@@ -218,7 +290,11 @@ namespace pyoomph
 												  std::set<oomph::Node *> &missing_nodes);
 		// Interpolate nodal values along a boundary from an old mesh, using the arclength-like boundary coordinate
 		// to find the closest correspondence; boundary_max_dist limits how far a match may be to still be accepted.
-		virtual void nodal_interpolate_along_boundary(Mesh *from, int bind, int oldbind, Mesh *imesh, Mesh *oldimesh, double boundary_max_dist);
+		// only_interface_fields transfers just the dofs that imesh adds on top of the bulk (the inter_field_map
+		// below) and leaves the bulk fields alone. That is what the codim-2 pass needs: the per-boundary passes
+		// have already put interpolated - not nearest-node-blended - bulk values on those very nodes, and this
+		// routine would overwrite them with the two-nearest-node blend. See meshes/interpolator.py.
+		virtual void nodal_interpolate_along_boundary(Mesh *from, int bind, int oldbind, Mesh *imesh, Mesh *oldimesh, double boundary_max_dist, bool only_interface_fields = false);
 		// Settle the boundary matching above across the ranks. Every rank produces a match for every
 		// destination node here - the nearest of ITS old nodes, however far away - so unlike the
 		// point-located transfer this is not "who found it" but "who found it closest": one MPI_MINLOC
@@ -228,14 +304,22 @@ namespace pyoomph
 		void pool_boundary_interpolation_across_ranks(const std::vector<oomph::Node *> &newnodes,
 													  const std::vector<double> &local_dist,
 													  Mesh *oldimesh, const std::string &where);
-		// Bind this mesh to its owning Problem and the JIT-compiled element code instance used to create its elements.
-		virtual void _set_problem(Problem *p, DynamicBulkElementInstance *code);
+		// Bind this mesh to its owning Problem and the JIT-compiled element code used to create its elements.
+		virtual void _set_problem(Problem *p, DynamicJITCode *code);
 		// Evaluate all fields at a list of local coordinates ("zetas") per element; masked_lines flags entries to
 		// skip. with_scales selects whether output_scales are applied (dimensional vs. nondimensional output).
 		std::vector<std::vector<double>> get_values_at_zetas(const std::vector<std::vector<double>> &zetas, std::vector<bool> &masked_lines, bool with_scales);
 		virtual void fill_dof_types(int *typarr);
 		// Make sure the halo layer (MPI-distributed meshes) is wide enough to represent periodic boundary partners.
 		virtual void ensure_halos_for_periodic_boundaries();
+		// True if any node of this mesh is a periodic ("copy") node, i.e. the mesh carries a PeriodicBC or
+		// was built from a template with add_periodic_node_pair(). Scans the node list; not cached, since
+		// refinement and remeshing both mint and destroy copy nodes.
+		virtual bool has_periodic_nodes() const;
+		// True if this mesh has periodic ("copy") nodes whose POSITIONS are still unknowns, i.e. a moving
+		// (ALE) mesh. Only meaningful once equation numbers have been assigned. See the note at the
+		// implementation for why that combination is refused under MPI.
+		virtual bool has_periodic_position_dofs() const;
 		// Evaluate a named user-defined integral (as set up in the JIT code) over this mesh.
 		virtual GiNaC::ex evaluate_integral_function(std::string name);
 		// Find the extremum (sign>0: max, sign<0: min) of a named local expression over the mesh; returns the
@@ -247,12 +331,12 @@ namespace pyoomph
 		// periodic/interface meshes, their opposite-side counterparts. Dimension-specific; base class throws.
 		virtual void fill_internal_facet_buffers(std::vector<BulkElementBase *> &, std::vector<int> &, std::vector<BulkElementBase *> &, std::vector<int> &, std::vector<int> &) { throw_runtime_error("Please specify this function for each dimension"); }
 		// Build an InterfaceMesh of elements attached to the boundary/interface named intername, using the
-		// JIT-compiled interface element code jitcode; imesh is the interface mesh to populate.
-		virtual void generate_interface_elements(std::string intername, Mesh *imesh, DynamicBulkElementInstance *jitcode);
+		// JIT-compiled interface element code interface_jitcode; imesh is the interface mesh to populate.
+		virtual void generate_interface_elements(std::string intername, Mesh *imesh, DynamicJITCode *interface_jitcode);
 		virtual void ensure_external_data();
 		virtual double get_temporal_error_norm_contribution();
 		// Store the output scale factor s (a symbolic expression, evaluated via _code) used to nondimensionalize field fname on output.
-		void set_output_scale(std::string fname, GiNaC::ex s, DynamicBulkElementInstance *_code);
+		void set_output_scale(std::string fname, GiNaC::ex s, DynamicJITCode *_code);
 		double get_output_scale(std::string fname);
 		int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nelem, bool discontinuous); // Gets the number of required elemental indices
 		// Same, but also fills source_element_indices (if non-NULL) with the mesh element index behind each output row
@@ -263,6 +347,19 @@ namespace pyoomph
 		// Row indices, in to_numpy's node ordering, of the nodes shared with process p, index-matched to process p's
 		// own list for this rank (empty without MPI). Used to merge the per-rank meshes into one global mesh.
 		virtual std::vector<int> get_shared_node_numpy_indices(unsigned p);
+
+		// --- Cross-domain topological node identity (dev_docs/interface_refinement_coupling.md section 15) ---
+		// Fill in pyoomph::Node::interface_topological_id for every node that does not have one yet, by
+		// walking the refinement tree downwards: a son's node is the C1 interpolation of its father's
+		// vertex nodes at a dyadic local coordinate, so its id is the canonical set of
+		// (father vertex id, exact dyadic weight) pairs. Idempotent, purely local (no MPI: the ids of
+		// pre-distribution nodes travel with the nodes, and later ones are born of a refinement this rank
+		// performed, halo elements included). Sets interface_topological_ids_complete.
+		void assign_interface_topological_ids();
+		// Did the last assign_interface_topological_ids() reach every node of this mesh? False means
+		// something was created outside the two routes above, and the interface machinery must then fall
+		// back to matching by position rather than silently compare an unset id.
+		bool has_complete_interface_topological_ids() const { return interface_topological_ids_complete; }
 
 		// --- Partition-independent addressing, for state files (dev_docs/distributed_state_files.md) ---
 		void assign_global_base_element_indices();            // number the roots; must run before distribute()
@@ -306,8 +403,12 @@ namespace pyoomph
 		// Whole-vector snapshot/restore of the activation flags, see mesh.cpp for why it exists.
 		std::vector<bool> get_dirichlet_active_flags() const;
 		void set_dirichlet_active_flags(const std::vector<bool> &flags);
-		// Ensure the intrinsic boundary coordinate (arclength/zeta along boundary_index) has been set up on all its nodes.
-		virtual void boundary_coordinates_bool(unsigned boundary_index);
+		// Declare that the intrinsic boundary coordinate (arclength/zeta along boundary_index) has been
+		// set up on all its nodes. value=false takes the declaration back, which is what a one-off
+		// assignment (see AxisymmetricReconnection) needs: a mesh that keeps claiming a chart nobody
+		// re-establishes makes the NEXT remesh fail, since the transfer then insists on finding one on
+		// the new mesh too.
+		virtual void boundary_coordinates_bool(unsigned boundary_index, bool value = true);
 		virtual bool is_boundary_coordinate_defined(unsigned boundary_index);
 		// Period of the intrinsic boundary coordinate along a boundary, or 0 for a non-periodic one.
 		//
@@ -351,7 +452,7 @@ namespace pyoomph
 		virtual int has_interface_dof_id(std::string n);		  //-1 if not present
 		virtual unsigned resolve_interface_dof_id(std::string n); // add it if not present
 		virtual unsigned count_nnode(bool discontinuous = false);
-		virtual Node *get_some_node() { return (this->nnode() ? dynamic_cast<Node *>(this->node_pt(0)) : NULL); }
+		virtual Node *get_some_node() { return (this->nnode() ? static_cast<Node *>(this->node_pt(0)) : NULL); }
 		virtual void fill_node_map(std::map<oomph::Node *, unsigned> &nodemap);
 		virtual std::vector<oomph::Node *> fill_reversed_node_map(bool discontinuous = false);
 		virtual void enlarge_elemental_error_max_override_to_only_nodal_connected_elems(unsigned bind);
@@ -433,7 +534,10 @@ namespace pyoomph
 	class InterfaceMesh : public Mesh
 	{
 	protected:
-		DynamicBulkElementInstance *code; // JIT-compiled code for the interface elements
+		// JIT code defining the interface elements. Deliberately kept separate from the inherited
+		// Mesh::jitcode: set_rebuild_information() fills this one, _set_problem() the other, and
+		// the two are set at different points of interface construction.
+		DynamicJITCode *code;
 		std::string interfacename;
 		Mesh *bulkmesh; // The bulk mesh this interface is attached to
 		// Build boundary information (which interface elements/nodes lie on which sub-boundary) for a 1d interface
@@ -557,7 +661,7 @@ namespace pyoomph
 		virtual void nullify_selected_bulk_dofs();
 		// Store the information (bulk mesh, interface name, JIT code) needed to rebuild this interface mesh later,
 		// e.g. after adaptation via rebuild_after_adapt.
-		virtual void set_rebuild_information(Mesh *_bulkmesh, std::string intername, DynamicBulkElementInstance *jitcode);
+		virtual void set_rebuild_information(Mesh *_bulkmesh, std::string intername, DynamicJITCode *interface_jitcode);
 		virtual Mesh *get_bulk_mesh() { return bulkmesh; }
 		const std::string &get_interface_name() const { return interfacename; }
 		// Drop the halo/haloed element lists. They point at elements this mesh is about to delete, and
@@ -565,12 +669,16 @@ namespace pyoomph
 		// Problem::copy_haloed_eqn_numbers_helper, i.e. a segfault far from here.
 		void clear_halo_element_scheme()
 		{
+			// The lists themselves only exist in an MPI build (oomph::Mesh declares them inside its own
+			// OOMPH_HAS_MPI guard), and without MPI there is nothing to go stale.
+#ifdef OOMPH_HAS_MPI
 			Root_halo_element_pt.clear();
 			Root_haloed_element_pt.clear();
+#endif
 		}
 		std::string get_full_domain_path() override;
 		unsigned count_nnode(bool discontinuous = false) override; // Interface meshes don't have their own nodes...
-		Node *get_some_node() override { return (this->nelement() ? dynamic_cast<Node *>(dynamic_cast<oomph::FiniteElement *>(this->element_pt(0))->node_pt(0)) : NULL); }
+		Node *get_some_node() override { return (this->nelement() ? static_cast<Node *>(dynamic_cast<oomph::FiniteElement *>(this->element_pt(0))->node_pt(0)) : NULL); }
 		void fill_node_map(std::map<oomph::Node *, unsigned> &nodemap) override;
 		std::vector<oomph::Node *> fill_reversed_node_map(bool discontinuous = false) override;
 		std::vector<int> get_shared_node_numpy_indices(unsigned p) override; // Delegates to the bulk mesh's scheme
@@ -580,6 +688,10 @@ namespace pyoomph
 		// Match this interface mesh's elements/nodes to those of another interface mesh (e.g. the opposite side of
 		// a periodic domain) by nearest-neighbor lookup via a KD-tree, populating opposite_interior_facets etc.
 		virtual void connect_interface_elements_by_kdtree(InterfaceMesh *other);
+		// The same pairing on the cross-domain topological node identity rather than on the positions.
+		// Used by connect_interface_elements_by_kdtree whenever both sides carry a complete set of ids and
+		// the connection is coincident; see pyoomph::Node::interface_topological_id.
+		virtual void connect_interface_elements_topologically(InterfaceMesh *other);
 		unsigned get_nodal_dimension() override;
 		int get_element_dimension() override;
 	};
@@ -969,6 +1081,9 @@ namespace pyoomph
 			// descent). Runs before equation numbering, so the hangs are picked up by
 			// assign_(hanging_)local_eqn_numbers. No-op for quad/hex meshes.
 			this->post_adapt_setup_hanging_nodes();
+			// The nodes the refinement just created have no cross-domain identity yet, and the coupled
+			// interface machinery is about to ask for it. Idempotent and cheap when nothing is new.
+			this->assign_interface_topological_ids();
 			const int halochk = this->halo_consistency_check_mode();
 			if (halochk) check_halo_element_consistency(this, "after 2:1 balancing", NULL, halochk > 1);
 		}

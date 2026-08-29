@@ -59,6 +59,7 @@ Beyond that, pyoomph makes use of the following libraries at runtime. During ins
 - [`mpi4py`](https://github.com/mpi4py/mpi4py/), ([BSD 3-Clause license](https://github.com/mpi4py/mpi4py/blob/master/LICENSE.rst)).
 - [`more_itertools`](https://github.com/more-itertools/more-itertools), ([MIT license](https://github.com/more-itertools/more-itertools/blob/master/LICENSE)).
 - [`scipy`](https://github.com/scipy/scipy), ([BSD-3-Clause license](https://github.com/scipy/scipy/blob/main/LICENSES_bundled.txt)).
+- [`shapely`](https://github.com/shapely/shapely), ([BSD 3-Clause license](https://github.com/shapely/shapely/blob/main/LICENSE.txt)), only required by `pyoomph.meshes.axisymm_topology` to plan axisymmetric pinch-off/coalescence. Optional, install with `pip install pyoomph[topology]`.
 - [`matplotlib`](https://github.com/matplotlib/matplotlib), ([PSF-based license](https://matplotlib.org/stable/users/project/license.html)).
 - [`mkl`](https://pypi.org/project/mkl/), ([Intel Simplified Software license](https://www.intel.com/content/dam/develop/external/us/en/documents/pdf/intel-simplified-software-license.pdf)).
 - [`petsc`](https://petsc.org/release/) and [`petsc4py`](https://petsc.org/release/petsc4py/), ([BSD 2-Clause license](https://petsc.org/release/install/license/)).

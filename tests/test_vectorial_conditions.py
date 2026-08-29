@@ -1,5 +1,7 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #
 #  @section LICENSE
 #
@@ -29,7 +31,7 @@
 #     InitialCondition(velocity=vector(u,v))  instead of  InitialCondition(velocity_x=u, velocity_y=v)
 #
 # Both classes act on the SCALAR fields the code generator knows about, so the vector has to be split
-# into its components (BaseEquations.expand_vectorial_entries). The oracle throughout is that the two
+# into its components (BaseEquations._expand_vectorial_entries). The oracle throughout is that the two
 # spellings are bit-identical -- same ndof, same initial dof vector, same solution -- which is a
 # stronger statement than "it runs", and the only one that catches a component being written to the
 # wrong slot.
@@ -182,7 +184,8 @@ def _solve_positions(tmp_path, **kw):
 def test_position_field_as_a_vector_matches_the_component_form(case, tmp_path):
     # "mesh" is not registered by define_vector_field(), and var("lagrangian") is not a matrix when the
     # condition is built -- so this whole family used to fail with "is not defined in the element".
-    # As above, the oracle is that the two spellings give bit-identical node positions.
+    # As above, the oracle is that the two spellings give the same node positions (bit-identical on
+    # x86_64; see the tolerance at the bottom for why that is not asserted as such).
     kw = {"axisymmetric": case == "axisymmetric", "threed": case == "threed",
           "value": "coordinate" if case == "coordinate" else "lagrangian"}
     ndof_v, pos_v = _solve_positions(tmp_path / "vec", vectorial=True, **kw)
@@ -192,7 +195,12 @@ def test_position_field_as_a_vector_matches_the_component_form(case, tmp_path):
     assert pos_v.shape == pos_s.shape
     # Guards against a vacuous comparison: if the condition moved nothing, every mix-up matches.
     assert numpy.max(numpy.abs(pos_s - pos_flat)) > 1e-3
-    assert numpy.max(numpy.abs(pos_v - pos_s)) == 0.0, "the vector-valued condition moved the mesh differently"
+    # Not == 0.0: the two spellings reach the same Newton solution through slightly differently
+    # ordered generated code, and on arm64 the [threed] case lands one ULP apart (2.2e-16) where
+    # x86_64 agrees exactly. The guard above is 1e-3, so anything this test is actually defending
+    # against - a component mix-up, a condition applied to the wrong field - is thirteen orders of
+    # magnitude larger than what is tolerated here.
+    assert numpy.max(numpy.abs(pos_v - pos_s)) < 1e-13, "the vector-valued condition moved the mesh differently"
 
 
 def test_a_deferred_symbol_is_resolved_before_it_is_split(tmp_path):
@@ -202,13 +210,13 @@ def test_a_deferred_symbol_is_resolved_before_it_is_split(tmp_path):
     class _Split(PseudoElasticMesh):
         def define_residuals(self):
             super().define_residuals()
-            got = self.expand_vectorial_entries({"mesh": 2 * var("lagrangian")}, "test")
+            got = self._expand_vectorial_entries({"mesh": 2 * var("lagrangian")}, "test")
             assert set(got.keys()) == {"mesh_x", "mesh_y"}, got
             assert "lagrangian_x" in str(got["mesh_x"]) and "lagrangian_y" not in str(got["mesh_x"])
             assert "lagrangian_y" in str(got["mesh_y"]) and "lagrangian_x" not in str(got["mesh_y"])
             # A plain scalar is not a vector, whatever the field is called: left untouched, so the code
             # generator reports it along with the fields it does have.
-            assert self.expand_vectorial_entries({"mesh": 0}, "test") == {"mesh": 0}
+            assert self._expand_vectorial_entries({"mesh": 0}, "test") == {"mesh": 0}
 
     class P(Problem):
         def define_problem(self):

@@ -39,6 +39,13 @@ classifiers=[
     ]
 dynamic = ["version"]
 
+[project.optional-dependencies]
+# shapely is only needed by pyoomph.meshes.axisymm_topology, which detects and plans
+# axisymmetric pinch-off/coalescence surgery via morphological opening/closing of the
+# mirrored cross section. Everything else runs without it, so it is not a hard dependency;
+# the module raises a RuntimeError naming this extra when it is missing.
+topology = ["shapely>=2.0"]
+
 [project.urls]
 homepage = "https://pyoomph.github.io"
 documentation = "https://pyoomph.readthedocs.io/en/latest/index.html"
@@ -130,6 +137,26 @@ config-settings = { "cmake.define.PYOOMPH_DOWNLOAD_CLN" = "ON", "cmake.define.PY
 select = "cp312-*"
 inherit.config-settings = "append"
 config-settings = { "wheel.py-api" = "cp312" }
+
+# The legacy tier gets a smoke test instead of the whole suite above. cibuildwheel runs
+# test-command once per WHEEL, i.e. once per Python version per platform - 3 wheels x 4 platforms =
+# 12 full suites per release, at ~26 minutes each as the suite stands. What those runs would prove
+# three times over is the same thing: cp310, cp311 and cp312 differ in the Python ABI, not in
+# anything the physics tests touch. So the full suite runs on the Stable ABI wheel, which is the one
+# every CPython >= 3.12 will actually install, and the two classic wheels only have to show that
+# their own extension loads and works with their own interpreter.
+#
+# The three files are chosen for coverage per second (~5 s locally, well under a minute on a
+# runner): test_compilers finds and drives the JIT C compilers, which is the part of a wheel most
+# likely to break on a user's machine; test_math_functions puts the vendored GiNaC through code
+# generation; test_stokes builds, assembles and solves. Anything version-specific about the wheel
+# shows up in the first import either way.
+#
+# test_openmp_present.py is the one addition to that list: it is the only test that FAILS rather
+# than skips when a wheel has no OpenMP (see its docstring), and it costs about a second.
+[[tool.cibuildwheel.overrides]]
+select = "cp310-* cp311-*"
+test-command = "pytest {package}/tests/test_compilers.py {package}/tests/test_math_functions.py {package}/tests/test_stokes.py {package}/tests/test_openmp_present.py"
 
 [tool.cibuildwheel.linux]
 before-all = [

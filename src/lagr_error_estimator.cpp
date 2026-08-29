@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -820,7 +820,7 @@ namespace pyoomph
       for (unsigned n = 0; n < el_pt->nnode(); n++)
       {
         oomph::Node *nod_pt = el_pt->node_pt(n);
-        pyoomph::Node *pnod_pt = (use_Lagrangian ? dynamic_cast<pyoomph::Node *>(nod_pt) : NULL);
+        pyoomph::Node *pnod_pt = (use_Lagrangian ? static_cast<pyoomph::Node *>(nod_pt) : NULL);
         Vector<double> p(nodal_dim, 0.0);
         for (unsigned i = 0; i < nodal_dim; i++)
         {
@@ -1577,7 +1577,7 @@ namespace pyoomph
         Vector<double> xglob(nodal_dim, 0.0);
         for (unsigned i = 0; i < nodal_dim; i++)
         {
-          pyoomph::Node *pnod_pt = (use_Lagrangian ? dynamic_cast<pyoomph::Node *>(nod_pt) : NULL);
+          pyoomph::Node *pnod_pt = (use_Lagrangian ? static_cast<pyoomph::Node *>(nod_pt) : NULL);
           xglob[i] = ((pnod_pt && i < pnod_pt->nlagrangian()) ? pnod_pt->xi(i) : nod_pt->x(i));
         }
 
@@ -1643,7 +1643,7 @@ namespace pyoomph
       for (unsigned i = 0; i < dim; i++)
       {
 
-        x[i] = (use_Lagrangian ? dynamic_cast<pyoomph::Node *>(nod_pt)->xi(i) : nod_pt->x(i));
+        x[i] = (use_Lagrangian ? static_cast<pyoomph::Node *>(nod_pt)->xi(i) : nod_pt->x(i));
       }
 
       // Evaluate global recovery functions at node

@@ -1,5 +1,7 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #
 #  @section LICENSE
 #
@@ -116,9 +118,8 @@ def _run_mpi(nproc, tmpdir, distribute, mode="eigen", eigensolver="slepc", size=
              azimuthal_m=None, problem="diffusion", timeout=900, extra=None):
     """Launch the worker under mpirun and return the list of per-rank result dicts."""
     cmd = ["mpirun", "-n", str(nproc)]
-    if os.environ.get("PYOOMPH_MPI_OVERSUBSCRIBE", "1") == "1":
-        # CI machines routinely have fewer slots than we ask for; without this OpenMPI refuses to start.
-        cmd += ["--oversubscribe"]
+    # No --oversubscribe: this project's machines have the cores these ranks need, and an
+    # oversubscribed run trades a deadlock for a machine that stops responding.
     cmd += [sys.executable, _WORKER, "--outdir", str(tmpdir), "--mode", mode,
             "--eigensolver", eigensolver, "--size", str(size), "--neigen", str(neigen),
             "--problem", problem,

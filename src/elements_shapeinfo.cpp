@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -33,14 +33,154 @@ The main author may be contacted at c.diddens@utwente.nl
 #include "expressions.hpp"
 #include "timestepper.hpp"
 
+#include <cstdlib>
+#include <cmath>
+#include <cstring>
+#include <limits>
+#include <sstream>
+#include <iostream>
+#include <map>
+
 namespace pyoomph
 {
+
+	// PYOOMPH_PARANOID_ALE_IDENTITY: re-derive the moving-mesh shape sensitivities from closed form and
+	// compare against what was actually filled. The mapping x_i = sum_q X^q_i Psi_q(s) makes them pure
+	// products of quantities that are already in the buffer,
+	//
+	//     d( D_i psi_l ) / dX^q_j  =  - (D_j psi_l)(D_i Psi_q)  +  N_ij (D psi_l . D Psi_q)
+	//     d( dx )       / dX^q_j  =  dx * (D_j Psi_q)
+	//     d( n_i )      / dX^q_j  =  - n_j (D_i Psi_q)
+	//
+	// with D the Eulerian (on an interface: surface) gradient, Psi the GEOMETRY space's shapes, and
+	// N = I - P the projector onto the normal space - identically zero on a bulk element, where the
+	// tangents span everything. The whole rank-4 d_dx_shape_dcoord array is therefore redundant data,
+	// which is worth exploiting but only once it has been shown to hold for every geometry pyoomph
+	// builds. Off by default and strictly read-only, so a build with it compiled in behaves exactly as
+	// before while the variable is unset.
+	static const bool __paranoid_ale_identity = getenv("PYOOMPH_PARANOID_ALE_IDENTITY") != NULL;
+
+	// PYOOMPH_POISON_UNREQUIRED, see the declaration in elements.hpp: fill every shape buffer family
+	// that the PASSED required-shapes struct does not ask for with signalling NaN. Same precedent and
+	// same discipline as PYOOMPH_PARANOID_ALE_IDENTITY above - off by default, and when on it only ever
+	// writes values nobody is supposed to read.
+	static const char *__poison_unrequired_mode = getenv("PYOOMPH_POISON_UNREQUIRED");
+	static const bool __poison_unrequired = __poison_unrequired_mode != NULL;
+	// PYOOMPH_POISON_UNREQUIRED=all poisons every family AFTER the fill, at the end of each
+	// integration point. That is the tool's own positive control: a poison that silently wrote
+	// nothing, or that wrote into buffers nobody reads, would report "clean" on every case just as
+	// loudly as a codebase with no under-requests. Poisoning required families BEFORE the fill proves
+	// nothing - the fill simply overwrites it, which is what a first attempt at this control did.
+	static const bool __poison_everything = __poison_unrequired && !strcmp(__poison_unrequired_mode, "all");
+	// Engagement counter, for the same reason: "0 entries poisoned" is not a clean bill of health.
+	// Diagnostic only (see the note in elements_hanging.cpp): process-wide and not thread-safe.
+	static unsigned long __poison_written = 0;
+	static struct __PoisonReport
+	{
+		~__PoisonReport()
+		{
+			if (!__poison_unrequired)
+				return;
+			std::cout << "PYOOMPH_POISON_UNREQUIRED: " << __poison_written << " buffer entries poisoned";
+			if (!__poison_written)
+				std::cout << " - NOTHING was poisoned, so nothing was proven";
+			std::cout << std::endl;
+		}
+	} __poison_report;
+
+	// Counted and reported at exit, because a check that is never reached passes just as quietly as one
+	// that holds: a run that ends with "0 comparisons" has proven nothing.
+	// Keyed by identity AND by the (el_dim, nodal_dim) pair, so the report proves which geometries were
+	// actually exercised - a bulk-only run says nothing about the normal-projector term.
+	struct AleIdentityStat
+	{
+		unsigned long n = 0, bad = 0;
+		double worst = 0.0;
+		std::string worst_where;
+	};
+	static std::map<std::string, AleIdentityStat> __ale_identity_stats;
+	static struct __AleIdentityReport
+	{
+		~__AleIdentityReport()
+		{
+			if (!__paranoid_ale_identity)
+				return;
+			if (__ale_identity_stats.empty())
+			{
+				std::cout << "PYOOMPH_PARANOID_ALE_IDENTITY: NO comparisons were made - nothing was proven"
+						  << std::endl;
+				return;
+			}
+			for (const auto &e : __ale_identity_stats)
+			{
+				std::cout << "PYOOMPH_PARANOID_ALE_IDENTITY: " << e.first << " -> " << e.second.n
+						  << " comparisons, " << e.second.bad << " violations, worst relative deviation "
+						  << e.second.worst << std::endl;
+				if (e.second.bad)
+					std::cout << "    worst at " << e.second.worst_where << std::endl;
+			}
+		}
+	} __ale_identity_report;
+
+	// The second nodal-coordinate derivative of a shape gradient, in closed form (see
+	// dev_docs/code_generation.md 9.4.13):
+	//
+	//   d2(D_i psi_l)/dX^q_j dX^r_k = (D_k psi_l)(D_j Psi_r)(D_i Psi_q) + (D_j psi_l)(D_k Psi_q)(D_i Psi_r)
+	//                                 - N_jk (Dpsi_l.DPsi_r)(D_i Psi_q) - N_ik (D_j psi_l)(DPsi_q.DPsi_r)
+	//                                 - N_ik (D_j Psi_r)(Dpsi_l.DPsi_q) - N_jk (D_i Psi_r)(Dpsi_l.DPsi_q)
+	//                                 - N_ij (D_k psi_l)(DPsi_r.DPsi_q) - N_ij (D_k Psi_q)(Dpsi_l.DPsi_r)
+	//
+	// with N = I - P the projector onto the normal space, which vanishes on a bulk element and leaves
+	// the first line. Symmetric under (q,j)<->(r,k), as a mixed second derivative has to be: the six
+	// N-terms pair up. Arguments are the FIRST derivatives, all of which the shape buffer already has -
+	// which is the point, since building this the other way (the E-tensor chain plus a rank-6 scratch
+	// allocated per integration point) was 24.4% of Hessian assembly.
+	// `with_normal_terms` is false on a bulk element, where N vanishes and only the first line survives.
+	// It is a real distinction, not tidiness: evaluating the full form everywhere costs about four times
+	// the arithmetic, and measured +6.9% on a case with 144 bulk elements to 24 interface ones, because
+	// the common case was paying for the rare one. The caller skips computing N and the dot products
+	// entirely in that case.
+	static const double __no_normal_projector[3][3] = {{0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}};
+
+	static inline double d2_shape_dcoord_closed_form(unsigned i, unsigned j, unsigned j2,
+													 const double *Dpsi_l, const double *Dq, const double *Dr,
+													 bool with_normal_terms, const double Nproj[3][3],
+													 double dot_lr, double dot_lq, double dot_qr)
+	{
+		double v = Dpsi_l[j2] * Dr[j] * Dq[i] + Dpsi_l[j] * Dq[j2] * Dr[i];
+		if (with_normal_terms)
+			v += -Nproj[j][j2] * dot_lr * Dq[i] - Nproj[i][j2] * Dpsi_l[j] * dot_qr
+				 - Nproj[i][j2] * Dr[j] * dot_lq - Nproj[j][j2] * Dr[i] * dot_lq
+				 - Nproj[i][j] * Dpsi_l[j2] * dot_qr - Nproj[i][j] * Dq[j2] * dot_lr;
+		return v;
+	}
+
+	static void ale_identity_check(const char *what, unsigned el_dim, unsigned nodal_dim, double got, double expected, const std::string &where)
+	{
+		// The sensitivities scale like 1/h^2, so a purely relative tolerance is the right one; the
+		// additive 1 keeps entries that ought to be zero (every bulk N-term) from tripping on noise.
+		const double scale = 1.0 + std::fabs(got) + std::fabs(expected);
+		const double rel = std::fabs(got - expected) / scale;
+		std::ostringstream key;
+		key << what << " [el_dim " << el_dim << " in " << nodal_dim << "D]";
+		auto &e = __ale_identity_stats[key.str()];
+		e.n++;
+		if (rel > 1e-8)
+			e.bad++;
+		if (rel > e.worst)
+		{
+			e.worst = rel;
+			std::ostringstream oss;
+			oss << where << ": filled " << got << ", closed form gives " << expected;
+			e.worst_where = oss.str();
+		}
+	}
 
 	// Convenience overload that fills the element's own (default) shape_info buffer; see the
 	// shape_info-taking overload below for the actual work.
 	double BulkElementBase::fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds,unsigned history_index) const
 	{
-		return fill_shape_info_at_s(s, index, required, this->shape_info, JLagr, flag, dxds,history_index);
+		return fill_shape_info_at_s(s, index, required, this->get_shape_info(), JLagr, flag, dxds,history_index);
 	}
 
 	/**
@@ -108,10 +248,14 @@ namespace pyoomph
 		}
 		
 		// Helper tensors
+		// el_dim is 0 for a point element, and a zero-extent VLA is undefined behaviour even though
+		// every loop over el_dim below is then empty. A dummy extent keeps these on the stack, which
+		// a std::vector would not - this runs per integration point.
+		const unsigned el_dim_extent = el_dim ? el_dim : 1;
 		// T^{l}_{gdj}=T[l][g][d][j]
-		double T[n_node][el_dim][el_dim][n_dim];
+		double T[n_node][el_dim_extent][el_dim_extent][n_dim];
 		// G^{lab}_j=G[l][a][b][j]
-		double G[n_node][el_dim][el_dim][n_dim];
+		double G[n_node][el_dim_extent][el_dim_extent][n_dim];
 		
 		//Fill the T tensor
 		for (unsigned int l=0;l<n_node;l++)
@@ -176,6 +320,14 @@ namespace pyoomph
 
 		if (require_hessian)
 		{
+		 // Only the E tensor below is replaced by the closed form of 9.4.12; the rest of this block
+		 // computes D_dshape_Dcoords and, from it, int_pt_weights_d2_coords - the second derivative of
+		 // the integration measure, which the Hessian needs whether or not the E tensor is built.
+		 // Gating the whole block on D2X2_dshape silently dropped that and made every moving-mesh
+		 // Hessian wrong by a few percent; the identity check did not catch it, because it validates
+		 // the E-tensor path that the flag keeps alive.
+		 if (D2X2_dshape)
+		 {
 		   // Fill the E tensor. Note: D in the document is accessed as follows:
 		   //  	$D^{lb}_{ij}=DXdshape_il_jb(j,l,i,b)
 		   
@@ -262,6 +414,7 @@ namespace pyoomph
 		       */
 		     }
 		   }
+		 }
 
 
 			// Variable to store the second derivatives of shape function wrt to coordinates, i.e.,
@@ -333,7 +486,7 @@ namespace pyoomph
 			{
 				for (unsigned j = 0; j < el_dim; j++)
 				{
-					// interpolated_T(j,i) += dynamic_cast<pyoomph::Node*>(this->node_pt(l))->xi(i)*dpsids_Element(l,j);
+					// interpolated_T(j,i) += static_cast<pyoomph::Node*>(this->node_pt(l))->xi(i)*dpsids_Element(l,j);
 					interpolated_T(j, i) += this->raw_lagrangian_position_gen(l, 0, i) * dpsids_Element(l, j);
 				}
 			}
@@ -404,10 +557,15 @@ namespace pyoomph
 	// normal residuals but require a pre-integrated scalar (and its coordinate sensitivities).
 	void BulkElementBase::fill_shape_info_element_sizes(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info,unsigned flag, unsigned history_index) const
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		bool require_hessian = flag > 2;
 		bool require_dxdshape = (flag && functable->moving_nodes && (!functable->fd_position_jacobian)); //&& (required.dx_psi_C2 || required.dx_psi_C1 || required.dx_psi_DL)			
 		bool require_dx_elemsize=require_dxdshape && (required.elemsize_Eulerian ||  required.elemsize_Eulerian_cartesian);
+		// The two families are separate flags on the generated code's side (elemsize_Eulerian vs
+		// elemsize_Eulerian_cartesian, chosen by the symbol's is_with_coordsys()), so a code asking only
+		// for the coordinate-system-weighted size must not also pay for the Cartesian sensitivities.
+		const bool need_eul_d = required.elemsize_Eulerian;
+		const bool need_cart_d = required.elemsize_Eulerian_cartesian;
 		if (require_dx_elemsize)
 		{
 		 // Fill the derivative buffer
@@ -415,16 +573,16 @@ namespace pyoomph
 		 {
 		  	for (unsigned int l=0;l<this->nnode();l++)
 		   {
-		    shape_info->elemsize_Cart_d_coords[i][l]=0.0;
-		    shape_info->elemsize_d_coords[i][l]=0.0;		    
+		    if (need_cart_d) shape_info->elemsize_Cart_d_coords[i][l]=0.0;
+		    if (need_eul_d) shape_info->elemsize_d_coords[i][l]=0.0;
 		    if (require_hessian)
 		    {
 				for (unsigned int j=0;j<this->nodal_dimension();j++)
 			 	{
 			  		for (unsigned int m=0;m<this->nnode();m++)
 					{
-		      		shape_info->elemsize_d2_coords[i][j][l][m]=0.0;
-  		      		shape_info->elemsize_Cart_d2_coords[i][j][l][m]=0.0;		    		    
+		      		if (need_eul_d) shape_info->elemsize_d2_coords[i][j][l][m]=0.0;
+  		      		if (need_cart_d) shape_info->elemsize_Cart_d2_coords[i][j][l][m]=0.0;
   		      	}
   		      }
   		    }
@@ -461,7 +619,7 @@ namespace pyoomph
 			 {
 			  	for (unsigned int l=0;l<this->nnode();l++)
 				{
-				 shape_info->elemsize_Cart_d_coords[i][l]+=shape_info->int_pt_weights_d_coords[i][l];
+				 if (need_cart_d) shape_info->elemsize_Cart_d_coords[i][l]+=shape_info->int_pt_weights_d_coords[i][l];
 				 if (required.elemsize_Eulerian)
 				 {
 				   shape_info->elemsize_d_coords[i][l]+=shape_info->int_pt_weights_d_coords[i][l]*J;				  
@@ -473,7 +631,7 @@ namespace pyoomph
 				 	{
 				  		for (unsigned int m=0;m<this->nnode();m++)
 						{
-	  		      		shape_info->elemsize_Cart_d2_coords[i][j][l][m]+=shape_info->int_pt_weights_d2_coords[i][j][l][m];		    		    
+	  		      		if (need_cart_d) shape_info->elemsize_Cart_d2_coords[i][j][l][m]+=shape_info->int_pt_weights_d2_coords[i][j][l][m];
 	  		      		if (required.elemsize_Eulerian)
 				         {
 					   		shape_info->elemsize_d2_coords[i][j][l][m]+=shape_info->int_pt_weights_d2_coords[i][j][l][m]*J;
@@ -554,17 +712,17 @@ namespace pyoomph
         }
 		}	
 		
-		if ( dynamic_cast<const InterfaceElementBase *>(this))
+		if ( this->as_interface_element())
 		{
 			if (required.bulk_shapes)
 			{
-			 const BulkElementBase *bel = dynamic_cast<const BulkElementBase *>(dynamic_cast<const InterfaceElementBase *>(this)->bulk_element_pt());
+			 const BulkElementBase *bel = dynamic_cast<const BulkElementBase *>(this->as_interface_element()->bulk_element_pt());
 			 bel->fill_shape_info_element_sizes(*(required.bulk_shapes),shape_info->bulk_shapeinfo,flag,history_index);		 
 			}
 			
 			if (required.opposite_shapes)
 			{
-			 const BulkElementBase *opp = dynamic_cast<const BulkElementBase *>(dynamic_cast<const InterfaceElementBase *>(this)->get_opposite_side());
+			 const BulkElementBase *opp = this->as_interface_element()->get_opposite_side(); // an InterfaceElementBase already IS a BulkElementBase
 			 opp->fill_shape_info_element_sizes(*(required.opposite_shapes),shape_info->opposite_shapeinfo,flag,history_index);		 
 			}
 	   }	   
@@ -837,9 +995,225 @@ namespace pyoomph
 						}
 	}
 
+	// PYOOMPH_DISABLE_SHAPE_FAMILY_SPLIT restores the pre-split behaviour - every family of a space
+	// that is needed at all gets filled - from ONE place, so that the whole stage can be A/B'd with a
+	// single binary (the PYOOMPH_DISABLE_NOHANG_DISPATCH pattern). The poison keys on the same helper,
+	// so it follows the lever automatically.
+	static const bool __disable_shape_family_split = getenv("PYOOMPH_DISABLE_SHAPE_FAMILY_SPLIT") != NULL;
+	// Its own lever, not folded into the one above: getting this family wrong does not produce a NaN or
+	// a crash, it silently drops nodal-position columns of the Jacobian, so it needs to be switched -
+	// and compared against the FD Jacobian - on its own.
+	static const bool __disable_dcoord_split = getenv("PYOOMPH_DISABLE_DCOORD_SPLIT") != NULL;
+
+	static inline BulkElementBase::RequiredShapeFamilies __widen_if_lever(BulkElementBase::RequiredShapeFamilies f)
+	{
+		// d2x is deliberately NOT widened: before the split it was gated by the GLOBAL "does any space
+		// want second derivatives" flag, and everything the second-derivative formulas need from the
+		// geometry (Qibc, dM_dX, the second local derivatives of the mapping) is built under that same
+		// flag. Widening it per space therefore segfaults on the first static-mesh case tried, which is
+		// what the fill sites restore instead (see the space_d2x lines).
+		if (__disable_shape_family_split && f.any())
+			f.psi = f.dx = f.dX = true;
+		if (__disable_dcoord_split && f.any())
+			f.dcoord = true;
+		return f;
+	}
+
+	// See the declaration. Two things are folded in here that the three copies of the predicate this
+	// replaces disagreed about:
+	//  * dX_psi now counts on its OWN space, not only via the dominant-space clause. A non-dominant
+	//    space asked for nothing but Lagrangian (or local-coordinate) derivatives used to get NO fill
+	//    at all and the generated code would have read a stale buffer. No corpus instance exists - the
+	//    combination needs a Lagrangian-gradient term on a non-geometry space - but nothing prevented
+	//    one, and poison mode now guards it.
+	//  * the old fill-side variant carried an extra "|| (dominant_space == "" && nnode_of_space == 0)"
+	//    alternative that was ANDed with nnode_of_space != 0, i.e. dead. It is simply gone.
+	BulkElementBase::RequiredShapeFamilies BulkElementBase::required_shape_families(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, unsigned ispace) const
+	{
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
+		const JITFuncSpec_RequiredShapes_For_Space_t &rs = required.continuous_spaces[ispace];
+		// The Pos.* flags name whichever space carries the geometry; set_remaining_shapes_appropriately
+		// resolves the shape_Pos aliases onto exactly that space, so there they widen the request.
+		const bool dominant = eleminfo.nnode_of_space[ispace] &&
+							  !strcmp(functable->dominant_space, functable->continuous_spaces[ispace].space_name);
+		RequiredShapeFamilies f;
+		f.psi = rs.psi || (dominant && required.Pos.psi);
+		f.dx = rs.dx_psi || (dominant && required.Pos.dx_psi);
+		f.dX = rs.dX_psi || (dominant && required.Pos.dX_psi);
+		f.d2x = rs.d2x_psi || (dominant && required.Pos.d2x_psi);
+		f.dcoord = rs.dx_psi_dcoord || (dominant && required.Pos.dx_psi_dcoord);
+		return __widen_if_lever(f);
+	}
+
+	BulkElementBase::RequiredShapeFamilies BulkElementBase::required_shape_families_DL(const JITFuncSpec_RequiredShapes_FiniteElement_t &required)
+	{
+		RequiredShapeFamilies f;
+		f.psi = required.DL.psi;
+		f.dx = required.DL.dx_psi;
+		f.dX = required.DL.dX_psi;
+		f.d2x = required.DL.d2x_psi;
+		f.dcoord = required.DL.dx_psi_dcoord;
+		return __widen_if_lever(f);
+	}
+
+	// A signalling NaN, written by explicit loops: memset cannot produce a NaN, since no repeated
+	// byte value is one.
+	static const double __POISON = std::numeric_limits<double>::signaling_NaN();
+
+	static inline void __poison_scalar(double &x)
+	{
+		x = __POISON;
+		__poison_written++;
+	}
+	static inline void __poison1(double *a, unsigned n)
+	{
+		if (!a) return;
+		for (unsigned i = 0; i < n; i++) a[i] = __POISON;
+		__poison_written += n;
+	}
+	static inline void __poison2(double **a, unsigned n, unsigned m)
+	{
+		if (!a) return;
+		for (unsigned i = 0; i < n; i++) __poison1(a[i], m);
+	}
+	static inline void __poison3(double ***a, unsigned n, unsigned m, unsigned k)
+	{
+		if (!a) return;
+		for (unsigned i = 0; i < n; i++) __poison2(a[i], m, k);
+	}
+	static inline void __poison4(double ****a, unsigned n, unsigned m, unsigned k, unsigned l)
+	{
+		if (!a) return;
+		for (unsigned i = 0; i < n; i++) __poison3(a[i], m, k, l);
+	}
+
+	void BulkElementBase::poison_unrequired_shapes(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *si, bool element_level) const
+	{
+		if (!__poison_unrequired || !si) return;
+		const unsigned n_dim = this->nodal_dimension();
+		const unsigned n_node = this->nnode();
+
+		if (element_level)
+		{
+			// The element-level families. They are filled once per assembly, BEFORE the
+			// per-integration-point fills, so they have to be poisoned from
+			// prepare_shape_buffer_for_integration rather than from fill_shape_info_at_s.
+			for (unsigned k = 0; k < 3; k++)
+			{
+				const bool want = (k == 0) || (k == 1 ? required.history_geometry1 : required.history_geometry2);
+				if (!required.elemsize_Eulerian || !want) __poison_scalar(si->elemsize_Eulerian[k]);
+				if (!required.elemsize_Eulerian_cartesian || !want) __poison_scalar(si->elemsize_Eulerian_cartesian[k]);
+			}
+			if (!required.elemsize_Lagrangian) __poison_scalar(si->elemsize_Lagrangian);
+			if (!required.elemsize_Lagrangian_cartesian) __poison_scalar(si->elemsize_Lagrangian_cartesian);
+			if (!required.elemsize_Eulerian)
+			{
+				__poison2(si->elemsize_d_coords, n_dim, n_node);
+				__poison4(si->elemsize_d2_coords, n_dim, n_dim, n_node, n_node);
+			}
+			if (!required.elemsize_Eulerian_cartesian)
+			{
+				__poison2(si->elemsize_Cart_d_coords, n_dim, n_node);
+				__poison4(si->elemsize_Cart_d2_coords, n_dim, n_dim, n_node, n_node);
+			}
+			return;
+		}
+
+		// Per-space AND per-family, keyed on the very predicate the fill uses
+		// (required_shape_families), which is what makes the poison meaningful: it must poison exactly
+		// what the fill declines to write, or it either misses under-requests or invents them.
+		// The history slots k=1,2 are poisoned along with k=0 because the history fills key on the same
+		// `required` struct, so a family nobody asked for is unfilled at every history level.
+		for (unsigned int ispace = 0; ispace < NUM_CONTINUOUS_SPACES; ispace++)
+		{
+			const unsigned nn = eleminfo.nnode_of_space[ispace];
+			const RequiredShapeFamilies fam = this->required_shape_families(required, ispace);
+			if (!fam.psi)
+				__poison1(si->shapes[ispace], nn);
+			if (!fam.dx)
+				for (unsigned k = 0; k < 3; k++) __poison2(si->dx_shapes[k][ispace], nn, n_dim);
+			if (!fam.dX)
+			{
+				__poison2(si->dX_shapes[ispace], nn, n_dim);
+				__poison2(si->dS_shapes[ispace], nn, n_dim);
+			}
+			if (!fam.d2x)
+			{
+				for (unsigned k = 0; k < 3; k++) __poison2(si->d2x_shapes[k][ispace], nn, MAX_N2DERIV);
+				__poison2(si->d2S_shapes[ispace], nn, MAX_N2DERIV);
+				__poison4(si->d_d2x_shape_dcoord[ispace], nn, MAX_N2DERIV, n_node, n_dim);
+			}
+			// Now per space: the fill still sits inside the "is this space needed at all" block, so a
+			// space that is not required at all is poisoned as before, and one that is required but
+			// whose gradient nothing differentiates by the nodal positions is poisoned too.
+			if (!fam.any() || !fam.dcoord)
+				__poison4(si->d_dx_shape_dcoord[ispace], nn, n_dim, n_node, n_dim);
+		}
+
+		{
+			const RequiredShapeFamilies fam = required_shape_families_DL(required);
+			const unsigned nn = eleminfo.nnode_DL;
+			if (!fam.psi)
+				__poison1(si->shape_DL, nn);
+			if (!fam.dx)
+				for (unsigned k = 0; k < 3; k++) __poison2(si->dx_shape_DL[k], nn, n_dim);
+			if (!fam.dX)
+			{
+				__poison2(si->dX_shape_DL, nn, n_dim);
+				__poison2(si->dS_shape_DL, nn, n_dim);
+			}
+			if (!fam.d2x)
+			{
+				for (unsigned k = 0; k < 3; k++) __poison2(si->d2x_shape_DL[k], nn, MAX_N2DERIV);
+				__poison2(si->d2S_shape_DL, nn, MAX_N2DERIV);
+				__poison4(si->d_d2x_shape_dcoord_DL, nn, MAX_N2DERIV, n_node, n_dim);
+			}
+			if (!fam.any())
+				__poison4(si->d_dx_shape_dcoord_DL, nn, n_dim, n_node, n_dim);
+		}
+
+		if (!(required.normal || required.normal_deriv))
+		{
+			for (unsigned k = 0; k < 3; k++) __poison1(si->normal[k], n_dim);
+			__poison3(si->d_normal_dcoord, n_dim, n_node, n_dim);
+		}
+		if (!required.normal_deriv)
+		{
+			for (unsigned k = 0; k < 3; k++) __poison2(si->dnormal_dx[k], n_dim, n_dim);
+			__poison4(si->d_dnormal_dx_dcoord, n_dim, n_dim, n_node, n_dim);
+		}
+	}
+
+	// The bulk/opposite sub-buffers are filled by the recursive fill_shape_info_at_s call, which
+	// poisons them itself with its own sub-struct. Only the ones this pass does NOT recurse into are
+	// handled here: nothing writes them at all, yet the generated code can still reach them through
+	// shapeinfo->bulk_shapeinfo, which is precisely the failure mode a stale flag produces.
+	void InterfaceElementBase::poison_unrequired_shapes(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *si, bool element_level) const
+	{
+		BulkElementBase::poison_unrequired_shapes(required, si, element_level);
+		if (!__poison_unrequired || !si) return;
+		JITFuncSpec_RequiredShapes_FiniteElement_t nothing;
+		memset(&nothing, 0, sizeof(nothing));
+		if (!required.bulk_shapes && si->bulk_shapeinfo && this->bulk_element_pt())
+		{
+			BulkElementBase *blk = dynamic_cast<BulkElementBase *>(this->bulk_element_pt());
+			if (blk) blk->poison_unrequired_shapes(nothing, si->bulk_shapeinfo, element_level);
+		}
+		if (!required.opposite_shapes && si->opposite_shapeinfo && this->opposite_side)
+		{
+			this->opposite_side->poison_unrequired_shapes(nothing, si->opposite_shapeinfo, element_level);
+		}
+	}
+
 	double BulkElementBase::fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds,unsigned history_index) const
 	{
 		bool require_hessian = flag > 2;
+
+		// History fills run BEFORE the current-configuration one and share the history-independent
+		// buffers with it, so poisoning on their (deliberately stripped-down) required struct would
+		// wipe what the real fill is about to need. Only the current configuration is poisoned.
+		if (__poison_unrequired && history_index == 0)
+			this->poison_unrequired_shapes(required, shape_info, false);
 
 		unsigned el_dim = this->dim();
 		unsigned n_dim = this->nodal_dimension();
@@ -914,7 +1288,7 @@ namespace pyoomph
 		double gab_gai[el_dim][n_dim];		// stores [g^{ab} g_a]_i . First index is b second i
 		double gab_gai_Lagr[el_dim][n_dim]; // stores [g^{ab} g_a]_i . First index is b second i
 
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 
 		bool require_dxdshape = (flag && functable->moving_nodes && (!functable->fd_position_jacobian)); //&& (required.dx_psi_C2 || required.dx_psi_C1 || required.dx_psi_DL)
 		// XXX: The last condition may not be used, since even dx depends on the coordinates
@@ -928,7 +1302,20 @@ namespace pyoomph
 
 		oomph::RankFourTensor<double> DXdshape_il_jb; //[n_dim][n_node][n_dim][el_dim]; //this is d(g^{ab}g_{a,j})/d(x_i^l) //TODO: This could lead to stack problems due to size
       RankSixTensor * D2X2_dshape=NULL;
-      if (require_hessian && require_dxdshape)
+      // On a bulk element the second nodal-coordinate derivative of a shape gradient is a sum of two
+      // triple products of FIRST derivatives (see the fill sites below), so neither this rank-6 scratch
+      // nor the E-tensor chain that fills it is needed - and it was 24.4% of Hessian assembly
+      // (dev_docs/code_generation.md 9.4.11). An interface picks up normal-projector terms the closed
+      // form does not carry, so there the old path stays. Under PYOOMPH_PARANOID_ALE_IDENTITY both are
+      // computed, so the check compares two independent derivations rather than one against itself.
+      // Bulk only, and that is a measured choice rather than a gap. The E-tensor cost scales with
+      // el_dim, so on an interface its loops collapse and it is cheap, while the closed form still pays
+      // eight terms plus the projector and three dot products, which scale with n_dim. Switching
+      // interfaces over measured +3.7% on a 2D free-surface case. The interface identity is derived and
+      // validated all the same - the check below covers el_dim < n_dim - so the path that ships there is
+      // now checked, which it was not before.
+      const bool closed_form_d2 = (el_dim == n_dim) && !__paranoid_ale_identity;
+      if (require_hessian && require_dxdshape && !closed_form_d2)
       {
         D2X2_dshape=new RankSixTensor(n_dim,el_dim,n_node,n_node,n_dim,n_dim);
       }
@@ -1219,14 +1606,18 @@ namespace pyoomph
 
 		for (unsigned int ispace=0;ispace<NUM_CONTINUOUS_SPACES;ispace++)
 		{
-			bool req = required.continuous_spaces[ispace].dx_psi || required.continuous_spaces[ispace].psi || required.continuous_spaces[ispace].d2x_psi;
-			req |= eleminfo.nnode_of_space[ispace] && (required.Pos.psi || required.Pos.dx_psi || required.Pos.dX_psi || required.Pos.d2x_psi || required.continuous_spaces[ispace].dX_psi) && ((!strcmp(functable->dominant_space, functable->continuous_spaces[ispace].space_name)) || ((!strcmp(functable->dominant_space, "")) && !eleminfo.nnode_of_space[ispace]));
+			// One shared predicate (see BulkElementBase::required_shape_families), which the poison and
+			// set_remaining_shapes_appropriately key on too.
+			const RequiredShapeFamilies fam = this->required_shape_families(required, ispace);
 
-			if (req)
+			if (fam.any())
 			{
 				oomph::Shape psi(eleminfo.nnode_of_space[ispace]);
 				oomph::DShape dpsids(eleminfo.nnode_of_space[ispace], std::max((unsigned int)1, el_dim));
-				const bool space_d2x = require_d2x && el_dim && eleminfo.nnode_of_space[ispace];
+				// Per-space, not the global require_d2x: a C1 pressure next to a C2 field that wants
+				// second derivatives must not pay for them. Everything the geometry side of the
+				// second-derivative formulas needs is guarded by require_geom_d2, which is wider.
+				const bool space_d2x = (__disable_shape_family_split ? require_d2x : fam.d2x) && el_dim && eleminfo.nnode_of_space[ispace];
 				oomph::DShape d2psids(std::max((unsigned int)1, eleminfo.nnode_of_space[ispace]), MAX_N2DERIV);
 				if (space_d2x)
 					this->d2shape_local_of_space(ispace, s, psi, dpsids, d2psids);
@@ -1234,24 +1625,37 @@ namespace pyoomph
 					this->dshape_local_of_space(ispace, s, psi, dpsids);
 				for (unsigned l = 0; l < eleminfo.nnode_of_space[ispace]; l++)
 				{
-					shape_info->shapes[ispace][l] = psi[l];
-					for (unsigned int i = 0; i < n_dim; i++)
+					// One family at a time. psi-only is by far the most common request, and it used to
+					// pay for both gradient contractions; the local derivatives dpsids come out of the
+					// same dshape_local_of_space call either way, so only the contractions are saved.
+					if (fam.psi)
+						shape_info->shapes[ispace][l] = psi[l];
+					if (fam.dx)
 					{
-						shape_info->dx_shapes[history_index][ispace][l][i] = 0.0;
-						for (unsigned b = 0; b < el_dim; b++)
+						for (unsigned int i = 0; i < n_dim; i++)
 						{
-							shape_info->dx_shapes[history_index][ispace][l][i] += gab_gai[b][i] * dpsids(l, b);
+							shape_info->dx_shapes[history_index][ispace][l][i] = 0.0;
+							for (unsigned b = 0; b < el_dim; b++)
+							{
+								shape_info->dx_shapes[history_index][ispace][l][i] += gab_gai[b][i] * dpsids(l, b);
+							}
 						}
 					}
 
-					for (unsigned int i=0; i < this->dim();i++) shape_info->dS_shapes[ispace][l][i] =  dpsids(l, i);
-
-					for (unsigned int i = 0; i < n_lagr; i++)
+					if (fam.dX)
 					{
-						shape_info->dX_shapes[ispace][l][i] = 0.0;
-						for (unsigned b = 0; b < el_dim; b++)
+						// dS rides on the dX_psi flag, see jitbridge.h: the code generator classifies a
+						// local-coordinate derivative as a Lagrangian one (D1XBasisFunctionLocalCoord
+						// derives from D1XBasisFunctionLagr), so there is no flag of its own to key on.
+						for (unsigned int i=0; i < this->dim();i++) shape_info->dS_shapes[ispace][l][i] =  dpsids(l, i);
+
+						for (unsigned int i = 0; i < n_lagr; i++)
 						{
-							shape_info->dX_shapes[ispace][l][i] += gab_gai_Lagr[b][i] * dpsids(l, b);
+							shape_info->dX_shapes[ispace][l][i] = 0.0;
+							for (unsigned b = 0; b < el_dim; b++)
+							{
+								shape_info->dX_shapes[ispace][l][i] += gab_gai_Lagr[b][i] * dpsids(l, b);
+							}
 						}
 					}
 
@@ -1342,8 +1746,11 @@ namespace pyoomph
 							}
 						}
 					}
-					// TODO: Only if neccessary!
-					if (require_dxdshape)
+					// Only for the spaces whose Eulerian gradient an assembled entry actually
+					// differentiates by the nodal positions - fam.dcoord is marked from the same set of
+					// shape expansions that emits those reads. This used to run for EVERY required
+					// space and is the most expensive family of a moving-mesh fill.
+					if (require_dxdshape && fam.dcoord)
 					{
 						for (unsigned int i = 0; i < n_dim; i++)
 						{
@@ -1359,7 +1766,94 @@ namespace pyoomph
 								}
 							}
 						}
-						if (require_hessian)
+						if (__paranoid_ale_identity)
+						{
+							// Both factors are rebuilt locally rather than read back from the buffer, so
+							// the check cannot be satisfied by a fill order coincidence: D psi_l from this
+							// space's own local derivatives, D Psi_q from dpsids_Element, which is the
+							// GEOMETRY space - it is the mapping that carries the nodal-position
+							// dependence, whichever space the field happens to live on.
+							double Dpsi_l[3], Nproj[3][3];
+							for (unsigned int i = 0; i < n_dim; i++)
+							{
+								Dpsi_l[i] = 0.0;
+								for (unsigned b = 0; b < el_dim; b++)
+									Dpsi_l[i] += gab_gai[b][i] * dpsids(l, b);
+								for (unsigned int j = 0; j < n_dim; j++)
+								{
+									double P = 0.0; // P_ij = g^{ab} t_{a,i} t_{b,j}, the tangential projector
+									for (unsigned b = 0; b < el_dim; b++)
+										P += gab_gai[b][i] * interpolated_t(b, j);
+									Nproj[i][j] = (i == j ? 1.0 : 0.0) - P;
+								}
+							}
+							for (unsigned l2 = 0; l2 < eleminfo.nnode; l2++)
+							{
+								double Dpsi_q[3], dot = 0.0;
+								for (unsigned int i = 0; i < n_dim; i++)
+								{
+									Dpsi_q[i] = 0.0;
+									for (unsigned b = 0; b < el_dim; b++)
+										Dpsi_q[i] += gab_gai[b][i] * dpsids_Element(l2, b);
+								}
+								for (unsigned int a = 0; a < n_dim; a++)
+									dot += Dpsi_l[a] * Dpsi_q[a];
+								for (unsigned int i = 0; i < n_dim; i++)
+									for (unsigned int i2 = 0; i2 < n_dim; i2++)
+									{
+										std::ostringstream where;
+										where << "(space " << ispace << ", node " << l << "/" << eleminfo.nnode_of_space[ispace]
+											  << ", dir " << i << ", coord node " << l2 << ", coord dir " << i2
+											  << ", el_dim " << el_dim << ", nodal_dim " << n_dim
+											  << ", eleminfo.nnode " << eleminfo.nnode
+											  << ", this->nnode() " << this->nnode()
+											  << ", n_node " << n_node << ")";
+										ale_identity_check("d_dx_shape_dcoord", el_dim, n_dim,
+														   shape_info->d_dx_shape_dcoord[ispace][l][i][l2][i2],
+														   -Dpsi_l[i2] * Dpsi_q[i] + Nproj[i][i2] * dot,
+														   where.str());
+									}
+							}
+						}
+						if (require_hessian && closed_form_d2)
+						{
+							// Straight from d2_shape_dcoord_closed_form, so neither the E tensor above nor
+							// its per-integration-point rank-6 allocation is needed - on interfaces too,
+							// where the N-terms carry the difference.
+							double Dpsi_l[3];
+							for (unsigned int i = 0; i < n_dim; i++)
+							{
+								Dpsi_l[i] = 0.0;
+								for (unsigned b = 0; b < el_dim; b++)
+									Dpsi_l[i] += gab_gai[b][i] * dpsids(l, b);
+							}
+							for (unsigned lel = 0; lel < eleminfo.nnode; lel++)
+							{
+								double Dq[3];
+								for (unsigned int i = 0; i < n_dim; i++)
+								{
+									Dq[i] = 0.0;
+									for (unsigned b = 0; b < el_dim; b++)
+										Dq[i] += gab_gai[b][i] * dpsids_Element(lel, b);
+								}
+								for (unsigned lel2 = 0; lel2 < eleminfo.nnode; lel2++)
+								{
+									double Dr[3];
+									for (unsigned int i = 0; i < n_dim; i++)
+									{
+										Dr[i] = 0.0;
+										for (unsigned b = 0; b < el_dim; b++)
+											Dr[i] += gab_gai[b][i] * dpsids_Element(lel2, b);
+									}
+									for (unsigned int i = 0; i < n_dim; i++)
+										for (unsigned int j = 0; j < n_dim; j++)
+											for (unsigned int j2 = 0; j2 < n_dim; j2++)
+												shape_info->d2_dx2_shape_dcoord[ispace][l][i][lel][j][lel2][j2] =
+													d2_shape_dcoord_closed_form(i, j, j2, Dpsi_l, Dq, Dr, false, __no_normal_projector, 0.0, 0.0, 0.0);
+								}
+							}
+						}
+						else if (require_hessian)
 						{
 						for (unsigned int i = 0; i < n_dim; i++)
 							{
@@ -1381,6 +1875,76 @@ namespace pyoomph
 								}
 							}
 						}
+						if (__paranoid_ale_identity)
+						{
+							// Differentiating the first-order identity a second time gives, for a bulk
+							// element (where the normal-space projector N vanishes),
+							//
+							//   d2(D_i psi_l)/dX^q_j dX^r_k
+							//        = (D_k psi_l)(D_j Psi_r)(D_i Psi_q) + (D_j psi_l)(D_k Psi_q)(D_i Psi_r)
+							//
+							// - two triple products of FIRST derivatives, symmetric under (q,j)<->(r,k) as
+							// it must be. If that holds, the whole rank-6 array is redundant, and it is
+							// 24.4% of Hessian assembly to fill (dev_docs/code_generation.md 9.4.11).
+							// On an interface the second derivative additionally carries normal-projector
+							// terms. Differentiating the codim-aware first-order identity again, and using
+							// that a surface gradient is tangential (so N.Dpsi = 0) together with
+							// P_ij = sum_q X^q_i (D_j Psi_q), which gives
+							//     dN_ij/dX^r_k = -[ N_ik (D_j Psi_r) + N_jk (D_i Psi_r) ],
+							// the whole thing collapses to the bulk part plus six N-terms. It is symmetric
+							// under (q,j)<->(r,k) - the six pair up - and reduces to the bulk form at N=0.
+							{
+								double Dpsi_l[3], Nproj[3][3];
+								for (unsigned int i = 0; i < n_dim; i++)
+								{
+									Dpsi_l[i] = 0.0;
+									for (unsigned b = 0; b < el_dim; b++)
+										Dpsi_l[i] += gab_gai[b][i] * dpsids(l, b);
+									for (unsigned int j = 0; j < n_dim; j++)
+									{
+										double P = 0.0;
+										for (unsigned b = 0; b < el_dim; b++)
+											P += gab_gai[b][i] * interpolated_t(b, j);
+										Nproj[i][j] = (i == j ? 1.0 : 0.0) - P;
+									}
+								}
+								for (unsigned lel = 0; lel < eleminfo.nnode; lel++)
+									for (unsigned lel2 = 0; lel2 < eleminfo.nnode; lel2++)
+									{
+										double Dq[3], Dr[3];
+										for (unsigned int i = 0; i < n_dim; i++)
+										{
+											Dq[i] = Dr[i] = 0.0;
+											for (unsigned b = 0; b < el_dim; b++)
+											{
+												Dq[i] += gab_gai[b][i] * dpsids_Element(lel, b);
+												Dr[i] += gab_gai[b][i] * dpsids_Element(lel2, b);
+											}
+										}
+										double dot_lr = 0.0, dot_lq = 0.0, dot_qr = 0.0;
+										for (unsigned int m = 0; m < n_dim; m++)
+										{
+											dot_lr += Dpsi_l[m] * Dr[m];
+											dot_lq += Dpsi_l[m] * Dq[m];
+											dot_qr += Dq[m] * Dr[m];
+										}
+										for (unsigned int i = 0; i < n_dim; i++)
+											for (unsigned int j = 0; j < n_dim; j++)
+												for (unsigned int j2 = 0; j2 < n_dim; j2++)
+												{
+													const double expected = d2_shape_dcoord_closed_form(
+														i, j, j2, Dpsi_l, Dq, Dr, el_dim != n_dim, Nproj, dot_lr, dot_lq, dot_qr);
+													std::ostringstream where;
+													where << "(space " << ispace << ", node " << l << ", dir " << i
+														  << ", coord " << lel << "/" << j << " and " << lel2 << "/" << j2
+														  << ", el_dim " << el_dim << ", nodal_dim " << n_dim << ")";
+													ale_identity_check("d2_dx2_shape_dcoord", el_dim, n_dim,
+																	   shape_info->d2_dx2_shape_dcoord[ispace][l][i][lel][j][lel2][j2],
+																	   expected, where.str());
+												}
+									}
+							}
+						}
 						}
 					}
 				}
@@ -1390,13 +1954,14 @@ namespace pyoomph
 
 		// Same pattern as above, for the discontinuous-Lagrange (DL) space (no "dominant space"
 		// fallback since DL fields are never used to represent the geometry).
-		if (required.DL.dx_psi || required.DL.psi || required.DL.d2x_psi)
+		const RequiredShapeFamilies fam_DL = required_shape_families_DL(required);
+		if (fam_DL.any())
 		{
 			oomph::Shape psi(eleminfo.nnode_DL);
 			oomph::DShape dpsids(eleminfo.nnode_DL, std::max((unsigned int)1, el_dim));
 			// The DL basis is affine in s in every dimension, so d2psids is identically zero - but the
 			// physical second derivative is not, since the Q term survives on a curved element.
-			const bool space_d2x_DL = require_d2x && el_dim && eleminfo.nnode_DL;
+			const bool space_d2x_DL = (__disable_shape_family_split ? require_d2x : fam_DL.d2x) && el_dim && eleminfo.nnode_DL;
 			oomph::DShape d2psids(std::max((unsigned int)1, eleminfo.nnode_DL), MAX_N2DERIV);
 			if (space_d2x_DL)
 				this->d2shape_local_at_s_DL(s, psi, dpsids, d2psids);
@@ -1404,24 +1969,32 @@ namespace pyoomph
 				this->dshape_local_at_s_DL(s, psi, dpsids);
 			for (unsigned l = 0; l < eleminfo.nnode_DL; l++)
 			{
-				shape_info->shape_DL[l] = psi[l];
-				for (unsigned int i = 0; i < n_dim; i++)
+				// Split per family exactly as for the continuous spaces above.
+				if (fam_DL.psi)
+					shape_info->shape_DL[l] = psi[l];
+				if (fam_DL.dx)
 				{
-					shape_info->dx_shape_DL[history_index][l][i] = 0.0;
-					for (unsigned b = 0; b < el_dim; b++)
+					for (unsigned int i = 0; i < n_dim; i++)
 					{
-						shape_info->dx_shape_DL[history_index][l][i] += gab_gai[b][i] * dpsids(l, b);
+						shape_info->dx_shape_DL[history_index][l][i] = 0.0;
+						for (unsigned b = 0; b < el_dim; b++)
+						{
+							shape_info->dx_shape_DL[history_index][l][i] += gab_gai[b][i] * dpsids(l, b);
+						}
 					}
 				}
 
-				for (unsigned int i=0; i < this->dim();i++) shape_info->dS_shape_DL[l][i] =  dpsids(l, i);
-
-				for (unsigned int i = 0; i < n_lagr; i++)
+				if (fam_DL.dX)
 				{
-					shape_info->dX_shape_DL[l][i] = 0.0;
-					for (unsigned b = 0; b < el_dim; b++)
+					for (unsigned int i=0; i < this->dim();i++) shape_info->dS_shape_DL[l][i] =  dpsids(l, i);
+
+					for (unsigned int i = 0; i < n_lagr; i++)
 					{
-						shape_info->dX_shape_DL[l][i] += gab_gai_Lagr[b][i] * dpsids(l, b);
+						shape_info->dX_shape_DL[l][i] = 0.0;
+						for (unsigned b = 0; b < el_dim; b++)
+						{
+							shape_info->dX_shape_DL[l][i] += gab_gai_Lagr[b][i] * dpsids(l, b);
+						}
 					}
 				}
 
@@ -1482,7 +2055,7 @@ namespace pyoomph
 							}
 						}
 					}
-				if (require_dxdshape)
+				if (require_dxdshape && fam_DL.dcoord)
 				{
 					for (unsigned int i = 0; i < n_dim; i++)
 					{
@@ -1498,7 +2071,88 @@ namespace pyoomph
 							}
 						}
 					}
-					if (require_hessian)
+					if (__paranoid_ale_identity)
+					{
+						// Same closed form as for the continuous spaces above - the identity is a property
+						// of the mapping, not of the space the shapes belong to.
+						double Dpsi_l[3], Nproj[3][3];
+						for (unsigned int i = 0; i < n_dim; i++)
+						{
+							Dpsi_l[i] = 0.0;
+							for (unsigned b = 0; b < el_dim; b++)
+								Dpsi_l[i] += gab_gai[b][i] * dpsids(l, b);
+							for (unsigned int j = 0; j < n_dim; j++)
+							{
+								double P = 0.0;
+								for (unsigned b = 0; b < el_dim; b++)
+									P += gab_gai[b][i] * interpolated_t(b, j);
+								Nproj[i][j] = (i == j ? 1.0 : 0.0) - P;
+							}
+						}
+						for (unsigned l2 = 0; l2 < eleminfo.nnode; l2++)
+						{
+							double Dpsi_q[3], dot = 0.0;
+							for (unsigned int i = 0; i < n_dim; i++)
+							{
+								Dpsi_q[i] = 0.0;
+								for (unsigned b = 0; b < el_dim; b++)
+									Dpsi_q[i] += gab_gai[b][i] * dpsids_Element(l2, b);
+							}
+							for (unsigned int a = 0; a < n_dim; a++)
+								dot += Dpsi_l[a] * Dpsi_q[a];
+							for (unsigned int i = 0; i < n_dim; i++)
+								for (unsigned int i2 = 0; i2 < n_dim; i2++)
+								{
+									std::ostringstream where;
+									where << "(space DL, node " << l << ", dir " << i << ", coord node " << l2
+										  << ", coord dir " << i2 << ", el_dim " << el_dim
+										  << ", nodal_dim " << n_dim << ")";
+									ale_identity_check("d_dx_shape_dcoord_DL", el_dim, n_dim,
+													   shape_info->d_dx_shape_dcoord_DL[l][i][l2][i2],
+													   -Dpsi_l[i2] * Dpsi_q[i] + Nproj[i][i2] * dot,
+													   where.str());
+								}
+						}
+					}
+					if (require_hessian && closed_form_d2)
+					{
+						// Same closed form as the continuous spaces above - the identity is a property of the
+						// mapping, not of the space the shapes belong to. Without this branch the loop below
+						// would dereference a D2X2_dshape that is no longer allocated.
+						double Dpsi_l[3];
+						for (unsigned int i = 0; i < n_dim; i++)
+						{
+							Dpsi_l[i] = 0.0;
+							for (unsigned b = 0; b < el_dim; b++)
+								Dpsi_l[i] += gab_gai[b][i] * dpsids(l, b);
+						}
+						for (unsigned lel = 0; lel < eleminfo.nnode; lel++)
+						{
+							double Dq[3];
+							for (unsigned int i = 0; i < n_dim; i++)
+							{
+								Dq[i] = 0.0;
+								for (unsigned b = 0; b < el_dim; b++)
+									Dq[i] += gab_gai[b][i] * dpsids_Element(lel, b);
+							}
+							for (unsigned lel2 = 0; lel2 < eleminfo.nnode; lel2++)
+							{
+								double Dr[3];
+								for (unsigned int i = 0; i < n_dim; i++)
+								{
+									Dr[i] = 0.0;
+									for (unsigned b = 0; b < el_dim; b++)
+										Dr[i] += gab_gai[b][i] * dpsids_Element(lel2, b);
+								}
+								for (unsigned int i = 0; i < n_dim; i++)
+									for (unsigned int j = 0; j < n_dim; j++)
+										for (unsigned int j2 = 0; j2 < n_dim; j2++)
+											shape_info->d2_dx2_shape_dcoord_DL[l][i][lel][j][lel2][j2] =
+												d2_shape_dcoord_closed_form(i, j, j2, Dpsi_l, Dq, Dr, false, __no_normal_projector, 0.0, 0.0, 0.0);
+							}
+						}
+					}
+					else if (require_hessian)
 					{
 					  for (unsigned int i = 0; i < n_dim; i++)
 						{
@@ -1747,11 +2401,10 @@ namespace pyoomph
 	// the priority chain C2TB -> C2 -> C1TB -> C1 depending on which nodes/spaces are present.
 	void BulkElementBase::set_remaining_shapes_appropriately(JITShapeInfo_t *shape_info, const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes)
 	{
-		bool required_C2TB = required_shapes.continuous_spaces[SPACE_INDEX_C2TB].dx_psi || required_shapes.continuous_spaces[SPACE_INDEX_C2TB].psi || required_shapes.continuous_spaces[SPACE_INDEX_C2TB].d2x_psi;
-		required_C2TB |= eleminfo.nnode_of_space[SPACE_INDEX_C2TB] && (required_shapes.Pos.psi || required_shapes.Pos.dx_psi || required_shapes.Pos.dX_psi || required_shapes.Pos.d2x_psi || required_shapes.continuous_spaces[SPACE_INDEX_C2TB].dX_psi) && (!strcmp(this->codeinst->get_func_table()->dominant_space, "C2TB"));
-		
-		bool required_C1TB = required_shapes.continuous_spaces[SPACE_INDEX_C1TB].dx_psi || required_shapes.continuous_spaces[SPACE_INDEX_C1TB].psi || required_shapes.continuous_spaces[SPACE_INDEX_C1TB].d2x_psi;		
-		required_C1TB |= eleminfo.nnode_of_space[SPACE_INDEX_C1TB] && (required_shapes.Pos.psi || required_shapes.Pos.dx_psi || required_shapes.Pos.dX_psi || required_shapes.Pos.d2x_psi || required_shapes.continuous_spaces[SPACE_INDEX_C1TB].dX_psi) && (!strcmp(this->codeinst->get_func_table()->dominant_space, "C1TB"));
+		// Same predicate as the fill, from the same helper: the two used to spell it out separately and
+		// had to agree, or the Pos aliases would point at a space that was never filled.
+		const bool required_C2TB = this->required_shape_families(required_shapes, SPACE_INDEX_C2TB).any();
+		const bool required_C1TB = this->required_shape_families(required_shapes, SPACE_INDEX_C1TB).any();
 		
 		if (required_C2TB)
 		{
@@ -1814,6 +2467,7 @@ namespace pyoomph
 	// the combined integration weights (weight * Jacobian) used by JIT code to form dx/dX/etc.
 	void BulkElementBase::fill_shape_buffer_for_integration_point(unsigned ipt, const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag)
 	{
+		JITShapeInfo_t *const shape_info = this->get_shape_info();
 		oomph::Vector<double> s(this->dim());
 		for (unsigned int i = 0; i < this->dim(); i++)
 			s[i] = integral_pt()->knot(ipt, i);
@@ -1912,19 +2566,123 @@ namespace pyoomph
 				oss << "Inverted element: the signed determinant of the Eulerian mapping dx/ds is "
 					<< detJ << " (must be > 0) at integration point " << ipt << " of a "
 					<< this->dim() << "-dimensional element";
-				if (codeinst && codeinst->get_func_table() && codeinst->get_func_table()->domain_name)
-					oss << " on domain '" << codeinst->get_func_table()->domain_name << "'";
+				if (jitcode && jitcode->get_func_table() && jitcode->get_func_table()->domain_name)
+					oss << " on domain '" << jitcode->get_func_table()->domain_name << "'";
+				// Where, in nondimensional coordinates. Without it the report says only that SOME
+				// element folded, which on a mesh of thirty thousand is not a starting point: a fold
+				// at a fresh pinch-off cap and one in the far field call for entirely different
+				// answers. The nodal positions are all this needs and they are certainly available.
+				{
+					oomph::Vector<double> mid(this->nodal_dimension(), 0.0);
+					const unsigned nnod = this->nnode();
+					for (unsigned n = 0; n < nnod; n++)
+						for (unsigned i = 0; i < this->nodal_dimension(); i++)
+							mid[i] += this->node_pt(n)->x(i) / nnod;
+					oss << ", around the position (";
+					for (unsigned i = 0; i < mid.size(); i++)
+						oss << (i ? ", " : "") << mid[i];
+					oss << ")";
+				}
 				oss << "." << std::endl
 					<< "This usually means the mesh has been distorted too far, e.g. by too large a "
 					<< "time step or continuation step." << std::endl
 					<< "Detection can be switched off again with set_detect_inverted_elements(False).";
-				throw oomph::InvertedElementError(oss.str(), OOMPH_CURRENT_FUNCTION, OOMPH_EXCEPTION_LOCATION);
+				// Always recorded, never thrown from here: see the comment on
+				// defer_inverted_element_errors in elements.hpp. Two independent reasons - the
+				// collectives of an assembly's element loop, and the fact that this function is
+				// reached from the JIT-generated code, which tcc compiles as plain C with no unwind
+				// tables, so an exception crossing that frame reaches std::terminate and aborts the
+				// process. Problem::InvertedElementScope::raise_if_any() turns the record into an
+				// exception, in C++, where it can be caught.
+				if (inverted_elements_detected++ == 0) inverted_element_message = oss.str();
 			}
 		}
 
+		if (__paranoid_ale_identity && !(J > 0.0 && std::isfinite(J)))
+		{
+			std::ostringstream key;
+			key << "DEGENERATE MAPPING J=" << (std::isfinite(J) ? "finite" : "non-finite")
+				<< " [el_dim " << this->dim() << " in " << this->nodal_dimension() << "D, nnode "
+				<< this->nnode() << "]";
+			auto &e = __ale_identity_stats[key.str()];
+			e.n++;
+			e.bad++;
+			if (e.worst_where.empty())
+			{
+				std::ostringstream oss;
+				oss << "J=" << J << " at integration point " << ipt << " of domain '"
+					<< ((jitcode && jitcode->get_func_table() && jitcode->get_func_table()->domain_name)
+							? jitcode->get_func_table()->domain_name : "?")
+					<< "', node positions:";
+				for (unsigned l = 0; l < this->nnode(); l++)
+				{
+					oss << " (";
+					for (unsigned d = 0; d < this->nodal_dimension(); d++)
+						oss << (d ? "," : "") << this->node_pt(l)->x(d);
+					oss << ")";
+				}
+				e.worst_where = oss.str();
+			}
+		}
 		shape_info->int_pt_weight_unity= w;
 		shape_info->int_pt_weight[0] = w * J;
 		shape_info->int_pt_weight_Lagrangian = w * JLagr;
+
+		if (__poison_everything)
+		{
+			// Positive control, see __poison_everything: everything the generated code is about to read
+			// is destroyed here, so every case MUST come out NaN. If one does not, the buffers it reads
+			// are not the ones this tool poisons and its "clean" verdict is worthless.
+			JITFuncSpec_RequiredShapes_FiniteElement_t nothing;
+			memset(&nothing, 0, sizeof(nothing));
+			this->poison_unrequired_shapes(nothing, shape_info, false);
+		}
+
+		if (__paranoid_ale_identity)
+		{
+			// The remaining two identities can only be checked once the integration weight is known and
+			// the "Pos" aliases have been resolved (set_remaining_shapes_appropriately runs once per
+			// assembly, before this). Checking them through dx_shape_Pos rather than through the space
+			// they alias is deliberate: it is exactly the assumption that the position space IS the
+			// geometry space that the generated code makes, and that ConstrainPositionsToC1Space could
+			// in principle break.
+			const JITFuncSpec_Table_FiniteElement_t *ft = jitcode->get_func_table();
+			if (flag && ft->moving_nodes && !ft->fd_position_jacobian && shape_info->dx_shape_Pos[0])
+			{
+				const unsigned ND = this->nodal_dimension();
+				const unsigned NQ = this->nnode();
+				for (unsigned q = 0; q < NQ; q++)
+					for (unsigned j = 0; j < ND; j++)
+					{
+						std::ostringstream where;
+						where << "(coord node " << q << ", coord dir " << j << ", el_dim " << this->dim()
+							  << ", nodal_dim " << ND << ")";
+						// d(dx)/dX^q_j = dx * D_j Psi_q, i.e. d(det J)/dX = det J * dpsi_q/dx_j.
+						ale_identity_check("int_pt_weights_d_coords", this->dim(), ND,
+										   shape_info->int_pt_weights_d_coords[j][q],
+										   shape_info->int_pt_weight[0] * shape_info->dx_shape_Pos[0][q][j],
+										   where.str());
+						// d(n_i)/dX^q_j = -n_j D_i Psi_q. Only meaningful where a normal exists at all.
+						// Gated on normal_deriv, not on normal: d_normal_dcoord is written whenever a normal
+						// is wanted at all, but the generated code only ever READS it when it needs the
+						// sensitivity. Checking the write-only case reports mismatches in values nobody
+						// consumes - established, not assumed: with the guard widened to `normal`, 96 of
+						// 108 entries disagree on a 2D free surface while the normal_deriv cases are
+						// exact. Worth a look on its own, but it is not this identity.
+						if (required_shapes.normal_deriv && shape_info->d_normal_dcoord)
+							for (unsigned i = 0; i < ND; i++)
+							{
+								std::ostringstream w2;
+								w2 << "(normal comp " << i << ", coord node " << q << ", coord dir " << j
+								   << ", el_dim " << this->dim() << ", nodal_dim " << ND << ")";
+								ale_identity_check("d_normal_dcoord", this->dim(), ND,
+												   shape_info->d_normal_dcoord[i][q][j],
+												   -shape_info->normal[0][j] * shape_info->dx_shape_Pos[0][q][i],
+												   w2.str());
+							}
+					}
+			}
+		}
 
 	}
 
@@ -1936,7 +2694,10 @@ namespace pyoomph
 	// called before fill_shape_buffer_for_integration_point() is used for the individual points.
 	void BulkElementBase::prepare_shape_buffer_for_integration(const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		JITShapeInfo_t *const shape_info = this->get_shape_info();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
+		if (__poison_unrequired)
+			this->poison_unrequired_shapes(required_shapes, shape_info, true);
 		shape_info->n_int_pt = integral_pt()->nweight();
 
 		const oomph::TimeStepper *tstepper = (this->nnode() ? this->node_pt(0)->time_stepper_pt() : this->internal_data_pt(0)->time_stepper_pt());
@@ -1993,8 +2754,6 @@ namespace pyoomph
 
 		set_remaining_shapes_appropriately(shape_info, required_shapes);
 
-		_currently_assembled_element = this;
-		
       // Should be fine here!
       this->fill_shape_info_element_sizes(required_shapes,shape_info,flag);
 
@@ -2016,12 +2775,13 @@ namespace pyoomph
 	// EvalIntegralExpression, which reads the prepared shape_info buffer.
 	double BulkElementBase::eval_integral_expression(unsigned index)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		JITShapeInfo_t *const shape_info = this->get_shape_info();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		if (index >= functable->numintegral_expressions)
 			throw_runtime_error("Cannot evaluate integral expression at too large index " + std::to_string(index));		
 		this->interpolate_hang_values();
 		prepare_shape_buffer_for_integration(functable->shapes_required_IntegralExprs, 0);
-		return functable->EvalIntegralExpression(&eleminfo, this->shape_info, index);
+		return functable->EvalIntegralExpression(&eleminfo, shape_info, index);
 	}
 
 	// Evaluates a user-defined "local expression" (a pointwise, non-integrated expression) at a
@@ -2036,19 +2796,19 @@ namespace pyoomph
 	// Evaluates a user-defined "local expression" at an arbitrary local coordinate s.
 	double BulkElementBase::eval_local_expression_at_s(unsigned index, const oomph::Vector<double> &s)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		JITShapeInfo_t *const shape_info = this->get_shape_info();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		if (index >= functable->numlocal_expressions)
 			throw_runtime_error("Cannot evaluate local expression at too large index " + std::to_string(index));
 		
 		this->interpolate_hang_values();
 
 		double JLagr;
-		this->fill_shape_info_at_s(s, 0, codeinst->get_func_table()->shapes_required_LocalExprs, JLagr, 0);
-		this->prepare_shape_buffer_for_integration(codeinst->get_func_table()->shapes_required_LocalExprs, 0);
-//		set_remaining_shapes_appropriately(shape_info, codeinst->get_func_table()->shapes_required_LocalExprs);
-      _currently_assembled_element = this;
+		this->fill_shape_info_at_s(s, 0, jitcode->get_func_table()->shapes_required_LocalExprs, JLagr, 0);
+		this->prepare_shape_buffer_for_integration(jitcode->get_func_table()->shapes_required_LocalExprs, 0);
+//		set_remaining_shapes_appropriately(shape_info, jitcode->get_func_table()->shapes_required_LocalExprs);
 	    //std::cout << "CALLING EVAL LOCAL EXPRESSION  " << this << " ELEMINFO " << &eleminfo << std::endl;
-		return functable->EvalLocalExpression(&eleminfo, this->shape_info, index);
+		return functable->EvalLocalExpression(&eleminfo, shape_info, index);
 	}
 
 	// Evaluates a user-defined "extremum expression" (used e.g. to track min/max of some field)
@@ -2063,17 +2823,17 @@ namespace pyoomph
 	// Evaluates a user-defined "extremum expression" at an arbitrary local coordinate s.
 	double BulkElementBase::eval_extremum_expression_at_s(unsigned index, const oomph::Vector<double> &s)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		JITShapeInfo_t *const shape_info = this->get_shape_info();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		if (index >= functable->numextremum_expressions)
 			throw_runtime_error("Cannot evaluate extremum expression at too large index " + std::to_string(index));
 		
 		this->interpolate_hang_values();
 
 		double JLagr;
-		this->fill_shape_info_at_s(s, 0, codeinst->get_func_table()->shapes_required_ExtremumExprs, JLagr, 0);
-		this->prepare_shape_buffer_for_integration(codeinst->get_func_table()->shapes_required_ExtremumExprs, 0);
-      _currently_assembled_element = this;	    
-		return functable->EvalExtremumExpression(&eleminfo, this->shape_info, index);
+		this->fill_shape_info_at_s(s, 0, jitcode->get_func_table()->shapes_required_ExtremumExprs, JLagr, 0);
+		this->prepare_shape_buffer_for_integration(jitcode->get_func_table()->shapes_required_ExtremumExprs, 0);
+		return functable->EvalExtremumExpression(&eleminfo, shape_info, index);
 	}	
 
 	// Deliberately NOT built on fill_shape_info_at_s: this is called several times per Runge-Kutta
@@ -2134,7 +2894,7 @@ namespace pyoomph
 	void BulkElementBase::tracer_prepare_element()
 	{
 		this->interpolate_hang_values();
-		this->prepare_shape_buffer_for_integration(codeinst->get_func_table()->shapes_required_TracerAdvection, 0);
+		this->prepare_shape_buffer_for_integration(jitcode->get_func_table()->shapes_required_TracerAdvection, 0);
 	}
 
 	// Evaluates a user-defined tracer-advection velocity field, in physical/Eulerian components, at
@@ -2150,7 +2910,8 @@ namespace pyoomph
 	// drop them silently.
 	void BulkElementBase::eval_tracer_advection_at_s(unsigned index, const oomph::Vector<double> &s, oomph::Vector<double> &xvelo)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		JITShapeInfo_t *const shape_info = this->get_shape_info();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		if (index >= functable->numtracer_advections)
 			throw_runtime_error("Cannot evaluate tracer advection at too large index " + std::to_string(index));
 		const JITFuncSpec_RequiredShapes_FiniteElement_t &required = functable->shapes_required_TracerAdvection;
@@ -2168,7 +2929,6 @@ namespace pyoomph
 		set_remaining_shapes_appropriately(shape_info, required);
 
 		xvelo.assign(3, 0.0);
-		_currently_assembled_element = this;
-		functable->EvalTracerAdvection(&eleminfo, this->shape_info, index, &(xvelo[0]));
+		functable->EvalTracerAdvection(&eleminfo, shape_info, index, &(xvelo[0]));
 	}
 }

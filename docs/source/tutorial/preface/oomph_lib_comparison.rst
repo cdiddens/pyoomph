@@ -3,13 +3,13 @@
 Comparison with oomph-lib
 -------------------------
 
-pyoomph is built *on top of* `oomph-lib <https://oomph-lib.github.io/oomph-lib/doc/html/>`_ :cite:`Heil2006`: the C++ core of pyoomph links against a (slightly modified) subset of oomph-lib, which provides the underlying finite-element data structures, the Newton solver, the spatial and temporal adaptivity machinery and the arc-length continuation and bifurcation-tracking framework. pyoomph is therefore **not** a competitor of oomph-lib, but a high-level, symbolic Python frontend that trades some of oomph-lib's breadth and low-level control for a drastically reduced implementation effort.
+pyoomph is built *on top of* `oomph-lib <https://oomph-lib.github.io/oomph-lib/doc/html/>`_ :cite:`Heil2006`: the C++ core of pyoomph links against a (modified) subset of oomph-lib, which provides the underlying finite-element data structures, the Newton solver, the spatial and temporal adaptivity machinery and the arc-length continuation and basis of the bifurcation-tracking framework. pyoomph is therefore **not** a competitor of oomph-lib, but a high-level, symbolic Python frontend that trades some of oomph-lib's breadth and low-level control for a reduced implementation effort.
 
 This page gives a systematic, feature-by-feature comparison. It complements the more narrative :ref:`motivation<tutorial/preface/motivation:Motivation>` and :ref:`when to use pyoomph<tutorial/preface/whentouse:When to use pyoomph, and when better use something else>` sections. The comparison was made against the full upstream oomph-lib library, i.e. the *native* library, not the stripped-down and modified partial copy bundled inside pyoomph's ``src/thirdparty/oomph-lib``.
 
 .. note::
 
-   Because pyoomph is fundamentally a *symbolic* framework, many features that oomph-lib ships as hand-written, pre-compiled C++ element classes can instead be assembled by the user in a handful of lines of Python. Throughout this page, a feature "missing" from pyoomph therefore usually means *not pre-packaged* rather than *impossible* — the weak form can often just be typed out directly. Conversely, a few oomph-lib features (e.g. :math:`C^1`-continuous Hermite elements, hp-refinement) rely on machinery that pyoomph currently does not expose at all.
+   Because pyoomph is fundamentally a *symbolic* framework, many features that oomph-lib ships as hand-written, pre-compiled C++ element classes can instead be assembled by the user in a handful of lines of Python. Throughout this page, a feature "missing" from pyoomph therefore usually means *not pre-packaged* rather than *impossible*. The weak form can often just be typed out directly. Conversely, a few oomph-lib features (e.g. :math:`C^1`-continuous Hermite elements, hp-refinement) rely on machinery that pyoomph currently does not expose at all.
 
 
 Two development philosophies
@@ -38,7 +38,7 @@ The essential difference is *how a new equation gets into the solver*.
      - Generated symbolically and exactly
    * - Performance path
      - Compiled C++
-     - Symbolically generated C code, JIT-compiled (TinyC by default, or gcc/clang/MSVC) and linked back into the running Python process — on par with hand-coded C/C++
+     - Symbolically generated C code, JIT-compiled (TinyC by default, or gcc/clang/MSVC) and linked back into the running Python process. On par with hand-coded C/C++
    * - Combining multi-physics
      - Make a combined ``Element`` class, adjust nodal storage, implement off-diagonal Jacobian terms
      - Just add ``equationA + equationB``, cross-coupling automatically
@@ -71,7 +71,7 @@ oomph-lib ships an extensive catalogue of pre-coded physics modules (one ``src/`
      - Same equation + coordinate system
    * - Generalised-Newtonian (shear-thinning etc.)
      - Dedicated modules
-     - Set a symbolic, shear-rate-dependent ``dynamic_viscosity`` — no new module needed
+     - Set a symbolic, shear-rate-dependent ``dynamic_viscosity``. No new module needed
    * - Viscoelastic flow
      - Not a dedicated module
      - Assemble symbolically; log-conformation tensor tools provided
@@ -279,7 +279,7 @@ This is one of oomph-lib's clear strengths: fully distributed meshes with halo/h
 What pyoomph adds on top of oomph-lib
 =====================================
 
-* Symbolic and coordinate-system agnostic weak-form entry directly in Python, with **exact, automatically generated Jacobians, parameter derivatives and Hessians** — including derivatives with respect to moving-mesh coordinates.
+* Symbolic and coordinate-system agnostic weak-form entry directly in Python, with **exact, automatically generated Jacobians, parameter derivatives and Hessians**, including derivatives with respect to moving-mesh coordinates.
 * JIT C code generation and compilation (TinyC / gcc / clang / MSVC), giving hand-coded performance without hand-coding.
 * A full physical **units / non-dimensionalisation** system tracked symbolically through code generation.
 * A **materials** database with multi-component mixtures, thermodynamic activity models (UNIFAC/AIOMFAC) and mass-transfer models.
@@ -294,14 +294,13 @@ Features of oomph-lib not (yet) available in pyoomph
 * The large catalogue of pre-coded physics (beams, shells, Föppl–von Kármán plates, biharmonic, Womersley, flux-transport/Euler, space-time, time-harmonic elasticity, full poroelasticity).
 * :math:`C^1`-continuous Hermite elements, spectral elements, and p-/hp-refinement.
 * The mature specific block-preconditioners, algebraic/geometric multigrid ecosystem for large iterative solves.
-* Highly scalable distributed-memory (MPI) meshes and parallel solvers.
 * Immersed rigid bodies and the residual-hijacking mechanism.
 * A wider selection of unstructured mesh generators (TetGen, VMTK, Geompack, …).
 
-Keep in mind that, thanks to pyoomph's symbolic nature, several of these "missing" equations can nevertheless be implemented by the user in a few lines of Python. The genuine limitations are those requiring machinery pyoomph does not expose — most notably :math:`C^1`-continuous elements, hp-refinement, and large-scale parallelism.
+Keep in mind that, thanks to pyoomph's symbolic nature, several of these "missing" equations can nevertheless be implemented by the user in a few lines of Python. The genuine limitations are those requiring machinery pyoomph does not expose, most notably :math:`C^1`-continuous elements and hp-refinement.
 
 
 Summary
 =======
 
-Use pyoomph when you value rapid, symbolic problem setup, black-box symbolic differentiation, physical units, multi-component flow with mass transfer, or (azimuthal) bifurcation tracking on moving meshes — and when your problems fit within continuous Lagrange elements and moderate parallelism. Use native oomph-lib directly when you need its full breadth of pre-coded physics, :math:`C^1`/spectral/hp elements, its advanced preconditioners, or heavily parallelised large-scale (3D) computations. See :ref:`When to use pyoomph<tutorial/preface/whentouse:When to use pyoomph, and when better use something else>` for a shorter decision guide.
+Use pyoomph when you value rapid, symbolic problem setup, black-box symbolic differentiation, physical units, multi-component flow with mass transfer, or (azimuthal) bifurcation tracking on moving meshes, and when your problems fit within continuous Lagrange elements and moderate parallelism. Use native oomph-lib directly when you need its full breadth of pre-coded physics, :math:`C^1`/spectral/hp elements, its advanced preconditioners. See :ref:`When to use pyoomph<tutorial/preface/whentouse:When to use pyoomph, and when better use something else>` for a shorter decision guide.

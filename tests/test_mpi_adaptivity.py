@@ -1,5 +1,7 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #
 #  @section LICENSE
 #
@@ -115,9 +117,8 @@ def _run_distributed(cases, nproc, tmpdir, cases_module="box_cases", timeout=900
     """Launch the worker under mpirun and return {case_id: [per-rank result dicts]}."""
     spec = json.dumps([[k, e, list(l)] for k, e, l in cases])
     cmd = ["mpirun", "-n", str(nproc)]
-    if os.environ.get("PYOOMPH_MPI_OVERSUBSCRIBE", "1") == "1":
-        # CI machines routinely have fewer slots than we ask for; without this OpenMPI refuses to start.
-        cmd += ["--oversubscribe"]
+    # No --oversubscribe: this project's machines have the cores these ranks need, and an
+    # oversubscribed run trades a deadlock for a machine that stops responding.
     cmd += [sys.executable, _WORKER, "--spec", spec, "--outdir", str(tmpdir),
             "--cases", cases_module, "--distribute"]
     # Importing pyoomph calls MPI_Init, so THIS pytest process is already a (singleton) MPI job and owns an

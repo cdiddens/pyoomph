@@ -1,3 +1,4 @@
+#  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
@@ -31,39 +32,33 @@ from pyoomph.meshes.simplemeshes import RectangularQuadMesh
 
 
 class HDGPoissonEquations(Equations):
-    # -grad^2(u)=f on a fully discontinuous space. No facet terms at all: everything that connects the
-    # elements lives on the skeleton, which is what makes the element blocks condensable.
-    def __init__(self, source, space="D2"):
+    # -grad^2(u)=f on a fully discontinuous space. The bulk residual has no facet terms at all; the
+    # coupling is the facet residual below, on the interior-facet skeleton.
+    #
+    # Both are written here: add_interior_facet_residual() puts a weak form on the skeleton, and
+    # at_internal_facets=True declares a field there, so uhat is a facet unknown, not a bulk one.
+    # Both need requires_interior_facet_terms in the constructor - that is how pyoomph learns about
+    # the skeleton, while the equation tree is assembled and long before define_fields() runs.
+    def __init__(self, source, tau, space="D2", facet_space="D2"):
         super().__init__()
-        self.source, self.space = source, space
+        self.source, self.tau = source, tau
+        self.space, self.facet_space = space, facet_space
+        self.requires_interior_facet_terms = True
 
     def define_fields(self):
         self.define_scalar_field("u", self.space)
+        self.define_scalar_field("uhat", self.facet_space, at_internal_facets=True)
 
     def define_residuals(self):
         u, v = var_and_test("u")
         self.add_residual(weak(grad(u), grad(v)) - weak(self.source, v))
 
-
-class HDGCoupling(Equations):
-    # The unknown uhat on each interior facet is the single-valued trace of u there. Each element sees
-    # only its own u and the uhat of its own facets, never the neighbour's u - that is what
-    # "hybridizable" means, and it is why the bulk unknowns can be eliminated element by element.
-    #
-    # Per element K, the symmetric hybridized interior-penalty form adds
-    #     - int_dK  dn(u) (v - vhat)  - int_dK (u - uhat) dn(v)  + int_dK tau (u - uhat)(v - vhat)
-    # to the bulk term int_K grad(u).grad(v). The second term restores symmetry, the third stabilizes.
-    # Both are consistent, since u = uhat at the exact solution.
-    def __init__(self, tau, space="D2"):
-        super().__init__()
-        self.tau, self.space = tau, space
-
-    def define_fields(self):
-        self.define_scalar_field("uhat", self.space)
-
-    def define_residuals(self):
+        # Per element K, the symmetric hybridized interior-penalty form adds
+        #     - int_dK  dn(u) (v - vhat)  - int_dK (u - uhat) dn(v)  + int_dK tau (u - uhat)(v - vhat)
+        # to the bulk term int_K grad(u).grad(v). Each element therefore sees only its own u and the
+        # uhat of its own facets, never the neighbour's u - which is what makes the bulk unknowns
+        # eliminable element by element.
         uhat, vhat = var_and_test("uhat")
-        u, v = var("u"), testfunction("u")
         n = var("normal")   # outward normal of the element this facet is attached to
 
         # The two one-sided values. avg(a)+jump(a)/2 is the near side, avg(a)-jump(a)/2 the far one,
@@ -77,11 +72,11 @@ class HDGCoupling(Equations):
         r = -weak(dot(n, gu_n), v_n - vhat) - weak(-dot(n, gu_f), v_f - vhat)
         r += -weak(u_n - uhat, dot(n, gv_n)) - weak(u_f - uhat, -dot(n, gv_f))
         r += weak(self.tau * (u_n - uhat), v_n - vhat) + weak(self.tau * (u_f - uhat), v_f - vhat)
-        self.add_residual(r)
+        self.add_interior_facet_residual(r)
 
         # Only relevant under adaptivity/remeshing: a facet created inside a refined element has no
         # predecessor to take a value from, so reconstruct the trace from the bulk solution instead.
-        self.set_facet_recovery("uhat", avg(u))
+        self.set_facet_recovery("uhat", avg(u), at_internal_facets=True)
 
 
 class HDGDirichletBC(InterfaceEquations):
@@ -123,9 +118,8 @@ class HDGPoissonProblem(Problem):
         self += RectangularQuadMesh(N=self.N)
         tau = self.tau_factor * self.N              # ~ tau_factor/h on the unit square
 
-        eqs = HDGPoissonEquations(self.source, self.space)
+        eqs = HDGPoissonEquations(self.source, tau, self.space, self.facet_space)
         eqs += IntegralObservables(err2=(var("u") - self.exact)**2)
-        eqs += HDGCoupling(tau, self.facet_space) @ "_internal_facets_"
         eqs += HDGDirichletBC(self.exact, tau) @ ["left", "right", "top", "bottom"]
 
         if self.condense:

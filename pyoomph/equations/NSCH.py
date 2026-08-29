@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -287,9 +287,14 @@ class DisjunctDomainMarkerNSCH(Equations):
 
         if mesh.nelement()==0:
             return
-        marker_index=mesh.element_pt(0).get_code_instance().get_discontinuous_field_index(self.name)
+        marker_index=mesh.element_pt(0).get_jit_code().get_discontinuous_field_index(self.name)
+        # unhandled_nodes is an insertion-ordered dict rather than a set, and checknodes a stack
+        # rather than a set: both hold Node objects, and a set of those iterates by id(), i.e. by
+        # allocation address. Which connected component became droplet 0 - and which node seeded it
+        # when several share the extremal y - was therefore not reproducible between two runs, let
+        # alone between two MPI ranks marking the same geometry. The dict is only used as a set.
         # Reset all markers
-        unhandled_nodes:set[Node]=set()
+        unhandled_nodes:dict[Node,None]={}
         unhandled_elems:set[Element]=set()
         nodes2elem:dict[Node,list[Element]]={}
         # Create the look-up tables for unhandles nodes and node->elements map
@@ -299,7 +304,7 @@ class DisjunctDomainMarkerNSCH(Equations):
             for ni in range(e.nnode()):
                 n=e.node_pt(ni)
                 if n.value(phase_ind)>self.mark_threshold:
-                    unhandled_nodes.add(n)
+                    unhandled_nodes[n]=None
                     if n not in nodes2elem.keys():
                         nodes2elem[n]=[]
                     nodes2elem[n].append(e)
@@ -319,11 +324,11 @@ class DisjunctDomainMarkerNSCH(Equations):
                 break
 
             # Flood-fill like algorithm
-            checknodes:set[Node]=set([startnode]) # seed the start node
+            checknodes:list[Node]=[startnode] # seed the start node
             while len(checknodes)>0:
                 nn=checknodes.pop() # get one node out of the bucket
                 if nn in unhandled_nodes: # only check further if the node was not handled before
-                    unhandled_nodes.remove(nn)
+                    unhandled_nodes.pop(nn)
                     for e in nodes2elem[nn]: # go over all elements the node is part of
                         if e in unhandled_elems:
                             e.internal_data_pt(marker_index).set_value(0,domain_index) # mark the element
@@ -332,7 +337,7 @@ class DisjunctDomainMarkerNSCH(Equations):
                             for ni in range(e.nnode()):
                                 n=e.node_pt(ni)
                                 if n in unhandled_nodes:
-                                    checknodes.add(n)
+                                    checknodes.append(n)
             domain_index+=1
 
     def after_newton_solve(self):

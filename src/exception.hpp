@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -44,6 +44,23 @@ namespace pyoomph
     ~runtime_error_with_line() throw() override {}
     const char *what() const throw() override;
 
+  };
+
+  // Raised when an inverted element has been seen on enough consecutive Newton solves that shrinking
+  // the step has clearly stopped helping, AND a RemeshWhen(on_inverted_element=True) is armed to do
+  // something about it. Python catches it, restores the last good state, remeshes and retries.
+  //
+  // Deliberately NOT derived from oomph::OomphLibError: oomph::Problem::adaptive_unsteady_newton_-
+  // solve() catches both OomphLibError and InvertedElementError and answers each by halving dt, which
+  // is exactly the response being escalated away from. A std::runtime_error walks straight out of
+  // that loop and reaches Python, which is the only place a remesh may happen at all (see
+  // dev_docs/mesh_construction.md section 5.1).
+  //
+  // Raised on every rank at once or on none - see Problem::raise_inverted_element_if_any().
+  class InvertedElementRemeshRequest : public std::runtime_error
+  {
+  public:
+    InvertedElementRemeshRequest(const std::string &what) : std::runtime_error(what) {}
   };
 
   extern int pyoomph_verbose; // Global verbosity level, checked by various parts of the code to decide whether to print diagnostic output

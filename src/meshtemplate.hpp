@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -813,7 +813,7 @@ namespace pyoomph
   };
 
   // A named group ("domain") of MeshTemplateElement objects that all share
-  // the same generated oomph-lib element code (code_instance), e.g. "bulk"
+  // the same generated oomph-lib element code (jitcode), e.g. "bulk"
   // vs. named interface/boundary domains. This is the level at which the
   // Python side attaches an element implementation (via set_element_code())
   // to a set of geometric elements, and at which the nodal/Lagrangian
@@ -825,7 +825,7 @@ namespace pyoomph
     MeshTemplate *mesh_template;
     std::string name;
     std::vector<MeshTemplateElement *> elements;
-    DynamicBulkElementInstance *code_instance;
+    DynamicJITCode *jitcode;
     int Nodal_dimension = -1;
     int Lagr_dimension = -1;
     int dim = -1;
@@ -865,7 +865,7 @@ namespace pyoomph
 
     const std::vector<MeshTemplateElement *> &get_elements() const { return elements; }
     std::vector<std::string> get_adjacent_boundary_names();
-    void set_element_code(DynamicBulkElementInstance *code_inst);
+    void set_element_code(DynamicJITCode *jit_code);
     //	void set_element_class(BaseFiniteElementCode & cls);
     MeshTemplate *get_template() { return mesh_template; }
     virtual ~MeshTemplateElementCollection();
@@ -962,6 +962,31 @@ namespace pyoomph
     // raw pointers rather than vectors because it runs once per element edge, face and cell of the
     // whole mesh, and the callers all have their indices on the stack already.
     nodeindex_t add_intermediate_node_generic(const nodeindex_t *key_corners, unsigned nkey, const nodeindex_t *parents, unsigned nparents, bool boundary_possible);
+
+    // --- Cross-domain topological node identity (dev_docs/interface_refinement_coupling.md section 15) ---
+    // Memo for topological_node_id(), rebuilt whenever the node list or the intermediate map has grown.
+    std::vector<std::array<unsigned long long, 2>> topo_node_id_cache;
+    std::vector<std::vector<std::pair<std::size_t, double>>> topo_node_expansion_cache;
+    std::unordered_map<nodeindex_t, std::vector<nodeindex_t>> topo_intermediate_corners;
+    std::size_t topo_cache_nodes = 0, topo_cache_intermediates = (std::size_t)-1;
+    void build_topological_id_cache();
+
+  public:
+    // The 128-bit identity of template node `ni`, as stamped onto every Node generated from it.
+    //
+    // A corner node is identified by its own index; an INTERMEDIATE node (edge mid-point, face or cell
+    // centre) by the C1 combination of the entity's corners -- exactly the form the refinement sweep
+    // produces. That is the whole point: a C2 domain's midside node is a template node, while the C1
+    // domain's node at the same place is created by a refinement, and the two must digest identically or
+    // the two sides of the interface stop recognising each other. intermediate_node_map already holds
+    // that entity description, keyed by the corner set precisely because "that set - not the node's
+    // position - is its identity".
+    std::array<unsigned long long, 2> topological_node_id(nodeindex_t ni);
+    // ... and the expansion it is the digest of, empty for an opaque node (see
+    // pyoomph::Node::interface_topological_expansion).
+    const std::vector<std::pair<std::size_t, double>> &topological_node_expansion(nodeindex_t ni);
+
+  protected:
 
   public:
     void note_predefined_higher_order_element() { has_predefined_higher_order_elements = true; }

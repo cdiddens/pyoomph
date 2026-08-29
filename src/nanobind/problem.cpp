@@ -88,7 +88,7 @@ namespace pyoomph
 	class PyProblemTrampoline : public pyoomph::Problem
 	{
 	public:
-		NB_TRAMPOLINE(pyoomph::Problem, 18);
+		NB_TRAMPOLINE(pyoomph::Problem, 19);
 
 		void setup_pinning() override
 		{
@@ -175,6 +175,11 @@ namespace pyoomph
 			NB_OVERRIDE(get_custom_residuals_jacobian, info);
 		}
 
+		double get_residual_scale_factor() override
+		{
+			NB_OVERRIDE(get_residual_scale_factor);
+		}
+
 		void _build_mesh() override
 		{
 			NB_OVERRIDE(_build_mesh);
@@ -197,8 +202,24 @@ void PyDecl_Problem(nb::module_ &m)
 	// py_decl_DofAugmentations=new nb::class_<pyoomph::DofAugmentations>(m,"DofAugmentations");
 }
 
+namespace
+{
+	// The two halves of the GIL hook that pyoomph_core declares but cannot implement: it links neither
+	// Python nor nanobind (see thread_state.hpp). Installed once at import time below, so that the
+	// threaded element loop can hand the GIL over to its workers' Python callbacks.
+	void *pyoomph_gil_release()
+	{
+		return (void *)new nb::gil_scoped_release();
+	}
+	void pyoomph_gil_acquire(void *token)
+	{
+		delete (nb::gil_scoped_release *)token;
+	}
+}
+
 void PyReg_Problem(nb::module_ &m)
 {
+	pyoomph::install_gil_hooks(&pyoomph_gil_release, &pyoomph_gil_acquire);
 
 	m.def(
 		"InitMPI", [](std::vector<std::string> &argv)
@@ -554,6 +575,16 @@ void PyReg_Problem(nb::module_ &m)
 		.def("is_floquet_mode", &pyoomph::PeriodicOrbitHandler::is_floquet_mode,
 			 "Whether the handler discretizes the orbit using the explicit Floquet mode (with an explicit degree of freedom "
 			 "at the end of the period) rather than a B-spline or finite-difference representation.")
+		.def("get_time_element_node_indices", &pyoomph::PeriodicOrbitHandler::get_time_element_node_indices,
+			 "Return, for each element of the time discretization, the list of time-block (knot) indices it spans. The "
+			 "element fills the orbit Jacobian rows of all but the last of these indices, from the columns of all of them, "
+			 "so this is the block bidiagonal structure along which the Floquet condensation slices. Empty in the modes "
+			 "that have no such structure (central/BDF2/B-spline).")
+		.def("get_naive_equation_order", &pyoomph::PeriodicOrbitHandler::get_naive_equation_order,
+			 "Return the augmented equation number of each row of the naive, time-major orbit layout "
+			 "[u_0 | u_1 | ... | u_nT-1 | T]. On a distributed (--distribute) problem the augmented rows are "
+			 "interleaved per rank, so a gathered global orbit Jacobian has to be permuted by this to be read "
+			 "time block by time block. Empty when the problem is not distributed, where the two orders agree.")
 		.def("get_T", &pyoomph::PeriodicOrbitHandler::get_T, "Return the current period of the tracked periodic orbit.")
 		.def("get_num_time_steps", &pyoomph::PeriodicOrbitHandler::n_tsteps,
 			 "Return the number of time steps used to discretize one period of the orbit.")
@@ -580,37 +611,38 @@ void PyReg_Problem(nb::module_ &m)
 */
 
 
-	nb::class_<pyoomph::DynamicBulkElementInstance>(
-		m, "DynamicBulkElementInstance",
-		"A JIT-compiled and instantiated finite element code, attached to a particular mesh. Created via "
+	nb::class_<pyoomph::DynamicJITCode>(
+		m, "DynamicJITCode",
+		"One JIT-compiled finite element code: a shared library generated from a symbolic equation definition, "
+		"loaded and bound to the bulk mesh it was compiled for. Created via "
 		"Problem.generate_and_compile_bulk_element_code(); provides the low-level bookkeeping (field indices, "
 		"external data links, ...) required by the Python-level Equations/Mesh classes.")
-		.def("_exchange_mesh", [](pyoomph::DynamicBulkElementInstance *self, MeshHandleBase *mesh_h)
+		.def("_exchange_mesh", [](pyoomph::DynamicJITCode *self, MeshHandleBase *mesh_h)
 			 { self->set_bulk_mesh(mesh_h->mesh()); }, nb::arg("mesh"),
-			 "Change the bulk mesh this element code instance is associated with.")
-		.def("link_external_data", &pyoomph::DynamicBulkElementInstance::link_external_data,
+			 "Change the bulk mesh this element code is bound to (used when remeshing replaces the mesh underneath it).")
+		.def("link_external_data", &pyoomph::DynamicJITCode::link_external_data,
 			 nb::arg("name"), nb::arg("data"), nb::arg("index"), nb::arg("full_source_name"),
 			 "Link an external (non-local) Data value, identified by ``name`` in the generated code, to the given "
 			 "oomph-lib ``data`` object and value ``index``; ``full_source_name`` is used for diagnostics.")
-		.def("get_nodal_field_index", &pyoomph::DynamicBulkElementInstance::get_nodal_field_index, nb::arg("name"),
+		.def("get_nodal_field_index", &pyoomph::DynamicJITCode::get_nodal_field_index, nb::arg("name"),
 			 "Return the local index of the nodal field ``name`` in this element code, or a negative value if it is not present.")
-		.def("get_discontinuous_field_index", &pyoomph::DynamicBulkElementInstance::get_discontinuous_field_index, nb::arg("name"),
+		.def("get_discontinuous_field_index", &pyoomph::DynamicJITCode::get_discontinuous_field_index, nb::arg("name"),
 			 "Return the local index of the discontinuous (elemental, DG-type) field ``name`` in this element code, or a negative value if it is not present.")
-		.def("has_moving_nodes", &pyoomph::DynamicBulkElementInstance::has_moving_nodes,
+		.def("has_moving_nodes", &pyoomph::DynamicJITCode::has_moving_nodes,
 			 "Whether this element code moves its nodes, i.e. uses an ALE (Arbitrary Lagrangian-Eulerian) formulation.")
-		.def("get_max_dt_order", &pyoomph::DynamicBulkElementInstance::get_max_dt_order,
+		.def("get_max_dt_order", &pyoomph::DynamicJITCode::get_max_dt_order,
 			 "Return the highest time derivative order (0: steady, 1: first order in time, ...) occurring in this element code.")
-		.def("can_be_time_adaptive", &pyoomph::DynamicBulkElementInstance::can_be_time_adaptive,
+		.def("can_be_time_adaptive", &pyoomph::DynamicJITCode::can_be_time_adaptive,
 			 "Whether this element code provides the temporal error estimators required for adaptive time stepping.")
-		.def("has_parameter_contribution", &pyoomph::DynamicBulkElementInstance::has_parameter_contribution, nb::arg("parameter_name"),
+		.def("has_parameter_contribution", &pyoomph::DynamicJITCode::has_parameter_contribution, nb::arg("parameter_name"),
 			 "Whether the residuals of this element code depend on the global parameter ``parameter_name``.")
-		.def("setup_interface_dof_indices", &pyoomph::DynamicBulkElementInstance::setup_interface_dof_indices,
+		.def("setup_interface_dof_indices", &pyoomph::DynamicJITCode::setup_interface_dof_indices,
 			 "Populate and return the mapping of interface degree-of-freedom names to indices, required for continuous "
 			 "fields defined only on parts of the mesh boundary (e.g. C2TB-C1 interface fields).")
-		.def("get_nodal_field_indices", &pyoomph::DynamicBulkElementInstance::get_nodal_field_indices,
+		.def("get_nodal_field_indices", &pyoomph::DynamicJITCode::get_nodal_field_indices,
 			 "Return a mapping from nodal field name to its local index in this element code.")
 		.def(
-			"set_analytical_jacobian", [](pyoomph::DynamicBulkElementInstance *self, bool ana, bool anapos)
+			"set_analytical_jacobian", [](pyoomph::DynamicJITCode *self, bool ana, bool anapos)
 			{
 				self->get_func_table()->fd_jacobian = !ana;
 				self->get_func_table()->fd_position_jacobian = !anapos;
@@ -619,7 +651,7 @@ void PyReg_Problem(nb::module_ &m)
 			"Select whether the Jacobian is assembled analytically (via the generated derivative code) or by finite "
 			"differences, separately for the ordinary degrees of freedom (``analytic``) and for the nodal position "
 			"degrees of freedom in moving-mesh problems (``analytic_positions``).")
-		.def("get_elemental_field_indices", &pyoomph::DynamicBulkElementInstance::get_elemental_field_indices,
+		.def("get_elemental_field_indices", &pyoomph::DynamicJITCode::get_elemental_field_indices,
 			 "Return a mapping from elemental (discontinuous) field name to its local index in this element code.");
 
 	nb::class_<pyoomph::Problem, pyoomph::PyProblemTrampoline>(
@@ -666,6 +698,18 @@ void PyReg_Problem(nb::module_ &m)
 		.def("_get_jacobian_information_string", &pyoomph::Problem::get_jacobian_information_string,
 			 "Return a human-readable summary of the defined fields, residuals and their Jacobian coupling structure, "
 			 "together with a flag whether the structure looks consistent; used for diagnostics/debugging.")
+		.def_rw("_inversion_remesh_threshold", &pyoomph::Problem::inversion_remesh_threshold,
+			 "How many consecutive Newton solves may report an inverted element before the next report is raised as "
+			 "InvertedElementRemeshRequest instead of being answered by halving the time step. 0 (the default) disables "
+			 "the escalation, i.e. an inversion is always just a rejected step. Set by RemeshWhen(on_inverted_element=True).")
+		.def("_get_inversion_reports", &pyoomph::Problem::get_inversion_reports,
+			 "How many inverted-element reports the current solve() call has absorbed so far.")
+		.def("_reset_inversion_counter", &pyoomph::Problem::reset_inversion_counter,
+			 "Start the inverted-element count again; called at the start of every solve() call and after a remesh.")
+		.def("_get_proven_matrix_symmetry", &pyoomph::Problem::get_proven_matrix_symmetry, nb::arg("residual_name") = "",
+			 "Return (jacobian_symmetric, mass_matrix_symmetric) for the named residual set: True only if every "
+			 "contributing block carries the symbolic symmetry proof AND no bifurcation tracking, dof augmentation, "
+			 "custom assembler or parameter-derivative replacement is active. False means 'not proven', never 'disproven'.")
 		.def("refine_uniformly", (void(pyoomph::Problem::*)()) & pyoomph::Problem::refine_uniformly,
 			 "Uniformly refine all refineable meshes of the problem by one level.")
 		.def("unrefine_uniformly", (unsigned(pyoomph::Problem::*)()) & pyoomph::Problem::unrefine_uniformly,
@@ -699,12 +743,41 @@ void PyReg_Problem(nb::module_ &m)
 			"If True (default), Dirichlet conditions are enforced the oomph-lib way, by removing the corresponding entries from the degree-of-freedom vector. "
 			"If False, all Dirichlet dofs are kept as regular degrees of freedom and the assembled system is manipulated afterwards instead.")
 		.def_prop_rw(
-			"nodal_block_dof_arrangement_used",
+			"_dof_ordering_mode",
 			[](pyoomph::Problem &p)
-			{ return p.is_block_dof_arrangement_used(); },
+			{ return p.get_dof_ordering_mode(); },
+			[](pyoomph::Problem &p, const std::string &m)
+			{ p.set_dof_ordering_mode(m); },
+			"Which layout the global degree-of-freedom numbering is permuted into. \"\" (the default) keeps oomph-lib's own order, "
+			"which numbers every nodal value of a mesh before any element-internal one. \"reverse\" is a test layout: it is a genuine "
+			"bijection that moves nearly every dof, and exists to prove that the renumbering is transparent to the answer. Takes effect "
+			"at the next equation numbering, i.e. after the next initialise()/reapply_boundary_conditions()/adapt.")
+		.def("_dof_ordering_row_cuts", &pyoomph::Problem::dof_ordering_row_cuts,
+			 "The nproc+1 row cut points a replicated MPI run should split the Jacobian at so that no block of the active dof "
+			 "layout is cut through. Empty when there is no layout, fewer than two ranks, a distributed problem (where each "
+			 "rank's dofs are contiguous already), or when some block is longer than a rank's share.")
+		.def("_dof_ordering_blocks", &pyoomph::Problem::get_dof_ordering_blocks,
+			 "The [first,last] equation ranges of the active dof layout's blocks, for diagnostics and tests.")
+		.def("_clear_dof_ordering_specs", &pyoomph::Problem::clear_dof_ordering_specs,
+			 "Drop all dof ordering layouts, i.e. go back to oomph-lib's own numbering.")
+		.def("_add_dof_ordering_spec", &pyoomph::Problem::add_dof_ordering_spec, nb::arg("by_element"), nb::arg("patterns"),
+			 "Append one dof ordering layout. patterns are glob patterns over _get_global_field_names(), in the order the "
+			 "fields should appear within a block; by_element groups an element's dofs rather than a node's. Layouts are "
+			 "applied in the order they are added and a dof is claimed by the first one naming its field, so several meshes "
+			 "and several layouts compose. A pattern matching no (unclaimed) field is an error, not a no-op.")
+		.def_prop_rw(
+			"nodal_block_dof_arrangement_used",
+			[](pyoomph::Problem &p) -> bool
+			{ throw_runtime_error("nodal_block_dof_arrangement_used never had any effect and has been removed. "
+								  "Use problem.dof_ordering = NodalBlockOrdering(\"domain/velocity_x\", ...) instead, "
+								  "which actually permutes the numbering. See pyoomph.generic.dof_ordering."); return false; },
 			[](pyoomph::Problem &p, const bool &r)
-			{ p.set_block_dof_arrangement_used(r); },
-			"Whether the degrees of freedom are arranged nodal-block-wise (all values of a node contiguous), which is required by some block-preconditioned solvers.")
+			{ throw_runtime_error("nodal_block_dof_arrangement_used never had any effect and has been removed. "
+								  "Use problem.dof_ordering = NodalBlockOrdering(\"domain/velocity_x\", ...) instead, "
+								  "which actually permutes the numbering. See pyoomph.generic.dof_ordering."); },
+			"REMOVED - raises. It set oomph-lib's Block_dof_arrangement_used flag, whose every consumer is commented out in the "
+			"vendored copy (linear_solver.cc, linear_algebra_distribution.cc), so setting it did nothing at all. The working "
+			"replacement is ``problem.dof_ordering``; see pyoomph.generic.dof_ordering.")
 		.def_prop_rw(
 			"DTSF_minimum_dt",
 			[](pyoomph::Problem &p)
@@ -838,7 +911,10 @@ void PyReg_Problem(nb::module_ &m)
 					  "``requires_explicit_diagonal()``, since needing a diagonal is a property of the factorisation and not of the problem: only some PETSc "
 					  "factorisations require one, MUMPS does not. Assigning to it overrides the solver in either direction and stops it being consulted "
 					  "(call ``_set_force_jacobian_diagonal_entries_auto()`` to undo). Stored zeros are not free -- they change the matrix a direct solver "
-					  "sees, hence its pivoting. Only has an effect together with ``keep_structural_zeros``.")
+					  "sees, hence its pivoting. Only has an effect together with ``keep_structural_zeros``.\n\n"
+					  "Setting ``apply_Dirichlet_BCs_by_dof_removing = False`` also forces the diagonal, and that one cannot be overridden: the "
+					  "constrained row's identity diagonal is only written where the pattern already has a slot for it, so without it a Dirichlet "
+					  "condition on a field with no self-coupling gives an identically zero row.")
 #ifdef OOMPH_HAS_MPI
 		// oomph-lib only declares this inside its own OOMPH_HAS_MPI guard, so a build configured with
 		// PYOOMPH_USE_MPI=OFF does not have it at all.
@@ -846,6 +922,16 @@ void PyReg_Problem(nb::module_ &m)
 			 "Make the distributed assembly report its local-stage time and the load imbalance across ranks. Diagnostics for the MPI assembly work. "
 			 "Only present in an MPI-enabled build.")
 #endif
+		.def("_set_num_assembly_threads", &pyoomph::Problem::set_num_assembly_threads, nb::arg("n"),
+			  "Number of OpenMP threads the element loop may use. 1 (the default) runs the serial loop unchanged. "
+			  "Set through Problem.set_num_threads(), which also passes the count to the linear solver; the command "
+			  "line switch --omp N does the same.")
+		.def("_get_num_assembly_threads", &pyoomph::Problem::get_num_assembly_threads,
+			  "Number of OpenMP threads currently allowed for the element loop.")
+		.def("_get_parallel_assemblies_done", &pyoomph::Problem::get_parallel_assemblies_done,
+			  "How many element loops have actually run threaded so far. Zero while --omp was not given, and "
+			  "still zero if the threaded path declined - which it reports once, but which otherwise looks "
+			  "exactly like a working one, since both give the right answer.")
 		.def_prop_rw("use_frozen_sparsity", &pyoomph::Problem::get_use_frozen_sparsity, &pyoomph::Problem::set_use_frozen_sparsity,
 					  "Whether assembly writes straight into a preallocated CSR through a precomputed scatter map, instead of accumulating into a searchable "
 					  "container and compressing it afterwards. Requires a value-independent pattern (``keep_structural_zeros``), and falls back to oomph-lib's "
@@ -1231,7 +1317,24 @@ void PyReg_Problem(nb::module_ &m)
 				return vector_to_ndarray(rs);
 			},
 			nb::arg("t"), "Return the values of all degrees of freedom at history/time level ``t`` (t=0: current values, t=1: previous time step, ...).")
-		.def("get_last_residual_convergence", &pyoomph::Problem::get_last_residual_convergence,
+		.def(
+			"_get_local_dof_values", [](pyoomph::Problem *self)
+			{ return vector_to_ndarray(self->get_local_dof_values()); },
+			"Return this process's block of the degree-of-freedom vector as a numpy array. Unlike get_current_dofs(), this is NOT gathered: "
+			"serially and on a replicated MPI run it is the whole vector, but under --distribute it holds only the rows this process owns.")
+		.def_prop_rw(
+			"residual_scale_hook_active",
+			[](pyoomph::Problem &p)
+			{ return p.residual_scale_hook_active; },
+			[](pyoomph::Problem &p, bool s)
+			{ p.residual_scale_hook_active = s; },
+			"If True, the assembled residual is multiplied by get_residual_scale_factor() before it reaches the Newton solver. Set by "
+			"Problem.set_deflation_operator(); left False otherwise so that problems without deflation never call into the hook.")
+		.def("get_residual_scale_factor", &pyoomph::Problem::get_residual_scale_factor,
+			 "Return the scalar the assembled residual vector is multiplied by before it reaches the Newton solver. Returns 1.0 unless a "
+			 "deflation operator is installed, which overrides this to make Newton unable to converge onto an already-known solution. The "
+			 "Jacobian is deliberately left unscaled; the linear solver compensates by rescaling the Newton step.")
+				.def("get_last_residual_convergence", &pyoomph::Problem::get_last_residual_convergence,
 			 "Return the maximum residual recorded at the start of, and after each iteration of, the most recent Newton solve; useful for diagnosing convergence behavior.")
 		.def(
 			"get_residuals", [](pyoomph::Problem *self)
@@ -1363,6 +1466,15 @@ void PyReg_Problem(nb::module_ &m)
 			"adapt", [](pyoomph::Problem &self)
 			{ unsigned nref, nunref; self.adapt(nref, nunref); return std::make_tuple(nref, nunref); },
 			"Perform spatial mesh adaptation (refinement/unrefinement) on all refineable submeshes. Returns (n_refined, n_unrefined).")
+		.def("set_interpolate_new_interface_dofs", &pyoomph::Problem::set_interpolate_new_interface_dofs, nb::arg("on"),
+			 "Controls whether newly created interface degrees of freedom (e.g. after refinement) are interpolated from the neighbouring nodes or initialized to zero. "
+			 "Was a process-wide switch; it is per Problem, because remeshing turns it off and on again around itself.")
+		.def("get_interpolate_new_interface_dofs", &pyoomph::Problem::get_interpolate_new_interface_dofs,
+			 "Whether newly created interface degrees of freedom are interpolated from their neighbours (see set_interpolate_new_interface_dofs).")
+		.def("set_use_eigen_Z2_error_estimators", &pyoomph::Problem::set_use_eigen_error_estimators, nb::arg("on"),
+			 "Controls whether the Zienkiewicz-Zhu (Z2) spatial error estimator uses the eigenvector flux set instead of the base-state one. Was a process-wide switch.")
+		.def("get_use_eigen_Z2_error_estimators", &pyoomph::Problem::get_use_eigen_error_estimators,
+			 "Whether the Z2 error estimator uses the eigenvector flux set (see set_use_eigen_Z2_error_estimators).")
 		.def("_replace_RJM_by_param_deriv", &pyoomph::Problem::_replace_RJM_by_param_deriv, nb::arg("parameter_name"), nb::arg("active"),
 			 "If ``active`` is True, replace the assembled residuals/Jacobian/mass-matrix by their derivative with respect to the global parameter "
 			 "``parameter_name`` in all subsequent assembly calls; if False, restore the plain residuals/Jacobian/mass-matrix.")
@@ -1544,9 +1656,6 @@ void PyReg_Problem(nb::module_ &m)
 					if (!quiet)
 						std::cout << "Generating equation C code: " << code_trunk << std::endl;
 					my_element->write_code(ofs);
-					// std::ofstream hfs(code_trunk+".gar",std::ios::binary);
-					// hfs << my_element->archive;
-					// hfs.close();
 				}
 
 #ifdef OOMPH_HAS_MPI
@@ -1574,13 +1683,11 @@ void PyReg_Problem(nb::module_ &m)
 #endif
 
 				std::string lib = compiler->get_shared_library(code_trunk);
-				pyoomph::DynamicBulkElementCode *code = problem->load_dynamic_bulk_element_code(lib, my_element);
-				pyoomph::DynamicBulkElementInstance *code_instance = code->factory_instance(bulkmesh);
-				return code_instance;
+				return problem->load_jit_code(lib, my_element, bulkmesh);
 			},
 			nb::rv_policy::reference,
 			nb::arg("my_element"), nb::arg("code_trunk"), nb::arg("suppress_writing"), nb::arg("suppress_compilation"), nb::arg("bulkmesh"), nb::arg("quiet"), nb::arg("extra_flags"),
 			"Generate the C source code for the symbolic finite element definition ``my_element`` (writing it to ``code_trunk``.c unless ``suppress_writing`` is True), "
 			"compile it with the problem's C compiler (unless ``suppress_compilation`` is True, passing ``extra_flags`` to the compiler) and load the resulting shared "
-			"library, instantiating it on ``bulkmesh``. Returns the resulting DynamicBulkElementInstance. ``quiet`` suppresses progress output.");
+			"library, binding it to ``bulkmesh``. Returns the resulting DynamicJITCode. ``quiet`` suppresses progress output.");
 }

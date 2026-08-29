@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -80,13 +80,24 @@ class UNIFACMainGroup:
         self.subgroups:dict[str,"UNIFACSubGroup"]={}
 
 class UNIFACSubGroup:
-    def __init__(self,name:str,maingroup:UNIFACMainGroup,R:float,Q:float,index:int | None=None):
+    def __init__(self,name:str,maingroup:UNIFACMainGroup,R:float,Q:float,index:int | None=None,
+                 molar_mass:float | None=None,charge:int=0):
         self.name=name
         self.maingroup=maingroup
         self.R=R
         self.Q=Q
         self.index=index
+        #: Molar mass in kg/mol. Used to be accepted by define_sub_group and dropped on the floor;
+        #: the middle-range part of AIOMFAC weights a main group's contribution by its mass, so it
+        #: is real data now.
+        self.molar_mass=molar_mass
+        #: Charge number. Nonzero only for the ion subgroups of AIOMFAC, which is what makes a
+        #: subgroup an ion as far as the activity model is concerned.
+        self.charge=charge
         self.maingroup.subgroups[self.name]=self
+
+    def is_ion(self)->bool:
+        return self.charge!=0
 
 class UNIFACMolecule:
     def __init__(self,name:str,server:ActivityModel):
@@ -189,6 +200,7 @@ class UNIFACMixture:
         self._sub_to_main:dict[str,str]={}
         for sg in self._allgroups.keys():
             self._sub_to_main[sg]=self.server.subgroups[sg].maingroup.name
+        self._check_interactions_are_known()
         self._As = {n: {m: self.server.interaction_table.get(self._sub_to_main[n], {}).get(self._sub_to_main[m], {}).get("A",0) for m in self._allgroups.keys()} for n in self._allgroups.keys()} 
         self._Bs = {n: {m: self.server.interaction_table.get(self._sub_to_main[n], {}).get(self._sub_to_main[m], {}).get("B", 0) for m in self._allgroups.keys()} for n in self._allgroups.keys()}
         self._Cs = {n: {m: self.server.interaction_table.get(self._sub_to_main[n], {}).get(self._sub_to_main[m], {}).get("C", 0) for m in self._allgroups.keys()} for n in self._allgroups.keys()}
@@ -196,6 +208,24 @@ class UNIFACMixture:
 
 
 
+
+    def _check_interactions_are_known(self)->None:
+        """Refuse a mixture that needs an interaction parameter the model does not have."""
+        assert isinstance(self.server,UNIFACLikeActivityModel)
+        if not self.server.undetermined_interactions:
+            return
+        mains={sg:self.server.subgroups[sg].maingroup for sg in self._allgroups.keys()}
+        missing:set[tuple[str,str]]=set()
+        for a in self._allgroups.keys():
+            for b in self._allgroups.keys():
+                ia,ib=mains[a].index,mains[b].index
+                if ia is not None and ib is not None and (ia,ib) in self.server.undetermined_interactions:
+                    missing.add((mains[a].name,mains[b].name))
+        if missing:
+            raise RuntimeError("The activity model '"+str(self.server.name)+"' has no interaction "+
+                               "parameter for "+", ".join(a+" <-> "+b for a,b in sorted(missing))+
+                               ", so it cannot describe this mixture. AIOMFAC itself stops on these "+
+                               "rather than assuming they are zero.")
 
     def get_ln_combinatorial_gamma(self,compo): #type:ignore
         r = compo.get_molecular_r() #type:ignore
@@ -317,6 +347,10 @@ class UNIFACLikeActivityModel(ActivityModel):
         self.interaction_table:dict[str,dict[str,dict[str,float]]]={}
 
         self.modified_volume_fraction_exponent=1
+        #: Main-group index pairs for which the model has no interaction parameter. A mixture whose
+        #: groups need one is refused: treating it as ideal would give a plausible wrong answer, and
+        #: AIOMFAC itself stops with an error on these.
+        self.undetermined_interactions:set[tuple[int,int]]=set()
         self.coordination_number=10
 
     def define_main_group(self,name:str,index:int | None=None):
@@ -332,10 +366,10 @@ class UNIFACLikeActivityModel(ActivityModel):
                 server._current_subgroup_definer=None
                 return
 
-            def sub_group(self,name:str,R:float,Q:float,index:int | None=None,molar_mass:float | None=None):
+            def sub_group(self,name:str,R:float,Q:float,index:int | None=None,molar_mass:float | None=None,charge:int=0):
                 if name in server.subgroups.keys():
                     raise RuntimeError("Subgroup "+name+" already defined in another main group "+server.subgroups[name].maingroup.name)
-                res=UNIFACSubGroup(name,self.maingrp,R,Q,index)
+                res=UNIFACSubGroup(name,self.maingrp,R,Q,index,molar_mass=molar_mass,charge=charge)
                 server.subgroups[name]=res
                 if index is not None:
                     server.subgroup_by_index[index]=res
@@ -347,10 +381,11 @@ class UNIFACLikeActivityModel(ActivityModel):
         return _MainGroupDefiner(grp)
 
 
-    def define_sub_group(self,name:str,R:float,Q:float,index:int,molar_mass:float | None=None):
+    def define_sub_group(self,name:str,R:float,Q:float,index:int,molar_mass:float | None=None,
+                         charge:int=0):
         if self._current_subgroup_definer is None:
             raise RuntimeError("Can only do it in 'with self.define_main_group():' statements")
-        self._current_subgroup_definer.sub_group(name,R,Q,index,molar_mass=molar_mass)
+        self._current_subgroup_definer.sub_group(name,R,Q,index,molar_mass=molar_mass,charge=charge)
 
     def set_interaction(self,mainI:int | str,mainJ:int | str,*,Aij:float | None=None,Aji:float | None=None,Bij:float | None=None,Bji:float | None=None,Cij:float | None=None,Cji:float | None=None):
         def ensure_table(first:str,second:str):

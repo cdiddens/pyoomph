@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -28,6 +28,7 @@ The main author may be contacted at c.diddens@utwente.nl
 #include <chrono>
 #include <unordered_set>
 #include <cmath>
+#include <functional>
 
 namespace pyoomph
 {
@@ -110,19 +111,69 @@ namespace pyoomph
 		return false;
 	}
 
+	static const bool __reciprocals_disabled = getenv("PYOOMPH_DISABLE_PARAM_RECIPROCALS") != NULL;
+
+	// A global parameter appearing with a negative exponent is printed by GiNaC's mul printer as an
+	// infix division - `.../pyoomph_gparam_0` - and GCC will not turn that into a reciprocal multiply
+	// without -freciprocal-math. Across the tutorial corpus there are 137 such divisions, and they sit
+	// inside Jacobian and Hessian ENTRIES, i.e. in the innermost trial loop, so each is a hardware
+	// divide per matrix entry. Substituting the reciprocal of the parameter (declared once per function
+	// by GlobalParameterFunctionScope, right next to the parameter itself) turns every one of them into
+	// a multiply: measured at -14.8% on the azimuthal element, composing with the buffer aliases of 13
+	// to -25.8%.
+	//
+	// This is the ONE place in code generation that deliberately changes the arithmetic: a*(1/b) is not
+	// bit-identical to a/b. It is a reassociation, nothing more - the same class of difference gcc and
+	// tcc already show against each other through FMA contraction (12).
+	//
+	// Only negative INTEGER exponents, and only global parameters, whose value is fixed for the whole
+	// assembly. Do not widen this to arbitrary printed subtrees: that is the general CSE pass of 8.3,
+	// which was built, measured at -1.9% and reverted.
+	class ParameterReciprocals : public GiNaC::map_function
+	{
+		FiniteElementCode *code;
+
+	public:
+		ParameterReciprocals(FiniteElementCode *code_) : code(code_) {}
+		GiNaC::ex operator()(const GiNaC::ex &inp) override
+		{
+			if (GiNaC::is_a<GiNaC::power>(inp) && GiNaC::is_a<GiNaC::GiNaCGlobalParameterWrapper>(inp.op(0)) &&
+				GiNaC::is_a<GiNaC::numeric>(inp.op(1)) && inp.op(1).info(GiNaC::info_flags::negint))
+			{
+				const unsigned global_index = GiNaC::ex_to<GiNaC::GiNaCGlobalParameterWrapper>(inp.op(0)).get_struct().cme->get_global_index();
+				auto it = code->global_parameter_to_local_indices.find(global_index);
+				// Only where the parameter really is a local of this function: outside a
+				// GlobalParameterFunctionScope it prints as the indirect table access, which is not what
+				// _rgp_<i> was declared from.
+				if (it != code->global_parameter_to_local_indices.end() && code->params_declared_in_current_function.count(it->second))
+				{
+					const unsigned local_index = it->second;
+					const GiNaC::ex recip = GiNaC::potential_real_symbol("_rgp_" + std::to_string(local_index));
+					const long n = -(long)GiNaC::ex_to<GiNaC::numeric>(inp.op(1)).to_long();
+					return (n == 1 ? recip : GiNaC::power(recip, GiNaC::numeric(n)));
+				}
+			}
+			return inp.map(*this);
+		}
+	};
+
+	static bool has_parameter_reciprocal(const GiNaC::ex &e)
+	{
+		for (GiNaC::const_preorder_iterator it = e.preorder_begin(); it != e.preorder_end(); ++it)
+			if (GiNaC::is_a<GiNaC::power>(*it) && GiNaC::is_a<GiNaC::GiNaCGlobalParameterWrapper>(it->op(0)) &&
+				GiNaC::is_a<GiNaC::numeric>(it->op(1)) && it->op(1).info(GiNaC::info_flags::negint))
+				return true;
+		return false;
+	}
+
 	// Prints a GiNaC expression as C source code, after applying an optional simplification
 	// strategy selected at runtime via FiniteElementCode::ccode_expression_mode (e.g. "factor",
 	// "normal", "expand", "collect_common_factors" - mostly useful for debugging/benchmarking
-	// how different GiNaC simplifications affect the generated code). The expression is also
-	// archived (csrc_opts.for_code->archive) so that it can be inspected/replayed later.
+	// how different GiNaC simplifications affect the generated code).
 	void print_simplest_form(GiNaC::ex expr, std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
 	{
 		GiNaC::ex towrite;
 		std::string mode = csrc_opts.for_code->ccode_expression_mode;
-		// Opt-in; nothing reads the archive - see FiniteElementCode::archive.
-		static const bool do_archive = getenv("PYOOMPH_ARCHIVE_EXPRESSIONS") != NULL;
-		if (do_archive)
-			csrc_opts.for_code->archive.archive_ex(expr, ("expression_" + std::to_string(csrc_opts.for_code->archive.num_expressions())).c_str());
 		if (mode == "factor")
 			towrite = GiNaC::factor(GiNaC::normal(GiNaC::expand(GiNaC::expand(expr).evalf())));
 		else if (mode == "normal")
@@ -148,6 +199,12 @@ namespace pyoomph
 		{
 			ExactifyWholeNumberExponents exactify;
 			towrite = exactify(towrite);
+		}
+		// After exactify, so that an inexact -1.0 exponent is an exact -1 by the time negint is tested.
+		if (!__reciprocals_disabled && csrc_opts.for_code && has_parameter_reciprocal(towrite))
+		{
+			ParameterReciprocals reciprocals(csrc_opts.for_code);
+			towrite = reciprocals(towrite);
 		}
 		towrite.print(GiNaC::print_csrc_FEM(os, &csrc_opts));
 	}
@@ -243,10 +300,104 @@ namespace pyoomph
 			{
 				const auto &p = GiNaC::ex_to<GiNaC::GiNaCGlobalParameterWrapper>(code->local_parameter_symbols[i]).get_struct();
 				os << indent << "const double pyoomph_gparam_" << i << " = *(my_func_table->global_parameters[" << i << "]); // " << p.cme->get_name() << std::endl;
+				// Emitted for every declared parameter rather than only for the ones that turn out to be
+				// divided by: which those are is only known once the derivatives have been printed, and
+				// these declarations have to come first. An unused one is a dead local that the compiler
+				// drops; a division by a zero-valued parameter that is never read yields an unused inf,
+				// and pyoomph does not unmask FP exceptions (see the note on BEGIN_RESIDUAL_* skipping
+				// contribution evaluation in jitbridge.h).
+				if (!__reciprocals_disabled)
+					os << indent << "const double _rgp_" << i << " = 1.0/pyoomph_gparam_" << i << ";" << std::endl;
 			}
 		}
 		~GlobalParameterFunctionScope() { code->params_declared_in_current_function.clear(); }
 	};
+
+	//////////////
+
+	// Buffer aliases, see FiniteElementCode::alias_buffer_access and the comment on the members in
+	// codegen.hpp. The switch is the A/B lever: it leaves the emitted code exactly as it was before
+	// the aliases existed, on the same binary, which is the only way to re-measure them later.
+	static const bool __buffer_aliases_disabled = getenv("PYOOMPH_DISABLE_BUFFER_ALIASES") != NULL;
+
+	// One per emitted function. Aliases are function-scoped (legal because the shape buffers are
+	// re-pointed by prepare_shape_buffer_for_integration, i.e. once per assembly and before the
+	// generated function is entered), so the registry is cleared per function and the declarations
+	// go at the top of it, after the nodal-index constants the hanginfo aliases reference.
+	class BufferAliasFunctionScope
+	{
+		FiniteElementCode *code;
+		bool was_active;
+
+	public:
+		BufferAliasFunctionScope(FiniteElementCode *code_) : code(code_), was_active(code_->buffer_aliases_active)
+		{
+			code->buffer_alias_by_access.clear();
+			code->buffer_alias_decls.clear();
+			code->buffer_aliases_active = true;
+		}
+		std::string declarations(const std::string &indent, const std::string &body) const { return code->write_buffer_alias_declarations(indent, body); }
+		~BufferAliasFunctionScope()
+		{
+			code->buffer_aliases_active = was_active;
+			code->buffer_alias_by_access.clear();
+			code->buffer_alias_decls.clear();
+		}
+	};
+
+	// Turns aliasing off for a stretch of printing that lands OUTSIDE the region the declarations will
+	// be emitted into. The Hessian needs it: its assembly body is printed before its header, so the
+	// scope is open while the pre-loop time-interpolation is printed, and an alias declared inside the
+	// integration loop must not be referenced above it.
+	class BufferAliasSuspend
+	{
+		FiniteElementCode *code;
+		bool was_active;
+
+	public:
+		BufferAliasSuspend(FiniteElementCode *code_) : code(code_), was_active(code_->buffer_aliases_active) { code->buffer_aliases_active = false; }
+		~BufferAliasSuspend() { code->buffer_aliases_active = was_active; }
+	};
+
+	std::string FiniteElementCode::alias_buffer_access(const std::string &access, const std::string &name, const std::string &decl)
+	{
+		if (!buffer_aliases_active || __buffer_aliases_disabled)
+			return access;
+		auto it = buffer_alias_by_access.find(access);
+		if (it != buffer_alias_by_access.end())
+			return it->second;
+		// A name must stand for exactly one access. If it ever did not, the generated code would read
+		// the wrong buffer and still compile - so this is checked rather than assumed.
+		auto clash = buffer_alias_decls.find(name);
+		if (clash != buffer_alias_decls.end())
+			throw_runtime_error("Buffer alias '" + name + "' would stand for '" + access + "' as well as for '" + clash->second + "'");
+		buffer_alias_by_access[access] = name;
+		buffer_alias_decls[name] = decl + " = " + access + ";";
+		return name;
+	}
+
+	std::string FiniteElementCode::alias_nodal_data(const FiniteElementSpace *sp)
+	{
+		const std::string nds = get_nodal_data_string(sp);
+		const std::string access = get_elem_info_str(sp) + "->" + nds;
+		const std::string name = "_" + get_owner_prefix(sp) + (nds == "nodal_coords" ? "ncoord" : "ndata");
+		return alias_buffer_access(access, name, "double *** const " + name);
+	}
+
+	// Only the aliases the body actually mentions. Registration happens while printing, and printing is
+	// not the same as emitting: write_generic_RJM_contribution buffers a whole space block and throws it
+	// away when the space turns out to contribute nothing, and the Hessian harvests over spaces it then
+	// skips. A left-over shape alias would merely be an unused local, but a left-over hanginfo alias is
+	// indexed by a this_nodalind_* constant that is only declared for the fields that survived - which
+	// is a compile error in the generated C, and was one on the azimuthal element's external-ODE field.
+	std::string FiniteElementCode::write_buffer_alias_declarations(const std::string &indent, const std::string &body) const
+	{
+		std::ostringstream oss;
+		for (const auto &e : buffer_alias_decls)
+			if (body.find(e.first) != std::string::npos)
+				oss << indent << e.second << std::endl;
+		return oss.str();
+	}
 
 	//////////////
 
@@ -273,26 +424,52 @@ namespace pyoomph
 		}
 	};
 
-	// Global code-generation state. These globals are set/restored around the symbolic
-	// differentiation and code-emission passes below and are read by the custom GiNaC
-	// structure classes (ShapeExpansion, SpatialIntegralSymbol, ...) whose derivative()/print()
-	// implementations otherwise have no direct access to "which pass are we currently in".
-	FiniteElementCode *__current_code;                                // Code object currently being processed (residual/Jacobian/Hessian assembly)
-	const ShapeExpansion *__deriv_subexpression_wrto = NULL;          // Set while differentiating a subexpression w.r.t. a specific field/direction
-	bool __derive_shapes_by_second_index = false;                     // True while building the "second" (l_shape2) index of a Hessian double-loop
-	bool __in_pitchfork_symmetry_constraint = false;                  // True while generating the extra pitchfork-symmetry-breaking constraint equations
-	int * __derive_only_by_expansion_mode = NULL;                     // If set, only derivatives w.r.t. this azimuthal/Fourier expansion mode are kept
-	bool __ignore_dpsi_coord_diffs_in_jacobian = false;                // Suppresses dpsi/dX (moving-mesh) contributions in the Jacobian for the current residual
+	// Ambient code-generation state, set and restored around the symbolic differentiation and
+	// code-emission passes below and read by GiNaC hooks that have no other channel.
+	//
+	// State that BELONGS to one code has been moved onto FiniteElementCode (the Hessian accumulators,
+	// the Hessian subexpression mapper, the hoisted-coefficient counter). What is left is genuinely
+	// ambient and stays that way on purpose: the readers are GiNaC `_eval` functions and print hooks
+	// whose only inputs are `ex` arguments - unitvect_eval, grad, div, the callback printers - so
+	// threading a code in would mean putting one into the expression itself, changing the symbolic
+	// representation and with it every generated-code hash. Nothing is bought
+	// by that: one FiniteElementCode belongs to exactly one Problem, and code generation is
+	// one-code-at-a-time by construction.
+	//
+	// They are thread_local so that two threads generating code never see each other's pass, and
+	// every set site is an RAII scope so that no path - including the several that can throw
+	// mid-differentiation - can leave one latched.
+	thread_local FiniteElementCode *__current_code = NULL;             // Code object currently being processed (residual/Jacobian/Hessian assembly)
+	thread_local const ShapeExpansion *__deriv_subexpression_wrto = NULL; // Set while differentiating a subexpression w.r.t. a specific field/direction
+	thread_local bool __derive_shapes_by_second_index = false;         // True while building the "second" (l_shape2) index of a Hessian double-loop
+	thread_local bool __in_pitchfork_symmetry_constraint = false;      // True while generating the extra pitchfork-symmetry-breaking constraint equations
+	thread_local int * __derive_only_by_expansion_mode = NULL;         // If set, only derivatives w.r.t. this azimuthal/Fourier expansion mode are kept
+	thread_local bool __ignore_dpsi_coord_diffs_in_jacobian = false;   // Suppresses dpsi/dX (moving-mesh) contributions in the Jacobian for the current residual
 	// Whether eval_at_expansion_mode() also tags the element size, i.e. whether tau and anything else
 	// built from the element size is perturbed along with the mesh in an azimuthal/normal-mode
 	// expansion. False (the default) freezes it at the base state, which is both the meaningful
 	// reading for a Cartesian mesh metric and the one whose augmented Jacobian is exact. True
 	// reproduces the behaviour that existed before this flag.
 	bool expand_element_size_in_expansion_modes = false;
-	std::set<ShapeExpansion> __all_Hessian_shapeexps;                 // Accumulates all shape expansions encountered while building a Hessian contribution
-	std::set<TestFunction> __all_Hessian_testfuncs;                   // Accumulates all test functions encountered while building a Hessian contribution
-	std::set<FiniteElementField *,FiniteElementFieldPtrLess> __all_Hessian_indices_required;    // Fields that need a Hessian index (i.e. contribute to the outer derivative direction)
-	bool __in_hessian = false;                                        // True while performing second-order (Hessian) differentiation
+	thread_local bool __in_hessian = false;                            // True while performing second-order (Hessian) differentiation
+
+	// Sets one of the ambient flags above for its lifetime and RESTORES the previous value, rather than
+	// clearing to a hard default the way the hand-written pairs did. Restoring matters because these
+	// regions nest (a subexpression derivative is taken in the middle of a Hessian pass), and because
+	// several of the differentiation calls in between can throw - an aborted code generation used to
+	// leave a flag latched for everything generated afterwards in the same process.
+	template <typename T>
+	class AmbientCodegenScope
+	{
+		T &ref;
+		T prev;
+
+	public:
+		AmbientCodegenScope(T &r, T v) : ref(r), prev(r) { ref = v; }
+		~AmbientCodegenScope() { ref = prev; }
+		AmbientCodegenScope(const AmbientCodegenScope &) = delete;
+		AmbientCodegenScope &operator=(const AmbientCodegenScope &) = delete;
+	};
 
 	// Pitchfork/symmetry-breaking constraint equations must not additionally pick up the usual
 	// Jacobian contribution from moving nodal positions (they are handled separately), unless we
@@ -458,7 +635,6 @@ namespace pyoomph
 		}
 	};
 
-	SubExpressionsToStructs *__SE_to_struct_hessian = NULL;
 
 	// GiNaC tree-mapper used to isolate the part of a residual expression that belongs to a single
 	// test-function space (and, if `varname` is given, to a single field's test function): any
@@ -1526,14 +1702,13 @@ namespace pyoomph
 	{
 		// The position space has its own dimension-indexed buffer; every other space (continuous,
 		// DG, DL, D0) shares one unified buffer indexed by this field's global nodal-data index.
-		if (dynamic_cast<PositionFiniteElementSpace *>(space))
-		{
-			return forcode->get_shape_info_str(space) + "->hanginfo_Pos[" + get_nodal_index_str(forcode) + "]";
-		}
-		else
-		{
-			return forcode->get_shape_info_str(space) + "->hanginfo[" + get_nodal_index_str(forcode) + "]";
-		}
+		// The whole hanginfo table is loop-invariant; the [node] index that follows at the use site is
+		// not. Aliasing the row (i.e. including the field index, which is a const declared above) means
+		// the macros index a local instead of walking shapeinfo-> once per test/trial node.
+		const bool is_pos = dynamic_cast<PositionFiniteElementSpace *>(space) != NULL;
+		const std::string access = forcode->get_shape_info_str(space) + (is_pos ? "->hanginfo_Pos[" : "->hanginfo[") + get_nodal_index_str(forcode) + "]";
+		const std::string alias_name = "_" + forcode->get_owner_prefix(space) + "hang_" + (is_pos ? "Pos_" : "") + this->name;
+		return forcode->alias_buffer_access(access, alias_name, "JITHangInfo_t * const " + alias_name);
 	}
 
 	std::string ShapeExpansion::get_num_nodes_str(FiniteElementCode *forcode) const
@@ -1541,33 +1716,81 @@ namespace pyoomph
 		return this->basis->get_space()->get_num_nodes_str(forcode);
 	}
 
+	// The single place that mints buffer-alias names for the six shape buffers. Both the trial-side
+	// accesses printed inside the loops (ShapeExpansion::get_shape_string) and the test-function
+	// pointers emitted per space block go through it, so they share one declaration instead of loading
+	// the same buffer twice. Only the Eulerian derivatives carry a history index.
+	static std::string alias_shape_buffer(FiniteElementCode *forcode, const FiniteElementSpace *sp,
+										  std::string base, const std::string &stem, int history,
+										  const std::function<std::string(const std::string &)> &decl)
+	{
+		std::string hist_suffix;
+		if (history >= 0)
+		{
+			size_t br = base.find('[');
+			if (br == std::string::npos)
+				base = base + "[" + std::to_string(history) + "]"; // flat per-space buffer, e.g. dx_shape_DL
+			else
+				base = base.substr(0, br) + "[" + std::to_string(history) + "]" + base.substr(br);
+			if (history)
+				hist_suffix = "_h" + std::to_string(history);
+		}
+		const std::string access = forcode->get_shape_info_str(sp) + "->" + base;
+		// Collision-free by construction: (owner, buffer, space, history) determines the access.
+		const std::string name = "_" + forcode->get_owner_prefix(sp) + stem + "_" + sp->get_shape_name() + hist_suffix;
+		return forcode->alias_buffer_access(access, name, decl(name));
+	}
+
+	// The timestepper weight arrays are re-pointed by prepare_shape_buffer_for_integration (the
+	// "_degr" variants switch between BDF1 and BDF2 on the first unsteady step), i.e. before the
+	// generated function is entered, so they alias like the shape buffers. This one matters more than
+	// it looks: weights[0] appears inside Jacobian ENTRIES, i.e. in the innermost trial loop, and one
+	// surviving shapeinfo-> read in there costs the hoist of all the others.
+	static std::string alias_timestepper_weights(FiniteElementCode *forcode, const std::string &kind, const std::string &scheme)
+	{
+		const std::string access = "shapeinfo->timestepper_weights_" + kind + "_" + scheme;
+		const std::string name = "_tsw_" + kind + "_" + scheme;
+		return forcode->alias_buffer_access(access, name, "const double * const " + name);
+	}
+
+	// Slot 0 of the same array, as a plain double. The Jacobian entries only ever read that one slot,
+	// and they read it in the innermost trial loop - aliasing the ARRAY there would still cost a load
+	// per iteration, which is most of what the aliases are trying to remove.
+	static std::string alias_timestepper_weight0(FiniteElementCode *forcode, const std::string &kind, const std::string &scheme)
+	{
+		const std::string access = "shapeinfo->timestepper_weights_" + kind + "_" + scheme + "[0]";
+		const std::string name = "_tsw0_" + kind + "_" + scheme;
+		return forcode->alias_buffer_access(access, name, "const double " + name);
+	}
+
 	std::string ShapeExpansion::get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const
 	{
-		std::string shape_str = basis->get_shape_string(forcode, nodal_index);
-		if (shape_str == "1")
-			return shape_str;
+		// D0 basis functions print as the literal 1 - nothing to index and nothing to alias.
+		if (basis->get_shape_string(forcode, nodal_index) == "1")
+			return "1";
 		// Only the EULERIAN derivative of a shape function depends on where the nodes are, so only that
 		// one carries a history index: dx_shapes[k][...] rather than dx_shapes[...], with 0 being the
 		// current configuration - the same convention as int_pt_weight[]. The undifferentiated shapes
 		// and the Lagrangian/local-coordinate derivatives are properties of the reference element and
 		// do not move with the mesh, so they have no such index.
+		int history = -1;
 		if (basis->is_eulerian_deriv())
 		{
 			const bool past = history_geometry && time_history_index > 0 && forcode->history_geometry_is_relevant();
-			size_t br = shape_str.find('[');
-			if (br == std::string::npos)
-				throw_runtime_error("Cannot index the shape access " + shape_str + " by history");
-			shape_str = shape_str.substr(0, br) + "[" + std::to_string(past ? time_history_index : 0) + "]" + shape_str.substr(br);
+			history = past ? (int)time_history_index : 0;
 		}
-		return forcode->get_shape_info_str(basis->get_space()) + "->" + shape_str;
+		BasisFunction *bf = basis;
+		const std::string alias = alias_shape_buffer(forcode, bf->get_space(), bf->get_shape_buffer_base(),
+													bf->get_shape_alias_stem(), history,
+													[bf](const std::string &n) { return bf->get_shape_alias_decl(n); });
+		return alias + "[" + nodal_index + "]" + bf->get_shape_index_suffix();
 	}
 
 	std::string ShapeExpansion::get_nodal_data_string(FiniteElementCode *forcode, std::string indexstr) const
 	{
 		if (this->dt_order > 0)
 			return this->get_dt_values_name(forcode) + "[" + indexstr + "]";
-		std::string nds = forcode->get_nodal_data_string(this->basis->get_space());
-		return forcode->get_elem_info_str(this->basis->get_space()) + "->" + nds + "[" + indexstr + "][" + get_nodal_index_str(forcode) + "][" + std::to_string(time_history_index) + "]";
+		return forcode->alias_nodal_data(this->basis->get_space()) + "[" + indexstr + "][" + get_nodal_index_str(forcode) + "][" + std::to_string(time_history_index) + "]";
 	}
 
 	// BasisFunction represents an (undifferentiated or spatially differentiated) shape function of a
@@ -1616,16 +1839,30 @@ namespace pyoomph
 		return local_coord_deriv_x[direction];
 	}
 
+	// The four continuous spaces share one buffer indexed by SPACE_INDEX_*; every other space (DL,
+	// D0, the DG family) has a buffer of its own named after the space.
+	static bool basis_space_is_indexed(const std::string &sn)
+	{
+		return sn == "C2TB" || sn == "C2" || sn == "C1TB" || sn == "C1";
+	}
+
+	static std::string basis_buffer_base(const std::string &array, const std::string &sn)
+	{
+		if (basis_space_is_indexed(sn))
+			return array + "s[SPACE_INDEX_" + sn + "]";
+		return array + "_" + sn;
+	}
+
+	std::string BasisFunction::get_shape_buffer_base() const
+	{
+		return basis_buffer_base("shape", space->get_shape_name());
+	}
+
+	// Assembled from the three pieces above rather than spelled out per subclass, so that a buffer
+	// alias built from get_shape_buffer_base() cannot drift away from the access it replaces.
 	std::string BasisFunction::get_shape_string(FiniteElementCode *, std::string nodal_index) const
 	{
-		if (space->get_shape_name()=="C2TB" || space->get_shape_name()=="C2" || space->get_shape_name()=="C1TB" || space->get_shape_name()=="C1")
-		{
-			return "shapes[SPACE_INDEX_" + space->get_shape_name() + "][" + nodal_index + "]";
-		}
-		else
-		{
-			return "shape_" + space->get_shape_name() + "[" + nodal_index + "]";
-		}
+		return get_shape_buffer_base() + "[" + nodal_index + "]" + get_shape_index_suffix();
 	}
 
 	// Second derivatives. The cache deliberately sits here, on the space's root BasisFunction, so
@@ -1760,16 +1997,9 @@ namespace pyoomph
 		return dx + "of BASIS of " + space->get_name();
 	}
 
-	std::string D1XBasisFunction::get_shape_string(FiniteElementCode *, std::string nodal_index) const
+	std::string D1XBasisFunction::get_shape_buffer_base() const
 	{
-		if (space->get_shape_name()=="C2TB" || space->get_shape_name()=="C2" || space->get_shape_name()=="C1TB" || space->get_shape_name()=="C1")
-		{
-			return "dx_shapes[SPACE_INDEX_" + space->get_shape_name() + "][" + nodal_index + "][" + std::to_string(direction) + "]";
-		}
-		else
-		{
-			return "dx_shape_" + space->get_shape_name() + "[" + nodal_index + "][" + std::to_string(direction) + "]";
-		}
+		return basis_buffer_base("dx_shape", space->get_shape_name());
 	}
 
 	std::string D1XBasisFunctionLagr::get_c_varname(FiniteElementCode *, std::string test_index)
@@ -1788,16 +2018,9 @@ namespace pyoomph
 		return dx + "of BASIS of " + space->get_name();
 	}
 
-	std::string D1XBasisFunctionLagr::get_shape_string(FiniteElementCode *, std::string nodal_index) const
+	std::string D1XBasisFunctionLagr::get_shape_buffer_base() const
 	{
-		if (space->get_shape_name()=="C2TB" || space->get_shape_name()=="C2" || space->get_shape_name()=="C1TB" || space->get_shape_name()=="C1")
-		{
-			return "dX_shapes[SPACE_INDEX_" + space->get_shape_name() + "][" + nodal_index + "][" + std::to_string(direction) + "]";
-		}
-		else
-		{
-			return "dX_shape_" + space->get_shape_name() + "[" + nodal_index + "][" + std::to_string(direction) + "]";
-		}
+		return basis_buffer_base("dX_shape", space->get_shape_name());
 	}
 
 
@@ -1818,16 +2041,9 @@ namespace pyoomph
 		return dx + "of BASIS of " + space->get_name();
 	}
 
-	std::string D1XBasisFunctionLocalCoord::get_shape_string(FiniteElementCode *, std::string nodal_index) const
+	std::string D1XBasisFunctionLocalCoord::get_shape_buffer_base() const
 	{
-		if (space->get_shape_name()=="C2TB" || space->get_shape_name()=="C2" || space->get_shape_name()=="C1TB" || space->get_shape_name()=="C1")
-		{
-			return "dS_shapes[SPACE_INDEX_" + space->get_shape_name() + "][" + nodal_index + "][" + std::to_string(direction) + "]";
-		}
-		else
-		{
-			return "dS_shape_" + space->get_shape_name() + "[" + nodal_index + "][" + std::to_string(direction) + "]";
-		}
+		return basis_buffer_base("dS_shape", space->get_shape_name());
 	}
 
 	// -------------------------------------------------------------------------------------------
@@ -1851,17 +2067,9 @@ namespace pyoomph
 		return "d^2/(d" + d2_direction_string(direction) + " d" + d2_direction_string(direction2) + ") of BASIS of " + space->get_name();
 	}
 
-	std::string D2XBasisFunction::get_shape_string(FiniteElementCode *, std::string nodal_index) const
+	std::string D2XBasisFunction::get_shape_buffer_base() const
 	{
-		const std::string slot = std::to_string(PYOOMPH_D2_SLOT(direction, direction2));
-		if (space->get_shape_name()=="C2TB" || space->get_shape_name()=="C2" || space->get_shape_name()=="C1TB" || space->get_shape_name()=="C1")
-		{
-			return "d2x_shapes[SPACE_INDEX_" + space->get_shape_name() + "][" + nodal_index + "][" + slot + "]";
-		}
-		else
-		{
-			return "d2x_shape_" + space->get_shape_name() + "[" + nodal_index + "][" + slot + "]";
-		}
+		return basis_buffer_base("d2x_shape", space->get_shape_name());
 	}
 
 	std::string D2XBasisFunctionLocalCoord::get_c_varname(FiniteElementCode *, std::string test_index)
@@ -1874,17 +2082,9 @@ namespace pyoomph
 		return "d^2/(ds^" + std::to_string(direction + 1) + " ds^" + std::to_string(direction2 + 1) + ") of BASIS of " + space->get_name();
 	}
 
-	std::string D2XBasisFunctionLocalCoord::get_shape_string(FiniteElementCode *, std::string nodal_index) const
+	std::string D2XBasisFunctionLocalCoord::get_shape_buffer_base() const
 	{
-		const std::string slot = std::to_string(PYOOMPH_D2_SLOT(direction, direction2));
-		if (space->get_shape_name()=="C2TB" || space->get_shape_name()=="C2" || space->get_shape_name()=="C1TB" || space->get_shape_name()=="C1")
-		{
-			return "d2S_shapes[SPACE_INDEX_" + space->get_shape_name() + "][" + nodal_index + "][" + slot + "]";
-		}
-		else
-		{
-			return "d2S_shape_" + space->get_shape_name() + "[" + nodal_index + "][" + slot + "]";
-		}
+		return basis_buffer_base("d2S_shape", space->get_shape_name());
 	}
 
 	// Name of, and index into, the shape-function sensitivity arrays w.r.t. the nodal coordinates
@@ -1921,18 +2121,28 @@ namespace pyoomph
 
 	std::string FiniteElementSpace::get_eqn_number_str(FiniteElementCode *forcode) const
 	{
-		std::string eleminfo = forcode->get_elem_info_str(this);
-		return eleminfo + "->nodal_local_eqn";
+		const std::string access = forcode->get_elem_info_str(this) + "->nodal_local_eqn";
+		const std::string name = "_" + forcode->get_owner_prefix(this) + "leqn";
+		return forcode->alias_buffer_access(access, name, "int * const * const " + name);
 	}
 
 	std::string FiniteElementSpace::get_num_nodes_str(FiniteElementCode *forcode) const
 	{
-		std::string eleminfo = forcode->get_elem_info_str(this);
-		if (this->get_shape_name()=="DL") //TODO: Make this in another way
+		const std::string eleminfo = forcode->get_elem_info_str(this);
+		// Aliased like the buffers, and for the same reason: this is a LOOP BOUND, re-read on every
+		// iteration of every trial loop because the jacobian[] store in the body may alias eleminfo.
+		std::string access, name;
+		if (this->get_shape_name() == "DL") // TODO: Make this in another way
 		{
-			return eleminfo + "->" + "nnode_DL";
+			access = eleminfo + "->nnode_DL";
+			name = "_" + forcode->get_owner_prefix(this) + "nnode_DL";
 		}
-		else return eleminfo + "->" + "nnode_of_space[SPACE_INDEX_" + this->get_shape_name() + "]";
+		else
+		{
+			access = eleminfo + "->nnode_of_space[SPACE_INDEX_" + this->get_shape_name() + "]";
+			name = "_" + forcode->get_owner_prefix(this) + "nnode_" + this->get_shape_name();
+		}
+		return forcode->alias_buffer_access(access, name, "const unsigned " + name);
 	}
 
 	std::string D0FiniteElementSpace::get_num_nodes_str(FiniteElementCode *) const
@@ -1942,14 +2152,16 @@ namespace pyoomph
 
 	std::string PositionFiniteElementSpace::get_num_nodes_str(FiniteElementCode *forcode) const
 	{
-		std::string eleminfo = forcode->get_elem_info_str(this);
-		return eleminfo + "->" + "nnode";
+		const std::string access = forcode->get_elem_info_str(this) + "->nnode";
+		const std::string name = "_" + forcode->get_owner_prefix(this) + "nnode";
+		return forcode->alias_buffer_access(access, name, "const unsigned " + name);
 	}
 
 	std::string PositionFiniteElementSpace::get_eqn_number_str(FiniteElementCode *forcode) const
 	{
-		std::string eleminfo = forcode->get_elem_info_str(this);
-		return eleminfo + "->pos_local_eqn";
+		const std::string access = forcode->get_elem_info_str(this) + "->pos_local_eqn";
+		const std::string name = "_" + forcode->get_owner_prefix(this) + "posleqn";
+		return forcode->alias_buffer_access(access, name, "int * const * const " + name);
 	}
 
 	// Emits C code that pre-computes, for every distinct time-derivative shape expansion in
@@ -2054,12 +2266,12 @@ namespace pyoomph
 				if (s.dt_order == 1)
 				{
 					//os << indent << "    " << varname << "[l_shape] += " <<  "shapeinfo->timestepper_weights_dt_" << timedisc_scheme << "[tindex]*" << eleminfo << "->" << nds << "[l_shape][" << nodalindex << "][tindex];" << std::endl;
-					compute_lines.push_back(indent + "    " + varname + "[l_shape] += " + "shapeinfo->timestepper_weights_dt_" + timedisc_scheme + "[tindex]*" + eleminfo + "->" + nds + "[l_shape][" + nodalindex + "][tindex];");
+					compute_lines.push_back(indent + "    " + varname + "[l_shape] += " + alias_timestepper_weights(for_code, "dt", timedisc_scheme) + "[tindex]*" + for_code->alias_nodal_data(s.basis->get_space()) + "[l_shape][" + nodalindex + "][tindex];");
 				}
 				else if (s.dt_order == 2)
 				{
 					//os << indent << "    " << varname << "[l_shape] += " <<   "shapeinfo->timestepper_weights_d2t_" << timedisc_scheme << "[tindex]*" << eleminfo << "->" << nds << "[l_shape][" << nodalindex << "][tindex];" << std::endl;
-					compute_lines.push_back(indent + "    " + varname + "[l_shape] += " + "shapeinfo->timestepper_weights_d2t_" + timedisc_scheme + "[tindex]*" + eleminfo + "->" + nds + "[l_shape][" + nodalindex + "][tindex];");
+					compute_lines.push_back(indent + "    " + varname + "[l_shape] += " + alias_timestepper_weights(for_code, "d2t", timedisc_scheme) + "[tindex]*" + for_code->alias_nodal_data(s.basis->get_space()) + "[l_shape][" + nodalindex + "][tindex];");
 				}
 				else
 					throw_runtime_error("TODO Higher order time derivatives");
@@ -2114,6 +2326,12 @@ namespace pyoomph
 				if (s.basis->is_eulerian_deriv())
 				{
 					required_coorddiffs.insert(s);
+					// The rank-4 nodal-coordinate sensitivity of this space is about to be READ below.
+					// Marking the flag from this very set is what keeps the fill and the reads in step -
+					// deriving it a second time from the residual would be another predicate to keep
+					// synchronised by hand, which is how the Hessian flags went wrong (see 9.4.15).
+					if (!for_code->current_shapeflag_func_type.empty())
+						for_code->mark_shapes_required(for_code->current_shapeflag_func_type, const_cast<FiniteElementSpace *>(s.basis->get_space()), "dx_psi_dcoord");
 				}
 			}
 		}
@@ -2340,6 +2558,392 @@ namespace pyoomph
 		}
 	}
 
+	// ---------------------------------------------------------------------------------------------
+	// Exact hoisting of a Jacobian entry out of the l_shape loop. See dev_docs/code_generation.md 9.4.
+	//
+	// A Jacobian entry is a Frechet derivative, hence EXACTLY linear in the quantities carrying the
+	// trial index l_shape: the trial shape functions, and on a moving mesh every geometric sensitivity,
+	// which are indexed by l_shape too. Its coefficients therefore do not depend on l_shape - yet the
+	// emitted C recomputes the whole entry nnode times per (integration point, l_test). Naming each
+	// coefficient once above the loop is not a heuristic CSE (contrast 8.3, which was reverted): it is
+	// that linearity, used. nnode*|entry| becomes |entry| + nnode*K for K atoms, and K is 3-4 where
+	// nnode is 27 on the 3D solid element that motivated this.
+	//
+	// If the split fails for any reason the entry is emitted unchanged, so a case the mathematics did
+	// not anticipate costs performance, never correctness.
+	static const bool __hoist_disabled = getenv("PYOOMPH_DISABLE_JACOBIAN_HOIST") != NULL;
+
+	// Coefficients below this many expression nodes are left inline rather than named. The default is 1,
+	// i.e. hoist everything: naming a coefficient costs one value live across the trial loop, and once
+	// the assembly function is split by its flag (9.4.6) that value lives in a body the residual-only
+	// call never enters, so it costs nothing there. Measured on the split build, 3D solid element:
+	// 1 -> -63.7%, 8 -> -63.2%, 32 -> -62.6%, 64 -> -48.5%, with residual-only flat at -8..-10%
+	// throughout and 9 kB of extra C between the extremes.
+	//
+	// The knob is kept because the answer inverts without the split: with PYOOMPH_DISABLE_RJM_SPLIT the
+	// coefficients DO sit in the residual-only path, hoisting cheap ones slowed it 3.6x, and 32 was the
+	// right cut (9.4.5).
+	static const unsigned __hoist_min_cost = getenv("PYOOMPH_JACOBIAN_HOIST_MIN")
+												? (unsigned)atoi(getenv("PYOOMPH_JACOBIAN_HOIST_MIN"))
+												: 1;
+
+	// Leaves count 1 as well: a leaf here is a shape-function or interpolated-value array read, and on
+	// this weak form the loads are what dominate (the same correction 8.3 had to make).
+	static unsigned hoist_expr_cost(const GiNaC::ex &e)
+	{
+		unsigned c = 1;
+		for (size_t i = 0; i < e.nops(); i++)
+			c += hoist_expr_cost(e.op(i));
+		return c;
+	}
+
+	// The quantities indexed by the trial index. A plain TestFunction is indexed by l_test and a plain
+	// (non-derived) ShapeExpansion is an interpolated value, so neither qualifies; but a test function
+	// or an interpolated value differentiated by a nodal COORDINATE does, because its C array carries
+	// the coordinate node as an index (see dcoord_shape_array and the _COORDDIFF_ arrays).
+	static bool is_l_shape_atom(const GiNaC::ex &e)
+	{
+		if (GiNaC::is_a<GiNaC::GiNaCShapeExpansion>(e))
+		{
+			const pyoomph::ShapeExpansion &sp = GiNaC::ex_to<GiNaC::GiNaCShapeExpansion>(e).get_struct();
+			return sp.is_derived || sp.nodal_coord_dir >= 0 || sp.nodal_coord_dir2 >= 0;
+		}
+		if (GiNaC::is_a<GiNaC::GiNaCTestFunction>(e))
+		{
+			const pyoomph::TestFunction &tf = GiNaC::ex_to<GiNaC::GiNaCTestFunction>(e).get_struct();
+			return tf.nodal_coord_dir >= 0 || tf.nodal_coord_dir2 >= 0;
+		}
+		if (GiNaC::is_a<GiNaC::GiNaCSpatialIntegralSymbol>(e))
+			return GiNaC::ex_to<GiNaC::GiNaCSpatialIntegralSymbol>(e).get_struct().is_derived();
+		if (GiNaC::is_a<GiNaC::GiNaCElementSizeSymbol>(e))
+			return GiNaC::ex_to<GiNaC::GiNaCElementSizeSymbol>(e).get_struct().is_derived();
+		if (GiNaC::is_a<GiNaC::GiNaCNormalSymbol>(e))
+			return GiNaC::ex_to<GiNaC::GiNaCNormalSymbol>(e).get_struct().get_derived_direction() >= 0;
+		return false;
+	}
+
+	// Which trial index an atom carries, as BITS: 1 = l_shape, 2 = l_shape2, 3 = both, 0 = not an atom.
+	// Test with `cls & 2` for "carries l_shape2" - `2 | 3` is just 3 and matches everything, which is a
+	// mistake worth making only once. Only the
+	// Hessian has two indices; there, an atom carries BOTH exactly when it is a second derivative, and
+	// otherwise carries l_shape2 iff its "other index" flag is set. Kept in step with the print sites -
+	// GiNaCShapeExpansion::print, GiNaCTestFunction::print, and the SpatialIntegral/ElementSize/Normal
+	// printers - which is where the actual [l_shape]/[l_shape2] subscripts are chosen.
+	static unsigned l_shape_atom_class(const GiNaC::ex &e)
+	{
+		if (!is_l_shape_atom(e))
+			return 0;
+		bool second = false, by_lshape2 = false;
+		if (GiNaC::is_a<GiNaC::GiNaCShapeExpansion>(e))
+		{
+			const pyoomph::ShapeExpansion &sp = GiNaC::ex_to<GiNaC::GiNaCShapeExpansion>(e).get_struct();
+			// A DERIVED shape expansion carrying a nodal-coordinate direction prints as
+			// d_dx_shape_dcoord[l_shape2][dir][l_shape][cdir] - the trial function of one index
+			// differentiated by the nodal coordinate of the other - so it carries BOTH. The
+			// second-coordinate-derivative forms (2ndCOORDDIFF, d2_dx2_shape_dcoord) do too.
+			second = (sp.nodal_coord_dir2 >= 0) || (sp.is_derived && sp.nodal_coord_dir >= 0);
+			by_lshape2 = sp.is_derived_other_index;
+		}
+		else if (GiNaC::is_a<GiNaC::GiNaCTestFunction>(e))
+		{
+			const pyoomph::TestFunction &tf = GiNaC::ex_to<GiNaC::GiNaCTestFunction>(e).get_struct();
+			second = (tf.nodal_coord_dir2 >= 0);
+			by_lshape2 = tf.is_derived_other_index;
+		}
+		else if (GiNaC::is_a<GiNaC::GiNaCSpatialIntegralSymbol>(e))
+		{
+			const auto &si = GiNaC::ex_to<GiNaC::GiNaCSpatialIntegralSymbol>(e).get_struct();
+			second = si.is_derived2();
+			by_lshape2 = si.is_derived_by_lshape2();
+		}
+		else if (GiNaC::is_a<GiNaC::GiNaCElementSizeSymbol>(e))
+		{
+			const auto &es = GiNaC::ex_to<GiNaC::GiNaCElementSizeSymbol>(e).get_struct();
+			second = es.is_derived2();
+			by_lshape2 = es.is_derived_by_lshape2();
+		}
+		else if (GiNaC::is_a<GiNaC::GiNaCNormalSymbol>(e))
+		{
+			const auto &ns = GiNaC::ex_to<GiNaC::GiNaCNormalSymbol>(e).get_struct();
+			second = (ns.get_derived_direction2() >= 0);
+			by_lshape2 = ns.is_derived_by_lshape2();
+		}
+		if (second)
+			return 3;
+		return by_lshape2 ? 2 : 1;
+	}
+
+	// Atoms whose class shares any bit with `mask`, in first-appearance order.
+	static void collect_atoms_of_class(const GiNaC::ex &e, unsigned mask, std::vector<GiNaC::ex> &out)
+	{
+		const unsigned cls = l_shape_atom_class(e);
+		if (cls)
+		{
+			if (cls & mask)
+			{
+				for (const auto &a : out)
+					if (a.is_equal(e))
+						return;
+				out.push_back(e);
+			}
+			return;
+		}
+		for (size_t i = 0; i < e.nops(); i++)
+			collect_atoms_of_class(e.op(i), mask, out);
+	}
+
+	static void collect_l_shape_atoms(const GiNaC::ex &e, std::vector<GiNaC::ex> &out)
+	{
+		if (is_l_shape_atom(e))
+		{
+			for (const auto &a : out)
+				if (a.is_equal(e))
+					return;
+			out.push_back(e);
+			return;
+		}
+		for (size_t i = 0; i < e.nops(); i++)
+			collect_l_shape_atoms(e.op(i), out);
+	}
+
+	// Accumulate `factor * (linear form of t)` into acc[]. Structural rather than via expand(): the
+	// entries reach hundreds of kilobytes and expanding them is exactly the cost we are removing.
+	static const char *__hoist_fail_reason = "";
+	static GiNaC::ex __hoist_fail_at;
+
+	static bool accumulate_linear_in(const GiNaC::ex &t, const GiNaC::ex &factor,
+									 const std::vector<GiNaC::symbol> &syms, std::vector<GiNaC::ex> &acc)
+	{
+		auto has_any = [&syms](const GiNaC::ex &x)
+		{
+			for (const auto &sy : syms)
+				if (x.has(sy))
+					return true;
+			return false;
+		};
+		if (GiNaC::is_a<GiNaC::add>(t))
+		{
+			for (size_t i = 0; i < t.nops(); i++)
+			{
+				// An additive term free of every atom would be a Jacobian contribution that survives a
+				// vanishing trial function. That cannot happen, so treat it as a failure rather than
+				// silently dropping it.
+				if (!has_any(t.op(i)))
+				{
+					__hoist_fail_reason = "additive term with no atom";
+					__hoist_fail_at = t.op(i);
+					return false;
+				}
+				if (!accumulate_linear_in(t.op(i), factor, syms, acc))
+					return false;
+			}
+			return true;
+		}
+		if (GiNaC::is_a<GiNaC::mul>(t))
+		{
+			GiNaC::ex rest = 1, core;
+			unsigned ncore = 0;
+			for (size_t i = 0; i < t.nops(); i++)
+			{
+				if (has_any(t.op(i)))
+				{
+					core = t.op(i);
+					ncore++;
+				}
+				else
+					rest *= t.op(i);
+			}
+			if (ncore != 1)
+			{
+				__hoist_fail_reason = (ncore == 0 ? "product with no atom" : "product of two or more atoms");
+				__hoist_fail_at = t;
+				return false; // quadratic in the atoms, so not a first derivative
+			}
+			return accumulate_linear_in(core, factor * rest, syms, acc);
+		}
+		for (size_t k = 0; k < syms.size(); k++)
+			if (t.is_equal(syms[k]))
+			{
+				acc[k] += factor;
+				return true;
+			}
+		__hoist_fail_reason = "atom inside a power or a function";
+		__hoist_fail_at = t;
+		return false; // a power of an atom, or an atom inside a function: not linear
+	}
+
+	// entry == sum_k coeffs[k] * atoms[k], or false and nothing usable.
+	static bool split_entry_by_l_shape(const GiNaC::ex &entry, const std::vector<GiNaC::ex> &atoms,
+									   std::vector<GiNaC::ex> &coeffs)
+	{
+		std::vector<GiNaC::symbol> syms;
+		GiNaC::exmap m;
+		for (size_t k = 0; k < atoms.size(); k++)
+		{
+			syms.push_back(GiNaC::symbol("__hoist_atom_" + std::to_string(k)));
+			m[atoms[k]] = syms.back();
+		}
+		const GiNaC::ex sub = entry.subs(m, GiNaC::subs_options::no_pattern);
+		std::vector<GiNaC::ex> acc(atoms.size(), GiNaC::ex(0));
+		if (!accumulate_linear_in(sub, GiNaC::ex(1), syms, acc))
+			return false;
+		// The coefficients must be free of the atoms, or the loop body would be wrong.
+		for (const auto &c : acc)
+			for (const auto &sy : syms)
+				if (c.has(sy))
+					return false;
+		coeffs = acc;
+		return true;
+	}
+
+	// The Hessian counterpart. A Hessian entry is a SECOND derivative, hence bilinear in the two trial
+	// indices: linear in the l_shape2-carrying atoms with coefficients that still depend on l_shape.
+	// Naming those coefficients just above the inner loop turns nnode*nnode2 evaluations of the whole
+	// entry into nnode evaluations plus nnode*nnode2 multiply-adds. Atoms carrying BOTH indices (the
+	// second-derivative family: int_pt_weights_d2_coords, d2_normal_d2coord, the 2ndCOORDDIFF arrays,
+	// d2_dx2_shape_dcoord) belong to the inner set too - the entry is linear in them as well, and their
+	// coefficients carry no index at all.
+	//
+	// A second split of those coefficients by the l_shape-carrying atoms would let the constants move
+	// above the OUTER loop as well; that is left for later, because the outer loop is opened lazily and
+	// shared between field pairs, and this level already removes the nnode2 factor.
+	static std::string hoist_hessian_entry(const GiNaC::ex &entry, std::ostream &pre,
+										   const std::string &indent, GiNaC::print_FEM_options &csrc_opts)
+	{
+		static const bool dbg = getenv("PYOOMPH_DEBUG_HOIST") != NULL;
+		if (__hoist_disabled || entry.is_zero())
+			return "";
+		std::vector<GiNaC::ex> atoms;
+		collect_atoms_of_class(entry, 2, atoms); // bit 1: everything carrying l_shape2, i.e. classes 2 and 3
+		if (atoms.empty())
+		{
+			if (dbg)
+			{
+				std::vector<GiNaC::ex> all;
+				collect_atoms_of_class(entry, 3, all);
+				std::cerr << "HOIST-HESS: no l_shape2 atom (" << all.size() << " atoms of any class)" << std::endl;
+				for (auto &a : all)
+					std::cerr << "    class " << l_shape_atom_class(a) << " : " << a << std::endl;
+			}
+			return "";
+		}
+		std::vector<GiNaC::ex> coeffs;
+		if (!split_entry_by_l_shape(entry, atoms, coeffs))
+		{
+			if (dbg)
+			{
+				std::cerr << "HOIST-HESS: split failed (" << __hoist_fail_reason << ") at: " << __hoist_fail_at << std::endl;
+				for (size_t k = 0; k < atoms.size(); k++)
+					std::cerr << "    atom " << k << " class " << l_shape_atom_class(atoms[k]) << " : " << atoms[k] << std::endl;
+			}
+			return "";
+		}
+		std::ostringstream body;
+		bool any = false;
+		const unsigned min_cost = (csrc_opts.for_code && csrc_opts.for_code->jacobian_hoist_min_cost >= 0)
+									  ? (unsigned)csrc_opts.for_code->jacobian_hoist_min_cost
+									  : __hoist_min_cost;
+		for (size_t k = 0; k < atoms.size(); k++)
+		{
+			if (coeffs[k].is_zero())
+				continue;
+			if (!body.str().empty())
+				body << "+";
+			if (hoist_expr_cost(coeffs[k]) >= min_cost)
+			{
+				const std::string nm = "_hc" + std::to_string(csrc_opts.for_code->hoist_coeff_counter++);
+				pre << indent << "const double " << nm << " = ";
+				print_simplest_form(coeffs[k], pre, csrc_opts);
+				pre << ";" << std::endl;
+				body << nm;
+				any = true;
+			}
+			else
+			{
+				body << "(";
+				print_simplest_form(coeffs[k], body, csrc_opts);
+				body << ")";
+			}
+			body << "*(";
+			print_simplest_form(atoms[k], body, csrc_opts);
+			body << ")";
+		}
+		if (!any)
+			return "";
+		return body.str().empty() ? std::string("0.0") : body.str();
+	}
+
+	// Emits `double _jcN = <coeff>;` lines into `pre` and returns the loop-body expression, or "" when
+	// the entry could not be split and must be printed as it always was.
+	// Coefficients are named one per surviving atom, independently per entry, so the same coefficient
+	// can be emitted several times into the same `pre` stream - the Jacobian half and the mass half of
+	// one field share that stream, and so do all the fields of one trial space. Across the tutorial
+	// corpus 179 of 639 coefficients were an exact duplicate of a sibling in the same BEGIN_JACOBIAN()
+	// block. GCC's GCSE removes them, so this is not about run time under the system compiler: it is
+	// generated bytes and JIT compile time, and it IS run time under tcc, which has no CSE at all.
+	// Keyed by the PRINTED text rather than by GiNaC structure - that is what "duplicate" means for the
+	// emitted C, and it costs no expression comparisons.
+	static std::string hoist_jacobian_entry(const GiNaC::ex &entry, std::ostream &pre,
+											const std::string &indent, GiNaC::print_FEM_options &csrc_opts,
+											std::map<std::string, std::string> &seen)
+	{
+		if (__hoist_disabled || entry.is_zero())
+			return "";
+		std::vector<GiNaC::ex> atoms;
+		collect_l_shape_atoms(entry, atoms);
+		if (atoms.empty())
+			return "";
+		std::vector<GiNaC::ex> coeffs;
+		if (!split_entry_by_l_shape(entry, atoms, coeffs))
+			return "";
+		std::ostringstream body;
+		bool any_hoisted = false;
+		const unsigned min_cost = (csrc_opts.for_code && csrc_opts.for_code->jacobian_hoist_min_cost >= 0)
+									  ? (unsigned)csrc_opts.for_code->jacobian_hoist_min_cost
+									  : __hoist_min_cost;
+		for (size_t k = 0; k < atoms.size(); k++)
+		{
+			if (coeffs[k].is_zero())
+				continue;
+			if (!body.str().empty())
+				body << "+";
+			if (hoist_expr_cost(coeffs[k]) >= min_cost)
+			{
+				std::ostringstream rhs;
+				print_simplest_form(coeffs[k], rhs, csrc_opts);
+				const std::string rhs_str = rhs.str();
+				std::string nm;
+				auto it = seen.find(rhs_str);
+				if (it != seen.end())
+				{
+					nm = it->second; // already named in this same pre-stream
+				}
+				else
+				{
+					nm = "_jc" + std::to_string(csrc_opts.for_code->hoist_coeff_counter++);
+					pre << indent << "const double " << nm << " = " << rhs_str << ";" << std::endl;
+					seen[rhs_str] = nm;
+				}
+				body << nm;
+				any_hoisted = true;
+			}
+			else
+			{
+				body << "(";
+				print_simplest_form(coeffs[k], body, csrc_opts);
+				body << ")";
+			}
+			body << "*(";
+			print_simplest_form(atoms[k], body, csrc_opts);
+			body << ")";
+		}
+		// Nothing was worth naming: leave the entry exactly as it was rather than emit a re-associated
+		// copy of it for no gain.
+		if (!any_hoisted)
+			return "";
+		return body.str().empty() ? std::string("0.0") : body.str();
+	}
+
 	// The nodal position space only carries real degrees of freedom (and thus needs
 	// Jacobian/Hessian rows/columns of its own) when the mesh coordinates are themselves unknowns
 	// being solved for (moving-mesh/ALE problems with coordinates_as_dofs); otherwise positions are
@@ -2376,11 +2980,11 @@ namespace pyoomph
 	//      w.r.t. f2 to get the true second derivative diffpart2. If for_code->assemble_hessian_by_symmetry
 	//      is enabled and the symmetric (f2,f) combination has already been emitted, the almost-symmetric
 	//      Hessian entry is skipped entirely (mass part only, since that part is not symmetric).
-	//   4. Convert all remaining subexpression(...) markers to structs (via __SE_to_struct_hessian) and
+	//   4. Convert all remaining subexpression(...) markers to structs (via se_to_struct_hessian) and
 	//      emit nested loops over the outer node index l_shape and inner node index l_shape2 (using the
 	//      BEGIN_HESSIAN_SHAPE_LOOP1[_CONTINUOUS_SPACE] macros for hanging-node-aware assembly), writing
 	//      the C statement that adds the Hessian entry into the sparse Hessian tensor.
-	// Global state (__derive_shapes_by_second_index, __all_Hessian_shapeexps/testfuncs/indices_required,
+	// Global state (__derive_shapes_by_second_index, all_Hessian_shapeexps/testfuncs/indices_required,
 	// __derive_only_by_expansion_mode) is toggled around the differentiation calls so that the custom
 	// GiNaC structures' derivative() implementations know which index of the double loop is being
 	// derived, and so the caller can later learn which shape expansions/spaces/fields must have their
@@ -2448,7 +3052,7 @@ namespace pyoomph
 
 		for (auto &f : jacobian_fields)
 		{
-			__all_Hessian_indices_required.insert(f);
+			for_code->all_Hessian_indices_required.insert(f);
 			bool loop2_written = false;
 
 			__derive_only_by_expansion_mode=for_code->get_derive_jacobian_by_expansion_mode();
@@ -2457,7 +3061,7 @@ namespace pyoomph
 			__derive_only_by_expansion_mode=NULL;
 			__ignore_dpsi_coord_diffs_in_jacobian=false;
 
-			for_code->subexpressions = __SE_to_struct_hessian->subexpressions;
+			for_code->subexpressions = for_code->se_to_struct_hessian->subexpressions;
 			//			std::cout << "HESSIAN  CONTRIBU " << for_what << std::endl;
 			//			std::cout << "DHESSIAN  CONTRIBU " << diffpart << std::endl;
 			// Same split as in write_generic_RJM_jacobian_contribution: take the mass half off the
@@ -2544,7 +3148,7 @@ namespace pyoomph
 			for (auto s2 : hessian_shapes)
 			{
 				hessian_spaces.insert(s2.field->get_space());
-				__all_Hessian_indices_required.insert(s2.field);
+				for_code->all_Hessian_indices_required.insert(s2.field);
 			}
 			for (auto *s2 : hessian_spaces)
 			{
@@ -2589,6 +3193,13 @@ namespace pyoomph
 
 				for (auto f2 : hessian_fields)
 				{
+					// Not an AmbientCodegenScope, unlike the other flags: the true-region here spans a
+					// loop body with a `continue` in the middle and three separate clears at the loop
+					// exits below, and the two differentiations that need it are separated by the
+					// symmetry-skip branch. Restructuring the double loop to scope it precisely is a
+					// change to the most intricate part of the Hessian generator for no gain against
+					// either of the two reasons the other flags were scoped (nesting, and throwing
+					// mid-differentiation) - this one is set and cleared inside a single pass.
 					__derive_shapes_by_second_index = true;
 					GiNaC::ex masspart2 = GiNaC::diff(masspart, f2->get_symbol());
 					bool only_mass_part = false; // Since the mass Hessian is NOT symmetric!
@@ -2616,7 +3227,7 @@ namespace pyoomph
 					  std::cout << "22 MASSPART " << masspart << std::endl;
 					  std::cout << "22 MASSPART BY" << f2->get_symbol()<< " : " << masspart2 << std::endl;
 					}*/
-					for_code->subexpressions = __SE_to_struct_hessian->subexpressions;
+					for_code->subexpressions = for_code->se_to_struct_hessian->subexpressions;
 					// The subexpression shape expansions used to be harvested into the Hessian-wide sets
 					// here. They are not any more: this point is skipped by the assemble_hessian_by_symmetry
 					// "continue" above, and it runs before the mappings further down, so the last (f,f2)
@@ -2641,21 +3252,26 @@ namespace pyoomph
 					
 					for (auto sexpa : shapeexps)
 					{
+						// The derived ones are excluded HERE only (they would collide as interpolation
+						// variables), but they are still read by the emitted code - see
+						// all_Hessian_shapeexps_for_shapeflags.
 						if ((!sexpa.is_derived && !sexpa.is_derived_other_index) || sexpa.nodal_coord_dir != -1 || sexpa.nodal_coord_dir2 != -1)
-							__all_Hessian_shapeexps.insert(sexpa);
-						__all_Hessian_indices_required.insert(sexpa.field);
+							for_code->all_Hessian_shapeexps.insert(sexpa);
+						for_code->all_Hessian_shapeexps_for_shapeflags.insert(sexpa);
+						for_code->all_Hessian_indices_required.insert(sexpa.field);
 					}
 					for (auto sexpa : shapeexpsM)
 					{
 						if ((!sexpa.is_derived && !sexpa.is_derived_other_index) || sexpa.nodal_coord_dir != -1 || sexpa.nodal_coord_dir2 != -1)
-							__all_Hessian_shapeexps.insert(sexpa);
-						__all_Hessian_indices_required.insert(sexpa.field);
+							for_code->all_Hessian_shapeexps.insert(sexpa);
+						for_code->all_Hessian_shapeexps_for_shapeflags.insert(sexpa);
+						for_code->all_Hessian_indices_required.insert(sexpa.field);
 					}
-					//		  		   __all_Hessian_shapeexps.insert(shapeexps.begin(),shapeexps.end());
+					//		  		   all_Hessian_shapeexps.insert(shapeexps.begin(),shapeexps.end());
 					auto testfuncs = for_code->get_all_test_functions_in(diffpart2);
-					__all_Hessian_testfuncs.insert(testfuncs.begin(), testfuncs.end());
+					for_code->all_Hessian_testfuncs.insert(testfuncs.begin(), testfuncs.end());
 					auto testfuncsM = for_code->get_all_test_functions_in(masspart2);
-					__all_Hessian_testfuncs.insert(testfuncsM.begin(), testfuncsM.end());
+					for_code->all_Hessian_testfuncs.insert(testfuncsM.begin(), testfuncsM.end());
 
 					std::string eqn_index2 = f2->get_equation_str(for_code, l_shape2);
 					std::string hang_info2;
@@ -2694,6 +3310,20 @@ namespace pyoomph
 
 					has_contribs = true;
 
+					// The entry is built BEFORE the inner loop header is written, so that the coefficients
+					// hoisted out of it (9.4.8) can be emitted above the loop. The subexpression pass of
+					// 9.3 runs first either way; only the emission order moves.
+					//	 		                        std::cout << "DIFFPART2 " << diffpart2 << std::endl;
+					GiNaC::ex diffpart2_se = (*for_code->se_to_struct_hessian)(diffpart2);
+					//						 		                        std::cout << "DIFFPART2 SE" << diffpart2_se << std::endl;
+					for_code->subexpressions = for_code->se_to_struct_hessian->subexpressions;
+					std::ostringstream hess_pre;
+					const std::string hess_hoisted =
+						(only_mass_part || l_shape2 != "l_shape2")
+							? std::string("")
+							: hoist_hessian_entry(diffpart2_se, hess_pre, indent + "     ", csrc_opts);
+					os << hess_pre.str();
+
 					if (numnodes_str2 != "1")
 					{
 						os << indent << "     for (unsigned int l_shape2=0;l_shape2<" << numnodes_str2 << ";l_shape2++)" << std::endl;
@@ -2703,15 +3333,13 @@ namespace pyoomph
 					//		   os << indent << "   //HESSIAN SHAPE CONTRIB: " << f2->get_nodal_index_str(for_code) << ": " << diffpart2 ;
 
 					os << std::endl;
-					//	 		                        std::cout << "DIFFPART2 " << diffpart2 << std::endl;
-					GiNaC::ex diffpart2_se = (*__SE_to_struct_hessian)(diffpart2);
-					//						 		                        std::cout << "DIFFPART2 SE" << diffpart2_se << std::endl;
-					for_code->subexpressions = __SE_to_struct_hessian->subexpressions;
 					if (hang2)
 					{
 						os << indent << "        BEGIN_HESSIAN_SHAPE_LOOP2_CONTINUOUS_SPACE(" << eqn_index2 << ",";
 						if (only_mass_part)
 							os << "0";
+						else if (!hess_hoisted.empty())
+							os << hess_hoisted;
 						else
 							print_simplest_form(diffpart2_se, os, csrc_opts);
 						os << "," << hang_info2 << "," << l_shape2 << ")" << std::endl;
@@ -2721,6 +3349,8 @@ namespace pyoomph
 						os << indent << "        BEGIN_HESSIAN_SHAPE_LOOP2(" << eqn_index2 << ", ";
 						if (only_mass_part)
 							os << "0";
+						else if (!hess_hoisted.empty())
+							os << hess_hoisted;
 						else
 							print_simplest_form(diffpart2_se, os, csrc_opts);
 						os << ")" << std::endl;
@@ -2739,7 +3369,7 @@ namespace pyoomph
 					}
 
 					//					GiNaC::ex mass_part2 = GiNaC::diff(mass_part, pyoomph::expressions::__partial_t_mass_matrix);
-					for_code->subexpressions = __SE_to_struct_hessian->subexpressions;
+					for_code->subexpressions = for_code->se_to_struct_hessian->subexpressions;
 					// std::cout << "CHECKING MASS PART " << (masspart2-GiNaC::diff(diffpart2,pyoomph::expressions::__partial_t_mass_matrix)) << std::endl;
 					// std::cout << " MA " << masspart2 << std::endl;
 					// std::cout << " MB " << GiNaC::diff(diffpart2,pyoomph::expressions::__partial_t_mass_matrix) << std::endl;
@@ -2748,8 +3378,8 @@ namespace pyoomph
 					//					__derive_shapes_by_second_index = false;
 					if (!masspart2.is_zero())
 					{
-						GiNaC::ex mass_part_se = (*__SE_to_struct_hessian)(masspart2);
-						for_code->subexpressions = __SE_to_struct_hessian->subexpressions;
+						GiNaC::ex mass_part_se = (*for_code->se_to_struct_hessian)(masspart2);
+						for_code->subexpressions = for_code->se_to_struct_hessian->subexpressions;
 						for_code->mark_nonconstant_mass_matrix(); // If we have a Hessian contribution, then we clearly have a changing mass matrix
 						os << indent << "           ADD_TO_MASS_HESSIAN_" << (hanging_eqns ? "HANG" : "NOHANG") << "_" << (hang ? "HANG" : "NOHANG") << "_" << (hang2 ? "HANG" : "NOHANG") << "(";
 						print_simplest_form(mass_part_se, os, csrc_opts);
@@ -2794,7 +3424,7 @@ namespace pyoomph
 		{
 			os << indent << "}" << std::endl;
 		}
-		__derive_shapes_by_second_index = false; // Just to make sure....
+		__derive_shapes_by_second_index = false; // the loop above has three exits; this catches them all
 		return has_contribs;
 	}
 
@@ -2891,12 +3521,21 @@ namespace pyoomph
 		}
 		else
 		{
-			os << indent << "for (unsigned int l_shape=0;l_shape<" << numnodes_str << ";l_shape++)" << std::endl;
-			os << indent << "{" << std::endl;
 			l_shape = "l_shape";
 		}
 
-		bool hang = this->can_have_hanging_nodes() || this->code != for_code;
+		// "" means "no hanging possible here"; otherwise the token to hand the hang macros as their
+		// HANGON argument (a literal 1, or the constant _impl parameter when this routine is split).
+		const std::string hang_on = this->get_hang_on_str(for_code);
+		bool hang = !hang_on.empty();
+
+		// The hoisted coefficients (9.4) have to be emitted BEFORE the loop, so the loop body is
+		// buffered and the two streams are concatenated at the end. With hoisting off or unavailable
+		// `pre` stays empty and the emitted code is exactly what it always was.
+		std::ostringstream pre, body;
+		// Shared by every entry written into `pre` (all fields of this trial space, Jacobian and mass
+		// halves alike), so an identical coefficient is named once - see hoist_jacobian_entry.
+		std::map<std::string, std::string> hoisted_coeffs;
 
 		for (auto &f : jacobian_fields)
 		{
@@ -2935,30 +3574,32 @@ namespace pyoomph
 				for_code->record_jacobian_block_expr(residual_field, f, diffpart, mass_part);
 			if (!diffpart.is_zero())
 				residual_field->mark_jacobian_contribution_for_code(for_code,for_code->get_current_residual_index(),f);
+			// Only worth doing where there is a loop to hoist out of: a single-DoF space indexes with
+			// the literal "0" and pays nothing per trial node.
+			const std::string hoisted = (l_shape == "l_shape")
+											? hoist_jacobian_entry(diffpart, pre, indent, csrc_opts, hoisted_coeffs)
+											: std::string("");
 			if (hang)
 			{
 				std::string hang_info = f->get_hanginfo_str(for_code);
-				os << indent << "  BEGIN_JACOBIAN_HANG(" << eqn_index << ", ";
-				//if (for_code->get_derive_jacobian_by_expansion_mode())
-				//{
-				//	os << indent << " /* SYMBOLIC FORM  " << std::endl << diffpart << std::endl << " */ ";
-				//}
-				print_simplest_form(diffpart, os, csrc_opts);
-				os << "," << hang_info << "," << l_shape << ")" << std::endl;
+				body << indent << "  BEGIN_JACOBIAN_HANG(" << hang_on << ", " << eqn_index << ", ";
+				if (hoisted.empty())
+					print_simplest_form(diffpart, body, csrc_opts);
+				else
+					body << hoisted;
+				body << "," << hang_info << "," << l_shape << ")" << std::endl;
 			}
 			else
 			{
-				//	    os << indent << "  //TODO Jacobian of ext data must be always hanging!!! " <<std::endl;
-				os << indent << "  BEGIN_JACOBIAN_NOHANG(" << eqn_index << ", ";
-				//if (for_code->get_derive_jacobian_by_expansion_mode())
-				//{
-				//	os << indent << " /* SYMBOLIC FORM  " << std::endl << diffpart << std::endl << " */ ";
-				//}
-				print_simplest_form(diffpart, os, csrc_opts);
-				os << indent << ")" << std::endl;
+				body << indent << "  BEGIN_JACOBIAN_NOHANG(" << eqn_index << ", ";
+				if (hoisted.empty())
+					print_simplest_form(diffpart, body, csrc_opts);
+				else
+					body << hoisted;
+				body << indent << ")" << std::endl;
 			}
 			if (!diffpart.is_zero()) // A pure mass contribution still needs the block, but adds no Jacobian
-				os << indent << "    ADD_TO_JACOBIAN_" << (hanging_eqns ? "HANG" : "NOHANG") << "_" << (hang ? "HANG" : "NOHANG") << "()" << std::endl;
+				body << indent << "    ADD_TO_JACOBIAN_" << (hanging_eqns ? "HANG" : "NOHANG") << "_" << (hang ? "HANG" : "NOHANG") << "()" << std::endl;
 			// diffpart.evalf().print(GiNaC::print_csrc_FEM(os,&csrc_opts));
 			// GiNaC::factor(GiNaC::normal(GiNaC::expand(GiNaC::expand(diffpart).evalf()))).print(GiNaC::print_csrc_FEM(os,&csrc_opts));
 
@@ -2974,16 +3615,27 @@ namespace pyoomph
 				// mass matrix get a tight, value-independent pattern of its own instead of either
 				// inheriting the Jacobian's (3x too dense) or being value-filtered (not reusable).
 				residual_field->mark_mass_matrix_contribution_for_code(for_code,for_code->get_current_residual_index(),f);
-				os << indent << "    ADD_TO_MASS_MATRIX_" << (hanging_eqns ? "HANG" : "NOHANG") << "_" << (hang ? "HANG" : "NOHANG") << "(";
-				//		    mass_part.evalf().print(GiNaC::print_csrc_FEM(os,&csrc_opts));
-				//          GiNaC::factor(GiNaC::normal(GiNaC::expand(GiNaC::expand(mass_part).evalf()))).print(GiNaC::print_csrc_FEM(os,&csrc_opts));
-				//std::cout << mass_part << std::endl;
-				print_simplest_form(mass_part, os, csrc_opts);
-				os << ")" << std::endl;
+				for_code->emitted_mass_matrix_contribution = true;
+				const std::string hoisted_mass = (l_shape == "l_shape")
+													 ? hoist_jacobian_entry(mass_part, pre, indent, csrc_opts, hoisted_coeffs)
+													 : std::string("");
+				body << indent << "    ADD_TO_MASS_MATRIX_" << (hanging_eqns ? "HANG" : "NOHANG") << "_" << (hang ? "HANG" : "NOHANG") << "(";
+				if (hoisted_mass.empty())
+					print_simplest_form(mass_part, body, csrc_opts);
+				else
+					body << hoisted_mass;
+				body << ")" << std::endl;
 			}
-			os << indent << "  END_JACOBIAN_" << (hang ? "HANG" : "NOHANG") << "()" << std::endl;
+			body << indent << "  END_JACOBIAN_" << (hang ? "HANG" : "NOHANG") << "()" << std::endl;
 		}
 
+		os << pre.str();
+		if (numnodes_str != "1")
+		{
+			os << indent << "for (unsigned int l_shape=0;l_shape<" << numnodes_str << ";l_shape++)" << std::endl;
+			os << indent << "{" << std::endl;
+		}
+		os << body.str();
 		if (numnodes_str != "1")
 		{
 			os << indent << "}" << std::endl;
@@ -3042,24 +3694,22 @@ namespace pyoomph
 		if (numnodes_str != "1")
 		{
 
-			if (this->get_shape_name()=="C2TB" || this->get_shape_name()=="C2" || this->get_shape_name()=="C1TB" || this->get_shape_name()=="C1")
-			{
-				oss << indent << "  double const * testfunction = " << shapeinfo << "->shapes[SPACE_INDEX_" << this->get_shape_name() << "];" << std::endl;
-				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dx_testfunction) = " << shapeinfo << "->dx_shapes[0][SPACE_INDEX_" << this->get_shape_name() << "];" << std::endl;
-				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dX_testfunction) = " << shapeinfo << "->dX_shapes[SPACE_INDEX_" << this->get_shape_name() << "];" << std::endl;
-				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dS_testfunction) = " << shapeinfo << "->dS_shapes[SPACE_INDEX_" << this->get_shape_name() << "];" << std::endl;
-				oss << indent << "  D2X_SHAPE_FUNCTION_DECL(d2x_testfunction) = " << shapeinfo << "->d2x_shapes[0][SPACE_INDEX_" << this->get_shape_name() << "];" << std::endl;
-				oss << indent << "  D2X_SHAPE_FUNCTION_DECL(d2S_testfunction) = " << shapeinfo << "->d2S_shapes[SPACE_INDEX_" << this->get_shape_name() << "];" << std::endl;
-			}
-			else
-			{
-				oss << indent << "  double const * testfunction = " << shapeinfo << "->shape_" << this->get_shape_name() << ";" << std::endl;
-				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dx_testfunction) = " << shapeinfo << "->dx_shape_" << this->get_shape_name() << "[0];" << std::endl;
-				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dX_testfunction) = " << shapeinfo << "->dX_shape_" << this->get_shape_name() << ";" << std::endl;
-				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dS_testfunction) = " << shapeinfo << "->dS_shape_" << this->get_shape_name() << ";" << std::endl;
-				oss << indent << "  D2X_SHAPE_FUNCTION_DECL(d2x_testfunction) = " << shapeinfo << "->d2x_shape_" << this->get_shape_name() << "[0];" << std::endl;
-				oss << indent << "  D2X_SHAPE_FUNCTION_DECL(d2S_testfunction) = " << shapeinfo << "->d2S_shape_" << this->get_shape_name() << ";" << std::endl;
-			}
+			// Sourced from the function-scope buffer aliases rather than from shapeinfo directly, so
+			// that a space block re-entered on every integration point does not re-walk the struct, and
+			// so that the test and trial sides of the same buffer share one load. When the aliases are
+			// switched off, alias_shape_buffer hands back the plain access and this is what it was.
+			const bool indexed_space = (this->get_shape_name()=="C2TB" || this->get_shape_name()=="C2" || this->get_shape_name()=="C1TB" || this->get_shape_name()=="C1");
+			const std::string sn = this->get_shape_name();
+			auto ptr_decl = [](const std::string &n) { return "double const * " + n; };
+			auto dx_decl = [](const std::string &n) { return "DX_SHAPE_FUNCTION_DECL(" + n + ")"; };
+			auto d2x_decl = [](const std::string &n) { return "D2X_SHAPE_FUNCTION_DECL(" + n + ")"; };
+			auto buf = [&](const std::string &array) { return indexed_space ? array + "s[SPACE_INDEX_" + sn + "]" : array + "_" + sn; };
+			oss << indent << "  double const * testfunction = " << alias_shape_buffer(for_code, this, buf("shape"), "psi", -1, ptr_decl) << ";" << std::endl;
+			oss << indent << "  DX_SHAPE_FUNCTION_DECL(dx_testfunction) = " << alias_shape_buffer(for_code, this, buf("dx_shape"), "dxpsi", 0, dx_decl) << ";" << std::endl;
+			oss << indent << "  DX_SHAPE_FUNCTION_DECL(dX_testfunction) = " << alias_shape_buffer(for_code, this, buf("dX_shape"), "dXpsi", -1, dx_decl) << ";" << std::endl;
+			oss << indent << "  DX_SHAPE_FUNCTION_DECL(dS_testfunction) = " << alias_shape_buffer(for_code, this, buf("dS_shape"), "dSpsi", -1, dx_decl) << ";" << std::endl;
+			oss << indent << "  D2X_SHAPE_FUNCTION_DECL(d2x_testfunction) = " << alias_shape_buffer(for_code, this, buf("d2x_shape"), "d2xpsi", 0, d2x_decl) << ";" << std::endl;
+			oss << indent << "  D2X_SHAPE_FUNCTION_DECL(d2S_testfunction) = " << alias_shape_buffer(for_code, this, buf("d2S_shape"), "d2Spsi", -1, d2x_decl) << ";" << std::endl;
 
 			oss << indent << "  for (unsigned int l_test=0;l_test<" << numnodes_str << ";l_test++)" << std::endl;
 			oss << indent << "  {" << std::endl;
@@ -3084,7 +3734,11 @@ namespace pyoomph
 			std::string eqn_index = field->get_equation_str(for_code, l_test);
 			std::string hang_info = field->get_hanginfo_str(for_code);
 			bool hessian_loop1_written = false;
-			bool can_have_hanging = this->can_have_hanging_nodes() || for_code != this->code; // Always hang for external spaces
+			// "" means "no hanging possible here"; otherwise the token to hand the hang macros as
+			// their HANGON argument. External/bulk spaces always hang - their hang buffers carry the
+			// equation remap (see FiniteElementSpace::get_hang_on_str).
+			const std::string hang_on = this->get_hang_on_str(for_code);
+			bool can_have_hanging = !hang_on.empty();
 			if (!hessian)
 			{
 				field->mark_residual_contribution_for_code(for_code,for_code->get_current_residual_index());
@@ -3093,7 +3747,7 @@ namespace pyoomph
 				has_contribs = true;
 				if (can_have_hanging)
 				{
-					oss << indent << "    BEGIN_RESIDUAL_CONTINUOUS_SPACE(" << eqn_index << ",";
+					oss << indent << "    BEGIN_RESIDUAL_CONTINUOUS_SPACE(" << hang_on << ", " << eqn_index << ",";
 					print_residual_entry(for_code, res_part, oss, csrc_opts);
 					if (for_code->latex_printer)
 					{
@@ -3403,6 +4057,30 @@ namespace pyoomph
 		return code->with_adaptivity;
 	}
 
+	// Three-way decision behind the hanging-node macros, see the declaration in codegen.hpp.
+	//
+	// The middle case is the specialisation: the hang macros are emitted, but with the constant
+	// `_impl` parameter as their HANGON argument, so the same body compiles to a hanging and a
+	// non-hanging entry point and elements_assembly.cpp picks per element.
+	//
+	// The FIRST case is a correctness trap and not an optimisation opportunity: for a space living on
+	// another code (a bulk or opposite-side space accessed from an interface element),
+	// fill_hang_info_with_equations reuses these very hang buffers as the local-equation REMAP channel
+	// - it writes nummaster=1, weight=1.0 and the remapped local_eqn for every dof, hanging or not
+	// (src/elements_hanging.cpp:1062-1099). With HANGON folded to 0 those entries would be skipped and
+	// the element would scatter into the wrong rows/columns, so they stay unconditional.
+	std::string FiniteElementSpace::get_hang_on_str(FiniteElementCode *for_code)
+	{
+		if (for_code != this->code)
+			return "1"; // external/bulk/opposite space: the hang buffers carry the equation remap
+		if (!this->can_have_hanging_nodes())
+			return ""; // no hanging possible at all -> the plain non-hang macros
+		if (!for_code->emitting_hang_parameter)
+			return "1";
+		for_code->hang_parameter_was_used = true;
+		return "pyoomph_hang_on";
+	}
+
 	unsigned FiniteElementCode::next_creation_index = 0;
 
 	// Constructs the built-in FiniteElementSpace hierarchy shared by every element (Pos, the
@@ -3485,6 +4163,7 @@ namespace pyoomph
 		for (auto *f : myfields)
 			if (f)
 				delete f;
+		delete se_to_struct_hessian; // the last Hessian pass's mapper; leaked while it was a global
 	}
 
 	// Collects every distinct ShapeExpansion appearing anywhere in expression `inp`, recursing into
@@ -4618,7 +5297,7 @@ namespace pyoomph
 	{
 		if (this->use_shared_shape_buffer_during_multi_assemble)
 		{
-			os << indent << "unsigned n_int_pt=(my_func_table->during_shared_multi_assembling ? 1 : shapeinfo->n_int_pt);" << std::endl;
+			os << indent << "unsigned n_int_pt=(shapeinfo->during_shared_multi_assembling ? 1 : shapeinfo->n_int_pt);" << std::endl;
 			os << indent << "for(unsigned ipt=0;ipt<n_int_pt;ipt++)" << std::endl;
 		}
 		else
@@ -4628,10 +5307,10 @@ namespace pyoomph
 		os << indent << "{" << std::endl;
 		if (this->use_shared_shape_buffer_during_multi_assemble)
 		{
-			os << indent << "   if (!my_func_table->during_shared_multi_assembling)" << std::endl;
+			os << indent << "   if (!shapeinfo->during_shared_multi_assembling)" << std::endl;
 			os << indent << "   {" << std::endl;
 		}
-		os << indent << "  my_func_table->fill_shape_buffer_for_point(ipt, " << required_table_and_flag << ");" << std::endl;
+		os << indent << "  my_func_table->fill_shape_buffer_for_point(eleminfo, ipt, " << required_table_and_flag << ");" << std::endl;
 		if (this->use_shared_shape_buffer_during_multi_assemble)
 		{
 			os << indent << "   }" << std::endl;
@@ -4934,43 +5613,47 @@ namespace pyoomph
 					// the skipped variant costs nothing.
 					if (subexpr_fills_written.count(derivname.str()))
 						continue;
-					__deriv_subexpression_wrto = &f;
 					if (pyoomph::pyoomph_verbose)
 					{
 						std::cout << "DERIVING SUBSEXPRESSION " << subexpressions[j].get_expression() << " BY " << f.field->get_symbol() << ", more specifically by " << (0 + GiNaC::GiNaCShapeExpansion(f)) << std::endl;
 					}
-					// Every d_subexpr_N_d_<field> the Hessian actually reads is a *second*-index
-					// derivative: the outer index never touches the cache, it builds a nested
-					// subexpression instead (GiNaCSubExpression::derivative). The second index is
-					// differentiated under the Hessian expansion mode - the base state, mode 0 - not the
-					// Jacobian's perturbation mode 1, so filling with the Jacobian mode would cache the
-					// wrong derivative for azimuthal and Cartesian normal-mode stability.
-					__derive_only_by_expansion_mode = (hessian ? this->get_derive_hessian_by_expansion_mode() : this->get_derive_jacobian_by_expansion_mode());
-					// Clear __in_hessian for the fill itself. Left set, a nested subexpression in the body
-					// would take the outer-index branch and append a *new* entry to
-					// __SE_to_struct_hessian->subexpressions - after this list was snapshotted and after
-					// the declarations above were emitted, so it would have neither a "double subexpr_N ="
-					// line nor a declared derivative, and resolve_subexpression would fail on it. Reading
-					// the nested subexpression's own cache is also what the chain rule wants here.
-					const bool was_in_hessian = pyoomph::__in_hessian;
-					pyoomph::__in_hessian = false;
-					// The result is cached in a scalar C variable, so it has to be the PURE partial
-					// derivative with respect to this one interpolated quantity. Differentiating by a
-					// coordinate field also produces the moving-mesh dpsi/dX contributions, and those are
-					// l_shape-indexed arrays that a scalar cannot hold: they came out inside
-					// d_subexpr_N_d_..._d2x00_coordinate_x as "..._COORDDIFF_0_u[l_shape]" and the
-					// generated code then failed to compile with "'l_shape' undeclared". They do not
-					// belong here anyway - the chain rule that consumes this cache sums over every
-					// required field and multiplies by dq/dX itself, so keeping them would double count.
-					// Only azimuthal/normal-mode expansions on a moving mesh reach this, since only they
-					// put second spatial derivatives of the coordinates into a subexpression.
-					const bool was_ignore_dpsi = pyoomph::__ignore_dpsi_coord_diffs_in_jacobian;
-					pyoomph::__ignore_dpsi_coord_diffs_in_jacobian = true;
-					GiNaC::ex dsdf = pyoomph::expressions::diff(subexpressions[j].get_expression(), f.field->get_symbol());
-					pyoomph::__ignore_dpsi_coord_diffs_in_jacobian = was_ignore_dpsi;
-					pyoomph::__in_hessian = was_in_hessian;
-					__derive_only_by_expansion_mode=NULL;
-					__deriv_subexpression_wrto = NULL;
+					// The four flags below are set for the derivative and nothing else: the scope closes
+					// before deriv_se_to_1 runs, which must not see them.
+					//
+					// __derive_only_by_expansion_mode: every d_subexpr_N_d_<field> the Hessian actually
+					// reads is a *second*-index derivative - the outer index never touches the cache, it
+					// builds a nested subexpression instead (GiNaCSubExpression::derivative). The second
+					// index is differentiated under the Hessian expansion mode, the base state, mode 0,
+					// not the Jacobian's perturbation mode 1; filling with the Jacobian mode would cache
+					// the wrong derivative for azimuthal and Cartesian normal-mode stability.
+					//
+					// __in_hessian off: left set, a nested subexpression in the body would take the
+					// outer-index branch and append a *new* entry to se_to_struct_hessian->subexpressions
+					// - after this list was snapshotted and after the declarations above were emitted, so
+					// it would have neither a "double subexpr_N =" line nor a declared derivative, and
+					// resolve_subexpression would fail on it. Reading the nested subexpression's own cache
+					// is also what the chain rule wants here.
+					//
+					// __ignore_dpsi_coord_diffs_in_jacobian on: the result is cached in a scalar C
+					// variable, so it has to be the PURE partial derivative with respect to this one
+					// interpolated quantity. Differentiating by a coordinate field also produces the
+					// moving-mesh dpsi/dX contributions, and those are l_shape-indexed arrays that a
+					// scalar cannot hold: they came out inside d_subexpr_N_d_..._d2x00_coordinate_x as
+					// "..._COORDDIFF_0_u[l_shape]" and the generated code then failed to compile with
+					// "'l_shape' undeclared". They do not belong here anyway - the chain rule that
+					// consumes this cache sums over every required field and multiplies by dq/dX itself,
+					// so keeping them would double count. Only azimuthal/normal-mode expansions on a
+					// moving mesh reach this, since only they put second spatial derivatives of the
+					// coordinates into a subexpression.
+					GiNaC::ex dsdf;
+					{
+						AmbientCodegenScope<const ShapeExpansion *> wrto_scope(__deriv_subexpression_wrto, &f);
+						AmbientCodegenScope<int *> expansion_mode_scope(__derive_only_by_expansion_mode,
+																		hessian ? this->get_derive_hessian_by_expansion_mode() : this->get_derive_jacobian_by_expansion_mode());
+						AmbientCodegenScope<bool> not_in_hessian(pyoomph::__in_hessian, false);
+						AmbientCodegenScope<bool> ignore_dpsi(pyoomph::__ignore_dpsi_coord_diffs_in_jacobian, true);
+						dsdf = pyoomph::expressions::diff(subexpressions[j].get_expression(), f.field->get_symbol());
+					}
 					DerivedShapeExpansionsToUnity deriv_se_to_1(f.basis,f.dt_order,f.dt_scheme); // Map all other expanded basis functions to zero to separate between e.g. d/dx or nonderived shapes
 					GiNaC::ex dsub = deriv_se_to_1(dsdf);
 					if (pyoomph::pyoomph_verbose)
@@ -5024,6 +5707,20 @@ namespace pyoomph
 				const pyoomph::NormalSymbol &sp = GiNaC::ex_to<GiNaC::GiNaCNormalSymbol>(*i).get_struct();
 				if (sp.history_step != 0 && this->history_geometry_is_relevant())
 					this->mark_shapes_required(for_what, this->get_my_position_space(), "history_geometry" + std::to_string(sp.history_step));
+				// The position-space "psi" that goes with a normal is the POSITION-JACOBIAN channel, not a
+				// shape the residual reads: the normal's nodal-coordinate sensitivities are expressed in
+				// the position-owning element's nodes, so that element's position dofs have to be
+				// attached, remapped and given hang info. On a static mesh there are no position dofs and
+				// none of that exists, yet the mark used to be unconditional - the structurally identical
+				// elemsize branch below has always had the guard. The consequence was not merely a set
+				// flag: a non-NULL bulk_shapes forces a full bulk shape fill per integration point, a
+				// bulk interpolate_hang_values, bulk equation remapping, and (because the interface
+				// fill_hang_info_with_equations returns true whenever it recursed) the HANG entry point
+				// for EVERY interface element of a static mesh. Corpus: 175 of the generated codes
+				// setting it never touch bulk_shapeinfo at all.
+				//
+				// Guarded on the code OWNING the marked position space, exactly as the elemsize branch
+				// does. No is_lagrangian() term: a normal is never Lagrangian.
 				if (sp.get_code() == this || sp.get_code() == NULL)
 				{
 					this->mark_shapes_required(for_what, this->get_my_position_space(), "normal");
@@ -5031,11 +5728,13 @@ namespace pyoomph
 						this->mark_shapes_required(for_what, this->get_my_position_space(), "normal_deriv");
 					if (this->bulk_code)
 					{
-						this->mark_shapes_required(for_what, this->bulk_code->get_my_position_space(), "psi");
+						if (this->bulk_code->coordinates_as_dofs)
+							this->mark_shapes_required(for_what, this->bulk_code->get_my_position_space(), "psi");
 					}
 					else
 					{
-						this->mark_shapes_required(for_what, this->get_my_position_space(), "psi");
+						if (this->coordinates_as_dofs)
+							this->mark_shapes_required(for_what, this->get_my_position_space(), "psi");
 					}
 				}
 				else if (this->bulk_code && sp.get_code() == this->bulk_code)
@@ -5045,11 +5744,13 @@ namespace pyoomph
 						this->mark_shapes_required(for_what, this->bulk_code->get_my_position_space(), "normal_deriv");
 					if (this->bulk_code->bulk_code)
 					{
-						this->mark_shapes_required(for_what, this->bulk_code->bulk_code->get_my_position_space(), "psi");
+						if (this->bulk_code->bulk_code->coordinates_as_dofs)
+							this->mark_shapes_required(for_what, this->bulk_code->bulk_code->get_my_position_space(), "psi");
 					}
 					else
 					{
-						this->mark_shapes_required(for_what, this->bulk_code->get_my_position_space(), "psi");
+						if (this->bulk_code->coordinates_as_dofs)
+							this->mark_shapes_required(for_what, this->bulk_code->get_my_position_space(), "psi");
 					}
 				}
 				else if (this->opposite_interface_code && sp.get_code() == this->opposite_interface_code)
@@ -5059,11 +5760,13 @@ namespace pyoomph
 						this->mark_shapes_required(for_what, this->opposite_interface_code->get_my_position_space(), "normal_deriv");
 					if (this->opposite_interface_code->bulk_code)
 					{
-						this->mark_shapes_required(for_what, this->opposite_interface_code->bulk_code->get_my_position_space(), "psi");
+						if (this->opposite_interface_code->bulk_code->coordinates_as_dofs)
+							this->mark_shapes_required(for_what, this->opposite_interface_code->bulk_code->get_my_position_space(), "psi");
 					}
 					else
 					{
-						this->mark_shapes_required(for_what, this->opposite_interface_code->get_my_position_space(), "psi");
+						if (this->opposite_interface_code->coordinates_as_dofs)
+							this->mark_shapes_required(for_what, this->opposite_interface_code->get_my_position_space(), "psi");
 					}
 				}
 				else
@@ -5198,13 +5901,13 @@ namespace pyoomph
 	//   1. Split off the Eulerian/Lagrangian spatially-integrated part of the residual (nodal-delta
 	//      Hessian contributions are not supported and raise an error if present) and turn its
 	//      subexpression(...) markers into structs via a fresh SubExpressionsToStructs instance
-	//      (__SE_to_struct_hessian) dedicated to this Hessian pass. The double differentiation in step 2
+	//      (se_to_struct_hessian) dedicated to this Hessian pass. The double differentiation in step 2
 	//      then grows that list further, with one nested subexpression per (subexpression, outer field)
 	//      pair - see GiNaCSubExpression::derivative, whose first-derivative cache is the Hessian's
 	//      second derivative.
 	//   2. Call write_generic_RJM_contribution(..., hessian=true) on every FiniteElementSpace, which
 	//      (via write_generic_Hessian_contribution, see above) performs the actual double symbolic
-	//      differentiation and accumulates, as a side effect, the global __all_Hessian_shapeexps/
+	//      differentiation and accumulates, as a side effect, the code's all_Hessian_shapeexps/
 	//      testfuncs/indices_required sets describing everything the emitted code needs at runtime.
 	//   3. Emit the function header/signature and the boilerplate that allocates the dense
 	//      n_dof^3 Hessian (and, if needed, mass-Hessian) scratch buffers, based on the `flag`
@@ -5220,17 +5923,18 @@ namespace pyoomph
 	// implementations elsewhere know a Hessian derivative is in progress.
 	bool FiniteElementCode::write_generic_Hessian(std::ostream &os, std::string funcname, GiNaC::ex resi, bool)
 	{
-		__in_hessian = true;
+		this->current_shapeflag_func_type = "Hessian[" + std::to_string(residual_index) + "]";
+		AmbientCodegenScope<bool> in_hessian_scope(__in_hessian, true); // cleared on every exit, including the throwing ones
 		bool has_contribs = false;
 		std::ostringstream osh; // Header
 		std::ostringstream osm; // Main contribution
 
-		__all_Hessian_shapeexps.clear();
-		__all_Hessian_testfuncs.clear();
-		__all_Hessian_indices_required.clear();
-		if (__SE_to_struct_hessian)
-			delete __SE_to_struct_hessian;
-		__SE_to_struct_hessian = new SubExpressionsToStructs(this);
+		this->all_Hessian_shapeexps.clear();
+		this->all_Hessian_shapeexps_for_shapeflags.clear();
+		this->all_Hessian_testfuncs.clear();
+		this->all_Hessian_indices_required.clear();
+		delete this->se_to_struct_hessian;
+		this->se_to_struct_hessian = new SubExpressionsToStructs(this);
 
 		GiNaC::ex spatial_integral_portion_Eulerian = extract_spatial_integral_part(resi, true, false);	  // resi.coeff(get_dx(false), 1) * get_dx(false);
 		GiNaC::ex spatial_integral_portion_Lagrangian = extract_spatial_integral_part(resi, false, true); // resi.coeff(get_dx(true), 1) * get_dx(true);
@@ -5239,15 +5943,23 @@ namespace pyoomph
 		// if (!spatial_integral_portion_Lagrangian.is_zero()) this->mark_shapes_required("ResJac["+std::to_string(residual_index)+"]",spaces[0],"psi");
 		GiNaC::ex spatial_integral_portion = spatial_integral_portion_Eulerian + spatial_integral_portion_Lagrangian;
 
-		spatial_integral_portion = (*__SE_to_struct_hessian)(spatial_integral_portion);
+		spatial_integral_portion = (*this->se_to_struct_hessian)(spatial_integral_portion);
 		// Needed before the first differentiation, not merely for tidiness: GiNaCSubExpression::derivative
 		// resolves against this list, and write_generic_Hessian_contribution only refreshes it *after* its
 		// first diff() call.
-		subexpressions = __SE_to_struct_hessian->subexpressions;
+		subexpressions = this->se_to_struct_hessian->subexpressions;
 
 		// Constructed before the osm expression printing below; the declarations are emitted into the
 		// osh header stream later, which precedes osm in the assembled function text
 		GlobalParameterFunctionScope gp_scope(this, {resi});
+
+		// Same buffer aliases as the Residual/Jacobian/Mass path, and they pay more here: a Hessian entry
+		// sits in a THREE-deep loop (l_test, l_shape, l_shape2) whose innermost body stores into
+		// hessian_buffer, so every shapeinfo-> read in there was reloaded per iteration of the innermost
+		// loop. The scope has to open here, before the contributions are printed into osm, because osm is
+		// generated before the osh header it will be concatenated behind; the declarations are emitted
+		// into osh, right after the integration-loop header (see below).
+		BufferAliasFunctionScope alias_scope(this);
 
 		osm << "    //START: Contribution of the spaces" << std::endl;
 		osm << "    double _H_contrib;" << std::endl;
@@ -5263,20 +5975,20 @@ namespace pyoomph
 		// last (f,f2) pair appends are never scanned at all. A field missed here is one that
 		// write_spatial_interpolation is never asked to produce, i.e. an undeclared identifier in the
 		// emitted C rather than a wrong number.
-		subexpressions = __SE_to_struct_hessian->subexpressions;
+		subexpressions = this->se_to_struct_hessian->subexpressions;
 		for (auto &se : subexpressions)
 		{
 			for (auto &sh : get_all_shape_expansions_in(se.get_expression()))
 			{
 				if (!sh.is_derived && !sh.is_derived_other_index)
-					__all_Hessian_shapeexps.insert(sh);
-				__all_Hessian_indices_required.insert(sh.field);
+					this->all_Hessian_shapeexps.insert(sh);
+				this->all_Hessian_shapeexps_for_shapeflags.insert(sh);
+				this->all_Hessian_indices_required.insert(sh.field);
 			}
 		}
 
 		if (!has_contribs)
 		{
-			__in_hessian = false;
 			return has_contribs;
 		}
 
@@ -5328,9 +6040,9 @@ namespace pyoomph
 				  osh << "    hessian_M_buffer=Cs;" << std::endl;
 				  osh << "  }" << std::endl;
 				}*/
-		std::set<ShapeExpansion> all_shapeexps = __all_Hessian_shapeexps;
-		std::set<TestFunction> all_testfuncs = __all_Hessian_testfuncs;
-		std::set<FiniteElementField *,FiniteElementFieldPtrLess> indices_required = __all_Hessian_indices_required;
+		std::set<ShapeExpansion> all_shapeexps = this->all_Hessian_shapeexps;
+		std::set<TestFunction> all_testfuncs = this->all_Hessian_testfuncs;
+		std::set<FiniteElementField *,FiniteElementFieldPtrLess> indices_required = this->all_Hessian_indices_required;
 
 		std::set<ShapeExpansion> merged_shapeexps;
 		for (auto &sp : all_shapeexps)
@@ -5345,6 +6057,13 @@ namespace pyoomph
 			sp_for_merge.is_derived_other_index = false;
 			sp_for_merge.expansion_mode = 0;
 			merged_shapeexps.insert(sp_for_merge);
+		}
+		// The basis functions of the Jacobian COLUMNS (phi_i, dphi_i/dx, ... at l_shape/l_shape2), which
+		// all_shapeexps deliberately does not contain - see all_Hessian_shapeexps_for_shapeflags. They
+		// are only marked, never merged into the interpolation sets.
+		for (auto &sp : this->all_Hessian_shapeexps_for_shapeflags)
+		{
+			this->mark_shapes_required("Hessian[" + std::to_string(residual_index) + "]", sp.field->get_space(), sp.basis);
 		}
 		for (auto &tf : all_testfuncs)
 		{
@@ -5398,19 +6117,24 @@ namespace pyoomph
 		{
 			osh << l << std::endl;
 		}
-		osh << "  //START: Precalculate time derivatives of the necessary data" << std::endl;
-		for (auto *sp : allspaces)
 		{
-			sp->write_nodal_time_interpolation(this, osh, "  ", all_shapeexps);
-		}
-		osh << "  //END: Precalculate time derivatives of the necessary data" << std::endl
-			<< std::endl;
-		// First assign the "interpolated D0" values
-		for (auto *sp : allspaces)
-		{
-			if (!sp->need_interpolation_loop())
+			// Above the integration loop, i.e. above where the alias declarations will land - see
+			// BufferAliasSuspend. The scope is still open here because osm was printed with it.
+			BufferAliasSuspend no_aliases(this);
+			osh << "  //START: Precalculate time derivatives of the necessary data" << std::endl;
+			for (auto *sp : allspaces)
 			{
-				sp->write_spatial_interpolation(this, osh, "    ", all_shapeexps, this->coordinates_as_dofs, true);
+				sp->write_nodal_time_interpolation(this, osh, "  ", all_shapeexps);
+			}
+			osh << "  //END: Precalculate time derivatives of the necessary data" << std::endl
+				<< std::endl;
+			// First assign the "interpolated D0" values
+			for (auto *sp : allspaces)
+			{
+				if (!sp->need_interpolation_loop())
+				{
+					sp->write_spatial_interpolation(this, osh, "    ", all_shapeexps, this->coordinates_as_dofs, true);
+				}
 			}
 		}
 
@@ -5419,6 +6143,7 @@ namespace pyoomph
 			osh << "  //START: Spatial integration loop" << std::endl;
 			std::string required_name = "&(my_func_table->shapes_required_Hessian[" + std::to_string(residual_index) + "]), 3";
 			write_generic_spatial_integration_header(osh, "  ", spatial_integral_portion_Eulerian, spatial_integral_portion_Lagrangian, required_name);
+			std::ostringstream osh_ipt; // in-loop part, so the alias declarations can be emitted ahead of it
 			std::set<ShapeExpansion> spatial_shape_exps = get_all_shape_expansions_in(spatial_integral_portion); // TODO: This is wrong!
 			std::set<ShapeExpansion> shape_intersect;
 
@@ -5436,20 +6161,21 @@ namespace pyoomph
 
 			//			std::set_intersection(spatial_shape_exps.begin(), spatial_shape_exps.end(), all_shapeexps.begin(), all_shapeexps.end(), std::inserter(shape_intersect, shape_intersect.begin()));
 			//			std::set<ShapeExpansion> spatial_shape_exps = get_all_shape_expansions_in(spatial_integral_portion);
-			osh << "    //START: Interpolate all required fields" << std::endl;
+			osh_ipt << "    //START: Interpolate all required fields" << std::endl;
 			for (auto *sp : allspaces)
 			{
 				if (sp->need_interpolation_loop())
 				{
-					//					sp->write_spatial_interpolation(this, osh, "    ", spatial_shape_exps, this->coordinates_as_dofs,true);
-					//					sp->write_spatial_interpolation(this, osh, "    ", all_shapeexps, this->coordinates_as_dofs,true);
-					sp->write_spatial_interpolation(this, osh, "    ", merged_shapeexps, this->coordinates_as_dofs, true);
-					//					sp->write_spatial_interpolation(this, osh, "    ", shape_intersect, false,true);
+					sp->write_spatial_interpolation(this, osh_ipt, "    ", merged_shapeexps, this->coordinates_as_dofs, true);
 				}
 			}
-			osh << "    // SUBEXPRESSIONS" << std::endl
+			osh_ipt << "    // SUBEXPRESSIONS" << std::endl
 				<< std::endl;
-			spatial_integral_portion = this->write_code_subexpressions(osh, "     ", spatial_integral_portion, spatial_shape_exps, true);
+			spatial_integral_portion = this->write_code_subexpressions(osh_ipt, "     ", spatial_integral_portion, spatial_shape_exps, true);
+			// osm as well as osh_ipt: the Hessian assembly body was printed first and lives in osm, which
+			// is concatenated after this header.
+			osh << alias_scope.declarations("    ", osh_ipt.str() + osm.str());
+			osh << osh_ipt.str();
 		}
 		osh << "    //END: Interpolate all required fields" << std::endl
 			<< std::endl;
@@ -5458,7 +6184,6 @@ namespace pyoomph
 
 		if (!has_contribs)
 		{
-			__in_hessian = false;
 			return has_contribs;
 		}
 
@@ -5515,7 +6240,6 @@ namespace pyoomph
 		os << "  }" << std::endl;
 		//		}
 		os << "}" << std::endl;
-		__in_hessian = false;
 		return has_contribs;
 	}
 
@@ -5527,10 +6251,31 @@ namespace pyoomph
 	// the CSE subexpression code, and finally delegates the actual residual/Jacobian/mass-matrix
 	// emission to write_generic_RJM_contribution() on every FiniteElementSpace inside the
 	// integration-point loop.
-	void FiniteElementCode::write_generic_RJM(std::ostream &os, std::string funcname, GiNaC::ex resi, bool)
+	void FiniteElementCode::write_generic_RJM(std::ostream &os, std::string funcname, GiNaC::ex resi, bool, bool may_be_asked_for_mass_matrix, bool allow_hang_split)
 	{
+		this->current_shapeflag_func_type = "ResJac[" + std::to_string(residual_index) + "]";
+		// Redundant since write_generic_Hessian restores the flag on every exit (AmbientCodegenScope);
+		// kept because it costs nothing and this function is also reached from paths that predate that.
 		__in_hessian = false;
-		os << "static void " << funcname << "(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo,double * PYOOMPH_RESTRICT residuals, double * PYOOMPH_RESTRICT jacobian, double * PYOOMPH_RESTRICT mass_matrix,unsigned flag)" << std::endl;
+		emitted_mass_matrix_contribution = false;
+		// Emitted as an implementation with a CONSTANT flag plus a dispatcher below, so that the three
+		// assembly modes become three specialised bodies. See PYOOMPH_RJM_IMPL in jitbridge.h.
+		static const bool split_rjm_globally = getenv("PYOOMPH_DISABLE_RJM_SPLIT") == NULL;
+		const bool split_rjm = split_rjm_globally && this->split_rjm_by_flag;
+		// The same trick once more, for the hanging-node machinery: a second constant parameter turns
+		// the one emitted body into a hanging and a non-hanging entry point, and the assembly picks per
+		// element (elements_assembly.cpp). Requires split_rjm - without the _impl there is nothing to
+		// add a constant parameter to - and with_adaptivity, since otherwise no hang macro is emitted
+		// at all and the two entry points would be the same code.
+		static const bool hang_split_globally = getenv("PYOOMPH_DISABLE_HANG_SPLIT") == NULL;
+		const bool split_hang = split_rjm && hang_split_globally && this->split_rjm_by_hang && this->with_adaptivity && allow_hang_split;
+		this->emitting_hang_parameter = split_hang;
+		this->hang_parameter_was_used = false;
+		const std::string hangparam = (split_hang ? ",const int pyoomph_hang_on" : "");
+		if (split_rjm)
+			os << "PYOOMPH_RJM_IMPL " << funcname << "_impl(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo,double * PYOOMPH_RESTRICT residuals, double * PYOOMPH_RESTRICT jacobian, double * PYOOMPH_RESTRICT mass_matrix,const unsigned flag" << hangparam << ")" << std::endl;
+		else
+			os << "static void " << funcname << "(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo,double * PYOOMPH_RESTRICT residuals, double * PYOOMPH_RESTRICT jacobian, double * PYOOMPH_RESTRICT mass_matrix,unsigned flag)" << std::endl;
 		os << "{" << std::endl;
 		os << "  int local_eqn, local_unknown;" << std::endl;
 		os << "  bool _has_residual_contribution,_has_jacobian_contribution;" << std::endl;
@@ -5541,6 +6286,16 @@ namespace pyoomph
 
 		os << "  const double * t=shapeinfo->t;" << std::endl;
 		os << "  const double * dt=shapeinfo->dt;" << std::endl;
+		// The scatter macros index with these instead of re-reading shapeinfo->jacobian_size /
+		// ->mass_matrix_size, which they may not keep in a register: the jacobian[]/mass_matrix[] store
+		// in the same statement can alias shapeinfo (PYOOMPH_RESTRICT is empty and does not help, see
+		// jitbridge.h), so both the load and the row multiply were repeated per inner-loop iteration.
+		// Both are set by prepare_shape_buffer_for_integration before this function is entered and do
+		// not change inside it. Hoisting them alone is worth nothing - it only pays together with the
+		// buffer aliases, because one surviving shapeinfo-> read in the loop forces the reload of all
+		// the others. HessianVectorProduct has had the same local (n_dof) all along.
+		os << "  const unsigned _jacsize = shapeinfo->jacobian_size;" << std::endl;
+		os << "  const unsigned _msize = shapeinfo->mass_matrix_size;" << std::endl;
 		if (stage == 0)
 			index_fields();
 
@@ -5622,12 +6377,14 @@ namespace pyoomph
 			os << l << std::endl;
 		}
 
-		os << "  //START: Precalculate time derivatives of the necessary data" << std::endl;
+		std::ostringstream body;
+
+		body << "  //START: Precalculate time derivatives of the necessary data" << std::endl;
 		for (auto *sp : allspaces)
 		{
-			sp->write_nodal_time_interpolation(this, os, "  ", all_shapeexps);
+			sp->write_nodal_time_interpolation(this, body, "  ", all_shapeexps);
 		}
-		os << "  //END: Precalculate time derivatives of the necessary data" << std::endl
+		body << "  //END: Precalculate time derivatives of the necessary data" << std::endl
 		   << std::endl;
 
 		// First assign the "interpolated D0" values
@@ -5635,7 +6392,7 @@ namespace pyoomph
 		{
 			if (!sp->need_interpolation_loop())
 			{
-				sp->write_spatial_interpolation(this, os, "    ", all_shapeexps, false, false);
+				sp->write_spatial_interpolation(this, body, "    ", all_shapeexps, false, false);
 			}
 		}
 
@@ -5656,50 +6413,67 @@ namespace pyoomph
 
 		if (!spatial_integral_portion.is_zero())
 		{
-			os << "  //START: Spatial integration loop" << std::endl;
+			body << "  //START: Spatial integration loop" << std::endl;
 			std::string required_name = "&(my_func_table->shapes_required_ResJac[" + std::to_string(residual_index) + "]), flag";
-			write_generic_spatial_integration_header(os, "  ", spatial_integral_portion_Eulerian, spatial_integral_portion_Lagrangian, required_name);
+			write_generic_spatial_integration_header(body, "  ", spatial_integral_portion_Eulerian, spatial_integral_portion_Lagrangian, required_name);
+
+			// The buffer aliases are declared HERE, at the top of the integration-point body, and not at
+			// function scope - even though function scope would be equally correct, since
+			// prepare_shape_buffer_for_integration re-points the buffers once per assembly and
+			// fill_shape_buffer_for_point never does. It was tried, and it is measurably worse: the
+			// aliases would then be live across the indirect fill_shape_buffer_for_point call, there are
+			// far more of them than there are callee-saved registers, and every use pays a stack reload
+			// instead of a register read. Callgrind on the heated-cylinder element, 300 assemblies:
+			// 107.6M data reads unaliased, 108.0M with function-scope aliases (i.e. nothing gained),
+			// 102.5M with these. Redeclaring per integration point costs a handful of loads per point
+			// and buys the whole trial loop.
+			BufferAliasFunctionScope alias_scope(this);
+			std::ostringstream ipt_body;
 
 			std::set<ShapeExpansion> spatial_shape_exps = get_all_shape_expansions_in(spatial_integral_portion);
-			os << "    //START: Interpolate all required fields" << std::endl;
+			ipt_body << "    //START: Interpolate all required fields" << std::endl;
 			for (auto *sp : allspaces)
 			{
 				if (sp->need_interpolation_loop())
 				{
-					sp->write_spatial_interpolation(this, os, "    ", spatial_shape_exps, this->coordinates_as_dofs, false);
+					sp->write_spatial_interpolation(this, ipt_body, "    ", spatial_shape_exps, this->coordinates_as_dofs, false);
 				}
 			}
-			os << "    //END: Interpolate all required fields" << std::endl
+			ipt_body << "    //END: Interpolate all required fields" << std::endl
 			   << std::endl;
 
-			os << std::endl;
+			ipt_body << std::endl;
 
-			os << "    // SUBEXPRESSIONS" << std::endl
+			ipt_body << "    // SUBEXPRESSIONS" << std::endl
 			   << std::endl;
-			spatial_integral_portion = this->write_code_subexpressions(os, "     ", spatial_integral_portion, spatial_shape_exps, false);
+			spatial_integral_portion = this->write_code_subexpressions(ipt_body, "     ", spatial_integral_portion, spatial_shape_exps, false);
 
-			os << "    //START: Contribution of the spaces" << std::endl;
-			os << "    double _res_contrib,_J_contrib;" << std::endl;
+			ipt_body << "    //START: Contribution of the spaces" << std::endl;
+			ipt_body << "    double _res_contrib,_J_contrib;" << std::endl;
 			for (auto *sp : allspaces)
 			{
-				sp->write_generic_RJM_contribution(this, os, "    ", spatial_integral_portion, false);
+				sp->write_generic_RJM_contribution(this, ipt_body, "    ", spatial_integral_portion, false);
 			}
-			os << "    //END: Contribution of the spaces" << std::endl;
+			ipt_body << "    //END: Contribution of the spaces" << std::endl;
 
-			write_generic_spatial_integration_footer(os, "  ");
-			os << "  //END: Spatial integration loop" << std::endl
+			const std::string ipt_text = ipt_body.str();
+			body << alias_scope.declarations("    ", ipt_text);
+			body << ipt_text;
+
+			write_generic_spatial_integration_footer(body, "  ");
+			body << "  //END: Spatial integration loop" << std::endl
 			   << std::endl;
 		}
 
 		if (!spatial_integral_portion_NodalDelta.is_zero())
 		{
-			os << "  //START: Nodal delta" << std::endl;
-			os << "  //END: Nodal delta" << std::endl;
+			body << "  //START: Nodal delta" << std::endl;
+			body << "  //END: Nodal delta" << std::endl;
 			//	write_generic_nodal_delta_header(os,"  "); //TODO
 
 			std::set<ShapeExpansion> nodal_shape_exps = get_all_shape_expansions_in(spatial_integral_portion_NodalDelta);
-			os << "    //START: Interpolate all required fields" << std::endl;
-			os << "    double _res_contrib,_J_contrib;" << std::endl;
+			body << "    //START: Interpolate all required fields" << std::endl;
+			body << "    double _res_contrib,_J_contrib;" << std::endl;
 			// 			throw_runtime_error("TODO: Spatial interpolation! Psi->nodal_Psi");
 			for (auto *sp : allspaces)
 			{
@@ -5718,7 +6492,7 @@ namespace pyoomph
 					}
 					if (dynamic_cast<D0FiniteElementSpace *>(se.field->get_space()))
 					{
-						sp->write_generic_RJM_contribution(this, os, "    ", spatial_integral_portion_NodalDelta, false);
+						sp->write_generic_RJM_contribution(this, body, "    ", spatial_integral_portion_NodalDelta, false);
 					}
 					else
 					{
@@ -5726,16 +6500,71 @@ namespace pyoomph
 					}
 				}
 			}
-			os << "    //END: Interpolate all required fields" << std::endl
+			body << "    //END: Interpolate all required fields" << std::endl
 			   << std::endl;
 
 			//			write_generic_nodal_delta_footer(os,"  "); //TODO
 
-			os << std::endl;
+			body << std::endl;
 		}
+
+		os << body.str();
 
 		os << "}" << std::endl
 		   << std::endl;
+
+		// The registered entry point. Keeping the name means nothing outside this file changes: the
+		// function table, the C++ callers and the ABI are all as they were.
+		this->emitting_hang_parameter = false;
+		if (!split_rjm)
+			return;
+		// Two entry points only if the body actually reads pyoomph_hang_on somewhere; see
+		// hang_parameter_was_used in codegen.hpp.
+		const bool write_nohang_entry = split_hang && this->hang_parameter_was_used;
+		if (write_nohang_entry)
+			this->emitted_nohang_entry_points.insert(funcname);
+		const std::string args = "eleminfo, shapeinfo, residuals, jacobian, mass_matrix";
+		// hangarg is what the dispatcher hands the constant parameter: the normal entry point keeps the
+		// hanging-node machinery, the _NoHang twin folds it away.
+		auto write_dispatcher = [&](const std::string &entryname, const std::string &hangarg)
+		{
+		os << "static void " << entryname << "(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo,double * PYOOMPH_RESTRICT residuals, double * PYOOMPH_RESTRICT jacobian, double * PYOOMPH_RESTRICT mass_matrix,unsigned flag)" << std::endl;
+		os << "{" << std::endl;
+		os << "  if (flag == 0) " << funcname << "_impl(" << args << ", 0" << hangarg << ");" << std::endl;
+		if (!emitted_mass_matrix_contribution)
+		{
+			// No mass-matrix entry was emitted anywhere in this routine, so `if (flag == 2)` guards
+			// nothing and the flag==1 and flag==2 bodies are the same code. Ask for one of them.
+			os << "  else " << funcname << "_impl(" << args << ", 1" << hangarg << "); /* no mass matrix in this routine */" << std::endl;
+		}
+		else if (!may_be_asked_for_mass_matrix)
+		{
+			// This routine has mass-matrix entries but is the UNSTEADY one of a residual that also got a
+			// separate steady routine, i.e. MPT/TPZ time integration. A mass matrix is requested through
+			// whichever routine tstepper->is_steady() picks (src/elements_assembly.cpp:157,378), and
+			// every consumer that asks for one either makes the timesteppers steady first
+			// (pyoomph/generic/problem.py:5374 and the make_steady/undo pairs in bifurcation_tools,
+			// assembly, periodic_driving_response, lyapunov:109) or is BDF2-only and therefore never
+			// reaches this branch at all - LyapunovExponentCalculatorBDF2, the one caller that assembles
+			// a mass matrix mid-transient, is BDF2 by construction and BDF2 needs no steady routine.
+			//
+			// So flag==2 should not arrive here, and specialising to 1 saves the third body. The assert
+			// is what keeps that an assumption we would HEAR about rather than one that silently returns
+			// a zero mass matrix: it costs one predictable branch per element per assembly.
+			os << "  else { assert(flag < 2 && \"mass matrix requested from the unsteady routine of an MPT/TPZ residual - make the timesteppers steady first\"); "
+			   << funcname << "_impl(" << args << ", 1" << hangarg << "); }" << std::endl;
+		}
+		else
+		{
+			os << "  else if (flag == 1) " << funcname << "_impl(" << args << ", 1" << hangarg << ");" << std::endl;
+			os << "  else " << funcname << "_impl(" << args << ", 2" << hangarg << ");" << std::endl;
+		}
+		os << "}" << std::endl
+		   << std::endl;
+		};
+		write_dispatcher(funcname, split_hang ? ", 1" : "");
+		if (write_nohang_entry)
+			write_dispatcher(funcname + "_NoHang", ", 0");
 	}
 
 	// Emits the top-of-file preprocessor boilerplate for the generated element's C source: the
@@ -5751,7 +6580,15 @@ namespace pyoomph
 		}
 		os << "#include \"jitbridge.h\"" << std::endl
 		   << std::endl;
-		os << "static JITFuncSpec_Table_FiniteElement_t * my_func_table;" << std::endl
+		// my_func_table used to be a file-scope `static JITFuncSpec_Table_FiniteElement_t *` here,
+		// assigned by JIT_ELEMENT_init. One .so serving two Problems then shared one pointer: dlopen
+		// dedupes by inode, so the second Problem's init silently repointed it and the first
+		// Problem's elements started reading the second's global_parameters (and dangled once that
+		// Problem was destroyed). It is now the code's own table reached through the element info
+		// that every generated entry point already receives. Kept as a macro rather than rewritten
+		// at ~15 emission sites so that the compiler flags any body that has no `eleminfo` in scope
+		// instead of that being found at runtime.
+		os << "#define my_func_table (eleminfo->functable)" << std::endl
 		   << std::endl;
 	}
 
@@ -5768,6 +6605,9 @@ namespace pyoomph
 	// same name (which would make the two indistinguishable to users of the generated evaluation API).
 	void FiniteElementCode::write_code_integral_or_local_expressions(std::ostream &os, std::map<std::string, GiNaC::ex> &exprs, std::map<std::string, GiNaC::ex> &units, std::string funcname, std::string reqname, bool integrate)
 	{
+		// Not an assembled contribution: nothing here may mark dx_psi_dcoord, and leaving the
+		// last routine's value standing would attribute its reads to the wrong contribution.
+		this->current_shapeflag_func_type.clear();
 		os << "static double " << funcname << "(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo, unsigned index)" << std::endl;
 		os << "{" << std::endl;
 		os << "  const unsigned flag=0;" << std::endl;
@@ -5822,7 +6662,7 @@ namespace pyoomph
 			os << "  double res=0.0;" << std::endl;
 			os << "  for(unsigned ipt=0;ipt<shapeinfo->n_int_pt;ipt++)" << std::endl;
 			os << "  {" << std::endl;
-			os << "    my_func_table->fill_shape_buffer_for_point(ipt, &(my_func_table->shapes_required_IntegralExprs), 0);" << std::endl;
+			os << "    my_func_table->fill_shape_buffer_for_point(eleminfo, ipt, &(my_func_table->shapes_required_IntegralExprs), 0);" << std::endl;
 		}
 		else
 		{
@@ -5922,6 +6762,9 @@ namespace pyoomph
 	// which could only ever be first order in a varying-dt run.
 	void FiniteElementCode::write_code_tracer_advection(std::ostream &os)
 	{
+		// Not an assembled contribution: nothing here may mark dx_psi_dcoord, and leaving the
+		// last routine's value standing would attribute its reads to the wrong contribution.
+		this->current_shapeflag_func_type.clear();
 		// Past-level geometry must be materialised even on a code without position dofs: a mesh moved
 		// by macro elements or by direct node manipulation still has a nodal position history, and a
 		// gradient inside a past-level advection expression has to be taken on the matching
@@ -6143,6 +6986,9 @@ namespace pyoomph
 	// error estimation instead of the regular one.
 	void FiniteElementCode::write_code_get_z2_flux(std::ostream &os,bool for_eigen)
 	{
+		// Not an assembled contribution: nothing here may mark dx_psi_dcoord, and leaving the
+		// last routine's value standing would attribute its reads to the wrong contribution.
+		this->current_shapeflag_func_type.clear();
 		os << "static void GetZ2Fluxes"<<(for_eigen ? "ForEigen" : "")<<"(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo, double * Z2Flux)" << std::endl;
 		os << "{" << std::endl;
 		os << std::endl;
@@ -6408,7 +7254,9 @@ namespace pyoomph
 		auto print_named_ex_map = [&](const std::map<std::string, GiNaC::ex> &m)
 		{ for (auto &kv : m) { os << kv.first << "="; print_ex(kv.second); } };
 
-		os << "FMT9\n"; // Bump whenever this function's coverage/format changes
+		os << "FMT10\n"; // Bump whenever this function's coverage/format changes
+		// FMT10: the hanging-node split (split_rjm_by_hang, PYOOMPH_DISABLE_HANG_SPLIT) is covered, and
+		// so is PYOOMPH_DISABLE_RJM_SPLIT, which decides the same kind of thing and was missing.
 		// FMT9: the Z2 compound-flux grouping and its per-group normalization/weight are covered
 		// (see the Z2 block below). Before that, the same estimator expressions in different groups
 		// or with a different normalize_relative/weight shared one fingerprint.
@@ -6422,17 +7270,22 @@ namespace pyoomph
 		// dev_docs/code_generation.md). Without these the same fingerprint would map to two different
 		// generated-code hashes depending on the environment, which makes Tier-2 shadow mode report
 		// a mismatch it cannot explain - and would let a future codegen-skipping Tier-2 reuse code
-		// generated under a different setting. PYOOMPH_ARCHIVE_EXPRESSIONS is deliberately absent:
-		// the archive is write-only and cannot affect the emitted code.
+		// generated under a different setting.
 		os << "sw_memo=" << __expand_memo_on
 		   << " sw_unit_fastcheck=" << (getenv("PYOOMPH_UNIT_FASTCHECK") != NULL)
-		   << " sw_no_unit_prescan=" << (getenv("PYOOMPH_DISABLE_UNIT_PRESCAN") != NULL) << "\n";
+		   << " sw_no_unit_prescan=" << (getenv("PYOOMPH_DISABLE_UNIT_PRESCAN") != NULL)
+		   << " sw_no_rjm_split=" << (getenv("PYOOMPH_DISABLE_RJM_SPLIT") != NULL)
+		   << " sw_no_hang_split=" << (getenv("PYOOMPH_DISABLE_HANG_SPLIT") != NULL) << "\n";
 		os << "dim=" << nodal_dim << " lagr_dim=" << lagr_dim << " max_dt_order=" << max_dt_order << " integration_order=" << integration_order << "\n";
 		os << "generate_hessian=" << generate_hessian << " assemble_hessian_by_symmetry=" << assemble_hessian_by_symmetry << "\n";
 		os << "analytical_jacobian=" << analytical_jacobian << " analytical_position_jacobian=" << analytical_position_jacobian << "\n";
 		os << "with_adaptivity=" << with_adaptivity << " ccode_expression_mode=" << ccode_expression_mode << "\n";
 		os << "use_shared_shape_buffer_during_multi_assemble=" << use_shared_shape_buffer_during_multi_assemble << "\n";
 		os << "coordinates_as_dofs=" << coordinates_as_dofs << "\n"; // moving-mesh/ALE flag (functable->moving_nodes)
+		// The emission choices of 9.4, recorded so a generated file can be traced back to the settings
+		// that produced it. They need no cache epoch of their own: both change the generated C, and the
+		// JIT cache key is the contents of that file (pyoomph/generic/ccompiler.py).
+		os << "jacobian_hoist_min_cost=" << jacobian_hoist_min_cost << " split_rjm_by_flag=" << split_rjm_by_flag << " split_rjm_by_hang=" << split_rjm_by_hang << "\n";
 		// NOTE: typeid(*coordinate_sys).name() is deliberately NOT used here (unlike elsewhere in
 		// this function) - every Python-level CustomCoordinateSystem subclass (Cartesian,
 		// Axisymmetric, ...) is wrapped by the same single nanobind trampoline class on the C++
@@ -6628,7 +7481,8 @@ namespace pyoomph
 	void FiniteElementCode::write_code(std::ostream &os)
 	{
 		__current_code = this;
-		this->archive.clear();
+		this->hoist_coeff_counter = 0; // names are per code, not per process - see codegen.hpp
+		this->emitted_nohang_entry_points.clear(); // Refilled by write_generic_RJM; a rewrite must not inherit the last one's decisions
 		CustomMathExpressionBase::code_map.clear();
 		CustomMultiReturnExpressionBase::code_map.clear();
 		find_all_accessible_spaces();
@@ -6655,7 +7509,8 @@ namespace pyoomph
 		for (unsigned int resind = 0; resind < residual.size(); resind++)
 		{
 			residual_index = resind;
-			__in_pitchfork_symmetry_constraint = (residual_names[resind] == "_simple_mass_matrix_of_defined_fields");
+			AmbientCodegenScope<bool> pitchfork_scope(__in_pitchfork_symmetry_constraint,
+													  residual_names[resind] == "_simple_mass_matrix_of_defined_fields");
 			if (!residual[resind].is_zero())
 			{
 				// Record the block expressions for the JACOBIAN_BLOCK_* flags, but only here: the steady
@@ -6663,20 +7518,30 @@ namespace pyoomph
 				// derived by expansion mode (azimuthal/Cartesian normal-mode stability) are skipped too -
 				// their blocks are complex and would need conjugate-transpose semantics, so their flags
 				// stay 0, which the contract reads as "nothing proven".
-				record_jacobian_blocks_for_flags = (get_derive_jacobian_by_expansion_mode() == NULL);
-				write_generic_RJM(os, "ResidualAndJacobian" + std::to_string(resind), residual[resind], true); // Hanging unsteady routine
-				record_jacobian_blocks_for_flags = false;
-				os << std::endl;
-
-				// Check if we need a dedicated steady routine. This happens, if you use e.g. MPT or TPZ time integration, which use history values
+				// Check if we need a dedicated steady routine. This happens, if you use e.g. MPT or TPZ
+				// time integration, which use history values. Decided BEFORE the unsteady routine is
+				// written, because it decides how many specialised bodies that routine needs:
+				// assemble_eigenproblem_matrices asks for a mass matrix through whichever routine
+				// tstepper->is_steady() selects (src/elements_assembly.cpp:157,378), so once a separate
+				// steady routine exists, the unsteady one is the unusual place to ask - not an
+				// impossible one, which is why write_generic_RJM keeps a runtime flag there rather than
+				// specialising the branch away. MakeResidualSteady is a pure GiNaC map, so hoisting it
+				// above the write changes nothing else.
 				MakeResidualSteady make_steady(this);
 				GiNaC::ex steady_residual = make_steady(residual[resind]);
 				extra_steady_routine[resind] = make_steady.require_extra_steady_routine();
 
+				record_jacobian_blocks_for_flags = (get_derive_jacobian_by_expansion_mode() == NULL);
+				write_generic_RJM(os, "ResidualAndJacobian" + std::to_string(resind), residual[resind], true, !extra_steady_routine[resind], true); // Hanging unsteady routine
+				record_jacobian_blocks_for_flags = false;
+				os << std::endl;
+
 				if (extra_steady_routine[resind])
 				{
 					os << std::endl;
-					write_generic_RJM(os, "ResidualAndJacobianSteady" + std::to_string(resind), steady_residual, true); // Hanging unsteady routine
+					// The steady twin gets the hang split too: a stationary solve is the common case, and
+					// elements_assembly.cpp picks the Steady slot without ever looking at the unsteady one.
+					write_generic_RJM(os, "ResidualAndJacobianSteady" + std::to_string(resind), steady_residual, true, true, true); // Hanging steady routine
 					os << std::endl;
 				}
 
@@ -6710,7 +7575,6 @@ namespace pyoomph
 			{
 				extra_steady_routine[resind] = false;
 			}
-			__in_pitchfork_symmetry_constraint = false;
 		}
 
 		residual_index = 0;
@@ -7824,9 +8688,8 @@ namespace pyoomph
 	}
 
 	// Resets the residual accumulator(s) and invokes the user's _define_element() (weak-form
-	// definition) hook, with expressions::el_dim temporarily set to this element's dimension so that
-	// dimension-dependent symbolic constructs (e.g. spatial vectors of the right size) resolve
-	// correctly during that call.
+	// definition) hook, with __current_code pointing at this code so that the GiNaC structures
+	// built during that call can reach their coordinate system and dimensions.
 	void FiniteElementCode::finalise()
 	{
 		// residual[0]=0;
@@ -7835,11 +8698,9 @@ namespace pyoomph
 		residual_names.clear();
 		residual.push_back(0);
 		residual_names.push_back("");
-		expressions::el_dim = this->element_dim;
 		__current_code = this;
 		_define_element();
 		__current_code = NULL;
-		expressions::el_dim = -1;
 	}
 
 	void FiniteElementCode::set_problem(Problem * p) {problem=p;}
@@ -8124,7 +8985,7 @@ namespace pyoomph
 			{
 				if (psientry.second)
 				{
-					if (psientry.first=="psi" || psientry.first=="dx_psi" || psientry.first=="dX_psi" || psientry.first=="d2x_psi" || psientry.first=="d2X_psi")
+					if (psientry.first=="psi" || psientry.first=="dx_psi" || psientry.first=="dX_psi" || psientry.first=="d2x_psi" || psientry.first=="d2X_psi" || psientry.first=="dx_psi_dcoord")
 					{
 						if (fieldentry.first->get_name()=="C1" || fieldentry.first->get_name()=="C1TB"||  fieldentry.first->get_name()=="C2" || fieldentry.first->get_name()=="C2TB")
 						{
@@ -9297,6 +10158,8 @@ namespace pyoomph
 		cleanup << " pyoomph_tested_free(functable->ResidualAndJacobian); functable->ResidualAndJacobian=PYOOMPH_NULL; " << std::endl;					
 		init << " functable->ResidualAndJacobianSteady=(JITFuncSpec_ResidualAndJacobian_FiniteElement *)calloc(functable->num_res_jacs,sizeof(JITFuncSpec_ResidualAndJacobian_FiniteElement));" << std::endl;
 		cleanup << " pyoomph_tested_free(functable->ResidualAndJacobianSteady); functable->ResidualAndJacobianSteady=PYOOMPH_NULL; " << std::endl;							
+		init << " functable->ResidualAndJacobianSteady_NoHang=(JITFuncSpec_ResidualAndJacobian_FiniteElement *)calloc(functable->num_res_jacs,sizeof(JITFuncSpec_ResidualAndJacobian_FiniteElement));" << std::endl;
+		cleanup << " pyoomph_tested_free(functable->ResidualAndJacobianSteady_NoHang); functable->ResidualAndJacobianSteady_NoHang=PYOOMPH_NULL; " << std::endl;							
 		init << " functable->shapes_required_ResJac=(JITFuncSpec_RequiredShapes_FiniteElement_t *)calloc(functable->num_res_jacs,sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t));" << std::endl;
 		cleanup << " pyoomph_tested_free(functable->shapes_required_ResJac); functable->shapes_required_ResJac=PYOOMPH_NULL; " << std::endl;									
 		init << " functable->shapes_required_Hessian=(JITFuncSpec_RequiredShapes_FiniteElement_t *)calloc(functable->num_res_jacs,sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t));" << std::endl;
@@ -9319,16 +10182,16 @@ namespace pyoomph
 			cleanup << " pyoomph_tested_free(functable->res_jac_names["<<resiind<<"]); functable->res_jac_names["<<resiind<<"]=PYOOMPH_NULL; " << std::endl;		
 			if (!residual[resiind].is_zero())
 			{
-				init << " functable->ResidualAndJacobian_NoHang[" << resiind << "]=&ResidualAndJacobian" << resiind << ";" << std::endl;
-				init << " functable->ResidualAndJacobian[" << resiind << "]=&ResidualAndJacobian" << resiind << ";" << std::endl;				
-				if (extra_steady_routine[resiind])
-				{
-					init << " functable->ResidualAndJacobianSteady[" << resiind << "]=&ResidualAndJacobianSteady" << resiind << ";" << std::endl;
-				}
-				else
-				{
-					init << " functable->ResidualAndJacobianSteady[" << resiind << "]=&ResidualAndJacobian" << resiind << ";" << std::endl;
-				}
+				// The _NoHang slots point at the specialised entry point where one was emitted and at the
+				// hanging one otherwise, so the assembly can dereference them unconditionally.
+				const std::string unsteady_name = "ResidualAndJacobian" + std::to_string(resiind);
+				const std::string steady_name = (extra_steady_routine[resiind] ? "ResidualAndJacobianSteady" + std::to_string(resiind) : unsteady_name);
+				const std::string unsteady_nohang = (emitted_nohang_entry_points.count(unsteady_name) ? unsteady_name + "_NoHang" : unsteady_name);
+				const std::string steady_nohang = (emitted_nohang_entry_points.count(steady_name) ? steady_name + "_NoHang" : steady_name);
+				init << " functable->ResidualAndJacobian[" << resiind << "]=&" << unsteady_name << ";" << std::endl;
+				init << " functable->ResidualAndJacobian_NoHang[" << resiind << "]=&" << unsteady_nohang << ";" << std::endl;
+				init << " functable->ResidualAndJacobianSteady[" << resiind << "]=&" << steady_name << ";" << std::endl;
+				init << " functable->ResidualAndJacobianSteady_NoHang[" << resiind << "]=&" << steady_nohang << ";" << std::endl;
 				if (generate_hessian)
 				{
 					if (has_hessian_contribution[resiind])
@@ -9991,15 +10854,14 @@ namespace pyoomph
 		}
 		
 		// domain_name is deliberately NOT set here (nor freed in cleanup below): baking a
-		// per-instance string into the generated C code made otherwise textually-identical
+		// per-domain string into the generated C code made otherwise textually-identical
 		// codes on different domains (e.g. a DirichletBC(u=0) on both "left" and "right" of a
 		// rectangle) compile to different .c/.so content, defeating the JIT code cache's
 		// ability to share one compiled artifact between them. It is instead set by the host
-		// (DynamicBulkElementCode's constructor in problem.cpp, right after calling this
+		// (DynamicJITCode's constructor in problem.cpp, right after calling this
 		// init function) and freed there too - see the comment there for why that keeps
 		// alloc/free symmetric regardless of the compiler backend's C runtime.
 		init << " functable->clean_up=&clean_up;" << std::endl;
-		init << " my_func_table=functable;" << std::endl;
 		init << "}" << std::endl;
 		
 		init << std::endl << std::endl;
@@ -10187,7 +11049,6 @@ namespace GiNaC
 		if (!se)
 			throw_runtime_error("Cannot resolve subexpressions");
 		GiNaC::ex res = 0;
-		bool found = false;
 		for (auto &shape_exp : se->req_fields)
 		{
 			if (shape_exp.field->get_symbol() == s)
@@ -10218,10 +11079,9 @@ namespace GiNaC
 					inner = strip_derived(inner);
 					if (inner.is_zero())
 						continue; // nothing to cache, and wrapping it would emit a dead subexpr_N
-					GiNaC::ex newse = (*pyoomph::__SE_to_struct_hessian)(pyoomph::expressions::subexpression(inner));
+					GiNaC::ex newse = (*get_struct().code->se_to_struct_hessian)(pyoomph::expressions::subexpression(inner));
 					auto sexp = pyoomph::ShapeExpansion(shape_exp.field, shape_exp.dt_order, shape_exp.basis, shape_exp.dt_scheme, true);
 					res += newse * GiNaCShapeExpansion(sexp);
-					found = true;
 				}
 				else
 				{
@@ -10234,7 +11094,6 @@ namespace GiNaC
 					if (pyoomph::__derive_shapes_by_second_index)
 						sexp.is_derived_other_index = true;
 					res += pyoomph::__field_name_cache[derivname.str()] * GiNaCShapeExpansion(sexp);
-					found = true;
 				}
 			}
 		}
@@ -11253,10 +12112,10 @@ namespace GiNaC
 						throw_runtime_error("Too high dt order");
 					}
 					else if (sp.dt_order == 2)
-						c.s << "shapeinfo->timestepper_weights_d2t_" << timedisc_scheme << "[0]*";
+						c.s << alias_timestepper_weight0(femprint.FEM_opts->for_code, "d2t", timedisc_scheme) << "*";
 					else if (sp.dt_order == 1)
 					{
-						c.s << "shapeinfo->timestepper_weights_dt_" << timedisc_scheme << "[0]*";
+						c.s << alias_timestepper_weight0(femprint.FEM_opts->for_code, "dt", timedisc_scheme) << "*";
 					}
 					if (femprint.FEM_opts->in_subexpr_deriv)
 					{
@@ -11274,6 +12133,10 @@ namespace GiNaC
 								throw_runtime_error("DD")
 							}
 							std::string shapename = dcoord_shape_array(sp.basis, false);
+							// Second site that emits a rank-4 read; marks through the same channel as the
+							// interpolation loop so the flag stays a superset of the reads.
+							if (!femprint.FEM_opts->for_code->current_shapeflag_func_type.empty())
+								femprint.FEM_opts->for_code->mark_shapes_required(femprint.FEM_opts->for_code->current_shapeflag_func_type, const_cast<pyoomph::FiniteElementSpace *>(sp.basis->get_space()), "dx_psi_dcoord");
 							const std::string dirstr = dcoord_shape_index(sp.basis);
 							if (sp.nodal_coord_dir >= 0)
 							{
@@ -11653,7 +12516,23 @@ namespace GiNaC
 					std::ostringstream ossn;
 					ossn << s;
 					std::string sname = ossn.str();
+					// Only a NODAL COORDINATE can contribute the moving-mesh dpsi/dX term. This branch
+					// is reached whenever we differentiate by the field's OWN symbol, and for anything
+					// that is not a position field -- a potential, a concentration, ... -- that symbol
+					// is not a coordinate at all. The ternary below has no such case and fell through
+					// to direction 2, so the Jacobian asked for a COORDDIFF_2 array that the
+					// declaration loop (which runs to nodal_dimension()) never declares. That made
+					// partial_t(grad(u)) of a bulk field, evaluated on an interface, fail to compile
+					// with "COORDDIFF_2_u undeclared" - in every dimension and coordinate system, on a
+					// static mesh as well as a moving one. The residual was always correct; only the
+					// Jacobian carried the bogus term.
+					// The dimension check covers the same invariant from the other side: a direction
+					// the declaration loop does not reach cannot be referenced here either.
+					if (sname != "coordinate_x" && sname != "coordinate_y" && sname != "coordinate_z")
+						return GiNaCShapeExpansion(se);
 					int coord_dir = (sname == "coordinate_x" ? 0 : (sname == "coordinate_y" ? 1 : 2));
+					if (coord_dir >= (int)sp.basis->get_space()->get_code()->nodal_dimension())
+						return GiNaCShapeExpansion(se);
 					if (sp.nodal_coord_dir >= 0)
 						throw_runtime_error("Handle second order derivative here");
 					//std::cout << "SHOULD NOT GENERATE A TERM HERE " << pyoomph::__ignore_dpsi_coord_diffs_in_jacobian << "  " << GiNaCShapeExpansion(se) << std::endl;
@@ -11752,6 +12631,12 @@ namespace GiNaC
 				}
 				else if (sp.nodal_coord_dir2 == -1)
 				{
+					// Third site emitting a rank-4 read (test-function side); same channel again. Only
+					// THIS branch reads d_dx_shape_dcoord - the one above reads no sensitivity at all and
+					// the one below reads the rank-6 array, so marking before the branch over-requests
+					// and gives the space back its full fill for nothing.
+					if (!femprint.FEM_opts->for_code->current_shapeflag_func_type.empty())
+						femprint.FEM_opts->for_code->mark_shapes_required(femprint.FEM_opts->for_code->current_shapeflag_func_type, const_cast<pyoomph::FiniteElementSpace *>(sp.basis->get_space()), "dx_psi_dcoord");
 					std::string shapestr = femprint.FEM_opts->for_code->get_shape_info_str(sp.basis->get_space()) + "->"+ shapename;
 					shapestr += "[l_test][" + dcoord_shape_index(sp.basis) + "][" + (sp.is_derived_other_index ? "l_shape2" : "l_shape") + "][" + std::to_string(sp.nodal_coord_dir) + "]";
 					c.s << shapestr;

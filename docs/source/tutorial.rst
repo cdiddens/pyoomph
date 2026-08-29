@@ -23,9 +23,10 @@ Pyoomph Tutorial
    tutorial/advstab.rst
    tutorial/plotting.rst
    tutorial/precice.rst
-   tutorial/mpi.rst
+   tutorial/parallel.rst
    tutorial/miscsettings.rst
    tutorial/math.rst
+   tutorial/vibecoding.rst
    tutorial/references.rst
 
 

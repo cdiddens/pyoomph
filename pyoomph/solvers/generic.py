@@ -4,24 +4,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -143,6 +143,86 @@ class GenericLinearSystemSolver:
 
 	def __init__(self,problem:"Problem"):
 		self.problem=problem
+		#: Switch to a symmetric factorization whenever the assembled matrix is symbolically proven
+		#: symmetric (see Problem._get_proven_matrix_symmetry). Falls back silently to the general
+		#: factorization on any doubt - augmented (tracking) systems, custom assemblers, unproven
+		#: blocks - so leaving it on cannot produce a wrong result, only different pivoting/roundoff.
+		self.exploit_proven_symmetry:bool=True
+		#: Outcome of the last _use_symmetric_factorisation_now() call (None = never asked), plus the
+		#: reason. For tests and benchmarks: a comparison where the symmetric path silently fell back
+		#: looks like a null result, so check this before believing one.
+		self.last_symmetry_decision:Optional[bool]=None
+		self.last_symmetry_decision_reason:str=""
+		#: Set while solve_gathered_to_root() drives a SERIAL backend on rank 0 with the gathered
+		#: system. That nested solve_serial() call goes through the same op_flag==2 branch as an
+		#: ordinary serial solve and would otherwise apply the Newton-step post-processing a second
+		#: time -- once on rank 0's gathered vector and once on each rank's block after the scatter.
+		#: Which of the two is the right place is not a matter of taste: the post-processing reduces,
+		#: and a reduction inside a rank-0-only branch deadlocks.
+		self._suppress_newton_step_postprocessing:bool=False
+
+	def _custom_solve_routine_active(self)->bool:
+		"""Is a custom assembler installed that wants to drive the solve itself?
+
+		Only the augmented (bifurcation-tracker) assemblers do. Deflation does not -- it is pure
+		post-processing of the increment -- which is why the two are asked separately: a backend that
+		cannot hand out a re-solve callable can still support deflation.
+		"""
+		ca=self.problem._custom_assembler #type:ignore
+		return ca is not None and ca.has_custom_solve_routine()
+
+	def _postprocess_newton_step(self,x:NPFloatArray,first_row:int=0,reduce_dot:bool=False)->NPFloatArray:
+		"""Turn the solved increment into the one the Newton update should take.
+
+		Today that means the deflation rescale and nothing else. ``first_row``/``reduce_dot`` describe
+		the row block ``x`` is: pass the block's offset and ``reduce_dot=True`` from a distributed
+		entry point, the defaults from a serial one. They are the CALLER's knowledge -- deciding them
+		from ``len(x)`` would send rank 0 (which owns every row of a small system) and rank 1 (which
+		owns none) into different branches of a collective.
+		"""
+		if self._suppress_newton_step_postprocessing:
+			return x
+		op=getattr(self.problem,"_deflation_operator",None)
+		if op is None or len(op)==0:
+			return x
+		return op.rescale_newton_step(x,first_row=first_row,reduce_dot=reduce_dot)
+
+	def _solve_newton_step(self,solve_fn:Callable[[NPFloatArray],NPFloatArray],b:NPFloatArray,
+						   first_row:int=0,reduce_dot:bool=False)->NPFloatArray:
+		"""Solve ``J x = b`` for the Newton increment, applying whatever post-processing is installed.
+
+		The one place every backend goes through, so that a new post-processing step is added once
+		rather than in each of them:
+
+		* a **deflation operator** turns the increment into the deflated one by a scalar rescale (one
+		  extra dot product, no extra solve -- see bifurcation_tools.DeflationOperator);
+		* a **custom assembler** with ``has_custom_solve_routine()`` (the augmented trackers) gets the
+		  solve handed to it as a callable, as before.
+
+		``first_row``/``reduce_dot`` describe the row block ``b`` is: pass the block's offset and
+		``reduce_dot=True`` from a distributed entry point, the defaults from a serial one. They are
+		the CALLER's knowledge -- deciding them from ``len(b)`` would send rank 0 (which owns every row
+		of a small system) and rank 1 (which owns none) into different branches of a collective.
+		"""
+		if self._custom_solve_routine_active():
+			ca=self.problem._custom_assembler #type:ignore
+			assert ca is not None
+			return ca.custom_solve_routine(solve_fn,b)
+		return self._postprocess_newton_step(solve_fn(b),first_row=first_row,reduce_dot=reduce_dot)
+
+	def _use_symmetric_factorisation_now(self)->bool:
+		"""Per-solve decision whether the matrix about to be factorised is proven symmetric.
+
+		Never cached: the same problem flips between symmetric and not when a bifurcation tracker or
+		custom assembler is (de)activated, so backends must ask again at every op_flag==1.
+		"""
+		if not self.exploit_proven_symmetry:
+			self.last_symmetry_decision,self.last_symmetry_decision_reason=False,"disabled by exploit_proven_symmetry=False"
+			return False
+		jac_sym,_=self.problem._get_proven_matrix_symmetry(self.problem._get_solved_residual())
+		self.last_symmetry_decision=jac_sym
+		self.last_symmetry_decision_reason="jacobian proven symmetric" if jac_sym else "jacobian not proven symmetric (or augmented/custom assembly)"
+		return jac_sym
 
 	@property
 	def problem(self)->"Problem":
@@ -344,13 +424,16 @@ class GenericLinearSystemSolver:
 			# block is then the whole system and there is nothing to gather.
 			self.solve_serial(op_flag,n,nnz_local,1 if op_flag==2 else 0,values,col_index,row_start,b,n,1)
 			return
-		# Replicated condition, checked before the first collective so all ranks refuse together. The
-		# custom solve routine would run on rank 0 alone, and the augmented handlers reach back into
-		# the problem from inside it; the custom assembler is not supported under MPI anyway.
-		if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine(): #type:ignore
-			raise RuntimeError("A custom solve routine (deflation, an augmented assembly handler) cannot "
-							   "be used together with a linear solver that gathers the system onto rank 0 "
-							   "under MPI: it would run on rank 0 only. Use petsc_mumps, or run serially.")
+		# Replicated condition, checked before the first collective so all ranks refuse together. An
+		# augmented handler's custom solve routine would run on rank 0 alone while it reaches back into
+		# the problem, which is collective; the custom assembler is not supported under MPI anyway.
+		# Deflation used to be refused here for the same reason and is not any more: it needs no
+		# re-solve, only a rescale of the scattered increment, which every rank does on its own block
+		# below.
+		if self._custom_solve_routine_active():
+			raise RuntimeError("An augmented assembly handler's custom solve routine cannot be used "
+							   "together with a linear solver that gathers the system onto rank 0 under "
+							   "MPI: it would run on rank 0 only. Use petsc_mumps, or run serially.")
 
 		rank=get_mpi_rank()
 		error:BaseException | None=None
@@ -388,13 +471,23 @@ class GenericLinearSystemSolver:
 			if rank==0 and local_code==0:
 				assert b_global is not None
 				try:
-					self.solve_serial(2,n,0,1,_EMPTY_F64,_EMPTY_I32,_EMPTY_I32,b_global,n,1)
+					# The plain solve only: the Newton-step post-processing happens after the scatter,
+					# on every rank's own block, because it reduces.
+					self._suppress_newton_step_postprocessing=True
+					try:
+						self.solve_serial(2,n,0,1,_EMPTY_F64,_EMPTY_I32,_EMPTY_I32,b_global,n,1)
+					finally:
+						self._suppress_newton_step_postprocessing=False
 				except BaseException as e:
 					error=e
 					local_code=1 if isinstance(e,SolverError) else 2
 			code=self._agree_on_gathered_outcome(local_code)
 			if code==0:
 				mpi_scatter_vector(layout,b_global,b)
+				# After the scatter, not before: every rank now holds its own row block of the
+				# increment and can reduce the one dot product deflation needs. Doing it on rank 0
+				# inside the gathered solve would be a collective inside a single-rank branch.
+				b[:]=self._postprocess_newton_step(b,first_row=int(layout.vec_displs[rank]),reduce_dot=True)
 		if code==0:
 			return
 		if code==1:
@@ -724,6 +817,79 @@ class GenericEigenSolver:
 		self.imag_contribution:str | None=None
 		self.ncv:int | None=None
 		self.last_assembly_was_complex:bool=False
+		#: Use a symmetric eigensolver (scipy eigsh / SLEPc GHEP) when J and M are both symbolically
+		#: proven symmetric. Those drivers additionally need M positive semi-definite, which the
+		#: symmetry proof does not give: the assembled M is screened for it numerically before the
+		#: symmetric driver is engaged (see _mass_matrix_can_be_positive_semidefinite).
+		self.exploit_proven_symmetry:bool=True
+		#: Outcome/reason of the last _use_symmetric_eigensolver_now() call (None = never asked);
+		#: also read by the Pardiso/Accelerate shift-invert operators to pick a symmetric mode.
+		self.last_symmetry_decision:Optional[bool]=None
+		self.last_symmetry_decision_reason:str=""
+
+	def _use_symmetric_eigensolver_now(self)->bool:
+		"""Per-solve decision whether the eigenproblem J,M pair is proven symmetric.
+
+		Requires BOTH matrices proven symmetric, a purely real assembly (imag_contribution unset -
+		expansion-mode residual sets carry no symmetry proofs anyway) and no matrix manipulators
+		(EigenMatrixSetDofsToZero replaces J rows by identity rows, which breaks symmetry after
+		assembly). Positive semi-definiteness of M is assumed, not proven - see exploit_proven_symmetry.
+		"""
+		if not self.exploit_proven_symmetry:
+			self.last_symmetry_decision,self.last_symmetry_decision_reason=False,"disabled by exploit_proven_symmetry=False"
+			return False
+		if self.imag_contribution is not None:
+			self.last_symmetry_decision,self.last_symmetry_decision_reason=False,"complex assembly (imag_contribution set)"
+			return False
+		if self.matrix_manipulators:
+			self.last_symmetry_decision,self.last_symmetry_decision_reason=False,"matrix manipulators break symmetry after assembly"
+			return False
+		jac_sym,mass_sym=self.problem._get_proven_matrix_symmetry(self.real_contribution)
+		decision=jac_sym and mass_sym
+		self.last_symmetry_decision=decision
+		self.last_symmetry_decision_reason="J and M proven symmetric" if decision else "J or M not proven symmetric (or augmented/custom assembly)"
+		return decision
+
+	def _mass_matrix_can_be_positive_semidefinite(self,M:Any,first_row:int=0,collective:bool=True)->bool:
+		"""Cheap necessary condition for a symmetric M to be positive semi-definite.
+
+		_use_symmetric_eigensolver_now only establishes that M is SYMMETRIC, but the symmetric drivers
+		use M as an inner product and need it positive semi-definite on top of that. PSD was initially
+		just assumed, on the grounds that partial_t generates Gram matrices - which is false as soon as
+		partial_t couples two different fields. The pendulum ODE (phi'=psi, psi'=-sin(phi)) assembles
+		M=[[0,1],[1,0]]: symmetric, eigenvalues +-1, and SLEPc aborts with "The inner product is not
+		well defined: indefinite matrix".
+
+		Screened in one pass over the stored entries: a PSD matrix has M[i,i]>=0 everywhere, and a
+		vanishing M[i,i] forces the whole of row i to vanish with it. Necessary, not sufficient - it
+		cannot certify PSD, it only catches the matrices that certainly are not, which is what the
+		cross-coupled mass matrices are.
+
+		``first_row`` is this rank's global row offset when M holds only a local row block (columns are
+		global either way); the verdict is then reduced across ranks, so all of them engage or none do.
+
+		``collective=False`` skips that reduction, and is required whenever M is already a whole global
+		matrix that only ONE rank holds -- the gathered path in ScipyEigenSolver, where rank 0 re-enters
+		solve() with the assembled system while every other rank waits in mpi_share_root_failure. The
+		reduction has no partner there, and the two ranks deadlock in different collectives (rank 0 in
+		this allreduce, the rest in that broadcast) until the test harness times out at 900 s.
+		"""
+		Mc=M.tocsr() if not hasattr(M,"indptr") else M
+		ok=True
+		if Mc.nnz>0:
+			absM=abs(Mc)
+			scale=absM.max()
+			if scale>0:
+				tol=1e-12*scale
+				diag=Mc.diagonal(first_row)
+				rowsum=numpy.asarray(absM.sum(axis=1)).ravel()[:len(diag)]
+				# A zero row is fine (pinned dofs, pressure): it only makes M singular, which
+				# shift-invert handles. A zero DIAGONAL with a non-zero row is not.
+				if bool((diag<-tol).any()) or bool(((diag<=tol)&(rowsum>tol)).any()):
+					ok=False
+		if not collective:
+			return ok
+		return not _mpi_any_rank(not ok)
 
 	@property
 	def problem(self)->"Problem":
@@ -741,6 +907,17 @@ class GenericEigenSolver:
 		pass
 
 	def supports_target(self)->bool:
+		return False
+
+	def supports_complex_target(self)->bool:
+		"""Whether a target with a nonzero IMAGINARY part is honoured, not just a real one.
+
+		Separate from supports_target() because a real PETSc/SLEPc build answers yes to that one and
+		then silently drops the imaginary part of the target (petsc4py casts a numpy complex to its
+		real ScalarType with nothing but a ComplexWarning). A Hopf's left eigenvector then came back as
+		some unrelated real mode - see NormalFormCalculator.get_left_eigenvector, which falls back to
+		scipy rather than believe it.
+		"""
 		return False
 
 	def setup_matrix_contributions(self,real_contribution:str,imag_contribution:str | None=None):

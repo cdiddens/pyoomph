@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -234,6 +234,43 @@ class DropletGeometry:
     # Relaxes the shape by gravity
     # returns an array of r and z positions and a scale factor to multiply the results with to get the right scaling
     def sample_gravity_shape(self,surface_tension:ExpressionOrNum,delta_rho_times_g:ExpressionOrNum,output_dir:str,fixations:YoungLaplaceFixationsType | None=None,update_params:bool=True,N:int=200,output_text:bool=True,compiler:Any=None,ignore_command_line:bool=False,globally_convergent_newton:bool=False)->tuple[NPFloatArray,ExpressionOrNum]:
+        """Solve the Young-Laplace shape under gravity and return it as sampled interface points.
+
+        Returns ``(points, spatial_scale)`` with ``points`` an (N+1, 2) array of nondimensional
+        (r, z), and also stores it for :py:meth:`get_sampled_gravity_shape`. With ``update_params``
+        the geometry's own volume/contact angle/apex height/base radius are replaced by the relaxed
+        ones.
+
+        ``output_text`` writes the relaxed shape as a text file into ``output_dir``. It used to be
+        accepted and then ignored - ``relax_by_gravity`` was called with a hardcoded ``True`` - so
+        the output could not be switched off at all.
+
+        This builds and solves a SECOND Problem (:py:class:`YoungLaplaceDropletShape`) while the
+        caller's own Problem usually exists already: the typical use is from a
+        ``GmshTemplate.define_geometry()``, i.e. from inside the outer problem's ``initialise()``.
+        Two things follow.
+
+        Give it an ``output_dir`` of its own, as every in-tree caller does (a ``_initial_shape``
+        subdirectory of the outer problem's). Both problems generate a code called ``domain``, so a
+        shared directory means one ``.so`` path for both; that is now caught and worked around, but
+        it is a collision worth not having.
+
+        Under mpirun EVERY rank builds and solves this, and that is deliberate rather than an
+        oversight. An oomph Problem is collective on its communicator whether or not it is
+        distributed - oomph's ``Problem::get_residuals`` broadcasts the assembled residual across the
+        communicator in its NON-distributed branch, i.e. on every Newton step - and a sub-problem
+        always inherits
+        ``MPI_COMM_WORLD``, with no way to give it one of its own. Solving it on rank 0 alone
+        therefore deadlocks the other ranks in the first collective inside the Newton solve, which is
+        exactly what happens if you try. The duplicated work is small (about 0.4 s at ``N=200``, 1.2 s
+        at ``N=800``) and concurrent, so it costs no wall-clock time, and the output is not
+        duplicated: the writers on ranks > 0 drop out on their own for a non-distributed problem.
+
+        The compiler is the process default (``system``), NOT the calling problem's choice - a fresh
+        Problem always starts from ``get_default_c_compiler()``. Pass ``compiler="tcc"`` if the
+        codegen of these four small element codes costs more than their execution saves, which for a
+        one-shot shape it usually does.
+        """
         if self.rivulet_instead:
             raise RuntimeError("Not yet implemented")
         if isinstance((0+surface_tension),(Expression)):
@@ -246,7 +283,7 @@ class DropletGeometry:
             problem.ignore_command_line=ignore_command_line
             if compiler is not None:
                 problem.set_c_compiler(compiler)
-            problem.relax_by_gravity(output_text=True,globally_convergent_newton=globally_convergent_newton)
+            problem.relax_by_gravity(output_text=output_text,globally_convergent_newton=globally_convergent_newton)
             dom=problem.get_mesh("domain")
             rs:list[float]=[]
             zs:list[float]=[]
@@ -333,17 +370,17 @@ class YoungLaplaceEquations(Equations):
         real_n=var("normal")
         norm,norm_test=var_and_test("_norm")
         curv,curv_test=var_and_test("_curv")
-        self.add_residual(weak(norm-real_n,norm_test,coordinate_system=cartesian)) # project normal, so that we can derive it
+        self.add_residual(weak(norm-real_n,norm_test,coordsys=cartesian)) # project normal, so that we can derive it
 
         self.add_residual(weak(curv-div(norm),curv_test)) # get curvature
 
         # In normal direction, we must make sure that sigma*curv+additional_pressure=p_ref
         _,xtest=var_and_test("mesh")
-        self.add_residual(weak(self.sigma*curv+self.additional_pressure-self.p_ref,self.blend_factor*dot(real_n,xtest),coordinate_system=cartesian))
+        self.add_residual(weak(self.sigma*curv+self.additional_pressure-self.p_ref,self.blend_factor*dot(real_n,xtest),coordsys=cartesian))
 
         # We solve the normalized arclength (Dirichlet _s=0 and _s=smax at boundaries required)
         s,stest=var_and_test("_s")
-        self.add_residual(weak(grad(s,coordsys=cartesian,nondim=True),grad(stest,coordsys=cartesian,nondim=True),coordinate_system=cartesian))
+        self.add_residual(weak(grad(s,coordsys=cartesian,nondim=True),grad(stest,coordsys=cartesian,nondim=True),coordsys=cartesian))
 
         # And we shift the nodes tangentially so that they keep an equidistance arclength distance. Otherwise, they would be free to move tangentially
         sdest=var("lagrangian_x") # desired position is given by the initial arclength
@@ -467,10 +504,10 @@ class YoungLaplaceDropletShape(Problem):
             # P_ref will enforce h(r=0)=h_apex
             peq = GlobalLagrangeMultiplier(p0=-dest_apex_height) # select p0 so that h=h0
             peq += TestScaling(p0=1 / scale_factor("spatial")) # nondimensionalize h-h0=0 by the spatial dimension
-            eqs += WeakContribution(var("mesh_y"),testfunction(p0),coordinate_system=cartesian)@"left" # and add h to the constraint equation
+            eqs += WeakContribution(var("mesh_y"),testfunction(p0),coordsys=cartesian)@"left" # and add h to the constraint equation
         else: # contact_angle
             peq = GlobalLagrangeMultiplier(p0=-cos(dest_contact_angle)) # we adjust p0 so that n_z-cos(theta)=0 holds
-            eqs += WeakContribution(var("_norm_y"), testfunction(p0), coordinate_system=cartesian) @ "right"
+            eqs += WeakContribution(var("_norm_y"), testfunction(p0), coordsys=cartesian) @ "right"
 
         # Setting reference pressure without gravity as initial condition
         peq+=Scaling(p0=scale_factor("pressure"))
@@ -494,9 +531,9 @@ class YoungLaplaceDropletShape(Problem):
         elif enforce_theta_via_base_radius:
             # Or, if volume is enforced by p0, the contact angle must be enforced by adjusting the base radius accordingly
             teq = GlobalLagrangeMultiplier(ca_by_r=-cos(dest_contact_angle)) # solve n_z-cos(theta)=0 by adjusting mesh_x(z=0)
-            eqs += WeakContribution(var("_norm_y"), testfunction("ca_by_r",domain="globals"), coordinate_system=cartesian) @ "right"
+            eqs += WeakContribution(var("_norm_y"), testfunction("ca_by_r",domain="globals"), coordsys=cartesian) @ "right"
             # Add the feedback of this Lagrange multiplier
-            eqs += WeakContribution(var("ca_by_r", domain="globals"),testfunction("mesh_x"),coordinate_system=cartesian) @ "right"
+            eqs += WeakContribution(var("ca_by_r", domain="globals"),testfunction("mesh_x"),coordsys=cartesian) @ "right"
             self.add_equations(teq @ "globals")
 
         # Fix the arclength calculation boundaries for the tangential shifting of the nodes

@@ -1,5 +1,7 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #
 #  @section LICENSE
 #
@@ -296,7 +298,7 @@ def _moving_curvature_problem(hessian):
             self.add_equations(eqs @ "domain")
             self.add_equations(Surf() @ "domain/bottom")
             if not hessian:
-                self.debug_jacobian_by_fd_epsilon = 1e-5
+                self.equation_compilation_flags.debug_jacobian_epsilon = 1e-5
 
     p = P()
     if hessian:
@@ -307,7 +309,7 @@ def _moving_curvature_problem(hessian):
         n.set_x(0, a + 0.30 * a * b)
         n.set_x(1, b - 0.20 * a * b + 0.15 * a * (1 - a))   # curves the interface itself
     im = p.get_mesh("domain/bottom")
-    idx = im.element_pt(0).get_code_instance().get_nodal_field_indices()["u"]
+    idx = im.element_pt(0).get_jit_code().get_nodal_field_indices()["u"]
     for n in im.nodes():
         n.set_value(idx, 0.3 + 0.5 * n.x(0))
     return p

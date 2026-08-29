@@ -72,7 +72,7 @@ namespace pyoomph
     case LocatorSpace::Eulerian:
       return e->node_pt(n)->x(setup.time_index, d);
     case LocatorSpace::Lagrangian:
-      return dynamic_cast<pyoomph::Node *>(e->node_pt(n))->xi(d);
+      return static_cast<pyoomph::Node *>(e->node_pt(n))->xi(d);
     case LocatorSpace::BoundaryZeta:
     default:
       return e->zeta_nodal(n, 0, d);
@@ -120,7 +120,7 @@ namespace pyoomph
     case LocatorSpace::Lagrangian:
       // The Lagrangian coordinates carried by the NODES, which on an interface mesh is the bulk
       // nodal dimension rather than the face element's own dimension.
-      space_dim = dynamic_cast<pyoomph::Node *>(e0->node_pt(0))->nlagrangian();
+      space_dim = static_cast<pyoomph::Node *>(e0->node_pt(0))->nlagrangian();
       break;
     case LocatorSpace::BoundaryZeta:
       // The interface's intrinsic boundary coordinate has one component per element dimension.
@@ -177,14 +177,14 @@ namespace pyoomph
       BulkElementBase *e = dynamic_cast<BulkElementBase *>(source->element_pt(ie));
       if (!e)
         continue;
-      if (setup.skip_halo_elements && e->is_halo())
+      if (setup.skip_halo_elements && element_is_halo(e))
         continue;
       element_index[e] = elements_by_index.size();
       elements_by_index.push_back(e);
 
       for (unsigned in = 0; in < e->nnode(); in++)
       {
-        pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(e->node_pt(in));
+        pyoomph::Node *n = static_cast<pyoomph::Node *>(e->node_pt(in));
         if (!n)
           continue;
         auto found = node_lookup.find(n);
@@ -1261,7 +1261,7 @@ namespace pyoomph
           // on-surface query match a neighbour whose closest point was half an element away.
           for (unsigned in = 0; in < previous->nnode() && (!hit || rank_by_offset); in++)
           {
-            pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(previous->node_pt(in));
+            pyoomph::Node *n = static_cast<pyoomph::Node *>(previous->node_pt(in));
             if (!n)
               continue;
             auto ni = node_lookup.find(n);
@@ -1417,7 +1417,7 @@ namespace pyoomph
       return;
     for (unsigned n = 0; n < e->nnode(); n++)
     {
-      auto it = node_lookup.find(dynamic_cast<pyoomph::Node *>(e->node_pt(n)));
+      auto it = node_lookup.find(static_cast<pyoomph::Node *>(e->node_pt(n)));
       if (it == node_lookup.end())
         continue;
       const unsigned ni = it->second;
@@ -1472,7 +1472,7 @@ namespace pyoomph
   {
     // Sizes of each block of one time level, in the fixed order evaluate() writes them. Taken from a
     // representative source element rather than the request, because every count except field_map's
-    // is a property of the source mesh's code instance.
+    // is a property of the source mesh's code.
     struct EvalLayout
     {
       unsigned ncont = 0, nDL = 0, nD0 = 0, nDG = 0, npos = 0, nlag = 0, nzeta = 0;
@@ -1484,7 +1484,7 @@ namespace pyoomph
       EvalLayout L;
       if (!e)
         return L;
-      const JITFuncSpec_Table_FiniteElement_t *ft = e->get_code_instance()->get_func_table();
+      const JITFuncSpec_Table_FiniteElement_t *ft = e->get_jit_code()->get_func_table();
       if (what.continuous_fields)
       {
         // With a field_map the caller is asking for ITS OWN field layout, so the count is the map's
@@ -1602,7 +1602,7 @@ namespace pyoomph
           // lays out before the DL and D0 entries. Only the fields the element owns
           // (numfields_new); anything inherited from the bulk is external data and not the source
           // element's to report.
-          const JITFuncSpec_Table_FiniteElement_t *ft = e->get_code_instance()->get_func_table();
+          const JITFuncSpec_Table_FiniteElement_t *ft = e->get_jit_code()->get_func_table();
           unsigned idata = 0, f = 0;
           for (unsigned si = 0; si < ft->num_present_dg_spaces; si++)
           {

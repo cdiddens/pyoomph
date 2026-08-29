@@ -8,6 +8,7 @@ Submodules
    :maxdepth: 4
 
    pyoomph.materials.UNIFAC.aiomfac
+   pyoomph.materials.UNIFAC.aiomfac_electrolyte
    pyoomph.materials.UNIFAC.dortmund
    pyoomph.materials.UNIFAC.original
 

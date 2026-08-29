@@ -1,6 +1,6 @@
 /*================================================================================
 pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
-Copyright (C) 2021-2026  Christian Diddens & Duarte Rocha
+Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -15,7 +15,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+The main author may be contacted at c.diddens@utwente.nl
 
 ================================================================================*/
 
@@ -110,8 +110,12 @@ namespace pyoomph
 
   // Gather one side. Silently yields an empty result if the mesh is null or carries no such boundary
   // (a side may legitimately be absent, e.g. when only dummy equations were created for it).
+  // `topological` selects the node identity: the cross-domain topological id (see
+  // pyoomph::Node::interface_topological_id) when both sides carry a complete set and the connection is
+  // coincident, the quantised Eulerian position otherwise. The two sides of one pair must always be
+  // collected with the same choice.
   void collect_interface_side(Mesh *m, const std::string &bname, const std::vector<double> &offset,
-                              InterfaceSideFacets &out);
+                              InterfaceSideFacets &out, bool topological);
 
   // Report how many of this rank's facets are non-conforming, globally summed so every rank agrees.
   // mode: 0 silent, 1 report to stdout, 2 throw. `when` labels the call site in the message.

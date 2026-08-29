@@ -19,8 +19,13 @@ First positional argument is a comma-separated set of independent flags:
   detect     set_detect_inverted_elements(True)
   adaptive   solve with a temporal error tolerance (so dt can be rejected/reduced)
   remesh     attach Remesher2d + the existing quality-based RemeshWhen
+  invremesh  RemeshWhen(on_inverted_element=True): remesh when an element turns inside out.
+             Implies "remesh", and arms the detection itself, so "invremesh" alone is enough.
   tight      with "adaptive": use a much tighter temporal tolerance
 Anything else (e.g. "plain") just runs with all of them off.
+
+Runs under mpirun as well, with and without --distribute: an inversion is seen only by the rank
+holding the folded element, and the report is reduced over the ranks before anyone acts on it.
 """
 
 import sys
@@ -57,9 +62,23 @@ class NotchProblem(Problem):
         self.N = 10               # elements per direction
         self.notch_width = 0.12   # Gaussian half width of the notch
         self.notch_rate = 0.85    # notch depth per unit time
-        self.with_remesher = "remesh" in mode.split(",")
-        self.remesh_options = RemeshingOptions(max_expansion=3, min_expansion=0.2,
-                                               min_quality_decrease=0.3)
+        flags = set(mode.split(","))
+        self.on_inverted = "invremesh" in flags
+        self.with_remesher = ("remesh" in flags) or self.on_inverted
+        # The two triggers are kept INDEPENDENT on purpose. The quality-based one alone already
+        # carries this case (it remeshes ~15 times and never lets an element invert), so leaving it
+        # on would mean "invremesh" proves nothing: the inversion trigger would never fire. With
+        # "invremesh" alone the quality thresholds are off and the fold is the only thing that can
+        # ask for a remesh, which is the situation the option exists for -- a mesh that folds
+        # without any element having grown, shrunk or lost quality enough to notice.
+        if self.on_inverted and "remesh" not in flags:
+            self.remesh_options = RemeshingOptions(max_expansion=None, min_expansion=None,
+                                                   min_quality_decrease=None,
+                                                   on_inverted_element=True)
+        else:
+            self.remesh_options = RemeshingOptions(max_expansion=3, min_expansion=0.2,
+                                                   min_quality_decrease=0.3,
+                                                   on_inverted_element=self.on_inverted)
 
     def define_problem(self):
         mesh = RectangularQuadMesh(N=self.N)

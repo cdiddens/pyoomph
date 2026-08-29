@@ -9,7 +9,12 @@ Threading
 ~~~~~~~~~
 
 ``PYOOMPH_OPENBLAS_NUM_THREADS``, ``PYOOMPH_MKL_NUM_THREADS``
-      Number of threads used by OpenBLAS and MKL, respectively. Both default to ``4``. On import, pyoomph sets the corresponding ``OPENBLAS_NUM_THREADS``/``MKL_NUM_THREADS`` environment variables to these values, unless they are already set in the environment (e.g. by your shell or by a launcher script), in which case the existing value is left untouched. To fully disable OpenMP-style parallelization, set both to ``1``.
+      Number of threads used by OpenBLAS and MKL, respectively. Both default to the ``N`` of a ``--omp N`` given on the command line, and to ``4`` without it. On import, pyoomph sets the corresponding ``OPENBLAS_NUM_THREADS``/``MKL_NUM_THREADS`` environment variables to these values, unless they are already set in the environment (e.g. by your shell or by a launcher script), in which case the existing value is left untouched. They exist so that a third-party library can be pinned for pyoomph runs alone, without also pinning it for everything else on the machine.
+
+      They bound the threading *inside* BLAS/MKL only. They do not make a pyoomph run serial: the element loop takes its thread count from ``--omp``/:py:meth:`~pyoomph.generic.problem.Problem.set_num_threads` and passes it on the OpenMP pragma itself, so with ``--omp 4`` the assembly runs on four threads whatever these variables say. Run without ``--omp`` (or with ``--omp 1``) for a serial run.
+
+``PYOOMPH_OMP_NUM_THREADS``
+      Value pyoomph sets ``OMP_NUM_THREADS`` to on import, again only if that variable is not already set. It defaults to the ``--omp N`` given on the command line, or to ``1`` without it -- pyoomph's own threaded element loop takes its thread count from ``--omp``/:py:meth:`~pyoomph.generic.problem.Problem.set_num_threads` and not from the environment, so the pin only keeps a third-party OpenMP runtime in the same process from opening a second pool of threads. See :numref:`secopenmp`.
 
 JIT code cache
 ~~~~~~~~~~~~~~
@@ -30,6 +35,26 @@ pyoomph compiles the equations of a problem into native code just-in-time. To av
 
 ``PYOOMPH_JIT_CACHE_TIER2``
       Set to ``0``, ``false``, ``False`` or an empty string to disable the (more experimental) Tier-2 caching. Defaults to enabled (``1``), but only has any effect while ``PYOOMPH_JIT_CACHE`` is also enabled.
+
+MPI
+~~~
+
+These are only read when running under ``mpirun`` (cf. :numref:`secmpi`).
+
+``PYOOMPH_MPI_OUTPUT``
+      Console output mode when several ranks share one terminal: ``condensed`` (the default -- only rank 0 prints, while the stderr of every rank still gets through, tagged), ``all`` (every rank, each line written in one piece and tagged ``[rank N]``) or ``off`` (no filtering at all, i.e. the raw interleaved output). The same choice is available as ``--mpi-output`` on the command line, which takes precedence; an unrecognized value here is ignored rather than raising, because this is read while ``pyoomph`` is being imported. See :numref:`secmpioutput`.
+
+``PYOOMPH_ALLOW_SERIAL_UNDER_MPIRUN``
+      Set to ``1`` to allow a pyoomph built **without** MPI support to be started by an MPI launcher with more than one rank, which is refused by default (cf. :numref:`secmpi`). The ranks are then independent serial runs which know nothing of each other, so each of them must be given its own output directory. This has no effect on a build with MPI support.
+
+``PYOOMPH_MPI_IDLE_SPIN``
+      How many polls a rank waiting for another one does before it starts sleeping between polls. Defaults to ``2000``. The spin phase is there because ``time.sleep()`` cannot resolve much better than about 60 microseconds, which would otherwise dominate the many short collectives of a small problem.
+
+``PYOOMPH_MPI_IDLE_MAX_SLEEP``
+      Longest sleep, in seconds, between two polls once a rank has given up spinning. Defaults to ``5e-3``, which leaves a waiting rank at roughly 200 wake-ups per second, i.e. no measurable CPU load, while bounding the delay with which it notices that a long factorization on another rank has finished.
+
+``PYOOMPH_MPI_IDLE_WARN_AFTER``
+      Seconds a rank may wait before pyoomph prints a one-off notice naming what it is waiting for. Defaults to ``600``. It is deliberately a notice and not a timeout: raising on the one rank that noticed would create exactly the deadlock it is trying to report.
 
 Compilation and debugging
 ~~~~~~~~~~~~~~~~~~~~~~~~~~

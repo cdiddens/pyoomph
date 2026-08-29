@@ -1,5 +1,7 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #
 #  @section LICENSE
 #
@@ -42,6 +44,7 @@
 # why the module has a single test function rather than one per aspect.
 
 import json
+import glob
 import os
 import shutil
 import sys
@@ -173,8 +176,52 @@ def test_bifurcation_gui_controller(tmp_path):
         assert numpy.isclose(fold.param_value, mu_c, atol=1e-7), "fold should be at mu=-b^2/4"
         assert numpy.isclose(fold.obs_values["ode/u"], u_c, atol=1e-5)
         assert fold.eig_value_Re == 0, "a located bifurcation is flagged by a zero real part"
+        # The base state's OWN spectrum is solved for at the located bifurcation too, which is what
+        # says whether the branch was already unstable here and which mode goes next. tracked_eigenindex
+        # is set only when that extra eigensolve ran, so it is also the certificate that it did.
+        assert fold.tracked_eigenindex is not None, "the rest of the spectrum has to be solved for"
+        assert not any("Could not solve the eigenproblem" in str(m) for m in logged), logged
+        # ... and the tracked eigenvalue is in that spectrum exactly ONCE, at its exact value: the
+        # solve returns its own rounding-error-sized copy, and listing both would show the same mode
+        # twice while the copy's positive real part had the point counted as unstable.
+        assert complex(fold.eig_values[fold.tracked_eigenindex]) == complex(fold.eig_value_Re,
+                                                                           fold.eig_value_Im)
+        assert len(fold.eig_values) == c.neigen, fold.eig_values
+        assert fold.measured_unstable_count() == 0, "an exact zero is not a positive real part"
         # Bifurcation tracking must not stay active afterwards, or every later solve would be
         # augmented.
+        assert not problem.get_bifurcation_tracking_mode()
+
+        # ... and not when the tracking solve FAILS either, which is the case that used to go wrong.
+        # The teardown lived in one caller rather than beside the activation, so a diverged tracking
+        # solve left the augmented system installed; the next attempt to locate a bifurcation then
+        # reported "a non-zero shift is required" from its opening eigensolve - the leftover tracker's
+        # message, saying nothing about the solve that actually failed. Two of the three entry points
+        # (Locate pitchfork, Locate the bifurcation of the selected eigenvalue) had no cleanup at all.
+        # The solve is stubbed rather than driven to divergence, so the invariant is tested and not
+        # some particular way of reaching it.
+        real_solve = problem.solve
+        boom = RuntimeError("the tracking solve diverged")
+
+        def failing_solve(*a, **kw):
+            raise boom
+
+        problem.solve = failing_solve   # type:ignore[method-assign]
+        # try/except rather than pytest.raises: this function imports pytest locally further down,
+        # which makes the name local to the whole function and unbound up here.
+        raised = None
+        try:
+            c.locate_bifurcation()
+        except RuntimeError as e:
+            raised = e
+        finally:
+            problem.solve = real_solve  # type:ignore[method-assign]
+        assert raised is boom, "the real failure has to reach the caller, not be swallowed"
+        assert not problem.get_bifurcation_tracking_mode(), \
+            "a failed locate must leave the tracker off, or every later solve is augmented"
+        # And the problem is usable again straight away, which is the point of the invariant.
+        c.locate_bifurcation()
+        assert numpy.isclose(c.current_point.param_value, mu_c, atol=1e-7)
         assert not problem.get_bifurcation_tracking_mode()
 
         # the stability split now has the fold as its boundary
@@ -417,16 +464,19 @@ def test_bifurcation_gui_controller(tmp_path):
             # eigenproblem was assembled on the BASE, not the augmented, dof layout.
             assert len(p.eig_values) == c.neigen, p.eig_values
             assert numpy.isclose(numpy.real(p.eig_values[0]), 0.0, atol=1e-6), p.eig_values
+            # The tracked eigenvalue appears exactly once and at the tracker's exact value: the
+            # eigensolve's own copy of it is replaced rather than listed beside it.
+            assert p.tracked_eigenindex == 0, p.tracked_eigenindex
+            assert complex(p.eig_values[0]) == complex(p.eig_value_Re, p.eig_value_Im)
         # ...and the eigensolve really ran. Both ways of not running it -- the deliberately non-fatal
         # except (a failed shift-invert must not abort a long two-parameter sweep) and
-        # locus_eigen_shift=None -- fall back to recording the synthetic critical value alone, which
-        # on this fold is exactly 0 with neigen == 1 and would satisfy both assertions above without
-        # a single eigenproblem having been solved. A solved fold eigenvalue is a rounding-error-sized
-        # number rather than an exact zero, so at least one point has to differ from its own critical
-        # value; the log is checked as well, so a failure says which of the two happened.
+        # tracked_eigen_shift=None -- record the synthetic critical value alone and leave
+        # tracked_eigenindex at None, which on this one-dof fold is otherwise indistinguishable from a
+        # solved spectrum: the tracked value replaces the solved one, so nothing numerical is left to
+        # tell them apart. The log is checked as well, so a failure says which of the two happened.
         assert not any("Could not solve the eigenproblem" in str(m) for m in logged), logged
-        assert any(complex(p.eig_values[0]) != complex(p.eig_value_Re, p.eig_value_Im) for p in locus), \
-            [(p.eig_values[0], p.eig_value_Re) for p in locus]
+        assert all(p.tracked_eigenindex is not None for p in locus), \
+            [p.tracked_eigenindex for p in locus]
         assert len({round(p.param_values["b"], 6) for p in locus}) == len(locus), "b really moved"
         # No normal form is computed per locus point even with classification on: the type is known.
         assert all(p.bifurcation_info is None for p in locus)
@@ -820,8 +870,8 @@ def test_extremum_observables_become_axis_choices(tmp_path):
 
     Out of process, since it needs its own Problem. The worker also pins that six axis choices cost two
     mesh sweeps rather than six, that the "[max, x]" tag replaces the "[obs]" one instead of stacking
-    with it, and that a name containing spaces, a comma and brackets survives the CSV export and a
-    save/load round trip.
+    with it, that set_initial_observable() picks which of them the diagram opens on, and that a name
+    containing spaces, a comma and brackets survives the CSV export and a save/load round trip.
     """
     import subprocess
 
@@ -896,6 +946,195 @@ def test_ds_is_recast_when_the_arclength_metric_changes():
     stub.theta, stub.dpds = 3.252, 0.7071067811865476
     assert c._recast_ds_after_metric_change(-0.05, 1.0, 0.88) == -0.05
 
+
+def _tracked_spectrum_controller(spectrum, evecs, tracked_vec, crit, tracked_m=None):
+    """A controller wired to a stub problem that reports one tracked eigenvalue and one spectrum.
+
+    A stub, because what is under test is which entry of the returned spectrum is recognised as the
+    tracked one - pure bookkeeping over numbers a real eigensolve would take minutes to produce, and
+    the interesting cases (two eigenvalues on the axis at once, a solve that never returns the
+    tracked mode) are ones a test problem cannot be talked into reliably.
+    """
+    from pyoomph.utils.bifurcation_gui.controller import BifurcationController
+
+    class StubProblem:
+        def __init__(self):
+            # What tracked continuation leaves behind: the single synthetic eigenvalue and its vector.
+            self._last_eigenvalues = numpy.array([crit], dtype=numpy.complex128)
+            self._last_eigenvectors = numpy.array([tracked_vec], dtype=numpy.complex128)
+            # What a tracked solve() leaves: one entry, the tracked mode, when there is one.
+            self._last_eigenvalues_m = None if tracked_m is None else numpy.array([tracked_m])
+            self._last_eigenvalues_k = None
+            self.solves = 0
+            self.raise_on_solve = None
+        def get_last_eigenvalues(self):
+            return self._last_eigenvalues
+        def get_last_eigenvectors(self):
+            return self._last_eigenvectors
+        def get_last_eigenmodes_m(self):
+            return self._last_eigenvalues_m
+        def get_last_eigenmodes_k(self):
+            return self._last_eigenvalues_k
+        def _get_bifurcation_eigenvector(self):
+            return tracked_vec
+        def _get_bifurcation_omega(self):
+            return float(numpy.imag(crit))
+        def _critical_normal_mode(self, eigenindex=0):
+            return None if not tracked_m else ("m", float(tracked_m))
+        def solve_eigenproblem(self, n, shift, quiet=False, **kw):
+            self.solves += 1
+            assert shift, "an eigensolve while tracking needs a non-zero shift"
+            if self.raise_on_solve is not None:
+                raise self.raise_on_solve
+            self._last_eigenvalues = numpy.array(spectrum, dtype=numpy.complex128)
+            self._last_eigenvectors = numpy.array(evecs, dtype=numpy.complex128)
+            # Untouched, like the real one: with no mode argument the plain path never writes these,
+            # so they stay at the single tracked entry and no longer match the spectrum's length.
+            return self._last_eigenvalues, self._last_eigenvectors
+
+    logged: list = []
+    c = BifurcationController.__new__(BifurcationController)
+    c._on_log = logged.append
+    c._on_changed = None
+    c._on_status = None
+    c._on_busy = None
+    c._eigen_mult = 1.0
+    c._eigen_unit = ""
+    c.neigen = len(spectrum)
+    c.tracked_eigen_shift = 0.1
+    c.problem = StubProblem()  # type: ignore[assignment]
+    return c, logged
+
+
+def test_tracked_spectrum_lists_the_tracked_eigenvalue_exactly_once():
+    """The tracker's exact zero replaces the eigensolve's own copy of it, and nothing else."""
+    # A fold sitting next to a SECOND eigenvalue on the axis, i.e. an incipient codim-2 point - the
+    # one case where "the entry nearest the critical value" is not good enough, and the only case
+    # where getting it wrong costs anything, since that second eigenvalue is why the spectrum is
+    # being solved for on a locus at all. The tracked vector is (1,0); the impostor's is (0,1).
+    tracked_vec = numpy.array([1.0, 0.0, 0.0], dtype=complex)
+    spectrum = [-0.5 + 0j, 1e-9 + 0j, -3e-10 + 0j]
+    evecs = [numpy.array([0.0, 0.0, 1.0], dtype=complex),   # some other mode entirely
+             numpy.array([0.0, 1.0, 0.0], dtype=complex),   # NEARER zero, but a different mode
+             numpy.array([1.0, 0.0, 0.0], dtype=complex)]   # the tracked one
+    c, logged = _tracked_spectrum_controller(spectrum, evecs, tracked_vec, 0j)
+    crit, spec, modes, idx = c._tracked_spectrum()
+    assert idx == 2, "the tracked mode is identified by its eigenvector, not by being nearest zero"
+    assert crit == 0j and spec is not None
+    assert spec[idx] == 0j, "and it is listed at the tracker's exact value"
+    assert spec[1] == 1e-9 + 0j, "the second eigenvalue on the axis is a different mode and stays"
+    assert len(spec) == 3, spec
+    assert modes is None
+
+    # ...and the problem is left holding the TRACKED eigenpair, not what the extra solve returned:
+    # the normal-form classification that runs next reads get_last_eigenvalues()[0].
+    assert list(c.problem.get_last_eigenvalues()) == [0j]
+    assert numpy.allclose(c.problem.get_last_eigenvectors()[0], tracked_vec)
+
+    # The same, with an azimuthal tracker installed. solve_eigenproblem takes the mode from the
+    # tracker's own global parameter and reports none per eigenvalue, so the whole solved spectrum
+    # belongs to the tracked mode and has to be labelled with it - the single-value record a located
+    # azimuthal bifurcation used to carry did say m, and losing that would leave the point looking
+    # like a base-state one.
+    c, logged = _tracked_spectrum_controller(spectrum, evecs, tracked_vec, 0j, tracked_m=1)
+    crit, spec, modes, idx = c._tracked_spectrum()
+    assert idx == 2 and modes == [1.0, 1.0, 1.0], modes
+
+    # A Hopf: the conjugate partner at -i*omega is a genuinely different entry of the spectrum and
+    # must survive, however close its eigenvector is to a phase of the tracked one.
+    zeta = numpy.array([1.0, 1j, 0.0], dtype=complex)
+    spectrum = [3e-11 + 2.0j, -1e-11 - 2.0j, -0.7 + 0j]
+    evecs = [zeta, numpy.conj(zeta), numpy.array([0.0, 0.0, 1.0], dtype=complex)]
+    c, logged = _tracked_spectrum_controller(spectrum, evecs, zeta, 2.0j)
+    crit, spec, modes, idx = c._tracked_spectrum()
+    assert idx == 0 and spec is not None
+    assert spec[0] == 2.0j, "the tracked value, exactly"
+    # The partner stays in the list - it is a genuinely different entry of the spectrum - but it is
+    # snapped onto the axis too: the tracker holds the whole PAIR there, and the solved copy's real
+    # part is rounding-sized with an arbitrary sign, which a positive one turns into a spurious
+    # "unstable" at the bifurcation itself.
+    assert spec[1] == -2.0j, spec
+    assert len(spec) == 3
+    assert sum(1 for v in spec if numpy.real(v) > 0) == 0, spec
+
+    # An eigensolve that never sees the tracked mode - too few eigenvalues, or a shift too far away.
+    # The point still has to read as a bifurcation, so the tracked value goes in front rather than
+    # being dropped, and it is said out loud, since the answer is to raise neigen or move the shift.
+    c, logged = _tracked_spectrum_controller([-0.5 + 0j, -0.9 + 0j],
+                                             [numpy.array([0.0, 1.0], dtype=complex),
+                                              numpy.array([1.0, 1.0], dtype=complex)],
+                                             numpy.array([1.0, 0.0], dtype=complex), 0j)
+    crit, spec, modes, idx = c._tracked_spectrum()
+    assert idx == 0 and spec is not None and spec[0] == 0j and len(spec) == 3
+    assert any("did not return the tracked eigenvalue" in str(m) for m in logged), logged
+
+    # Switched off: the historical single synthetic value, and no eigensolve at all.
+    c, logged = _tracked_spectrum_controller([0j], [numpy.array([1.0], dtype=complex)],
+                                             numpy.array([1.0], dtype=complex), 0j)
+    c.tracked_eigen_shift = None
+    crit, spec, modes, idx = c._tracked_spectrum()
+    assert (crit, spec, idx) == (0j, None, None)
+    assert c.problem.solves == 0
+
+    # A failed shift-invert costs this point its spectrum and nothing else: a two-parameter sweep
+    # that has been running for hours must not be aborted by one factorisation that would not go
+    # through. The tracked eigenpair is still what the problem is left holding.
+    c, logged = _tracked_spectrum_controller([0j], [numpy.array([1.0], dtype=complex)],
+                                             numpy.array([1.0], dtype=complex), 0j)
+    c.problem.raise_on_solve = RuntimeError("MUMPS zero pivot")
+    crit, spec, modes, idx = c._tracked_spectrum()
+    assert (crit, spec, idx) == (0j, None, None)
+    assert any("Could not solve the eigenproblem" in str(m) for m in logged), logged
+    assert list(c.problem.get_last_eigenvalues()) == [0j]
+
+
+def test_a_located_bifurcation_keeps_its_exact_zero():
+    """Nothing that re-solves a spectrum at a bifurcation may demote it to an ordinary point.
+
+    Its leading eigenvalue is the tracker's exact zero, which no eigensolve taken from the dump can
+    reproduce - there is no tracker installed any more, and the state IS the singularity. Both ways
+    to a fresh spectrum are covered: recomputing it outright (refused) and a stripe scan (merged).
+    """
+    from pyoomph.utils.bifurcation_gui.controller import BifurcationController
+    from pyoomph.utils.bifurcation_gui.model import BifurcationGUISolutionPoint
+
+    c = BifurcationController.__new__(BifurcationController)
+    c._on_log = lambda *a: None
+    c._on_changed = None
+    c._on_status = None
+    c._on_busy = None
+    c.neigen = 4
+    c.shift = 0
+    c.normal_modes = []
+    c._paramname = "mu"
+
+    class StubProblem:
+        def is_normal_mode_stability_set_up(self):
+            return None
+    c.problem = StubProblem()  # type: ignore[assignment]
+
+    p = BifurcationGUISolutionPoint(1.0, {}, 0j, "state.dump", 0,
+                                    eig_values=[-0.2 + 0j, 0j, -1.0 + 0j], tracked_eigenindex=1)
+    assert not c.compute_spectrum(p), "a located bifurcation must not be re-solved from its dump"
+    assert p.eig_value_Re == 0 and p.eig_values[1] == 0j
+
+    # A stripe scan at a bifurcation is worth having - a Hopf pair far up the axis is exactly what it
+    # finds - so it merges rather than being refused, and carries the tracked zero across. The scan's
+    # own copy of it (a rounding-error-sized number) is dropped, not listed beside it.
+    c._store_spectrum(p, [7e-12 + 0j, -0.2 + 0j, -0.05 + 3.0j, -0.05 - 3.0j], None, merge=True)
+    assert p.eig_value_Re == 0, "still a bifurcation"
+    assert p.tracked_eigenindex is not None
+    assert p.eig_values[p.tracked_eigenindex] == 0j
+    assert sum(1 for v in p.eig_values if abs(v) < 1e-6) == 1, p.eig_values
+    assert p.measured_unstable_count() == 0, p.eig_values
+    assert complex(-0.05, 3.0) in p.eig_values, "and the scan's own findings are kept"
+
+    # An ordinary point has no tracked entry, and a stale index would mark an unrelated eigenvalue.
+    q = BifurcationGUISolutionPoint(1.0, {}, -0.2 + 0j, "state.dump", 0,
+                                    eig_values=[-0.2 + 0j], tracked_eigenindex=0)
+    c._store_spectrum(q, [-0.3 + 0j, -0.9 + 0j], None, merge=False)
+    assert q.tracked_eigenindex is None
+    assert numpy.isclose(q.eig_value_Re, -0.3)
 
 def test_arclength_proportion_must_be_a_proper_fraction():
     """D outside (0,1) would make oomph divide by D or by 1-D when it retunes theta^2."""
@@ -1001,6 +1240,9 @@ def test_arclength_retune_steps_aside_on_an_inconsistent_continuation_state():
             self.ddof, self.cur, self.n = ddof, cur, n
             self.written = []
         def _get_n_unaugmented_dofs(self): return 0
+        # An orbit handler is augmented without saying so through the count above, so the retune
+        # asks what is installed as well; nothing is, here.
+        def assembly_handler_pt(self): return None
         def is_distributed(self): return False
         def ndof(self): return self.n
         def get_arclength_dof_derivative_vector(self): return numpy.array(self.ddof, dtype=float)
@@ -1248,6 +1490,32 @@ def test_outputting_a_tagged_point_writes_its_fields(tmp_path):
     assert "TAGOUT OK" in out
 
 
+def test_failed_command_rolls_back(tmp_path):
+    """A command that fails leaves the problem, and the diagram, where it started.
+
+    oomph-lib's steady Newton solve re-raises without restoring the dofs, and under a tracker the
+    continuation parameter is one of them - so a diverging search used to walk the problem off the
+    branch and take the parameter with it (measured: -0.629 -> +2.371), while the diagram still
+    showed the point that was current. The field plots then drew the diverged state and the next
+    continuation step started from it and died.
+
+    Two failures are exercised, because the recovery is not the same in both. On an ordinary branch
+    the state simply goes back. On a LOCUS the bifurcation tracker has to survive it: a state file
+    holds the base problem only, so loading one takes the augmentation off (measured: ndof 3 -> 1)
+    and every later step would then continue an ordinary branch while claiming to follow the fold.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "command_rollback_worker.py")
+    proc = subprocess.run([sys.executable, worker, os.path.join(str(tmp_path), "out")],
+                          cwd=here, capture_output=True, text=True, timeout=900)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+    assert "ROLLBACK OK" in out
+
+
 @pytest.mark.parametrize("policy", ["off", "when_needed", "every_n"])
 def test_adaptivity_during_continuation(policy, tmp_path):
     """The GUI can remesh/adapt during a sweep, and the arclength metric survives it.
@@ -1279,7 +1547,7 @@ def test_adaptivity_during_continuation(policy, tmp_path):
 def test_a_state_saved_on_an_adapted_mesh_restores_its_tangent(tmp_path):
     """Loading a state must apply its continuation tangent AFTER the equations are renumbered.
 
-    define_state_file reads the meshes but the numbering is rebuilt only after it returns -
+    _define_state_file reads the meshes but the numbering is rebuilt only after it returns -
     rebuild_global_mesh_from_list, actions_after_adapt and reapply_boundary_conditions all run later. So
     the tangent used to be checked against the OLD dof count, and any state saved on an adapted mesh
     threw "Mismatching size in the dof direction vector" and took the whole reload with it. It is now
@@ -1329,6 +1597,93 @@ def test_a_state_dumped_while_tracking_can_be_reloaded(tmp_path):
     assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
     assert "Mismatching size" not in out
     assert "TRACKED STATE OK" in out
+
+
+def _stub_branch(controller, coords):
+    """A branch of synthetic points at the given (x, y), in the order given."""
+    from pyoomph.utils.bifurcation_gui.model import (BifurcationGUISolutionBranch,
+                                                     BifurcationGUISolutionPoint)
+    pts = [BifurcationGUISolutionPoint(float(x), {"u": float(y)}, -1 + 0j, None, i,
+                                       param_values={"mu": float(x)})
+           for i, (x, y) in enumerate(coords)]
+    b = BifurcationGUISolutionBranch(list(pts), kind="solution", continuation_parameter="mu")
+    controller.branches = [b]
+    controller.current_branch = b
+    controller.current_point = b[0]
+    return b
+
+
+def _branch_length(controller, branch):
+    pts = controller._view_normalised_coordinates(branch)
+    return float(numpy.sum(numpy.sqrt(numpy.sum(numpy.diff(pts, axis=0)**2, axis=1))))
+
+
+def test_disentangle_branch_shortens_the_curve_and_keeps_its_direction():
+    """Reorder a branch that moving points by hand has left doubling back on itself.
+
+    Grabbing a point moves its coordinates but not its place in the branch, so the line drawn through
+    the branch crosses itself. The order is bookkeeping - each point is a full solution in its own
+    right - so it is recomputed as the shortest polyline through all of them, measured in the visible
+    box, which is the criterion the eye uses.
+
+    The curve here is x = u - u^3, an S with two folds, precisely because sorting by the parameter is
+    NOT the answer on a bifurcation diagram: the shortest path has to follow the S around both folds.
+    It is checked against the exact order the points were built in, from a full shuffle.
+    """
+    import random
+
+    from pyoomph.utils.bifurcation_gui.controller import BifurcationController, _FixedViewLimits
+
+    c = BifurcationController.__new__(BifurcationController)
+    c._on_log = lambda *a: None
+    c._on_changed = None
+    c._on_status = None
+    c._on_busy = None
+    c._paramname = "mu"
+    c._x_axis = None
+    c._y_axis = None
+    c._current_observable = "u"
+    c._avail_observables = ["u"]
+    c._extremum_axes = set()
+    c.view = _FixedViewLimits(xlim=(-1.2, 1.2), ylim=(-1.6, 1.6))
+    c.disentangle_max_points = 2000
+
+    u = numpy.linspace(-1.5, 1.5, 41)
+    b = _stub_branch(c, list(zip(u - u**3, u)))
+    exact = [p.obs_values["u"] for p in b]
+    straight = _branch_length(c, b)
+
+    order = list(range(len(b)))
+    random.Random(7).shuffle(order)
+    pts = list(b.data)
+    b.data = [pts[i] for i in order]
+    assert _branch_length(c, b) > 5 * straight, "the shuffle did not tangle it"
+
+    assert c.disentangle_branch(b) is True
+    assert _branch_length(c, b) == pytest.approx(straight, rel=1e-12)
+    got = [p.obs_values["u"] for p in b]
+    assert numpy.allclose(got, exact), "the S-curve order was not recovered"
+    # Following the curve, not sorting by the parameter: x turns around twice along it.
+    xs = [p.param_value for p in b]
+    assert not (xs == sorted(xs) or xs == sorted(xs, reverse=True))
+
+    # Idempotent, and it says so rather than reordering for nothing.
+    assert c.disentangle_branch(b) is False
+
+    # A branch travelling the other way keeps that direction - otherwise Step would continue backwards
+    # and "select next" would mean the other end.
+    b.data = list(reversed(pts))
+    c._renormalise_scoords(b)
+    b.data.insert(30, b.data.pop(5))
+    assert c.disentangle_branch(b) is True
+    got = [p.obs_values["u"] for p in b]
+    assert got[0] > got[-1], "the direction of travel was flipped"
+    assert numpy.allclose(got, exact[::-1])
+
+    # s is what the splines, the export and the stability segmentation sort by.
+    s = [p.scoord for p in b]
+    assert s[0] == 0.0 and s[-1] == pytest.approx(1.0)
+    assert all(s[i] <= s[i+1] for i in range(len(s)-1))
 
 
 def test_branch_switch_refuses_a_fold():
@@ -1807,6 +2162,143 @@ def _diagram_with_two_branches():
     return c, first, second
 
 
+def test_a_fresh_diagram_opens_on_a_window_derived_from_ds():
+    """The starting window along the parameter axis: 10 ds ahead of the first point, 2 ds behind it.
+
+    It used to be a 1e-4 box in both directions, which made the very first thing on the screen -- the
+    direction arrow, which is ds long -- five hundred times wider than the axes. Ahead is where Step
+    is about to go and roughly what a multistep sweep covers before it stops at the border; a little
+    behind so the point is not glued to the edge and Reverse has somewhere to land.
+
+    Across the parameter the tiny box stays: nothing is known about the observable's scale before
+    anything has been solved, and the view only ever grows as points arrive.
+    """
+    from pyoomph.utils.bifurcation_gui.model import observable_axis, parameter_axis
+
+    c, first, _second = _diagram_with_two_branches()
+    c._tangs = {}
+    fresh = type(first)([first[0]], continuation_parameter="mu")
+    c.branches = [fresh]
+    c.current_branch, c.current_point = fresh, fresh[0]
+    mu = float(fresh[0].param_value)
+    u = float(fresh[0].obs_values["ode/u"])
+
+    c._last_ds = 0.05
+    assert numpy.allclose(c.initial_view_box(),
+                          [mu - 0.1, mu + 0.5, u - 1e-4, u + 1e-4]), c.initial_view_box()
+    # Stepping the other way opens the window the other way round, not upside down.
+    c._last_ds = -0.05
+    assert numpy.allclose(c.initial_view_box(),
+                          [mu - 0.5, mu + 0.1, u - 1e-4, u + 1e-4]), c.initial_view_box()
+    # It follows the axes rather than assuming the parameter is on x.
+    c._last_ds = 0.05
+    c._x_axis, c._y_axis = observable_axis("ode/u"), parameter_axis("mu")
+    assert numpy.allclose(c.initial_view_box(),
+                          [u - 1e-4, u + 1e-4, mu - 0.1, mu + 0.5]), c.initial_view_box()
+    c._x_axis = c._y_axis = None
+    # A zero ds has no direction and no length, so there is nothing to derive a window from.
+    c._last_ds = 0.0
+    assert numpy.allclose(c.initial_view_box(),
+                          [mu - 1e-4, mu + 1e-4, u - 1e-4, u + 1e-4]), c.initial_view_box()
+
+
+def test_the_default_deflated_scan_is_the_default_window():
+    """The default scan covers exactly what a fresh diagram shows, and reports itself as uncut.
+
+    Three defaults have to agree for that: the increment is ds, the count is 10, and the window opens
+    initial_view_ds_ahead = 10 ds ahead of the first point. When they did not -- the increment used to
+    be 0.05*|parameter|, which is unrelated to ds and to the window -- one step could already leave
+    the plot and the tab read "1 step (cut short by the visible range)" before anything had been done.
+
+    Checked over four parameter magnitudes and both directions, because the failure was scale
+    dependent: it only showed up where 0.05*|parameter| was large against ds.
+    """
+    class _ViewFromBox:
+        """Stands in for the plotter: the window initialise_view() would have set."""
+
+        def __init__(self, c):
+            self.c = c
+
+        def get_xlim(self):
+            b = self.c.initial_view_box()
+            return (b[0], b[1])
+
+        def get_ylim(self):
+            b = self.c.initial_view_box()
+            return (b[2], b[3])
+
+        def get_xscale(self):
+            return "linear"
+
+        def get_yscale(self):
+            return "linear"
+
+    for param, ds in ((20.0, 0.05), (0.5, 0.01), (-3.0, 0.2), (1000.0, 1.0)):
+        for signed in (ds, -ds):
+            c, first, _second = _diagram_with_two_branches()
+            c._tangs = {}
+            c._last_ds = signed
+            c.deflated_scan_steps = 10
+            c.deflated_scan_dparam = None
+            fresh = type(first)([type(first[0])(param, {"ode/u": 0.5}, -1.0, "", 0,
+                                                param_values={"mu": param})],
+                                continuation_parameter="mu")
+            c.branches = [fresh]
+            c.current_branch, c.current_point = fresh, fresh[0]
+            c.get_bifurcation_parameter = lambda p=param: type("P", (), {"value": p})()
+            c.view = _ViewFromBox(c)
+
+            values = c.deflated_scan_values()
+            assert len(values) - 1 == 10, \
+                "mu0={:g} ds={:g}: {:d} steps".format(param, signed, len(values) - 1)
+            assert not c.deflated_scan_is_clipped(), \
+                "mu0={:g} ds={:g}: the default scan must fit the default window".format(param, signed)
+            assert abs(values[-1] - (param + 10*signed)) < 1e-9*max(1.0, abs(param)), values[-1]
+            assert (values[-1] > values[0]) == (signed > 0), "the scan must follow the sign of ds"
+
+
+def test_a_fresh_diagram_shows_which_way_step_will_go():
+    """The continuation arrow on a brand-new diagram, where there is no tangent yet.
+
+    The arrow is drawn from the arclength tangent recorded for the plotted observable, and a diagram
+    with one point has none -- so it used to be missing at the moment it is most wanted, before the
+    first Step, when the question is exactly "which way?". A first step moves the parameter and, to
+    first order, nothing else, so the fallback is a unit vector along whichever axis carries the
+    parameter; the plotter multiplies by ds, which draws (ds, 0) on the ordinary diagram.
+
+    The fallback must NOT reach a located bifurcation, where _tangs is emptied on purpose and the
+    arrows worth drawing are the departure directions the plotter draws itself.
+    """
+    from pyoomph.utils.bifurcation_gui.model import observable_axis, parameter_axis
+
+    c, first, second = _diagram_with_two_branches()
+    c._tangs = {}
+    c._last_ds = 0.05
+
+    # A branch of one point: no tangent, so the parameter axis is the answer.
+    fresh = type(first)([first[0]], continuation_parameter="mu")
+    c.branches = [fresh]
+    c.current_branch, c.current_point = fresh, fresh[0]
+    assert numpy.allclose(c.plotted_tangent(), [1.0, 0.0]), c.plotted_tangent()
+    # Reversing ds does not flip the VECTOR -- the plotter multiplies by ds and gets the sign there.
+    c._last_ds = -0.05
+    assert numpy.allclose(c.plotted_tangent(), [1.0, 0.0]), c.plotted_tangent()
+    # ... and it follows the axes rather than assuming the parameter is on x.
+    c._x_axis, c._y_axis = observable_axis("ode/u"), parameter_axis("mu")
+    assert numpy.allclose(c.plotted_tangent(), [0.0, 1.0]), c.plotted_tangent()
+    c._x_axis = c._y_axis = None
+
+    # A real tangent always wins over the fallback.
+    c._tangs = {"ode/u": numpy.array([0.3, 0.9])}
+    assert numpy.allclose(c.plotted_tangent(), [0.3, 0.9])
+
+    # A branch that has points but no tangent is a located bifurcation: no fallback arrow there.
+    c._tangs = {}
+    c.branches = [first]
+    c.current_branch, c.current_point = first, first[-1]
+    assert c.plotted_tangent() is None, "the fallback must not reach a bifurcation"
+
+
 def test_a_branch_can_be_split_at_a_point():
     """Cutting a branch in two, for when a continuation step landed on a different one.
 
@@ -1832,6 +2324,134 @@ def test_a_branch_can_be_split_at_a_point():
         assert "first point" in str(e)
     else:
         raise AssertionError("splitting at the first point of a branch has to be refused")
+
+
+def test_a_real_eigenvalues_eigenvector_has_no_imaginary_part_to_plot():
+    """Re v and Im v of a real mode are the same function, so only one of them is worth drawing.
+
+    A real eigenvalue's eigenvector is fixed only up to a global phase, and a COMPLEX PETSc build has
+    no reason to return it with that phase set to zero: what comes back is exp(i*phi)*w for a real w,
+    so Re v = cos(phi)*w and Im v = sin(phi)*w. Autoscaled - which an eigenplot is, having no scale in
+    common with the solution - the two panes are the same picture twice, which is how this was
+    noticed.
+
+    The test is on the eigenVECTOR, not on the eigenvalue: "is Im(lambda) small" needs a scale to be
+    small against, and near a fold both parts of lambda go to zero together, while "are Re v and Im v
+    parallel" needs none and is the question the plot actually asks.
+    """
+    from pyoomph.utils.bifurcation_gui.controller import BifurcationController
+
+    class _Stub:
+        def __init__(self, vectors):
+            self._v = vectors
+
+        def get_last_eigenvectors(self):
+            return self._v
+
+    def is_real(vectors, index=0):
+        c = BifurcationController.__new__(BifurcationController)
+        c.problem = _Stub(vectors)   # type:ignore[assignment]
+        return c.eigenvector_is_essentially_real(index)
+
+    w = numpy.array([1.0, -2.0, 0.5, 3.0])
+    # The case that started this: a real mode carrying an arbitrary phase.
+    for phi in (0.0, 0.3, 1.0, numpy.pi/2, 2.5, numpy.pi):
+        assert is_real([numpy.exp(1j*phi)*w]), "phase {:g} is still a real mode".format(phi)
+    # A real vector stored as real, and a purely imaginary one - i*w is as real a mode as w.
+    assert is_real([w.astype(complex)])
+    assert is_real([1j*w])
+    # A genuinely complex mode, i.e. a Hopf pair, has two independent functions and must keep both.
+    u = numpy.array([0.0, 1.0, 1.0, -1.0])
+    assert not is_real([w + 1j*u]), "a mode whose parts are not parallel is complex"
+    # Numerical dirt on top of a real mode does not make it complex.
+    assert is_real([numpy.exp(0.7j)*w + 1e-12j*u])
+    # Nothing solved yet, or fewer vectors than asked for: nothing to draw either way.
+    assert is_real(None)
+    assert is_real([w + 1j*u], index=3)
+
+
+def test_stability_is_not_inferred_across_a_point_with_no_test_function():
+    """Propagation needs a test function at every point it walks across, not just at the ends.
+
+    The argument for carrying an unstable count along a branch is that sign(det J) flips exactly when
+    an odd number of real eigenvalues crosses zero -- which says nothing at all about a point that has
+    no det_sign and no dparam_ds either. A DEFLATED SCAN records exactly such points: it steps the
+    parameter with no arclength control and no test function, in precisely the regions where branches
+    appear and disappear. Carrying the count across them would not be an inference, it would be an
+    assumption drawn in the same colour as a measurement.
+
+    Quick mode is unaffected -- its points always carry one of the two -- and that is asserted here
+    too, because the cheap way to "fix" this would be to stop propagating anywhere.
+    """
+    from pyoomph.utils.bifurcation_gui.controller import BifurcationController
+    from pyoomph.utils.bifurcation_gui.model import (BifurcationGUISolutionBranch,
+                                                     BifurcationGUISolutionPoint, STABILITY_EIGEN,
+                                                     STABILITY_INFERRED, STABILITY_UNKNOWN)
+
+    def point(mu, u, det=None, dparam=None, eig=None):
+        return BifurcationGUISolutionPoint(mu, {"ode/u": u}, eig, "", 0,
+                                           param_values={"mu": mu},
+                                           eig_values=[eig] if eig is not None else None,
+                                           det_sign=det, dparam_ds=dparam)
+
+    def propagate(branch):
+        c = BifurcationController.__new__(BifurcationController)
+        c._on_changed = c._on_status = c._on_busy = None
+        c._on_log = lambda *a: None
+        c._paramname = "mu"
+        c.branches = [branch]
+        c.propagate_stability(branch)
+        return branch
+
+    # Quick mode: one measured anchor, then determinant signs. Still inferred, still flipped where
+    # the sign changes.
+    b = propagate(BifurcationGUISolutionBranch(
+        [point(0.0, 0.0, eig=-1.0), point(0.1, 0.1, det=1), point(0.2, 0.2, det=-1),
+         point(0.3, 0.3, det=-1)]))
+    assert [p.stability_source for p in b] == [STABILITY_EIGEN] + [STABILITY_INFERRED]*3
+    assert [p.unstable_count for p in b] == [0, 0, 1, 1]
+
+    # "Folds only": dparam_ds and no determinant is still a test function.
+    b = propagate(BifurcationGUISolutionBranch(
+        [point(0.0, 0.0, eig=-1.0), point(0.1, 0.1, dparam=0.5), point(0.2, 0.2, dparam=0.5)]))
+    assert all(p.stability_source == STABILITY_INFERRED for p in b[1:])
+
+    # A deflated scan: neither, so the points stay unknown however close the measured one is.
+    b = propagate(BifurcationGUISolutionBranch(
+        [point(0.0, 0.0, eig=-1.0), point(0.5, 0.7), point(1.0, 1.0)]))
+    assert b[0].stability_source == STABILITY_EIGEN
+    assert all(p.stability_source == STABILITY_UNKNOWN and p.unstable_count is None for p in b[1:])
+
+    # The blind spot hides what is beyond it, but only from that side: a point past it is still
+    # reached from the anchor on the other end.
+    b = propagate(BifurcationGUISolutionBranch(
+        [point(0.0, 0.0, eig=-1.0), point(0.5, 0.7), point(1.0, 1.0, det=1), point(1.5, 1.2, eig=2.0)]))
+    assert b[1].stability_source == STABILITY_UNKNOWN
+    assert b[2].stability_source == STABILITY_INFERRED
+
+
+def test_a_branch_can_be_deleted_whole():
+    """Deleting a branch removes it and nothing else, and the last one is refused.
+
+    The refusal is the part worth pinning: with no branches left the problem would be sitting on a
+    solution the diagram does not know about, and every command that reads current_point would be
+    working from a stale one. Deleting the branch the problem is ON is the other half and needs a real
+    Problem to reload from, so it lives in delete_branch_worker.py.
+    """
+    c, first, second = _diagram_with_two_branches()
+    # The one that is NOT current, so nothing has to be reloaded.
+    c.selected_branch, c.selected_point = second, second[0]
+    npoints = len(second)
+    assert c.delete_branch() == npoints
+    assert c.branches == [first], "only the deleted branch may go"
+    assert c.current_branch is first and c.current_point is first[-1], \
+        "deleting another branch must not move the problem"
+    assert c.selected_branch is None and c.selected_point is None, \
+        "the selection pointed into the branch that is gone"
+
+    with pytest.raises(RuntimeError, match="last branch"):
+        c.delete_branch()
+    assert c.branches == [first], "the refusal must leave the diagram untouched"
 
 
 def test_two_branches_can_be_merged_by_the_ends_that_meet():
@@ -1915,6 +2535,89 @@ def test_the_branch_switch_offset_follows_the_step_size():
     assert abs(c.branch_switch_parameter_offset() - 0.02*1.2716) < 1e-12
 
 
+def test_arclength_metric_radio_group(tmp_path):
+    """The GUI starts in the mass-matrix metric and the menu's dot says which one is in force.
+
+    oomph's dof-sum norm is mesh-dependent - the same ds buys a different step after a refinement -
+    so the controller sets the "l2" inner product in its constructor. The three menu entries are one
+    radio group whose dot is re-read from the problem after every command, so a failed or
+    self-adjusting switch cannot leave it pointing at a metric that is not active.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "arclength_metric_menu_worker.py")
+    proc = subprocess.run(gui_launch_prefix() + [sys.executable, worker],
+                          cwd=here, capture_output=True, text=True, timeout=300)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+    assert "ARCLENGTH METRIC OK" in out
+
+
+def test_deflation_finds_the_branch_arclength_cannot_reach(tmp_path):
+    """The Deflation tab's two commands, against a problem whose whole solution set is known.
+
+    du/dt = mu - u^2 has exactly the two solutions u = +-sqrt(mu), and arclength continuation started
+    on one of them reaches the other only by going round the fold at mu = 0. Deflation has to find it
+    standing still - and, because there are only two, a SECOND deflated solve has to find nothing,
+    which is what separates deflation from perturbing and re-converging onto the branch one is on.
+
+    Out of process because it needs its own Problem, following the worker pattern the rest of this
+    suite uses; no window is involved, the controller is driven directly.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "deflation_gui_worker.py")
+    proc = subprocess.run([sys.executable, worker, "--outdir", os.path.join(str(tmp_path), "out")],
+                          cwd=here, capture_output=True, text=True, timeout=900)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+    assert "DEFLATION GUI OK" in out
+
+
+def test_deleting_the_branch_the_problem_is_on(tmp_path):
+    """The other half of test_a_branch_can_be_deleted_whole, which needs a real Problem.
+
+    Deleting the branch the problem is sitting on has to leave it loaded somewhere else -- not merely
+    re-pointed at another branch, the dofs have to be those of the point it landed on, or the next
+    step continues from a solution the diagram does not show. The state dumps must be gone too, which
+    is what makes this the one diagram command reloading cannot undo.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "delete_branch_worker.py")
+    proc = subprocess.run([sys.executable, worker, "--outdir", os.path.join(str(tmp_path), "out")],
+                          cwd=here, capture_output=True, text=True, timeout=900)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+    assert "DELETE BRANCH OK" in out
+
+
+def test_deflation_tab_settings_round_trip(tmp_path):
+    """What is typed into the Deflation tab reaches the controller, and a refresh brings it back.
+
+    The tab's variables only exist once the window is built, i.e. tk.Tk(), so this runs as a worker
+    under gui_launch_prefix() like the other window-opening tests. It also pins the two settings whose
+    empty value means something other than zero - the random seed (unseeded) and the Newton cap (the
+    problem's own) - and that a refused value leaves the old one in place rather than a default.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "deflation_tab_worker.py")
+    proc = subprocess.run(gui_launch_prefix() + [sys.executable, worker],
+                          cwd=here, capture_output=True, text=True, timeout=300)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+    assert "DEFLATION TAB OK" in out
+
+
 def test_every_default_shortcut_reaches_a_command(tmp_path):
     """A key in the default map with no action behind it does nothing, silently.
 
@@ -1933,3 +2636,683 @@ def test_every_default_shortcut_reaches_a_command(tmp_path):
     assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
     assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
     assert "SHORTCUTS OK" in out
+
+
+def test_closing_the_window_lets_go_of_the_problem(tmp_path):
+    """Closing the window must leave nothing of pyoomph behind it.
+
+    The field plots are pyplot-managed figures, so matplotlib's process-wide registry held every
+    pane - and with it the plotter, the mesh data cache, the meshes and the Problem - once the window
+    was gone. Nothing frees such a graph afterwards: what the window registered with Tcl is held by
+    the interpreter, and the references a C++ object holds through nanobind are invisible to the
+    cyclic collector, so a graph joining the two is beyond it for good and nanobind reports it as
+    leaked instances while the interpreter shuts down.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "gui_close_teardown_worker.py")
+    proc = subprocess.run(gui_launch_prefix() + [sys.executable, worker, "--outdir", str(tmp_path)],
+                          cwd=here, capture_output=True, text=True, timeout=600)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+    assert "GUI CLOSE TEARDOWN OK" in out
+    assert "nanobind: leaked" not in out, "C++ objects outlived the process:\n" + out[-3000:]
+
+
+def test_a_window_that_fails_to_open_is_not_left_standing(tmp_path):
+    """A window is never freed unless it is destroyed, so a failed set-up has to destroy it.
+
+    Building the window reads the controller (the axis menus do), and a session not far enough along
+    for that used to leave the whole window standing behind the exception - 61 leaked nanobind
+    instances at exit, measured, for a session that had not even started.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "gui_close_teardown_worker.py")
+    proc = subprocess.run(gui_launch_prefix() + [sys.executable, worker, "--phase", "raises"],
+                          cwd=here, capture_output=True, text=True, timeout=300)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+    assert "GUI FAILED-SETUP TEARDOWN OK" in out
+    assert "nanobind: leaked" not in out, "C++ objects outlived the process:\n" + out[-3000:]
+
+
+def test_clearing_the_artists_also_removes_a_shaded_band():
+    """A fill_between must not survive into the next redraw.
+
+    _clear_artists sweeps lines, artists, annotations and texts, none of which reaches a
+    PolyCollection - which is what fill_between (the orbit min/max band) returns. Left in, the bands
+    accumulate one per redraw: the shading darkens on every keystroke and the artist count grows
+    without bound over a session.
+    """
+    from pyoomph.utils.bifurcation_gui.plotter import BifurcationDiagramPlotter
+
+    plotter = BifurcationDiagramPlotter()
+    ax = plotter.axes
+    for _ in range(3):
+        ax.plot([0.0, 1.0], [0.0, 1.0])
+        ax.fill_between([0.0, 1.0], [0.0, 0.0], [1.0, 1.0])
+        plotter._clear_artists()
+        assert len(ax.lines) == 0
+        assert len(ax.collections) == 0, "a band survived the sweep and would be drawn again"
+
+
+def test_exporting_every_observable_skips_the_ones_a_branch_does_not_have(tmp_path):
+    """output_all_observables must not take the whole export down over one missing observable.
+
+    Not every branch carries every name in _avail_observables: the mode observables appear the first
+    time a mode scan runs, and an orbit's min/max only ever exist on orbit branches. get_coordinate
+    raises KeyError rather than skipping, so the export used to die on the first branch that predated
+    the observable being added.
+    """
+    from pyoomph.utils.bifurcation_gui.model import BRANCH_SOLUTION
+
+    c, first, second = _diagram_with_two_branches()
+    # A second observable that only the second branch has, exactly as a mode scan produces one.
+    for p in second:
+        p.obs_values["eigen/max Re [m=1]"] = 0.25
+    c._avail_observables = ["ode/u", "eigen/max Re [m=1]"]
+    c._observable_units = {}
+    c._eigen_unit = ""
+    c.output_all_observables = True
+    c.interpolated_splines = False
+    c.trust_inferred_stability = True
+    c.count_normal_modes_in_stability = True
+    c.data_subdir = "_bifurcation_gui_data"
+
+    class _FakeProblem:
+        def get_output_directory(self, sub):
+            return os.path.join(str(tmp_path), sub)
+    c.problem = _FakeProblem()
+
+    odir = c.output_curves()
+
+    files = glob.glob(os.path.join(odir, "*", "*", "*.txt"))
+    assert files, "nothing was exported"
+    headers = {f: open(f).readline() for f in files}
+    # The branch that has the mode observable gets its column; the one that does not is exported
+    # without it rather than not at all.
+    with_mode = [h for h in headers.values() if "eigen/max Re [m=1]" in h]
+    without = [h for h in headers.values() if "eigen/max Re [m=1]" not in h]
+    assert with_mode and without, "expected one branch with the column and one without: " + str(headers)
+    assert all("ode/u" in h for h in headers.values())
+
+
+def _orbit_branch(n=6, kind=None):
+    """A branch of periodic orbits: average 0, band +-r, period constant. No problem behind it."""
+    from pyoomph.utils.bifurcation_gui.model import (BifurcationGUISolutionBranch,
+                                                     BifurcationGUISolutionPoint, BRANCH_ORBIT,
+                                                     ORBIT_T_KEY, orbit_band_names)
+    lo, hi = orbit_band_names("ode/x")
+    pts = []
+    for i in range(n):
+        mu = -0.5 + 0.1*i
+        r = abs(mu)**0.5
+        obs = {"ode/x": 0.0, lo: -r, hi: +r, ORBIT_T_KEY: 6.283185307179586}
+        p = BifurcationGUISolutionPoint(mu, obs, -0.3, "", i, param_values={"mu": mu})
+        p.scoord = float(i)
+        p.orbit_info = {"T": 6.283185307179586, "nT": 31, "mode": "collocation", "order": 3,
+                        "GL_order": -1, "T_constraint": "phase", "nbase": 2, "format": "dofs"}
+        p.floquet = [complex(0.6, 0.0)]
+        pts.append(p)
+    return BifurcationGUISolutionBranch(pts, kind=kind or BRANCH_ORBIT,
+                                        continuation_parameter="mu")
+
+
+def test_an_orbit_branch_round_trips_through_the_diagram_file():
+    """kind, the period, the band and the multipliers must all survive save/load.
+
+    The branch kind has always round-tripped, so no format version bump is involved; what is new is
+    the per-point orbit record, which follows the same "write it only when it is there, read it with
+    a default" convention as every other optional field.
+    """
+    from pyoomph.utils.bifurcation_gui.model import (BifurcationGUISolutionBranch, BRANCH_ORBIT,
+                                                     ORBIT_T_KEY, orbit_band_names)
+
+    b = _orbit_branch()
+    back = BifurcationGUISolutionBranch.from_dict(json.loads(json.dumps(b.to_state_dict())))
+    assert back.kind == BRANCH_ORBIT
+    lo, hi = orbit_band_names("ode/x")
+    for a, c in zip(b, back):
+        assert c.orbit_info is not None
+        assert c.orbit_info["T"] == a.orbit_info["T"]
+        assert c.orbit_info["mode"] == "collocation"
+        assert c.floquet == a.floquet
+        assert c.obs_values[lo] == a.obs_values[lo]
+        assert c.obs_values[hi] == a.obs_values[hi]
+        assert c.obs_values[ORBIT_T_KEY] == a.obs_values[ORBIT_T_KEY]
+    # A stationary point must stay distinguishable from an orbit point that happens to have no data.
+    plain = BifurcationGUISolutionBranch.from_dict(json.loads(json.dumps(
+        _orbit_branch(kind="solution").to_state_dict())))
+    assert plain.kind == "solution"
+    assert "orbit_info" in b[0].to_state_dict()
+    from pyoomph.utils.bifurcation_gui.model import BifurcationGUISolutionPoint
+    assert "orbit_info" not in BifurcationGUISolutionPoint(
+        1.0, {"ode/u": 0.0}, -1.0, "", 0).to_state_dict()
+
+
+def test_the_orbit_band_is_one_polyline_pair_over_the_whole_branch():
+    """The band must not be built per stability segment.
+
+    to_branch_stab_list repeats a point at every change of stability, so a band assembled from those
+    segments covers each join twice - with alpha, that is a visibly darker bar at exactly the places
+    the diagram is being read most carefully.
+    """
+    from pyoomph.utils.bifurcation_gui.model import observable_axis, parameter_axis
+
+    b = _orbit_branch()
+    # Make the branch change stability half way, which is what produces the overlapping segments.
+    for p in b[3:]:
+        p.eig_value_Re = +0.3
+    y, x = observable_axis("ode/x"), parameter_axis("mu")
+    segs, _ = b.to_branch_stab_list(y, xspec=x)
+    assert sum(len(s) for s in segs) > len(b), "expected the segments to overlap, or this proves nothing"
+
+    xs, lo, hi = b.orbit_band(y, xspec=x)
+    assert len(xs) == len(b), "one point per point of the branch, no repeats"
+    assert len(set(map(float, xs))) == len(xs), "a repeated x is a doubly covered join"
+    assert all(l <= h for l, h in zip(lo, hi))
+
+    xs_s, lo_s, hi_s = b.orbit_band(y, xspec=x, smooth=True)
+    assert len(xs_s) > len(xs)
+    assert all(l <= h + 1e-12 for l, h in zip(lo_s, hi_s)), "the smoothed band must not cross itself"
+
+
+def test_a_branch_without_a_band_is_simply_not_shaded():
+    """Everything that legitimately has no band returns None rather than raising."""
+    from pyoomph.utils.bifurcation_gui.model import observable_axis, parameter_axis, ORBIT_T_KEY
+
+    b = _orbit_branch()
+    x = parameter_axis("mu")
+    assert b.orbit_band(parameter_axis("mu"), xspec=x) is None, "a parameter on y has no band"
+    assert b.orbit_band(observable_axis(ORBIT_T_KEY), xspec=x) is None, "the period has no band"
+    assert b.orbit_band(observable_axis("ode/nosuch"), xspec=x) is None
+    assert _orbit_branch(kind="solution").orbit_band(observable_axis("ode/x"), xspec=x) is None
+    # A constant observable over the cycle: a degenerate band, which must still be a valid one.
+    flat = _orbit_branch()
+    from pyoomph.utils.bifurcation_gui.model import orbit_band_names
+    lo_n, hi_n = orbit_band_names("ode/x")
+    for p in flat:
+        p.obs_values[lo_n] = p.obs_values[hi_n] = p.obs_values["ode/x"]
+    xs, lo, hi = flat.orbit_band(observable_axis("ode/x"), xspec=x)
+    assert list(lo) == list(hi)
+
+
+def test_an_orbit_branch_says_what_it_is():
+    b = _orbit_branch()
+    text = b.describe()
+    assert "periodic orbit" in text
+    assert "31 time steps" in text
+    assert "collocation" in text and "order 3" in text
+    assert "continued in mu" in text
+
+
+def _run_orbit_worker(tmp_path, phase, extra=(), outdir=None):
+    """One phase of tests/orbit_gui_worker.py, returning its JSON result."""
+    import subprocess
+
+    libdir = _complex_petsc_pythonpath()
+    if libdir is None:
+        pytest.skip("no complex PETSc build found; the Hopf-to-orbit switch needs one (see CLAUDE.md)")
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "orbit_gui_worker.py")
+    out_dir = outdir if outdir is not None else os.path.join(str(tmp_path), "orbit")
+    proc = subprocess.run([sys.executable, worker, "--outdir", out_dir, "--phase", phase, *extra],
+                          cwd=here, capture_output=True, text=True, timeout=1800,
+                          env={**os.environ, "PYTHONPATH": libdir})
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-4000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-4000:]
+    line = [l for l in out.splitlines() if l.startswith("PYOOMPH_ORBIT_RESULT ")]
+    assert line, "worker produced no result:\n" + out[-4000:]
+    return json.loads(line[-1][len("PYOOMPH_ORBIT_RESULT "):])
+
+
+@pytest.mark.parametrize("portable", [False, True], ids=["dofs", "portable"])
+def test_a_hopf_switches_onto_its_periodic_orbit(tmp_path, portable):
+    """Branch switch at a Hopf lands on the orbit, and everything recorded there is checked
+    against the closed form of the normal form rather than against the code's own output.
+
+    The system is m*rdot = mu*r - r^3, m*thetadot = w with m = w = 1: the cycle at mu > 0 has radius
+    exactly sqrt(mu) and period exactly 2*pi, its only non-trivial Floquet multiplier is
+    exp(-2*mu*T), and the trivial one at 1 must not be recorded at all - left in, it flips the whole
+    branch between stable and unstable from one point to the next, because its exponent is a tiny
+    number of either sign.
+    """
+    outdir = os.path.join(str(tmp_path), "orbit")
+    extra = ["--portable"] if portable else []
+    res = _run_orbit_worker(tmp_path, "switch", extra + ["--steps", "3"], outdir=outdir)
+
+    assert res["hopf_type"] == "hopf"
+    assert abs(res["mu_hopf"]) < 1e-9, "the Hopf of this normal form is at mu = 0"
+    assert res["kind"] == "orbit"
+    # The step onto the orbit is the one the current ds buys in the parameter: the orbit's parameter
+    # offset is eps**2, and switch_to_hopf_orbit takes eps = sqrt(dparam).
+    assert res["mu_first_orbit"] == pytest.approx(res["offset"], rel=1e-9)
+
+    for p in res["points"]:
+        mu, T = p["mu"], p["T"]
+        r = mu**0.5
+        assert T == pytest.approx(2*numpy.pi, rel=1e-5), "the period is amplitude-independent here"
+        # The extremes are sampled on the orbit's own time grid, which does not sit on the peak of a
+        # cosine, so they fall short by r*(1-cos(pi/nT)) at most.
+        tol = 3*r*(1 - numpy.cos(numpy.pi/p["nT"])) + 1e-9
+        assert p["max_x"] == pytest.approx(+r, abs=tol)
+        assert p["min_x"] == pytest.approx(-r, abs=tol)
+        assert abs(p["avg_x"]) < 0.01*r, "x averages to zero over the cycle"
+        assert p["min_x"] < p["avg_x"] < p["max_x"]
+
+        assert p["nfloquet"] == 1, "the trivial multiplier at 1 must not be recorded"
+        mult = complex(*p["floquet"][0])
+        assert mult.real == pytest.approx(numpy.exp(-2*mu*T), rel=1e-3)
+        assert abs(mult.imag) < 1e-12
+        # The exponent is what the stability machinery reads, and log(mu)/T = -2*mu here.
+        exponent = complex(*p["exponents"][0])
+        assert exponent.real == pytest.approx(-2*mu, rel=1e-3)
+        assert p["unstable_count"] == 0, "a supercritical Hopf sheds stable orbits"
+
+    assert res["eigenvalues_survived_floquet"], \
+        "the multipliers were left on the problem, where everything else reads eigenvalues"
+    assert res["band_names_registered"]
+    assert res["period_axis_hidden_on_steady"], \
+        "a stationary branch has no period and must drop out of a period-vs-parameter plot"
+    header = res["export_header"]
+    assert "orbit min" in header and "orbit max" in header and "orbit/T" in header
+    assert "FloquetExponent" in header, "on an orbit those columns are not eigenvalues"
+    assert "periodic orbits, 31 time steps" in header
+
+    # ... and the whole thing has to come back off disk, exactly, in a fresh process.
+    back = _run_orbit_worker(tmp_path, "reload", extra, outdir=outdir)
+    assert back["handler_installed"], \
+        "without the handler the problem holds one phase of the cycle, not the orbit"
+    stored, again = back["stored"], back["recomputed"]
+    for key in ("T", "min_x", "max_x", "avg_x"):
+        assert again[key] == stored[key], "the restored orbit is not the one that was stored"
+    assert again["floquet"] == stored["floquet"]
+    # A step from the reloaded orbit goes on where the branch was going.
+    step = back["stepped"]
+    assert step["mu"] > stored["mu"]
+    assert complex(*step["floquet"][0]).real == pytest.approx(
+        numpy.exp(-2*step["mu"]*step["T"]), rel=1e-3)
+
+
+@pytest.mark.parametrize("portable", [False, True], ids=["dofs", "portable"])
+def test_a_tagged_orbit_can_be_started_from_a_plain_script(tmp_path, portable):
+    """A tagged point of an orbit branch has to be a self-contained starting point.
+
+    Tagging a point and outputting it writes output/tagNN/, and what a state dump holds there is ONE
+    phase of the cycle - the rest of it, the period AND the discretization that gives the stored
+    blocks meaning live in the companion beside it. The discretization used to live in the diagram's
+    state.json alone, so a tag folder handed to somebody else was a pile of numbers nobody could
+    rebuild a handler from. It travels in the companion now, and PeriodicOrbit.load_from_state is the
+    way in - so the loading process here never imports the GUI, and the orbit it gets back is checked
+    against the closed form and against what the diagram recorded.
+    """
+    outdir = os.path.join(str(tmp_path), "orbit")
+    extra = ["--portable"] if portable else []
+    res = _run_orbit_worker(tmp_path, "switch", extra + ["--steps", "2", "--tag"], outdir=outdir)
+    assert res["tags_written"] == 1
+    stored = res["tagged"]
+
+    back = _run_orbit_worker(tmp_path, "standalone", ["--tagdir", res["tagdir"]],
+                             outdir=os.path.join(str(tmp_path), "standalone"))
+    assert back["handler_installed"], \
+        "without the handler the problem holds one phase of the cycle, not the orbit"
+    # The discretization came out of the companion, not out of any diagram.
+    assert back["mode"] == "collocation" and back["order"] == 3
+    assert back["nT"] == stored["nT"]
+    assert back["mu"] == stored["mu"], "the tagged point was taken at this parameter value"
+    assert back["T"] == stored["T"]
+    assert back["floquet"] == stored["floquet"]
+
+    # ... and it is the cycle of the normal form. The 200 samples are interpolated off the orbit's
+    # own 31-point collocation, so what is left is that discretization's amplitude error (a few 1e-3
+    # relative here), not the sampling.
+    r = back["mu"]**0.5
+    assert back["T"] == pytest.approx(2*numpy.pi, rel=1e-5)
+    assert back["max_x"] == pytest.approx(+r, rel=5e-3)
+    assert back["min_x"] == pytest.approx(-r, rel=5e-3)
+    assert abs(back["avg_x"]) < 1e-9
+    # A Newton solve on the reloaded orbit system may not have to move it anywhere.
+    assert back["T_after_solve"] == pytest.approx(back["T"], rel=1e-10)
+
+
+def test_a_bspline_orbit_branch_gets_its_floquet_multipliers(tmp_path):
+    """Continue a B-spline orbit branch WITH its stability, without ever converting it.
+
+    A periodic B-spline basis is periodic by construction, so the orbit Jacobian is
+    block-circulant-banded and has no seam for the condensation to cut - the orbit has no multipliers
+    of its own, which is why the GUI used to grey the whole Floquet section out and send the user to
+    "Apply to this orbit". It now asks the ORBIT rather than the problem, and the orbit answers on a
+    collocation sampling of itself, so every point of the branch gets its stability and the branch
+    stays B-spline.
+
+    Judged against the closed form: the non-trivial multiplier of this normal form is exp(-2*mu*T)
+    and its Floquet exponent is -2*mu, at every point.
+    """
+    res = _run_orbit_worker(tmp_path, "bsplinefloquet")
+    assert res["kind"] == "orbit"
+    assert res["installed_mode"] == "bspline"
+    assert res["is_floquet_mode"] is False, "the orbit is supposed to have no structure of its own"
+
+    for p in res["points"]:
+        assert p["mode"] == "bspline", p
+        assert p["T"] == pytest.approx(2*numpy.pi, rel=1e-4)
+        assert len(p["floquet"]) == 1, p          # the trivial one is removed, as on any orbit point
+        assert complex(*p["floquet"][0]).real == pytest.approx(
+            numpy.exp(-2*p["mu"]*p["T"]), rel=1e-4), p
+        assert p["exponent"] == pytest.approx(-2*p["mu"], rel=1e-4), p
+        assert p["unstable_count"] == 0, p
+    assert res["points"][-1]["mu"] > res["points"][0]["mu"], "the branch did not continue"
+
+    # The branch is still B-spline afterwards, and comes back as one from disk.
+    assert res["mode_after"] == "bspline"
+    assert res["mode_after_reload"] == "bspline"
+    assert res["nT_after_reload"] == res["points"][0]["nT"]
+
+
+def test_an_orbit_can_be_re_discretized_in_place(tmp_path):
+    """Convert an orbit found with bsplines into a collocation one, in place.
+
+    The two discretizations are good at different things: bsplines converge more readily on the step
+    off a Hopf. "Apply to this orbit" converts the one that is installed, and the point of the test
+    is that what comes out is the SAME orbit - which the normal form pins exactly: period 2*pi,
+    amplitude sqrt(mu), and one non-trivial multiplier exp(-2*mu*T).
+    """
+    res = _run_orbit_worker(tmp_path, "rediscretize")
+    assert res["kind"] == "orbit"
+    bspl, coll = res["bspline"], res["collocation"]
+
+    # A B-spline orbit has no multipliers OF ITS OWN - the basis is periodic by construction, so its
+    # Jacobian has no seam to cut - but it reports them all the same, computed on a collocation
+    # sampling of itself. Converting it should therefore not change the answer, only the orbit.
+    assert bspl["mode"] == "bspline" and bspl["nfloquet"] == 1
+    assert coll["mode"] == "collocation" and coll["nfloquet"] == 1
+    assert complex(*bspl["floquet"][0]).real == pytest.approx(
+        complex(*coll["floquet"][0]).real, rel=1e-6), \
+        "sampling the bspline orbit and converting it should give the same multiplier"
+
+    # The same orbit, before and after, and the closed form judges both.
+    mu = res["mu"]
+    assert res["mu_unchanged"] == mu, "the conversion moved the parameter"
+    assert res["points_unchanged"], "the conversion recorded a second point instead of updating one"
+    for facts in (bspl, coll):
+        assert facts["T"] == pytest.approx(2*numpy.pi, rel=1e-4)
+        assert complex(*facts["floquet"][0]).real == pytest.approx(
+            numpy.exp(-2*mu*facts["T"]), rel=1e-3)
+        assert facts["max_x"] == pytest.approx(numpy.sqrt(mu), rel=2e-2)
+        assert facts["min_x"] == pytest.approx(-numpy.sqrt(mu), rel=2e-2)
+    assert complex(*coll["floquet"][0]).real == pytest.approx(
+        numpy.exp(-2*mu*coll["T"]), rel=1e-3), "the converted orbit has the wrong stability"
+
+    # It goes on being an orbit branch afterwards, in the new discretization.
+    step = res["stepped"]
+    assert step["mode"] == "collocation" and step["nfloquet"] == 1
+    assert step["mu"] > mu
+    assert complex(*step["floquet"][0]).real == pytest.approx(
+        numpy.exp(-2*step["mu"]*step["T"]), rel=1e-3)
+
+    # ... and the converted point was rewritten on disk, not left holding its old cycle.
+    assert res["reloaded_mode"] == "collocation"
+    assert res["reloaded_nT"] == coll["nT"]
+
+
+@pytest.mark.parametrize("unstable", ["real", "hopf", "stable"])
+@pytest.mark.parametrize("kind", ["pitchfork", "transcritical"])
+def test_branch_switching_at_a_recomputed_real_bifurcation(kind, unstable, tmp_path):
+    """Switching at a pitchfork/transcritical whose classification is recomputed after the fact.
+
+    Two defects met on this path, and both had to go before any of the six combinations worked. The
+    normal form was built from eigenpair 0 of the last eigensolve, which on an already-unstable
+    branch is the mode that went unstable earlier; and that eigensolve was taken at shift 0, which is
+    exactly where a located REAL bifurcation's Jacobian is singular - so the critical eigenvalue came
+    back as +0.36787944, or -1.2e18, or not at all. The "stable" case is the control: it has no
+    unstable mode at all and still failed, on the second defect alone.
+
+    The landings are checked against the closed form: a pitchfork's arms are at x = +-sqrt(mu) and a
+    transcritical's second branch at x = mu.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "secondary_real_bifurcation_worker.py")
+    proc = subprocess.run([sys.executable, worker, os.path.join(str(tmp_path), "out"), kind, unstable],
+                          cwd=here, capture_output=True, text=True, timeout=900)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    line = [l for l in out.splitlines() if l.startswith("PYOOMPH_REALBIF_RESULT ")]
+    assert line, "worker produced no result:\n" + out[-3000:]
+    res = json.loads(line[-1][len("PYOOMPH_REALBIF_RESULT "):])
+
+    assert res["type_while_tracking"] == kind
+    # The eigensolve at the bifurcation has to RESOLVE the critical mode - at shift 0 it did not.
+    assert abs(res["located_eigenvalue"][0]) < 1e-8, res["fresh_spectrum"]
+    assert abs(res["located_eigenvalue"][1]) < 1e-8, res["fresh_spectrum"]
+    if unstable != "stable":
+        assert any(re > 0.1 for re, _im in res["spectrum"]), "the branch is not unstable here"
+
+    assert res["switched"], res.get("error")
+    assert res["type_after"] == kind, res["type_after"]
+    assert res["new_branches"] == 1
+    mu = res["landed_mu"]
+    expected = numpy.sqrt(mu) if kind == "pitchfork" else mu
+    assert abs(res["landed_x"]) == pytest.approx(expected, rel=1e-6), res
+
+
+def test_a_hopf_on_an_unstable_branch_is_classified_from_its_own_mode(tmp_path):
+    """A secondary bifurcation must be classified from the mode that is critical THERE.
+
+    get_normal_form builds the normal form out of eigenpair `eigenindex` of the last eigensolve, and
+    every caller left that at 0. With a tracker installed that is the tracked pair, so it is right;
+    classifying after the fact solves the whole spectrum, which is sorted by DESCENDING REAL PART -
+    so index 0 is whatever went unstable earlier, which is not bifurcating here at all.
+
+    The system has a Hopf at omega = 1.7 on a branch carrying a constant real unstable eigenvalue at
+    +0.3. Before the fix that Hopf was classified as a "pitchfork" from the +0.3 mode, and switching
+    onto its orbit refused it with "this one is pitchfork"; reloaded, the wrong classification then
+    reported its recovered eigenvector as "not real up to a phase", since it is the Hopf pair.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    libdir = _complex_petsc_pythonpath()
+    if libdir is None:
+        pytest.skip("no complex PETSc build found; the Hopf-to-orbit switch needs one (see CLAUDE.md)")
+    worker = os.path.join(here, "secondary_hopf_worker.py")
+    proc = subprocess.run([sys.executable, worker, os.path.join(str(tmp_path), "out")],
+                          cwd=here, capture_output=True, text=True, timeout=900,
+                          env={**os.environ, "PYTHONPATH": libdir})
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    line = [l for l in out.splitlines() if l.startswith("PYOOMPH_SECHOPF_RESULT ")]
+    assert line, "worker produced no result:\n" + out[-3000:]
+    res = json.loads(line[-1][len("PYOOMPH_SECHOPF_RESULT "):])
+
+    # The branch really is unstable before the Hopf, or there is no secondary bifurcation to test.
+    assert any(re > 0.1 and abs(im) < 1e-8 for re, im in res["spectrum"]), res["spectrum"]
+    assert res["type_while_tracking"] == "hopf"
+
+    # Not index 0: that is the real +0.3, and the located mode is the pair on the axis.
+    assert res["located_eigenindex"] != 0, res["fresh_spectrum"]
+    assert abs(res["located_eigenvalue"][0]) < 1e-6
+    assert abs(abs(res["located_eigenvalue"][1]) - 1.7) < 1e-6
+
+    # ... so classifying after the fact still says Hopf, and the orbit can be started.
+    assert res["switched"], res.get("error")
+    assert res["type_after"] == "hopf", res["type_after"]
+    assert res["omega_after"] == pytest.approx(1.7, rel=1e-6)
+    assert res["kind"] == "orbit"
+    assert res["T"] == pytest.approx(res["T_exact"], rel=1e-4)
+
+
+def test_an_orbit_step_does_not_depend_on_the_time_resolution(tmp_path):
+    """One arclength step on an orbit must buy the same physical step whatever nT is.
+
+    The constraint is (dparameter/ds)^2 + theta^2*|dU/ds|^2 = 1, and on an orbit dU is the whole cycle
+    - nT copies of the base dofs. theta^2 was left at 1 there (the mass-matrix metric refused to apply
+    to an orbit), so the sum ran over all nT blocks and dparameter/ds fell off as 1/sqrt(nT*Ndof):
+    0.164 at nT=12, 0.107 at nT=30, 0.0766 at nT=60 - the ratio of the square roots. Doubling the time
+    resolution halved the parameter movement per step for the same ds and the same orbit, and the
+    first step after switching hid it, being a plain parameter increment of ds.
+
+    Same orbit at three resolutions, so the steps can be compared directly.
+    """
+    runs = {nt: _run_orbit_worker(tmp_path, "metric", ["--NT", str(nt)],
+                                  outdir=os.path.join(str(tmp_path), "metric{:d}".format(nt)))
+            for nt in (12, 30, 60)}
+    for nt, res in runs.items():
+        assert res["nT"] >= nt, res
+        # The first step is oomph's own: a plain parameter increment of ds, before any tangent exists.
+        assert res["steps"][0]["dmu"] == pytest.approx(0.02, rel=1e-9)
+        # From the second on, theta^2 is the metric's - inversely proportional to the augmented size.
+        assert res["steps"][1]["theta_sqr"] == pytest.approx(1.0/res["ndof"], rel=0.2), res
+        # ... and the parameter takes a real share of the step rather than a vanishing one.
+        assert res["steps"][-1]["dparam_ds"] > 0.5, res
+
+    fine, coarse = runs[60], runs[30]
+    for i in range(1, 4):
+        assert fine["steps"][i]["dmu"] == pytest.approx(coarse["steps"][i]["dmu"], rel=1e-4), \
+            "step {:d} differs between nT={:d} and nT={:d}: {:g} vs {:g}".format(
+                i, coarse["nT"], fine["nT"], coarse["steps"][i]["dmu"], fine["steps"][i]["dmu"])
+    # The period is the same orbit's either way - 2*pi for this normal form, whatever nT. The
+    # tolerance is the coarse orbit's own discretization error (1.4e-4 at nT=12), not slack.
+    for res in runs.values():
+        assert res["steps"][-1]["T"] == pytest.approx(2*numpy.pi, rel=1e-3)
+
+
+def test_going_back_to_an_earlier_orbit_point_keeps_the_continuation_tangent(tmp_path):
+    """Load an earlier point of an orbit branch and step on from it.
+
+    Two things have to hold. A point reached by a step keeps its arclength tangent in the orbit's
+    sidecar - the state dump of an augmented system cannot carry one - and it has to come back
+    exactly, or the branch continues in a direction it was not going. And a point that never had one,
+    the point the Hopf switch created, has to be given one: oomph's FIRST arclength step after a reset
+    increments the parameter by the whole of ds and only then builds the derivatives, so without a
+    tangent the step is a plain parameter jump. Measured before the fix, with ds grown from 0.02 to
+    0.63 over three steps, that jump took mu from 0.02 to 0.647 - exactly ds - straight off a branch
+    whose next point is at 0.064.
+    """
+    res = _run_orbit_worker(tmp_path, "goback")
+    assert res["npoints"] == 4
+
+    # (a) the point with no stored tangent gets one, and the step follows the branch.
+    first = res["first"]
+    assert first["tangent_len"] == first["ndof"], "no tangent at the reloaded first point"
+    assert 0 < first["dparam_ds"] < 0.5, first["dparam_ds"]
+    # Relative to ds, not an absolute number: the arclength metric rescales ds (see
+    # Problem._retune_arclength_theta), so what says "this was not a plain parameter march" is that
+    # the parameter moved a small FRACTION of ds, in the direction the branch goes.
+    ds = abs(first["ds_used"])
+    moved = first["mu_after"] - first["mu_before"]
+    assert 0 < moved < 0.6 * ds, \
+        "the step marched the parameter by the whole of ds instead of stepping along the branch: " \
+        + str((first["mu_before"], first["mu_after"], ds))
+
+    # (b) a point that HAS one gets it back unchanged, and reproduces the forward step.
+    r = res["restored"]
+    assert r["same_length"] and r["max_abs_diff"] == 0.0, r
+    assert r["dparam_ds"] == r["dparam_ds_stored"]
+    assert r["theta_sqr"] == r["theta_sqr_stored"]
+    assert r["mu_after"] == pytest.approx(r["mu_forward"], rel=1e-9), r
+
+
+def test_an_orbit_stored_for_another_numbering_is_refused(tmp_path):
+    """A raw dof vector means nothing under a different equation numbering.
+
+    Unlike a state dump, which is written per node and can be read back anywhere, the orbit's time
+    blocks are indexed by equation number. A mesh adaptation or a different number of processes
+    renumbers, and the blocks would then load perfectly happily as a different, plausible-looking
+    orbit - so the numbering is fingerprinted and a mismatch refused.
+    """
+    outdir = os.path.join(str(tmp_path), "orbit")
+    _run_orbit_worker(tmp_path, "switch", ["--steps", "1"], outdir=outdir)
+    res = _run_orbit_worker(tmp_path, "fingerprint", outdir=outdir)
+    assert res["refused"], "a mismatched orbit was loaded instead of being refused"
+    assert "portable" in res["message"], "the refusal has to name the way out"
+
+
+def test_without_the_analytic_hessian_the_orbit_is_refused_up_front(tmp_path):
+    """There is no route to an orbit without it, and the refusal has to come BEFORE the handler.
+
+    The orbit handler's own Jacobian throws without the analytic Hessian (src/bifurcation.cpp), and
+    it throws from inside the first Newton solve - by which point the augmented system is installed
+    and every later command works on the wrong problem. And the remedy has to be applied before the
+    problem is initialised, so it cannot be offered as something to try again in this session.
+    """
+    res = _run_orbit_worker(tmp_path, "nohessian")
+    assert res["raised"]
+    assert "setup_for_stability_analysis" in res["refusal"]
+    assert "before" in res["refusal"].lower()
+    assert not res["handler_installed"], "a refused switch must leave the problem as it found it"
+    assert res["kind"] == "solution", "and must not leave an empty orbit branch behind"
+
+
+def test_the_orbit_tab_settings_reach_the_controller():
+    """The Orbit tab's wiring: the widgets exist, what is typed arrives, and a refresh writes back.
+
+    Its own worker because the tab's variables do not exist until a window has been built. The
+    numerics behind the settings are covered against a real problem by orbit_gui_worker.py.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "orbit_tab_worker.py")
+    proc = subprocess.run(gui_launch_prefix() + [sys.executable, worker],
+                          cwd=here, capture_output=True, text=True, timeout=600)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+    assert "ORBIT TAB OK" in out
+
+
+def test_a_multiplier_that_is_nearly_one_is_not_mistaken_for_the_trivial_one(tmp_path):
+    """Only ONE multiplier is trivial, so only one may be removed.
+
+    Near a Hopf the orbit's own multiplier tends to 1 along with the trivial one, and removing
+    "everything within a tolerance of 1" - which is what get_floquet_multipliers' ignore_periodic_unity
+    argument does - deletes exactly the number that says whether the orbit is stable, on the branch
+    where the answer is least obvious. At mu = 1e-7 the physical multiplier is 1 - 1.3e-6, well inside
+    the default tolerance.
+    """
+    res = _run_orbit_worker(tmp_path, "nearhopf")
+    mu, T = res["mu"], res["T"]
+    assert len(res["floquet"]) == 1, "the physical multiplier was deleted with the trivial one"
+    mult = complex(*res["floquet"][0])
+    assert abs(mult - 1.0) < 1e-5, "this test is pointless unless it is inside the tolerance"
+    assert mult.real == pytest.approx(numpy.exp(-2*mu*T), rel=1e-6)
+    # How far the trivial one came out from 1 is the accuracy of the discretization, nothing else.
+    assert res["trivial_error"] < 1e-8, res["trivial_error"]
+
+
+def test_an_orbit_that_collapsed_onto_the_stationary_branch_is_recognised():
+    """A collapsed orbit is a converged solution and looks like one; only its amplitude gives it away.
+
+    Continuation can walk an orbit branch back onto the stationary branch it came from, and what comes
+    back is recorded as an orbit, drawn as an orbit, and is not one. Not decided on the multipliers:
+    a collapsed orbit does lose its multiplier at 1, but so does a good one whose trivial multiplier
+    the discretization has not resolved, and the two cannot be told apart that way.
+    """
+    from pyoomph.utils.bifurcation_gui.controller import BifurcationController
+    from pyoomph.utils.bifurcation_gui.model import orbit_band_names
+
+    c = BifurcationController.__new__(BifurcationController)
+    c.orbit_collapse_tolerance = 1e-6
+    lo, hi = orbit_band_names("nf/x")
+
+    # The numbers are the ones measured on the Lorenz orbit: a genuine cycle and the collapsed one
+    # the step after it, three orders of magnitude apart on either side of the threshold.
+    genuine = {"nf/x": 7.94, lo: 7.917, hi: 7.995}
+    collapsed = {"nf/x": 7.835342532, lo: 7.835342532, hi: 7.835342532 + 6.9e-11}
+    assert not c._orbit_has_collapsed(genuine, [complex(1.0208)])
+    assert c._orbit_has_collapsed(collapsed, [complex(0.985, 0.0156)])
+    # ... and a good orbit whose trivial multiplier was not resolved is still a good orbit.
+    assert not c._orbit_has_collapsed(genuine, [])
+    # An observable that is genuinely constant over the cycle does not by itself mean collapse, as
+    # long as something else varies - x^2+y^2 is exactly constant on the normal form's cycle.
+    mixed = dict(genuine)
+    mixed.update({"nf/r2": 0.5, "nf/r2"+lo[len("nf/x"):]: 0.5, "nf/r2"+hi[len("nf/x"):]: 0.5})
+    assert not c._orbit_has_collapsed(mixed, [])

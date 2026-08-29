@@ -7,7 +7,8 @@ domains, periodic re-injection, and `--distribute`. Covered by `tests/test_trace
 `tests/test_mpi_tracers.py` (13 cases, `--full`).
 
 This replaces the original implementation wholesale. That one was dead code - no test, no example,
-no prose documentation, and the only `.rst` was an empty autodoc stub - and it was wrong in ways
+no prose documentation, and the only `.rst` was an empty autodoc stub (all of which is about the code
+that was REPLACED: the current one has `docs/source/tutorial/plotting/tracers.rst`) - and it was wrong in ways
 that would not have announced themselves. §5 lists what was wrong, because several of those defects
 are the reason particular tests are written the way they are.
 

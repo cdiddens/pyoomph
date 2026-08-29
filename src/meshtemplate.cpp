@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -1444,7 +1444,7 @@ Index : Local coordinates (s0,s1,s2)
 		res->link_nodes_with_domain(this);		
 	}
 	
-	// Attach the compiled element code `code_inst` to this collection and, if the code's
+	// Attach the compiled element code `jit_code` to this collection and, if the code's
 	// dominant nodal space requires more nodes than what the elements currently have
 	// (e.g. C1TB/C2/C2TB), convert every element in-place to that higher-order space (via
 	// convert_for_C*_space, which creates/reuses the required extra nodes). If any element
@@ -1452,11 +1452,11 @@ Index : Local coordinates (s0,s1,s2)
 	// nodes: an intermediate node is periodic iff *all* of its parent corner nodes have a
 	// periodic master, in which case its master is the intermediate node between those
 	// masters (found by matching the sorted parent-id keys in inter_nodes_periodic).
-	void MeshTemplateElementCollection::set_element_code(DynamicBulkElementInstance *code_inst)
+	void MeshTemplateElementCollection::set_element_code(DynamicJITCode *jit_code)
 	{
-		code_instance = code_inst;
+		jitcode = jit_code;
 		bool has_converted_to_C2 = false;
-		std::string dom_space = code_inst->get_func_table()->dominant_space;
+		std::string dom_space = jit_code->get_func_table()->dominant_space;
 		// Make to C2 or C1TB if not done yet
 		if (dom_space == "C1TB") 
 		{
@@ -1489,7 +1489,7 @@ Index : Local coordinates (s0,s1,s2)
 				}				
 			}
 		}
-		else if (code_inst->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields || dom_space == "C2" || code_inst->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields || dom_space == "C2TB") 
+		else if (jit_code->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields || dom_space == "C2" || jit_code->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields || dom_space == "C2TB") 
 		{
 			for (unsigned int ie = 0; ie < elements.size(); ie++)
 			{
@@ -1654,7 +1654,9 @@ Index : Local coordinates (s0,s1,s2)
 
 	MeshTemplate::~MeshTemplate()
 	{
-		reset();
+		// Qualified: a destructor cannot reach a Python subclass's _reset (see PyMeshTemplateTrampoline),
+		// and calling into Python during teardown is not wanted either. Only the C++ state is reset.
+		MeshTemplate::reset();
 	}
 
 	// Unconditionally append a new node and register its position in the KD-tree (used by
@@ -1738,6 +1740,89 @@ Index : Local coordinates (s0,s1,s2)
 	// intersection over the entity's corners - a face centre is on a boundary only if the whole face
 	// is - and the periodicity record keeps the *parents*, which is what set_element_code() matches
 	// against when it links up the partner side.
+	void MeshTemplate::build_topological_id_cache()
+	{
+		if (topo_cache_nodes == nodes.size() && topo_cache_intermediates == intermediate_node_map.size()) return;
+		topo_intermediate_corners.clear();
+		for (const auto &kv : intermediate_node_map)
+		{
+			std::vector<nodeindex_t> corners;
+			for (nodeindex_t c : kv.first)
+				if (c != (nodeindex_t)-1) corners.push_back(c); // the key is padded to 8 with -1
+			if (corners.size() >= 2) topo_intermediate_corners[kv.second] = corners;
+		}
+		topo_node_id_cache.assign(nodes.size(), std::array<unsigned long long, 2>{0ULL, 0ULL});
+		topo_node_expansion_cache.assign(nodes.size(), std::vector<std::pair<std::size_t, double>>());
+		topo_cache_nodes = nodes.size();
+		topo_cache_intermediates = intermediate_node_map.size();
+	}
+
+	// See the declaration. Resolves the expansion and the digest together, memoised, recursing through
+	// intermediate nodes (a brick's cell centre is keyed on corners that may themselves be face centres).
+	const std::vector<std::pair<std::size_t, double>> &MeshTemplate::topological_node_expansion(nodeindex_t ni)
+	{
+		build_topological_id_cache();
+		static const std::vector<std::pair<std::size_t, double>> empty;
+		if (ni >= topo_node_expansion_cache.size()) return empty;
+		if (topo_node_id_cache[ni][0] || topo_node_id_cache[ni][1]) return topo_node_expansion_cache[ni];
+
+		auto it = topo_intermediate_corners.find(ni);
+		if (it == topo_intermediate_corners.end())
+		{
+			// A corner, or a node of a predefined higher-order element: those never passed through
+			// add_intermediate_node_unique(), so intermediate_node_map has never seen them (see
+			// has_predefined_higher_order_elements) and their entity is not recoverable here. A corner is
+			// its own expansion; the second case is indistinguishable from it, which is why a mesh read in
+			// at second order cannot be matched topologically against a C1 neighbour's refinement.
+			topo_node_expansion_cache[ni] = std::vector<std::pair<std::size_t, double>>(1, std::make_pair((std::size_t)ni, 1.0));
+			topo_node_id_cache[ni] = topo_digest_of_template_index(ni);
+			return topo_node_expansion_cache[ni];
+		}
+		std::vector<nodeindex_t> corners = it->second;
+		const std::size_t nc = corners.size();
+		// Only an entity whose corner count is a power of two carries the dyadic weights a refinement
+		// produces (an edge mid-point 1/2, a quadrilateral face centre 1/4, a cell centre 1/8). A triangle
+		// centroid bubble is 1/3, which no refinement ever creates and which is not even exact in double,
+		// so it gets an opaque identity instead -- safe, because only C1 CORNERS enter an expansion and a
+		// bubble is never one.
+		const bool dyadic = (nc >= 2) && ((nc & (nc - 1)) == 0);
+		if (!dyadic)
+		{
+			std::vector<std::size_t> sc(corners.begin(), corners.end());
+			std::sort(sc.begin(), sc.end());
+			topo_node_expansion_cache[ni].clear();
+			topo_node_id_cache[ni] = topo_digest_of_corner_set(sc);
+			return topo_node_expansion_cache[ni];
+		}
+		std::vector<std::pair<std::size_t, double>> expansion;
+		const double w = 1.0 / (double)nc;
+		for (nodeindex_t c : corners)
+		{
+			const std::vector<std::pair<std::size_t, double>> &ce = topological_node_expansion(c);
+			if (ce.empty()) { expansion.clear(); break; } // an opaque corner makes this node opaque too
+			for (auto &t : ce) expansion.push_back(std::make_pair(t.first, t.second * w));
+		}
+		if (expansion.empty())
+		{
+			std::vector<std::size_t> sc(corners.begin(), corners.end());
+			std::sort(sc.begin(), sc.end());
+			topo_node_id_cache[ni] = topo_digest_of_corner_set(sc);
+			topo_node_expansion_cache[ni].clear();
+			return topo_node_expansion_cache[ni];
+		}
+		topo_node_id_cache[ni] = topo_digest_of_expansion(expansion);
+		topo_node_expansion_cache[ni] = expansion;
+		return topo_node_expansion_cache[ni];
+	}
+
+	std::array<unsigned long long, 2> MeshTemplate::topological_node_id(nodeindex_t ni)
+	{
+		topological_node_expansion(ni);
+		build_topological_id_cache();
+		if (ni >= topo_node_id_cache.size()) return topo_digest_of_template_index(ni);
+		return topo_node_id_cache[ni];
+	}
+
 	nodeindex_t MeshTemplate::add_intermediate_node_generic(const nodeindex_t *key_corners, unsigned nkey, const nodeindex_t *parents, unsigned nparents, bool boundary_possible)
 	{
 		intermediate_node_key_t key;
@@ -2165,8 +2250,8 @@ Index : Local coordinates (s0,s1,s2)
 	BulkElementBase *MeshTemplate::factory_element(MeshTemplateElement *el, MeshTemplateElementCollection *coll)
 	{
 		// Generate all nodes if not present
-		const JITFuncSpec_Table_FiniteElement_t *functable = coll->code_instance->get_func_table();
-		BulkElementBase::__CurrentCodeInstance = coll->code_instance;		
+		const JITFuncSpec_Table_FiniteElement_t *functable = coll->jitcode->get_func_table();
+		BulkElementBase::JITCodeScope __jit_scope1(coll->jitcode);
 		unsigned ntot = 0;
 		for (unsigned int si=0;si<functable->num_present_continuous_spaces;si++)
 		{
@@ -2180,7 +2265,7 @@ Index : Local coordinates (s0,s1,s2)
 		bool require_macro_elem = false;
 
 		std::vector<nodeindex_t> nodeindices = el->get_node_indices();
-		std::string domspace = coll->code_instance->get_func_table()->dominant_space;
+		std::string domspace = coll->jitcode->get_func_table()->dominant_space;
 		if (el->get_geometric_type_index() == 8 && (domspace == "C1" || domspace=="C1TB")) // QC2 -> QC1
 		{
 			// Reduce the element
@@ -2227,6 +2312,16 @@ Index : Local coordinates (s0,s1,s2)
 				else
 				{
 					nodes[nii]->oomph_node = new pyoomph::BoundaryNode(this->problem->time_stepper_pt(), n_lagrangian, n_lagrangian_type, nodal_dim, 1, ntot);
+				}
+				// The cross-domain topological identity of a level-0 node is its TEMPLATE index. Two
+				// domains sharing an interface generate distinct Node objects for it (flush_oomph_nodes()
+				// below clears the cache between domains), but they read the same MeshTemplateNode, so
+				// this number is the one thing they agree on without looking at a coordinate. See
+				// pyoomph::Node::interface_topological_id.
+				{
+					pyoomph::Node *tn = static_cast<pyoomph::Node *>(nodes[nii]->oomph_node);
+					tn->set_interface_topological_expansion(this->topological_node_expansion(nodes[nii]->index));
+					tn->set_interface_topological_id(this->topological_node_id(nodes[nii]->index));
 				}
 
 				if (nodal_dim > 0)
@@ -2423,7 +2518,6 @@ Index : Local coordinates (s0,s1,s2)
 			}
 		}
 
-		BulkElementBase::__CurrentCodeInstance = NULL;
 		return res;
 	}
 
@@ -2474,7 +2568,7 @@ Index : Local coordinates (s0,s1,s2)
 		samplepos.resize(samples.size(), std::vector<double>(pts[0].size()));
 		for (unsigned int i = 0; i < samplepos.size(); i++)
 		{
-			interpolate(samples[i], samplepos[i]);
+			CurvedEntityCatmullRomSpline::interpolate(samples[i], samplepos[i]); // called from the constructor
 		}
 	}
 
@@ -2619,7 +2713,7 @@ Index : Local coordinates (s0,s1,s2)
 	   for (unsigned int ie=0;ie<bulk_element_collections[i]->elements.size();ie++)
 	   {
 			 const MeshTemplateElement * e=bulk_element_collections[i]->elements[ie];
-		 const DynamicBulkElementInstance * code=e->get_dynamic_code();
+		 const DynamicJITCode * code=e->get_dynamic_code();
 
 			 for (unsigned int iC2=0;iC2<code->get_num_fields_C2();iC2++)
 			 {

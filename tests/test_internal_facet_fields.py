@@ -1,5 +1,7 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #
 #  @section LICENSE
 #
@@ -1580,3 +1582,289 @@ def test_a_state_file_without_the_facet_values_would_be_noticed():
         fresh = _facet_element_values(p)
     assert fresh
     assert all(v == 0.0 for vals in fresh.values() for v in vals)
+
+
+# ----------------------------------------------------------------------------------------------
+# declaring a skeleton field from the bulk class: define_*_field(..., at_internal_facets=True)
+# ----------------------------------------------------------------------------------------------
+#
+# The facet weak form could always be written in the bulk class (add_interior_facet_residual); the
+# facet UNKNOWN forced a second Equations class attached by hand to "_internal_facets_". The keyword
+# closes that gap: the declaration is recorded on the skeleton node and replayed there by
+# _InternalFacetFieldDeclarations when the skeleton defines its own fields.
+#
+# What has to be pinned down here is mostly the ORDERING, because define_fields() runs far too late
+# to create the skeleton domain (the node must exist by _fill_dummy_equations, before any code
+# generator or InterfaceMesh). Hence: the skeleton must already be there - which
+# requires_interior_facet_terms in __init__ arranges, and which add_interior_facet_residual demands
+# anyway - and the declaring domain must define its fields before the skeleton does. The latter is
+# checked for a bulk domain AND for an interface, where the two run in different places
+# (MeshFromTemplateBase.__init__ vs. the two loops of _finalise_creation).
+
+
+class _FusedTrace(Equations):
+    """_LinearBulk and _FacetTrace merged into one class, the trace declared in place."""
+
+    def __init__(self, space="DL", recovery=False):
+        super().__init__()
+        self.space, self.recovery = space, recovery
+        # what puts the "_internal_facets_" child on the tree, early enough for the declaration below
+        self.requires_interior_facet_terms = True
+
+    def define_fields(self):
+        self.define_scalar_field("u", "C2")
+        self.define_scalar_field("p", self.space, at_internal_facets=True)
+
+    def define_residuals(self):
+        u, ut = var_and_test("u")
+        self.add_residual(weak(u - _linear_expr(self.get_nodal_dimension()), ut))
+        p, ptest = var_and_test("p")
+        uavg = avg(var("u"))
+        self.add_interior_facet_residual(weak(p - uavg, ptest))
+        if self.recovery:
+            self.set_facet_recovery("p", uavg, at_internal_facets=True)
+
+
+class _FusedProblem(Problem):
+    def __init__(self, kind="quad", N=3, space="DL", recovery=False, estimator=False):
+        super().__init__()
+        self.kind, self.N, self.space = kind, N, space
+        self.recovery, self.estimator = recovery, estimator
+
+    def define_problem(self):
+        self += _mesh_for(self.kind, self.N)
+        eqs = _FusedTrace(space=self.space, recovery=self.recovery)
+        if self.estimator:
+            eqs += SpatialErrorEstimator(u=1)
+        self += eqs @ "domain"
+        self.max_refinement_level = 2 if self.estimator else 0
+
+
+@pytest.mark.parametrize("kind,space", [("quad", "DL"), ("quad", "D2"), ("tri", "DL"), ("line", "D0")])
+def test_at_internal_facets_matches_the_two_class_formulation(kind, space):
+    """Same physics written twice must give the same problem, not merely a similar one: identical dof
+    count and a bit-identical solution vector."""
+    with _TraceProblem(kind=kind, N=3, space=space) as split:
+        split.quiet()
+        split.solve()
+        n_split, dofs_split = split.ndof(), numpy.array(split.get_current_dofs()[0])
+    with _FusedProblem(kind=kind, N=3, space=space) as fused:
+        fused.quiet()
+        fused.solve()
+        n_fused, dofs_fused = fused.ndof(), numpy.array(fused.get_current_dofs()[0])
+        # the field really is on the skeleton, and only there. D0/DL are elemental, the nodal DG
+        # spaces (D1/D2/...) are indexed among the nodal fields, hence the union.
+        skel = fused.get_mesh("domain/_internal_facets_").get_code_gen().get_code()
+        assert "p" in set(skel.get_elemental_field_indices()) | set(skel.get_nodal_field_indices())
+        bulk = fused.get_mesh("domain").get_code_gen().get_code()
+        assert "p" not in bulk.get_nodal_field_indices()
+        assert "p" not in bulk.get_elemental_field_indices()
+    assert n_split == n_fused
+    assert numpy.max(numpy.abs(dofs_split - dofs_fused)) == 0.0
+
+
+def test_at_internal_facets_without_a_skeleton_says_what_to_add():
+    """Without requires_interior_facet_terms there is no skeleton node by the time define_fields runs,
+    and nothing downstream could create one - so this has to be an error naming the fix."""
+
+    class _NoTrigger(_LinearBulk):
+        def define_fields(self):
+            super().define_fields()
+            self.define_scalar_field("p", "DL", at_internal_facets=True)
+
+    class _P(Problem):
+        def define_problem(self):
+            self += _mesh_for("quad", 2)
+            self += _NoTrigger() @ "domain"
+            self.max_refinement_level = 0
+
+    with pytest.raises(RuntimeError, match=r"requires_interior_facet_terms=True in the __init__ of _NoTrigger"):
+        with _P() as p:
+            p.quiet()
+            p.solve()
+
+
+def test_at_internal_facets_rejects_a_continuous_space():
+    """Same refusal as declaring it on the skeleton directly, but raised at the declaring line."""
+
+    class _Continuous(_FusedTrace):
+        def define_fields(self):
+            self.define_scalar_field("u", "C2")
+            self.define_scalar_field("p", "C1", at_internal_facets=True)
+
+    class _P(Problem):
+        def define_problem(self):
+            self += _mesh_for("quad", 2)
+            self += _Continuous() @ "domain"
+            self.max_refinement_level = 0
+
+    with pytest.raises(NotImplementedError, match=r"Use a discontinuous facet space"):
+        with _P() as p:
+            p.quiet()
+            p.solve()
+
+
+def test_at_internal_facets_on_the_skeleton_itself_is_rejected():
+    """Pointless and ambiguous - the equations are already there, so the keyword is just dropped."""
+
+    class _Redundant(Equations):
+        def define_fields(self):
+            self.define_scalar_field("p", "DL", at_internal_facets=True)
+
+        def define_residuals(self):
+            p, ptest = var_and_test("p")
+            self.add_residual(weak(p - avg(var("u")), ptest))
+
+    class _P(Problem):
+        def define_problem(self):
+            self += _mesh_for("quad", 2)
+            self += (_LinearBulk() + _Redundant() @ "_internal_facets_") @ "domain"
+            self.max_refinement_level = 0
+
+    with pytest.raises(RuntimeError, match=r"already attached to the interior-facet skeleton"):
+        with _P() as p:
+            p.quiet()
+            p.solve()
+
+
+def test_at_internal_facets_carries_vector_and_tensor_fields():
+    """The components go through the same scalar path, so what is really checked is that the vector
+    substitution (var("w") -> vector(w_x,w_y)) is registered on the SKELETON master, i.e. that the
+    facet residual written in the bulk class can use the vector name."""
+
+    class _VecTens(Equations):
+        def __init__(self):
+            super().__init__()
+            self.requires_interior_facet_terms = True
+
+        def define_fields(self):
+            self.define_scalar_field("u", "C2")
+            # D0 for both, so that each field is exactly one value per facet and the flat list of
+            # internal values below is unambiguous - a wrong component wiring cannot hide in it.
+            self.define_vector_field("w", "D0", at_internal_facets=True)
+            self.define_tensor_field("T", "D0", at_internal_facets=True, symmetric=True)
+
+        def define_residuals(self):
+            u, ut = var_and_test("u")
+            self.add_residual(weak(u - _linear_expr(2), ut))
+            w, wtest = var_and_test("w")
+            T, Ttest = var_and_test("T")
+            self.add_interior_facet_residual(weak(w - vector(1, 2), wtest)
+                                             + weak(T - identity_matrix(), Ttest))
+
+    class _P(Problem):
+        def define_problem(self):
+            self += _mesh_for("quad", 2)
+            self += _VecTens() @ "domain"
+            self.max_refinement_level = 0
+
+    with _P() as p:
+        p.quiet()
+        p.solve()
+        skel = p.get_mesh("domain/_internal_facets_").get_code_gen().get_code()
+        names = set(skel.get_elemental_field_indices())
+        assert {"w_x", "w_y", "T_xx", "T_xy", "T_yy"} <= names, names
+        bulk = p.get_mesh("domain").get_code_gen().get_code()
+        assert not any(n.startswith(("w_", "T_")) for n in bulk.get_nodal_field_indices())
+        # w == (1,2) and T == identity on every facet, so a wrong component wiring is visible
+        vals = numpy.array([[e.internal_data_pt(i).value(j)
+                             for i in range(e.ninternal_data())
+                             for j in range(e.internal_data_pt(i).nvalue())]
+                            for e in p.get_mesh("domain/_internal_facets_").elements()])
+    assert numpy.max(numpy.abs(vals - vals[0])) < 1e-12          # identical on every facet
+    assert sorted(round(v, 12) for v in vals[0]) == [0.0, 1.0, 1.0, 1.0, 2.0]
+
+
+def test_at_internal_facets_recovery_fills_the_new_facets():
+    """set_facet_recovery(..., at_internal_facets=True) has to reach the skeleton's local functions,
+    which is what leaves get_discontinuous_unrestored_elements() empty after a refinement."""
+    with _FusedProblem(kind="quad", N=3, space="DL", recovery=True, estimator=True) as p:
+        p.quiet()
+        p.initialise()
+        p.solve()
+        p.refine_uniformly()
+        im = p.get_mesh("domain/_internal_facets_")
+        unrestored = list(im.get_discontinuous_unrestored_elements())
+        # the recovery is exact for a linear bulk field, so the trace is right BEFORE the next solve
+        nfacet = len(list(im.elements()))
+    assert unrestored == []
+    assert nfacet > 0
+    with _FusedProblem(kind="quad", N=3, space="DL", recovery=False, estimator=True) as q:
+        q.quiet()
+        q.initialise()
+        q.solve()
+        q.refine_uniformly()
+        without = list(q.get_mesh("domain/_internal_facets_").get_discontinuous_unrestored_elements())
+    assert without, "the control case must leave facets unrestored, else the test proves nothing"
+
+
+def test_a_declaration_is_recorded_exactly_once():
+    """_create_dummy_domains_for_DG runs the bulk define_fields() a SECOND time, on the throwaway
+    generators it builds for the two sides of a facet. Without the guard against that pass, every
+    declaration was recorded twice - harmless for a plain field declaration, which is idempotent, but
+    not for set_facet_recovery, which registers a local function each time."""
+    with _FusedProblem(kind="quad", N=2, space="DL", recovery=True) as p:
+        p.quiet()
+        p.solve()
+        node = p._equation_system._children["domain"]._children["_internal_facets_"]
+        recorded = list(node._pending_internal_facet_defs)
+    kinds = [k for k, _, _ in recorded]
+    assert kinds == ["scalar", "recovery"], recorded
+
+
+def test_one_instance_on_two_domains_gives_each_skeleton_one_copy():
+    """The declarations are recorded on the skeleton NODE, not on the equation instance, so a shared
+    instance (eqs @ ["a","b"]) must not accumulate its declarations across the domains."""
+
+    class _P(Problem):
+        def define_problem(self):
+            self += RectangularQuadMesh(name="dom_a", N=2)
+            self += RectangularQuadMesh(name="dom_b", N=2, lower_left=[2, 0], size=[1, 1])
+            self += _FusedTrace() @ ["dom_a", "dom_b"]
+            self.max_refinement_level = 0
+
+    with _P() as p:
+        p.quiet()
+        p.solve()
+        for dom in ("dom_a", "dom_b"):
+            code = p.get_mesh(dom + "/_internal_facets_").get_code_gen().get_code()
+            assert sorted(code.get_elemental_field_indices()) == ["p"], dom
+            elems = list(p.get_mesh(dom + "/_internal_facets_").elements())
+            assert elems
+            # one Data block per facet, not two: a duplicated declaration would double this
+            assert all(e.ninternal_data() == 1 for e in elems)
+
+
+def test_at_internal_facets_works_on_an_interface_too():
+    """An interface defines its fields in _finalise_creation, its own skeleton one loop later, so the
+    same record-then-replay ordering holds one level down."""
+
+    class _Surf(InterfaceEquations):
+        def __init__(self):
+            super().__init__()
+            self.requires_interior_facet_terms = True
+
+        def define_fields(self):
+            self.define_scalar_field("s", "C2")
+            self.define_scalar_field("q", "DL", at_internal_facets=True)
+
+        def define_residuals(self):
+            s, st = var_and_test("s")
+            self.add_residual(weak(s - var("coordinate_x"), st))
+            q, qt = var_and_test("q")
+            self.add_interior_facet_residual(weak(q - avg(var("s")), qt))
+
+    class _P(Problem):
+        def define_problem(self):
+            self += _mesh_for("quad", 3)
+            self += (_LinearBulk() + _Surf() @ "top") @ "domain"
+            self.max_refinement_level = 0
+
+    with _P() as p:
+        p.quiet()
+        p.solve()
+        im = p.get_mesh("domain/top/_internal_facets_")
+        assert sorted(im.get_code_gen().get_code().get_elemental_field_indices()) == ["q"]
+        # s is exactly x, so the trace on the two interior points of a 3-element edge is 1/3 and 2/3
+        q = sorted(e.internal_data_pt(0).value(0) for e in im.elements())
+    assert q == pytest.approx([1.0 / 3.0, 2.0 / 3.0], abs=1e-12), q

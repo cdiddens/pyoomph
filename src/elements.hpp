@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -21,8 +21,11 @@ The main author may be contacted at c.diddens@utwente.nl
 
 
 #pragma once
+#include <chrono>
+#include <atomic>
 #include "exception.hpp"
 #include "jitbridge.h"
+#include "thread_state.hpp"
 
 #include "oomph_lib.hpp"
 
@@ -38,14 +41,167 @@ The main author may be contacted at c.diddens@utwente.nl
 
 extern "C"
 {
-  double _pyoomph_get_element_size(void *);
   double _pyoomph_invoke_callback(void *, int, double *, int);
   void _pyoomph_invoke_multi_ret(void *, int, int, double *, double *, double *, int, int); // Index, flag,args,returns,derivative matrix, nargs,nret
-  void _pyoomph_fill_shape_buffer_for_point(unsigned, JITFuncSpec_RequiredShapes_FiniteElement_t *, int);
+  void _pyoomph_fill_shape_buffer_for_point(const JITElementInfo_t *, unsigned, JITFuncSpec_RequiredShapes_FiniteElement_t *, int);
 }
 
 namespace pyoomph
 {
+
+  // oomph-lib declares GeneralisedElement::is_halo() inside its own OOMPH_HAS_MPI guard, so every
+  // plain el->is_halo() is a call that does not compile in a build without MPI - which is what every
+  // released wheel is. Asking through here instead keeps the call sites readable: with no MPI there
+  // are no halo elements, so the answer is a compile-time false.
+  inline bool element_is_halo(const oomph::GeneralisedElement *el)
+  {
+#ifdef OOMPH_HAS_MPI
+    return el->is_halo();
+#else
+    (void)el;
+    return false;
+#endif
+  }
+
+  // --- Assembly-overhead campaign, stage 0 diagnostics ---
+  //
+  // Three measurement-only levers around the per-element hang bookkeeping, which runs in full for
+  // every element on every assembly (the outlook item of dev_docs/code_generation.md 9.4.14).
+  //
+  // PYOOMPH_MEASURE_SKIP_HANG_FILLS turns fill_hang_info_with_equations and interpolate_hang_values
+  // into early returns, to put a ceiling on what removing them could ever save. MEASUREMENT ONLY and
+  // unsound in general - the generated code then reads a stale hangbuffer. It is bitwise-safe exactly
+  // on meshes with no hanging nodes, no additional dof constraints and no dummy-value maps, which is
+  // the configuration the ceiling is measured in. The attached-element eqn_remap channel is
+  // deliberately NOT skipped: fill_hang_info_with_equations abuses the very same buffers for it
+  // (codegen.cpp, "REMAP channel"), and skipping that yields garbage local equation numbers - a
+  // crash rather than a stale-but-plausible number.
+  extern const bool __measure_skip_hang_fills;
+
+  // PYOOMPH_REPORT_HANG_FILL_TIME accumulates wall time and call counts of both fills and of the
+  // interface neighbour re-interpolation, reported at exit. Same motivation as
+  // PYOOMPH_REPORT_NOHANG_DISPATCH: a share that was never measured is not thereby a small share.
+  extern const bool __report_hang_fill_time;
+  enum HangFillTimeSlot
+  {
+    HANGFILL_SLOT_FILL = 0,            // fill_hang_info_with_equations (incl. its bulk/opposite recursion)
+    HANGFILL_SLOT_INTERP = 1,          // interpolate_hang_values on the element being assembled
+    HANGFILL_SLOT_NEIGHBOUR = 2,       // the same, re-run on the attached bulk/opposite elements
+    HANGFILL_NUM_SLOTS = 3
+  };
+  void __hang_fill_time_add(int slot, double seconds);
+  extern unsigned __hang_fill_time_depth;
+
+  // RAII accumulator. Only the OUTERMOST scope is timed: the fills recurse (interface -> bulk ->
+  // bulk's bulk) and the InterfaceElement template calls both of its parents, so accumulating per
+  // entry would count the same nanoseconds several times over. The neighbour block is entered at
+  // depth 0 and therefore lands in its own slot rather than in the element's own.
+  class HangFillTimeScope
+  {
+    int slot;
+    std::chrono::steady_clock::time_point t0;
+
+  public:
+    explicit HangFillTimeScope(int s) : slot(-1)
+    {
+      if (!__report_hang_fill_time || __hang_fill_time_depth++)
+        return;
+      slot = s;
+      t0 = std::chrono::steady_clock::now();
+    }
+    ~HangFillTimeScope()
+    {
+      if (!__report_hang_fill_time)
+        return;
+      __hang_fill_time_depth--;
+      if (slot < 0)
+        return;
+      __hang_fill_time_add(slot, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    }
+  };
+
+  // --- Assembly-overhead campaign, stage 3: hang bookkeeping caches ---
+  //
+  // PYOOMPH_DISABLE_HANG_FILL_CACHE restores the pre-stage-3 behaviour entirely (fill always run,
+  // interpolate always run, no classification, no pass dedupe), so an A/B comparison of the whole
+  // stage can be made with ONE binary - the pattern PYOOMPH_DISABLE_NOHANG_DISPATCH established.
+  extern const bool __disable_hang_fill_cache;
+  // PYOOMPH_REPORT_HANG_FILL_CACHE prints, at exit, how often each of the two mechanisms engaged. A
+  // "no difference" measurement with zero engagement proves nothing, so the counters are reported
+  // alongside every benchmark.
+  extern const bool __report_hang_fill_cache;
+  // PYOOMPH_PARANOID_HANG_FILL_CACHE is the self-test: it runs the full fill on every element whose
+  // fill was skipped and aborts if its return value disagrees with the cheap predicate, then poisons
+  // the hang buffers of skipped elements so that a NoHang body that DOES read one is caught; and it
+  // checks the "nothing to interpolate" classification against the nodes themselves.
+  extern const bool __paranoid_hang_fill_cache;
+  enum HangFillCacheCounter
+  {
+    HANGCACHE_FILL_SKIPPED = 0,
+    HANGCACHE_FILL_RUN,
+    HANGCACHE_INTERP_SKIPPED_BY_CLASS,
+    HANGCACHE_INTERP_SKIPPED_BY_STAMP,
+    HANGCACHE_INTERP_RUN,
+    HANGCACHE_NUM_COUNTERS
+  };
+  void __hang_fill_cache_count(int which);
+
+  // Id of the assembly sweep this thread is currently running, or 0 for "none".
+  // interpolate_hang_values() re-derives values that are constant for the whole sweep, so within one
+  // pass the second and further calls for the same element (an interface re-interpolating its bulk
+  // neighbour, then that bulk element assembling itself, then the interface on its other side) are
+  // redundant. 0 is the safe default: every caller that is NOT inside a sweep interpolates
+  // unconditionally.
+  //
+  // Per thread rather than global, because HangInterpPassSuspension closes and reopens the pass
+  // around every finite-difference loop, i.e. inside one element's assembly. A worker thread of a
+  // parallel element loop that never opens a pass of its own simply sees 0 and interpolates every
+  // time - slower than it needs to be, but never wrong, which is the right way round for a
+  // correctness-critical cache. Opening a pass per worker would recover the saving.
+  extern thread_local unsigned long __hang_interp_pass;
+  // The id generator, shared by all threads: an id must not be handed out twice, or a stamp left on
+  // an element by one pass would be matched by an unrelated later one and its interpolation skipped.
+  extern std::atomic<unsigned long> __hang_interp_pass_counter;
+
+  // Opens a new pass for its lifetime. Nesting is fine (the previous id is restored).
+  class HangInterpPassScope
+  {
+    unsigned long prev;
+
+  public:
+    HangInterpPassScope() : prev(__hang_interp_pass) { __hang_interp_pass = ++__hang_interp_pass_counter; }
+    ~HangInterpPassScope() { __hang_interp_pass = prev; }
+  };
+
+  // Closes the pass for its lifetime, i.e. restores unconditional interpolation. Wrapped around
+  // every finite-difference loop: those perturb a dof and re-enter get_residuals per perturbation,
+  // so the hang values genuinely change within one enclosing sweep. On exit a FRESH pass id is
+  // opened rather than the old one restored, because the FD loop left interpolated values belonging
+  // to the last perturbed state in the nodes of this element and its neighbours; a stale stamp would
+  // keep them.
+  class HangInterpPassSuspension
+  {
+    unsigned long prev;
+
+  public:
+    HangInterpPassSuspension() : prev(__hang_interp_pass) { __hang_interp_pass = 0; }
+    ~HangInterpPassSuspension() { __hang_interp_pass = (prev ? ++__hang_interp_pass_counter : 0); }
+  };
+
+  class BulkElementBase;
+  // Depth-guarded gate in front of interpolate_hang_values(). Only the OUTERMOST call may skip: the
+  // InterfaceElement override calls its bulk base, and gating there a second time would run the
+  // interface half without the bulk half.
+  class HangInterpGate
+  {
+    BulkElementBase *el;
+    bool outer;
+
+  public:
+    explicit HangInterpGate(BulkElementBase *e);
+    ~HangInterpGate();
+    bool skip();
+  };
 
   // Required for the Hessian nodal derivatives of second order
   // Dense rank-6 tensor with flat storage (row-major, index n6 varies fastest), used to hold
@@ -204,10 +360,16 @@ namespace pyoomph
 
   extern IntegrationSchemeStorage integration_scheme_storage;
 
+  // Hands this thread's shape-buffer chain back to the pool (definition in elements.cpp). Called at
+  // the end of each worker of a parallel element loop; the main thread of a serial run never calls
+  // it and simply keeps its one chain, as the single global buffer used to.
+  void release_thread_shape_buffer();
+
   class MeshTemplate;
   class MeshTemplateElement;
-  class DynamicBulkElementInstance;
+  class DynamicJITCode;
   class Problem;
+  class InterfaceElementBase;
   // The central base class for all pyoomph "bulk" finite elements (as opposed to face/interface
   // elements, see InterfaceElementBase below). A concrete element type (e.g. BulkElementTri2dC2)
   // combines this class with the appropriate oomph-lib geometric element (shape functions,
@@ -216,7 +378,7 @@ namespace pyoomph
   // BulkElementBase does *not* itself know the governing equations: the actual residuals, Jacobian
   // and (optionally) Hessian and mass matrix are produced by C code that is generated from the
   // user's symbolic (GiNaC) weak-form expressions, compiled at runtime, and reached through the
-  // JIT function table stored in the associated DynamicBulkElementInstance (codeinst). This class
+  // JIT function table stored in the associated DynamicJITCode (jitcode). This class
   // provides the glue: it evaluates shape functions/derivatives at integration points and fills a
   // JITShapeInfo_t buffer, maps nodal/internal/external data to local equation numbers (including
   // hanging-node constraints from mesh refinement and "dummy" values used for mixed-order
@@ -227,10 +389,23 @@ namespace pyoomph
   class BulkElementBase : public virtual FiniteElementBase
   {
   protected:
-    DynamicBulkElementInstance *codeinst;
+    DynamicJITCode *jitcode;
 
     JITElementInfo_t eleminfo;
-    JITShapeInfo_t *shape_info;
+    // The half-open range of eleminfo.nodal_coords[i] slots this element new'ed and must delete,
+    // RECORDED by fill_element_info() rather than re-derived at destruction time. See
+    // owned_nodal_coord_range().
+    unsigned owned_coord_begin = 0, owned_coord_end = 0;
+    // The shape buffer this element assembles into. Not owned per element and not a member: the
+    // buffer chain runs to hundreds of megabytes for a 3D C2 element with analytic Hessians on a
+    // moving mesh, so ShapeBufferPool (elements.cpp) hands out one chain per concurrently
+    // assembling thread instead of one per element. Functions that touch it more than once take it
+    // into a local first, so the lookup happens once per call rather than per integration point.
+    JITShapeInfo_t *get_shape_info() const;
+
+    // [first, last) slots of eleminfo.nodal_coords[i] that this element owns and must delete.
+    // Derived, not stored - see the definition in elements.cpp for why it may not consult the JIT code.
+    std::pair<unsigned, unsigned> owned_nodal_coord_range() const;
 
     // Set by pin_dummy_values (and its InterfaceElementBase override) whenever at least one node of
     // this element carries an additional dof constraint (see
@@ -242,6 +417,39 @@ namespace pyoomph
     // Releases/resets the JITElementInfo_t buffers owned by this element (nodal/external/internal
     // data pointers etc. handed to the generated code).
     void free_element_info();
+
+  public:
+    // Which of oomph-lib's geometric shape families this element belongs to. The four 3d families are
+    // mutually exclusive (a wedge/pyramid is neither a BrickElementBase nor a TElementBase), as are
+    // quad and simplex in 2d.
+    enum ElementFamily
+    {
+      EF_UNKNOWN = 0, // not yet determined - never returned by element_family()
+      EF_QUAD,        // oomph::QuadElementBase - 2d quadrilateral
+      EF_SIMPLEX,     // oomph::TElementBase - triangle or tetrahedron
+      EF_BRICK,       // oomph::BrickElementBase - 3d hexahedron
+      EF_WEDGE,       // oomph::RefineableWedgeElement
+      EF_PYRAMID,     // oomph::RefineablePyramidElement
+      EF_OTHER        // none of the above (a line element, a point/ODE element, ...)
+    };
+
+    // Cached: determining the family means dynamic_cast-ing across the virtual-inheritance diamond,
+    // and the mesh-level refinement_possible() asks it once per element on every call (several times
+    // per adaptation). An element never changes shape, so one cast per element object is enough.
+    ElementFamily element_family() const;
+
+    // Is this element an InterfaceElementBase? Overridden there to return `this`; the base returns
+    // NULL. Every element is a BulkElementBase, so this replaces dynamic_cast<InterfaceElementBase*>
+    // at every call site that already holds one. That cast is NOT cheap: the whole element hierarchy
+    // is joined by virtual inheritance (see ElementBase/FiniteElementBase above), so it takes
+    // libstdc++'s __vmi_class_type_info graph walk - measured at ~1900 cycles a call, and
+    // fill_shape_info_element_sizes asks the question once per element per integration sweep.
+    virtual InterfaceElementBase *as_interface_element() { return NULL; }
+    const InterfaceElementBase *as_interface_element() const { return const_cast<BulkElementBase *>(this)->as_interface_element(); }
+
+  protected:
+    // See element_family(). EF_UNKNOWN until first asked.
+    mutable ElementFamily element_family_cache = EF_UNKNOWN;
 
     // Allocates internal/external Data for fields stored discontinuously per element (D0: constant,
     // DL: discontinuous-Lagrange, DG: discontinuous on a sub-space) rather than as ordinary nodal data.
@@ -337,11 +545,46 @@ namespace pyoomph
     // square (element dimension == nodal dimension); interface elements have no orientation to lose
     // and are skipped. The adaptive time stepper and the arclength continuation in oomph-lib catch the
     // exception and retry with a smaller step, which is the whole point: on a moving mesh an inverted
-    // element is normally a symptom of too large a step, not of an ill-posed problem. Global rather
-    // than per-Problem, following use_eigen_error_estimators and interpolate_new_interface_dofs; off
-    // by default, since without a catching solver an inversion would turn a survivable garbage step
-    // into an abort.
+    // element is normally a symptom of too large a step, not of an ill-posed problem. Off by default,
+    // since without a catching solver an inversion would turn a survivable garbage step into an abort.
+    //
+    // Deliberately still process-wide, unlike the other switches that moved onto Problem: this one is
+    // read once per integration point, on the hottest path there is, and the measurement quoted in
+    // fill_shape_buffer_for_integration_point ("indistinguishable from a build with the block deleted"
+    // while off) rests on that read being a plain static load rather than two dependent pointer
+    // chases through jitcode->get_problem(). The cross-Problem leak it leaves is benign: a second
+    // Problem gets a diagnostic it did not ask for, never a different answer.
     static bool detect_inverted_elements;
+
+    // --- Making the detection above safe under MPI ---
+    //
+    // The throw is per element, and an element belongs to exactly one rank's share of the assembly
+    // loop (oomph splits that loop by element whether or not the problem is --distributed). So the
+    // rank holding the folded element threw and left the element loop while the others were still
+    // inside it, waiting in the assembly's own collectives: `mpirun -n 2` on a folding mesh HUNG,
+    // reproducibly, rather than reporting anything. Detection was therefore unusable under MPI.
+    //
+    // The fix is to make the report unanimous. An inversion is RECORDED here instead of thrown, so
+    // every rank finishes the loop and reaches the collective that follows it.
+    // Problem::InvertedElementScope::raise_if_any() then reduces the flag over the ranks and throws
+    // on all of them or on none.
+    //
+    // The recording is now unconditional, where it used to happen only while
+    // defer_inverted_element_errors was set and an immediate throw was kept for the paths outside an
+    // assembly (output, error estimation, a Z2 flux recovery). That throw was not survivable: this
+    // function is reached from the JIT-generated element code, which tcc compiles as plain C with no
+    // unwind tables, so the exception crossed a C frame straight into std::terminate and aborted the
+    // process - observed right after an axisymmetric pinch-off, where a fresh cap left a sliver
+    // element behind. Nothing is lost by recording instead: no path between two assemblies moves the
+    // mesh, so an element that is inverted outside one is inverted inside the next, where
+    // raise_if_any() reports it. The scope itself remains, since it owns the reset of the counter
+    // and the reduction over the ranks.
+    //
+    // Recording rather than throwing means the rest of the assembly runs against a folded element and
+    // produces meaningless numbers. That is fine and cannot escape: the matrix is discarded by the
+    // throw that follows, before any solver sees it.
+    static unsigned inverted_elements_detected;      // count on THIS rank since the scope was opened
+    static std::string inverted_element_message;     // the first one's message, for the report
 
     // Hang node X (one of THIS fine element's edge interpolating nodes for value_id) on the strictly
     // COARSER neighbour nb_re of a DIFFERENT shape, given X's fraction t along the shared coarse edge
@@ -434,6 +677,56 @@ namespace pyoomph
     // so generated code redistributes their residual/Jacobian contributions to the C1 corner nodes.
     // Overridden by InterfaceElementBase to additionally handle INTERFACE_DOF_CONSTRAIN_TO_C1.
     virtual bool fill_additional_hang_buffer_data(JITShapeInfo_t *shape_info);
+
+    // --- Stage 3: cached per-element hang classification ---
+    //
+    // The shape buffer is shared between all elements of a code (Default_shape_info_buffer), so the
+    // hang TABLES cannot be cached there. What can be cached is the DECISION: whether anything in
+    // this element hangs at all, and whether interpolate_hang_values() would write anything. Both
+    // depend only on the mesh topology, the hang schemes and the dof constraints - never on dof
+    // VALUES, which is why caching them is sound while caching any result would not be.
+    //
+    // Invalidated in fill_element_info(), next to local_dof_contribution_indices_valid: every
+    // adapt/remesh/pin/constraint change reaches it through assign_eqn_numbers().
+    enum HangStateBits
+    {
+      HANGSTATE_HAS_HANG = 1u,               // fill_hang_info_with_equations() would return true
+      HANGSTATE_NOTHING_TO_INTERPOLATE = 2u  // interpolate_hang_values() would write nothing
+    };
+    unsigned char hang_state = 0;
+    bool hang_state_valid = false;
+    // Id of the assembly pass in which this element's hang values were last interpolated; 0 = never.
+    unsigned long last_hang_interp_pass = 0;
+    // Computed lazily on FIRST USE, deliberately not eagerly in fill_element_info(): the interface
+    // elements' equation remap vectors are rebuilt after it (problem.cpp, "rebuild the interface
+    // remapping"), so a classification taken there would be based on a half-built state.
+    unsigned char get_hang_state();
+    // The scan itself. Mirrors, branch for branch, what the corresponding fill/interpolate would do;
+    // virtual for the same reason the fills are (the interface element adds its own fields).
+    virtual unsigned char compute_hang_state() const;
+    // The interface-only halves of the scan, so the base version composes exactly as the fills do.
+    virtual bool scan_hang_interface_fields() const { return false; }
+    virtual bool scan_interface_has_something_to_interpolate() const { return false; }
+
+  public:
+    // Whether interpolate_hang_values() would write anything for this element. Public because the
+    // parallel element loop has to decide, once per plan, whether its serial hanging pre-pass is
+    // needed at all (parallel_assembly.cpp); the classification itself stays protected.
+    bool would_interpolate_hang_values() { return !(get_hang_state() & HANGSTATE_NOTHING_TO_INTERPOLATE); }
+
+  protected:
+
+  public:
+    // What fill_hang_info_with_equations(required, ..., NULL) WOULD return, without doing the fill.
+    // The skip in elements_assembly.cpp needs the answer before the fill, which is why this exists
+    // at all (today has_hang IS the fill's return value).
+    virtual bool hang_fill_would_report_hang(const JITFuncSpec_RequiredShapes_FiniteElement_t &required);
+    // PYOOMPH_PARANOID_HANG_FILL_CACHE only: writes a NaN weight into every hang buffer slot the
+    // fill would have written, so that a supposedly hang-free body that still reads one is caught.
+    virtual void poison_hang_info(JITShapeInfo_t *shape_info);
+    friend class HangInterpGate;
+
+  protected:
     static const std::vector<std::vector<std::vector<unsigned>>> Dummy_Value_Interpolation_Map;
   public:
     // Maps a "dummy value" (a value slot that exists only to keep a lower-order field's nodal
@@ -457,6 +750,20 @@ namespace pyoomph
     // tree path this addresses an element independently of the partition, which is what lets state
     // files be written and read back on any number of processes. See dev_docs/distributed_state_files.md
     long global_base_index = -1;
+    // The index of THIS element's root in the undistributed base mesh, stamped on every element by
+    // Mesh::assign_global_base_element_indices() while the mesh is still whole. Read back by
+    // get_element_structural_keys(): after Problem::distribute() the root element a leaf belongs to
+    // need not be present on this rank any more (its object_pt() is then NULL and the live lookup
+    // returns -1), which made every element of a distributed mesh unaddressable and the state file
+    // refuse to be written. Inherited from the father by refinement, so it survives adaptivity too.
+    long global_root_index = -1;
+    // ... and the packed path from that root down to this element, stamped at the same moment and for
+    // the same reason. Problem::distribute() re-roots the forest at whatever the leaves are when it is
+    // called -- oomph says so itself, next to Base_mesh_element_number_plus_one: "these elements become
+    // roots on each of the processors involved in the distribution". The refinement history is gone
+    // from the tree afterwards, so a live walk answers "root, no steps" for every element and 240 of
+    // 256 addresses collide. Only a stamp taken beforehand can still say where an element sits.
+    long global_root_path = -1;
     // Transient (per tesselated-numpy pass, cleared by Mesh::to_numpy / get_num_numpy_elemental_indices):
     // for each finer-neighbour hanging node registered on THIS element, its LOCAL coordinate in this element,
     // computed TOPOLOGICALLY by the finer neighbour from the tree neighbour finder (no physical geometry, no
@@ -466,7 +773,7 @@ namespace pyoomph
     double initial_quality_factor = 0.0;
     // Factory for the FaceElement (interface element) attached to a given face/edge of this bulk
     // element; concrete element types override this to return the matching Interface*Element* type.
-    virtual oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *, int ) {throw_runtime_error(std::string("Specify the face element constructor for the element type ")+typeid(*this).name()); return NULL;}
+    virtual oomph::FaceElement * construct_face_element(DynamicJITCode *, int ) {throw_runtime_error(std::string("Specify the face element constructor for the element type ")+typeid(*this).name()); return NULL;}
     virtual const std::vector<int> & get_possible_face_indices() const=0;
     virtual  std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const=0;
 
@@ -554,6 +861,55 @@ namespace pyoomph
     // to be scattered through normal_coord_node() when they are combined with them.
     virtual unsigned n_normal_coord_nodes() const { return this->nnode(); }
     virtual unsigned normal_coord_node(unsigned l) const { return l; }
+
+    // PYOOMPH_REPORT_EXT_DATA sampling hook (defined in elements_assembly.cpp). A member because
+    // external_local_eqn() is protected in oomph-lib. No-op unless the lever is set.
+    void __sample_ext_data_stats();
+
+    // PYOOMPH_POISON_UNREQUIRED: fill every shape buffer family that `required` does NOT ask for with
+    // signalling NaN, so that generated code reading a buffer nobody flagged produces NaN instead of
+    // a plausible stale number. Diagnostic only; a no-op unless the lever is set. `required` is the
+    // struct actually PASSED to the fill, not functable->merged_required_shapes - the point is to
+    // catch a per-pass under-request that the merge would hide. Never touches hanginfo / the equation
+    // remap tables. Defined in elements_shapeinfo.cpp.
+    virtual void poison_unrequired_shapes(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *si, bool element_level) const;
+
+    // The requirement set that decides which external data an element attaches and, in lockstep, which
+    // equations the interface remapping hands out. Normally assembly_required_shapes; the env lever
+    // PYOOMPH_DISABLE_ASSEMBLY_EXTDATA_SPLIT restores the old behaviour of attaching from the full
+    // merge, for A/B-ing the split on one and the same binary. Defined in elements.cpp.
+    static const JITFuncSpec_RequiredShapes_FiniteElement_t *attachment_required_shapes(const JITFuncSpec_Table_FiniteElement_t *ft);
+
+    // Which shape-function families of ONE interpolation space a fill pass has to produce. They are
+    // filled individually: a psi-only space (by far the most common combination) does not pay for the
+    // two gradient contractions.
+    //
+    // That split is only sound because the flags are complete. They were not: codegen.cpp excludes
+    // "derived" shape expansions (the bare basis functions of the Jacobian COLUMNS) from the set it
+    // marks required shapes from, so shapes_required_Hessian carried psi alone for a lid-driven
+    // cavity whose HessianVectorProduct body dereferences dx_shapes. All-or-nothing filling hid it
+    // completely - any one flag pulled in all four families. The generator now marks those bases from
+    // a separate set (__all_Hessian_shapeexps_for_shapeflags); poison mode is what keeps it honest.
+    struct RequiredShapeFamilies
+    {
+      bool psi = false;  // shapes[]
+      bool dx = false;   // dx_shapes[] (Eulerian gradient), all three history slots
+      bool dX = false;   // dX_shapes[] (Lagrangian gradient) AND dS_shapes[]: the local-coordinate
+                         // derivative has no flag of its own and is marked as dX_psi by the code
+                         // generator (D1XBasisFunctionLocalCoord derives from D1XBasisFunctionLagr).
+      bool d2x = false;  // d2x_shapes[], d2S_shapes[] and d_d2x_shape_dcoord[]
+      bool dcoord = false; // d_dx_shape_dcoord[]: the rank-4 sensitivity of this space's Eulerian
+                         // gradient to the nodal positions. Only ever set on a moving mesh, and only
+                         // for spaces whose gradient an assembled entry really differentiates - it is
+                         // the most expensive single family of a moving-mesh Jacobian fill.
+      bool any() const { return psi || dx || dX || d2x; }
+    };
+    // The single place that decides the above. fill_shape_info_at_s, set_remaining_shapes_appropriately
+    // and poison_unrequired_shapes all key on it; they used to spell the predicate out three times and
+    // had to be kept in lockstep by hand.
+    RequiredShapeFamilies required_shape_families(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, unsigned ispace) const;
+    // The DL twin. No "dominant space" clause: DL fields never represent the geometry.
+    static RequiredShapeFamilies required_shape_families_DL(const JITFuncSpec_RequiredShapes_FiniteElement_t &required);
 
     // Discontinuous fields are stored as internal_data, on interfaces possibly also on external_data
     virtual oomph::Data *get_D0_nodal_data(const unsigned &fieldindex);
@@ -672,23 +1028,43 @@ namespace pyoomph
     // position, which is what lets a test sample the curved geometry over the whole reference domain
     // -- interior included -- rather than only where nodes happen to sit.
     virtual std::vector<double> get_macro_element_position_at_s(oomph::Vector<double> s);
-    DynamicBulkElementInstance *get_code_instance() { return codeinst; }
-    const DynamicBulkElementInstance *get_code_instance() const { return codeinst; }
-    // Bind this element to a physics (codeinst). Needed when a factory creates a son of a DIFFERENT element
+    DynamicJITCode *get_jit_code() { return jitcode; }
+    const DynamicJITCode *get_jit_code() const { return jitcode; }
+    // Bind this element to a physics (jitcode). Needed when a factory creates a son of a DIFFERENT element
     // type than the parent (e.g. a pyramid's tet son), where the parent cannot touch the son's protected
-    // codeinst directly. Same-type factories set codeinst inline.
-    void set_code_instance(DynamicBulkElementInstance *c) { codeinst = c; }
+    // jitcode directly. Same-type factories set jitcode inline.
+    void set_jit_code(DynamicJITCode *c) { jitcode = c; }
 
-    // Global "current code instance" used to pass the DynamicBulkElementInstance through
-    // oomph-lib's mesh/element construction machinery (e.g. Mesh::build, refinement son-element
-    // creation), which offers no direct way to pass extra constructor arguments. Set immediately
-    // before creating a new element instance of a given code, and read (then typically cleared) by
-    // that element's constructor/create_son_instance.
-    static DynamicBulkElementInstance *__CurrentCodeInstance; // Really annoying, but no other way to pass it through the entire mesh stur
+    // "Current code" side channel used to pass the DynamicJITCode through oomph-lib's mesh/element
+    // construction machinery (e.g. Mesh::build, refinement son-element creation), which offers no way
+    // to pass extra constructor arguments. Set immediately before creating a new element instance of
+    // a given code and read by that element's constructor.
+    //
+    // Per thread, so that two threads building meshes do not hand each other's code to their
+    // elements. Always set through JITCodeScope below rather than assigned directly.
+    static thread_local DynamicJITCode *__CurrentJITCode;
 
-    static unsigned zeta_time_history;    // Index in time for zeta. Only Eulerian
-    static unsigned zeta_coordinate_type; // 0: Lagrangian, 1: Eulerian -- On interfaces usually boundary coordinate
-    static bool use_eigen_error_estimators;
+    // RAII form of the side channel. It restores the previous value instead of clearing to NULL,
+    // which the hand-written set/clear pairs it replaced did not: a factory that transitively built
+    // an element of another code left its caller's scope at NULL, and the several construction paths
+    // that can throw in between (a non-boundary node on an interface, an unimplemented macro element)
+    // left the channel pointing at a code that was no longer being built.
+    class JITCodeScope
+    {
+      DynamicJITCode *prev;
+
+    public:
+      explicit JITCodeScope(DynamicJITCode *c) : prev(BulkElementBase::__CurrentJITCode) { BulkElementBase::__CurrentJITCode = c; }
+      ~JITCodeScope() { BulkElementBase::__CurrentJITCode = prev; }
+      JITCodeScope(const JITCodeScope &) = delete;
+      JITCodeScope &operator=(const JITCodeScope &) = delete;
+    };
+
+    // Which nodal coordinate zeta_nodal() reports, set and restored around a single locate_zeta /
+    // mesh-to-mesh interpolation. Per thread: the save/restore already makes them safe between two
+    // Problems in one thread, but two threads locating at once would trample each other's setting.
+    static thread_local unsigned zeta_time_history;    // Index in time for zeta. Only Eulerian
+    static thread_local unsigned zeta_coordinate_type; // 0: Lagrangian, 1: Eulerian -- On interfaces usually boundary coordinate
 
     // The "boundary coordinate" zeta used e.g. for mesh-to-mesh projection, taken to be either the
     // Lagrangian (reference/undeformed) or Eulerian (current) nodal position depending on the
@@ -1040,6 +1416,18 @@ namespace pyoomph
     // node l as seen in its father element (used to interpolate values from father to son node l).
     // Each concrete geometric element type must implement this according to its own son-numbering scheme.
     virtual void get_nodal_s_in_father(const unsigned int &, oomph::Vector<double> &) { throw_runtime_error("Implement"); }
+    // Whether get_nodal_s_in_father() will actually answer, asked WITHOUT provoking the throw above.
+    // Default false, paired with the default that throws: a shape that implements neither is
+    // consistent, and a shape that implements the map overrides both. Getting that pairing wrong the
+    // safe way round costs a fallback, never a wrong coordinate.
+    //
+    // It exists because refusing is legitimate here and two shapes do refuse: wedges and pyramids
+    // have no son->father map at all, and a TETRAHEDRON refuses when its father is a PYRAMID, since
+    // the mixed red split is not the 1->8 tet map (see tet3d_nodal_s_in_father). That is why the
+    // predicate is dynamic rather than a per-class constant. Callers that can degrade must ask first:
+    // Mesh::assign_interface_topological_ids() did not, so refining any wedge or pyramid mesh aborted
+    // the whole run inside actions_after_adapt() with a bare "Implement".
+    virtual bool can_report_nodal_s_in_father() const { return false; }
     // Inverse of the above for a SIMPLEX son of a simplex father: given a father-local coordinate,
     // returns this son's own local coordinate for the same point, or false if the point lies
     // outside this son. See the .cpp; used by restore_orphaned_interior_nodes.
@@ -1225,6 +1613,10 @@ namespace pyoomph
   // conventions between the two potentially differently-oriented/refined element types.
   class InterfaceElementBase : public virtual BulkElementBase, public virtual oomph::SolidFaceElement
   {
+  public:
+    using BulkElementBase::as_interface_element; // keep the const overload visible past the override
+    InterfaceElementBase *as_interface_element() override { return this; }
+
   protected:
     InterfaceElementBase *opposite_side;
     bool Is_internal_facet_opposite_dummy;
@@ -1264,12 +1656,23 @@ namespace pyoomph
     void prepare_shape_buffer_for_integration(const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag) override;
     double fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds = NULL, unsigned history_index=0) const override;
     bool fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap) override;
+    // Additionally poisons the bulk/opposite sub-buffers that this pass does NOT recurse into, i.e.
+    // exactly those an unflagged reader could still reach through shapeinfo->bulk_shapeinfo.
+    void poison_unrequired_shapes(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *si, bool element_level) const override;
     // Additional interface-only hanging-node bookkeeping, used by InterfaceElementBase to handle
     // the extra fields that exist only on the interface element and not on the bulk element.
     bool fill_hang_info_with_equations_interface(JITShapeInfo_t *shape_info) override;
     // Additionally handles INTERFACE_DOF_CONSTRAIN_TO_C1 additional dof constraints (on top of the
     // CONTINUOUS_BASE_DOF_CONSTRAIN_TO_C1 ones already handled by the base class implementation).
     bool fill_additional_hang_buffer_data(JITShapeInfo_t *shape_info) override;
+    // Stage-3 scan counterparts of the two overrides above, plus the recursion clause: the fill
+    // reports "hanging" for ANY interface element that pulls in a bulk or opposite element, because
+    // it then abuses the hang buffers as the local-equation remap channel. That is exactly why the
+    // fill of such an element must never be skipped, and keeping the clause here rather than at the
+    // call sites keeps the predicate and the fill in one place.
+    bool scan_hang_interface_fields() const override;
+    bool scan_interface_has_something_to_interpolate() const override;
+    bool hang_fill_would_report_hang(const JITFuncSpec_RequiredShapes_FiniteElement_t &required) override;
     void ensure_external_data() override;
     void assign_additional_local_eqn_numbers() override;
     void fill_in_jacobian_from_lagragian_by_fd(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian) override;
@@ -1294,19 +1697,19 @@ namespace pyoomph
     // implemented per concrete Interface*Element* subclass, since the mapping depends on the face
     // geometry (line/triangle/quad) and node ordering conventions.
     virtual oomph::Vector<double> local_coordinate_in_opposite_side(const oomph::Vector<double> &) const { throw_runtime_error("Implement"); }
-    virtual void fill_opposite_node_indices(JITShapeInfo_t *shape_info)
-    {
-      for (unsigned int i = 0; i < opposite_node_index.size(); i++)
-      {
-        shape_info->opposite_node_index[i] = opposite_node_index[i];
-      }
-    }
     // Determines opposite_orientation and opposite_node_index by matching this element's vertex
     // nodes to those of opposite_side (within a small tolerance, allowing for the "offset" vector
     // e.g. on periodic domains), so that fields on the two sides can be looked up consistently.
     // Must be implemented per concrete Interface*Element* subclass (the matching logic - which
     // permutations of nodes to try - depends on the face's geometric shape).
     virtual void analyze_opposite_orientation(const std::vector<double> & ) { throw_runtime_error("Implement"); }
+    // How far a vertex node of this side is from a candidate vertex on the opposite side, as the
+    // squared distance the permutation search minimises. TOPOLOGICAL when both nodes carry a
+    // cross-domain identity and the connection is coincident: 0 for the same node, 1 for a different
+    // one. The geometric answer is no longer a reliable one at a mixed-order interface -- a C2 side's
+    // interface is a quadratic curve where a C1 side's is the chord, so the two sides' vertices are
+    // genuinely apart and the nearest miss is not a match. See pyoomph::Node::interface_topological_id.
+    static double vertex_match_distance2(oomph::Node *a, oomph::Node *b, const std::vector<double> &offset);
     // Adds the discontinuous-Galerkin (DG) field data of the attached bulk element as external data
     // of this interface element, so generated interface code can access DG fields of the bulk domain.
     virtual void add_DG_external_data();
@@ -1326,10 +1729,14 @@ namespace pyoomph
     }
   public:
     InterfaceElementBase() : opposite_side(NULL), Is_internal_facet_opposite_dummy(false) {}
+    // Frees the nodal-coordinate buffers here, while the object still *is* a face element: the range
+    // to free is derived with the virtual as_interface_element(), which by ~BulkElementBase reports
+    // NULL because this sub-object is already gone. free_element_info() is idempotent, so the later
+    // call from ~BulkElementBase simply finds nothing left to do.
+    ~InterfaceElementBase() override { this->free_element_info(); }
 
     virtual int local_interface_hang_eqn(unsigned int interface_dof_index, oomph::Node * master_node) const;  
     void fill_in_jacobian_from_nodal_by_fd(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian) override;
-    static bool interpolate_new_interface_dofs;
     // Public entry point to refresh all the eqn_map bookkeeping (bulk_eqn_map,
     // opp_interf_eqn_map, opp_bulk_eqn_map, bulk_bulk_eqn_map) after equation numbers have changed
     // (e.g. following mesh refinement or re-numbering), by calling
@@ -1355,22 +1762,24 @@ namespace pyoomph
     // optional periodic "offset" applied before matching coordinates).
     void set_opposite_interface_element(BulkElementBase *_opposite_side,std::vector<double>  offset)
     {
-      if (_opposite_side && !dynamic_cast<InterfaceElementBase *>(_opposite_side))
+      if (_opposite_side && !_opposite_side->as_interface_element())
       {
         throw_runtime_error("Can only set an Interface Element as the opposite side of and interface element");
       }
-      opposite_side = dynamic_cast<InterfaceElementBase *>(_opposite_side);
-      const JITFuncSpec_Table_FiniteElement_t *functable = this->codeinst->get_func_table();
+      opposite_side = (_opposite_side ? _opposite_side->as_interface_element() : NULL);
+      const JITFuncSpec_Table_FiniteElement_t *functable = this->jitcode->get_func_table();
+      // Attachment reads the assembled requirements only - see attachment_required_shapes.
+      const JITFuncSpec_RequiredShapes_FiniteElement_t &attach_req = *attachment_required_shapes(functable);
 
-      if (functable->merged_required_shapes.opposite_shapes)
+      if (attach_req.opposite_shapes)
       {
-        // std::cout << "INTERFACE ELEM MERGED " << functable->merged_required_shapes.opposite_shapes->psi_D0 << std::endl;
-        add_required_external_data(functable->merged_required_shapes.opposite_shapes, dynamic_cast<BulkElementBase *>(opposite_side));
-        if (functable->merged_required_shapes.opposite_shapes->bulk_shapes)
+        // std::cout << "INTERFACE ELEM MERGED " << attach_req.opposite_shapes->psi_D0 << std::endl;
+        add_required_external_data(attach_req.opposite_shapes, opposite_side);
+        if (attach_req.opposite_shapes->bulk_shapes)
         {
-          //        std::cout << "INTERFACE ELEM MERGED BULK " <<  functable->merged_required_shapes.opposite_shapes->bulk_shapes->psi_D0 << std::endl;
-          auto *opp_blk = dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(opposite_side)->bulk_element_pt());
-          add_required_external_data(functable->merged_required_shapes.opposite_shapes->bulk_shapes, opp_blk);
+          //        std::cout << "INTERFACE ELEM MERGED BULK " <<  attach_req.opposite_shapes->bulk_shapes->psi_D0 << std::endl;
+          auto *opp_blk = dynamic_cast<BulkElementBase *>(opposite_side->bulk_element_pt());
+          add_required_external_data(attach_req.opposite_shapes->bulk_shapes, opp_blk);
           // ...and register the same data on the OPPOSITE element as well.
           //
           // Reaching the opposite side's bulk goes through the opposite INTERFACE element: its shape
@@ -1383,7 +1792,7 @@ namespace pyoomph
           // interface condition needs the gas bulk element's C2 dofs, but the gas-side interface
           // element may only carry a Dirichlet condition on c, which needs no bulk shapes whatsoever.
           // Without this the remap yields "not found" for exactly those dofs.
-          opposite_side->add_required_external_data(functable->merged_required_shapes.opposite_shapes->bulk_shapes, opp_blk);
+          opposite_side->add_required_external_data(attach_req.opposite_shapes->bulk_shapes, opp_blk);
         }
       }
 
@@ -1410,7 +1819,7 @@ namespace pyoomph
     {
       if (!opposite_side || opposite_node_index[i] < 0)
         return NULL;
-      return dynamic_cast<pyoomph::Node *>(opposite_side->node_pt(opposite_node_index[i]));
+      return static_cast<pyoomph::Node *>(opposite_side->node_pt(opposite_node_index[i]));
     }
     InterfaceElementBase *get_opposite_side() { return opposite_side; }
     const InterfaceElementBase *get_opposite_side() const { return opposite_side; }
@@ -1440,6 +1849,7 @@ namespace pyoomph
   protected:
     bool fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap) override
     {
+      HangFillTimeScope __hftime(HANGFILL_SLOT_FILL);
       bool res1 = BASE::fill_hang_info_with_equations(required, shape_info, eqn_remap);
       bool res2 = InterfaceElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap);
       return res1 || res2;
@@ -1448,6 +1858,10 @@ namespace pyoomph
 
     void interpolate_hang_values() override
     {
+      HangFillTimeScope __hftime(HANGFILL_SLOT_INTERP);
+      HangInterpGate __gate(this);
+      if (__gate.skip())
+        return;
       BASE::interpolate_hang_values();
       this->interpolate_hang_values_at_interface();
     }
@@ -1473,19 +1887,19 @@ namespace pyoomph
     }
 
     // Builds this face element from face "face_index" of bulk_el_pt (which must be built from the
-    // JIT code instance jitcode): sets up the shared geometry via oomph-lib's build_face_element,
+    // JIT code interface_jitcode): sets up the shared geometry via oomph-lib's build_face_element,
     // wires up the interface's own dofs and required external data (including the bulk element's
     // data, and - if the interface's dominant space is higher order than the bulk's - rejects the
     // combination since bulk fields could not represent the interface's higher-order dofs).
-    InterfaceElement(DynamicBulkElementInstance *jitcode, FiniteElement *const &bulk_el_pt, const int &face_index)
+    InterfaceElement(DynamicJITCode *interface_jitcode, FiniteElement *const &bulk_el_pt, const int &face_index)
     {
       bulk_el_pt->build_face_element(face_index, this);
-      this->codeinst = jitcode;
+      this->jitcode = interface_jitcode;
       this->eleminfo.bulk_eleminfo = dynamic_cast<BulkElementBase *>(bulk_el_pt)->get_eleminfo();
       this->add_interface_dofs();
-      const JITFuncSpec_Table_FiniteElement_t *functable = this->get_code_instance()->get_func_table();
+      const JITFuncSpec_Table_FiniteElement_t *functable = this->get_jit_code()->get_func_table();
 
-      const JITFuncSpec_Table_FiniteElement_t *bfunctable = dynamic_cast<BulkElementBase *>(bulk_el_pt)->get_code_instance()->get_func_table();
+      const JITFuncSpec_Table_FiniteElement_t *bfunctable = dynamic_cast<BulkElementBase *>(bulk_el_pt)->get_jit_code()->get_func_table();
       
       if (std::string(functable->dominant_space) == "C2")
       {      
@@ -1495,26 +1909,34 @@ namespace pyoomph
         }
       }
       //      std::cout << "ADDING INTERFACE ELEM EXTERNAL DATA " << this->nexternal_data() << std::endl;
+      // The geometric flags describe external_data_pt() BY INDEX, so they have to go with the list they
+      // describe. (Today the only flush is this one, on a freshly constructed element whose vector is
+      // still empty, so nothing is currently stale - but the flag became load-bearing when
+      // fill_in_jacobian_from_lagragian_by_fd started honouring it, and a stale "geometric" entry there
+      // is a silently wrong Jacobian column.)
+      this->external_data_is_geometric.clear();
       this->flush_external_data();
       //      std::cout << "FLUSING EXTERNAL DATA " << this->nexternal_data() << std::endl;
       this->add_DG_external_data();
       //      std::cout << "DONE ADDING INTERFACE ELEM DG DATA " << this->nexternal_data() << std::endl;
 
-      for (auto &e : this->codeinst->get_linked_external_data().get_required_external_data())
+      for (auto &e : this->jitcode->get_linked_external_data().get_required_external_data())
       {
         //        std:: cout << "ADDING ED0 " << std::endl;
         this->add_required_ext_data(e, false);
       }
       //      std::cout << "DONE ADDING INTERFACE ELEM ED0 DATA " << this->nexternal_data() << std::endl;
 
-      if (functable->merged_required_shapes.bulk_shapes)
+      // Attachment reads the assembled requirements only - see attachment_required_shapes.
+      const JITFuncSpec_RequiredShapes_FiniteElement_t &attach_req = *attachment_required_shapes(functable);
+      if (attach_req.bulk_shapes)
       {
         //	  std::cout << "ADDING BULK EXT DATA" << std::endl;
-        add_required_external_data(functable->merged_required_shapes.bulk_shapes, dynamic_cast<BulkElementBase *>(bulk_el_pt)); // TODO: Also the others? (is it necessary e.g. spatial integration of the stress along interface)
-        if (functable->merged_required_shapes.bulk_shapes->bulk_shapes)
+        add_required_external_data(attach_req.bulk_shapes, dynamic_cast<BulkElementBase *>(bulk_el_pt)); // TODO: Also the others? (is it necessary e.g. spatial integration of the stress along interface)
+        if (attach_req.bulk_shapes->bulk_shapes)
         {
           InterfaceElementBase *ip = dynamic_cast<InterfaceElementBase *>(bulk_el_pt);
-          add_required_external_data(functable->merged_required_shapes.bulk_shapes->bulk_shapes, dynamic_cast<BulkElementBase *>(ip->bulk_element_pt()));
+          add_required_external_data(attach_req.bulk_shapes->bulk_shapes, dynamic_cast<BulkElementBase *>(ip->bulk_element_pt()));
         }
       }
     }
@@ -1545,10 +1967,4 @@ namespace pyoomph
 
 
 
-  extern double *__replace_RJM_by_param_deriv;
-
-  // Set by the element that is currently having its shape buffer filled, read back by the extern "C"
-  // trampoline the generated code calls to refill that buffer at an integration point. Declared here
-  // because setter (elements_shapeinfo.cpp) and reader (elements.cpp) are no longer the same TU.
-  extern BulkElementBase *_currently_assembled_element;
 }

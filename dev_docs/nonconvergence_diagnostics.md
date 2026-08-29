@@ -37,9 +37,12 @@ rather than an artificially injected failure.
 
 ### 1.2 `--largest_residuals`
 
-Implemented (`Problem.debug_largest_residual`, `problem.py:3927`; the command-line flag is registered
-at `problem.py:2499`) and documented nowhere. It is one of the most useful things in the codebase for
-this class of problem and nobody knows it exists.
+Implemented (`Problem.debug_largest_residual`; the command-line flag is registered in
+`setup_cmd_line`) and documented as **one line** in
+`docs/source/tutorial/installation/cmdlineoptions.rst` - "Debug the ``N`` largest residual
+contributions after each Newton solve", which says nothing about the part that makes it useful. It is
+one of the most useful things in the codebase for this class of problem and nobody knows what it
+actually prints.
 
 `--largest_residuals N` prints the `N` largest entries of the residual vector before every Newton
 solve (`actions_before_newton_solve`) and after every Newton step (`actions_after_newton_step`), and

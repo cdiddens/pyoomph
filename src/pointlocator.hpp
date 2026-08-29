@@ -146,7 +146,7 @@ namespace pyoomph
     std::vector<unsigned> time_levels;
 
     // Maps this consumer's continuous field indices onto the source mesh's, for the case where the
-    // two meshes were generated from different JIT code instances. Empty means identity. Negative
+    // two meshes were generated from different JIT codes. Empty means identity. Negative
     // entries mark fields absent from the source, which are left untouched in the result.
     std::vector<int> field_map;
   };

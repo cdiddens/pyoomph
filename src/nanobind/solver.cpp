@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -180,6 +180,16 @@ namespace pyoomph
         static PyObject *cached = nullptr;
         static bool resolved = false;
         return lookup_python_type_once("pyoomph.solvers.generic", "SolverError", cached, resolved);
+    }
+
+    // Counterpart for pyoomph::InvertedElementRemeshRequest, so that Problem.solve()'s retry loop can
+    // tell "an element inverted and a remesh is armed" from every other RuntimeError.
+    static PyObject *inverted_element_remesh_error_type()
+    {
+        static PyObject *cached = nullptr;
+        static bool resolved = false;
+        return lookup_python_type_once("pyoomph.generic.problem",
+                                       "InvertedElementRemeshRequest", cached, resolved);
     }
 
     // Counterpart for oomph::AdaptiveResolveRecovered. Same lazy resolution and same fallback: if the
@@ -414,6 +424,10 @@ extern "C"
             xadj_Py = nb::ndarray<nb::numpy, idx_t>(xadj, {(size_t)nvertex + 1}, nb::capsule(xadj, [](void *f) noexcept {}));
 
         nb::ndarray<nb::numpy, idx_t> adjacency_vector_Py; // adjacency_vector // [xadj[-1]]
+        // The adjacency length is xadj[nvertex], so an adjacency without the row pointers cannot be
+        // sized at all. oomph-lib always passes both; say so rather than dereferencing a null xadj.
+        if (adjncy && !xadj)
+            throw_runtime_error("METIS IMPLEM: adjncy given without xadj");
         if (adjncy)
             adjacency_vector_Py = nb::ndarray<nb::numpy, idx_t>(adjncy, {(size_t)xadj[nvertex]}, nb::capsule(adjncy, [](void *f) noexcept {}));
 
@@ -490,6 +504,14 @@ void PyReg_Solvers(nb::module_ &m)
             catch (const oomph::AdaptiveResolveRecovered &e)
             {
                 PyObject *type = pyoomph::spatial_adapt_resolve_error_type();
+                PyErr_SetString(type ? type : PyExc_RuntimeError, e.what());
+            }
+            // An inverted element on enough consecutive solves that a remesh is the right answer.
+            // Its own class for the same reason as the one above: it is the one failure the caller
+            // is expected to recover from rather than report.
+            catch (const pyoomph::InvertedElementRemeshRequest &e)
+            {
+                PyObject *type = pyoomph::inverted_element_remesh_error_type();
                 PyErr_SetString(type ? type : PyExc_RuntimeError, e.what());
             }
         },

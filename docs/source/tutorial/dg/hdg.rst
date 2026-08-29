@@ -23,36 +23,22 @@ with :math:`\vec{n}` the outward normal of :math:`K`. On its own this is a colle
 
 Both added terms vanish at the exact solution, where :math:`u=\hat{u}` on every facet, so the method is consistent. The second one restores the symmetry of the bilinear form, and the third, with a stabilization parameter :math:`\tau` scaling like :math:`1/h`, is what makes it stable.
 
-The decisive property is which unknowns talk to each other. The unknowns of an element couple to that element and to the :math:`\hat{u}` of its own facets - and to nothing else. In particular they never couple to the unknowns of the neighbouring element, which in an interior penalty formulation they would.
+The unknowns of an element couple to that element and to the :math:`\hat{u}` of its own facets - and to nothing else. In particular they never couple to the unknowns of the neighbouring element, which in an interior penalty formulation they would.
 
-Setting it up
-~~~~~~~~~~~~~
+Both parts can be written in the same class: ``add_interior_facet_residual`` assembles a weak form on the skeleton, and ``at_internal_facets=True`` declares a field there, so :math:`\hat{u}` is a genuine facet unknown rather than a bulk one. Both need ``requires_interior_facet_terms`` in the constructor, which is how pyoomph learns about the skeleton while the equation tree is still being assembled - long before ``define_fields`` is called. Splitting the facet part off into its own class added with ``@"_internal_facets_"``, as in :numref:`secdgfacetfields`, is equivalent.
 
-The bulk equation has no facet terms whatsoever - everything that connects the elements sits on the skeleton:
+.. literalinclude:: hdg_poisson.py
+   :language: python
+   :start-at: class HDGPoissonEquations(Equations):
+   :end-at: self.add_residual(weak(grad(u), grad(v)) - weak(self.source, v))
 
-.. code:: python
+The facet residual adds the three boundary integrals of :math:numref:`eqdghdgform`, summed over the two elements sharing the facet. Since :math:`\vec{n}` is the outward normal of the element the facet is attached to, the other element contributes the same expression with :math:`-\vec{n}`. The one-sided values are recovered from the jump and the average, using :math:`a_\text{near}=\operatorname{avg}(a)+\operatorname{jump}(a)/2` and :math:`a_\text{far}=\operatorname{avg}(a)-\operatorname{jump}(a)/2`:
 
-   class HDGPoissonEquations(Equations):
-       def __init__(self, source, space="D2"):
-           super().__init__()
-           self.source, self.space = source, space
-
-       def define_fields(self):
-           self.define_scalar_field("u", self.space)
-
-       def define_residuals(self):
-           u, v = var_and_test("u")
-           self.add_residual(weak(grad(u), grad(v)) - weak(self.source, v))
-
-The facet equations own :math:`\hat{u}` and add the three boundary integrals of :math:numref:`eqdghdgform`, summed over the two elements sharing the facet. Since :math:`\vec{n}` is the outward normal of the element the facet is attached to, the other element contributes the same expression with :math:`-\vec{n}`. The one-sided values are recovered from the jump and the average, using :math:`a_\text{near}=\operatorname{avg}(a)+\operatorname{jump}(a)/2` and :math:`a_\text{far}=\operatorname{avg}(a)-\operatorname{jump}(a)/2`:
-
-.. code:: python
-
-   u_n, u_f = avg(u) + jump(u) / 2, avg(u) - jump(u) / 2
-   ...
-   r = -weak(dot(n, gu_n), v_n - vhat) - weak(-dot(n, gu_f), v_f - vhat)
-   r += -weak(u_n - uhat, dot(n, gv_n)) - weak(u_f - uhat, -dot(n, gv_f))
-   r += weak(self.tau * (u_n - uhat), v_n - vhat) + weak(self.tau * (u_f - uhat), v_f - vhat)
+.. literalinclude:: hdg_poisson.py
+   :language: python
+   :dedent: 8
+   :start-at: uhat, vhat = var_and_test("uhat")
+   :end-at: self.add_interior_facet_residual(r)
 
 Since the skeleton comprises the *interior* facets only, the exterior boundary needs its own terms: the same expression with :math:`\hat{u}` replaced by the prescribed value, i.e. Nitsche's method.
 
@@ -65,14 +51,14 @@ Since the skeleton comprises the *interior* facets only, the exterior boundary n
    that is not the normal derivative, the boundary condition contributes nothing, and the method
    silently degrades to first order instead of failing.
 
-Condensing
-~~~~~~~~~~
 
 Because the bulk unknowns of an element couple to nothing outside it, they can be eliminated by a small dense Schur complement per element before the Jacobian reaches the solver, and reconstructed afterwards. That is what :py:class:`~pyoomph.equations.generic.StaticCondensation` does (cf. :numref:`secspatialcrcondensation`), and one line is enough:
 
-.. code:: python
-
-   eqs += StaticCondensation("u")
+.. literalinclude:: hdg_poisson.py
+   :language: python
+   :dedent: 12
+   :start-at: eqs += StaticCondensation("u")
+   :end-at: eqs += StaticCondensation("u")
 
 Running :download:`hdg_poisson.py` on an :math:`8\times 8` mesh with ``"D2"`` for both spaces reports
 
@@ -106,28 +92,11 @@ The elimination is exact, so the accuracy is that of the unreduced scheme. Refin
      - 6.426e-04
      - 6.435e-06
 
+
 .. note::
 
-   Two practical points. The automatic selection
-   :py:meth:`~pyoomph.generic.problem.Problem.condense_element_private_dofs` does **not** pick up the
-   bulk field here, because the facet elements read it as external data; it has to be named
-   explicitly, as above. And the example keeps adaptivity off simply to compare a fixed sequence of
-   meshes; every discontinuous facet space, the nodal ``"D1"``/``"D2"`` included, is carried through
-   a spatial adaptation, a remesh, a state file and ``--distribute``.
-
-Under MPI
-~~~~~~~~~
-
-Both parallel modes of :numref:`secmpimodes` run this example, condensation included.
-
-With ``--distribute`` the mesh is partitioned, and a facet whose two elements land on different processes is *owned* by the one that assembles it while the other holds a halo copy - so the trace :math:`\hat{u}` is one unknown, numbered once, exactly as it is serially. Distributing rebuilds every facet element, but the trace is carried across that rebuild whatever its space is, so ``facet_space="DL"`` (with ``space="D1"`` for the bulk) is a modelling choice here rather than a restriction.
-
-Without ``--distribute`` the run is *replicated* - every process holds the whole mesh and only the assembly and the linear system are split - and the elimination is served there too. That it is, is a property of *which* dofs are being eliminated. A block can only be condensed on the process that owns all of its rows, and the rows are cut into contiguous ranges; pyoomph moves those cut points off the blocks, which it can do exactly when each element's selected dofs are numbered together. Element-internal values - the bulk field here, and ``"DL"``/``"D0"`` fields generally - are. A selection mixing *nodal* and element-internal dofs is not, because oomph-lib numbers every nodal value before any internal one: the Crouzeix-Raviart selection of :numref:`secspatialcrcondensation`, which pairs the bubble velocity (nodal) with the pressure gradients (internal), therefore has to be run with ``--distribute``, where each process's dofs are renumbered contiguously and the question does not arise. That case is refused with a message saying so, not silently skipped.
-
-.. warning::
-
    The hybridization is what makes this work, not the discontinuous space. If the facet terms couple
-   the two sides of a facet *directly* - an interior penalty formulation with a ``jump(u)*jump(v)``
+   the two sides of a facet directly - an interior penalty formulation with a ``jump(u)*jump(v)``
    term, say - then the bulk unknowns of the whole mesh form a single coupled block, and the
    elimination is refused with an explanation rather than silently performing a second, worse, direct
    solve. The stabilization term is likewise not optional: without it each element-local problem is a

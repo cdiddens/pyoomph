@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -404,7 +404,6 @@ namespace pyoomph
 			return false;
 		}
 
-		int el_dim = -1; // -1 means "not yet set" / element dimension unknown at this point
 
 		// Definitions of the global symbols declared in expressions.hpp. Names passed to the constructors match the
 		// identifiers used in generated C code / pretty-printed output.
@@ -430,8 +429,6 @@ namespace pyoomph
 		potential_real_symbol __partial_t_mass_matrix("__partial_t_mass_matrix");
 		potential_real_symbol dt("dt");
 		symbol nnode("nnode");
-
-		potential_real_symbol *proj_on_test_function = NULL;
 
 		// Both loop indices range over [0, nnode); which one actually corresponds to the number of shape/test functions used
 		// in a given loop is determined by the code generator's context, not by this declared range
@@ -3393,9 +3390,12 @@ namespace pyoomph
 
 		////////////////
 
-		// internal_function_with_element_arg(name,args): calls a named C-implemented internal function that additionally
-		// needs the current element pointer, by looking it up in the generated code's my_func_table and passing
-		// eleminfo->elem_ptr as the first argument, followed by "args"; always stays held except when actually printed as C code
+		// internal_function_with_element_arg(name,args): calls a named function of the code's own JIT
+		// function table that additionally needs the element, passing eleminfo->elem_ptr as its first
+		// argument followed by "args"; always stays held except when actually printed as C code.
+		// Reachable only from Python (GiNaC_internal_function_with_element_arg) and currently unused:
+		// get_element_size was the one such table member and was dead (it threw on its first line), so
+		// there is nothing left for a caller to name until another one is added.
 		static ex internal_function_with_element_arg_eval(const ex &n, const ex &args)
 		{
 			return internal_function_with_element_arg(n, args).hold();

@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -28,6 +28,7 @@ from __future__ import annotations
  
 
 
+from .._deprecation import deprecated_kwargs as _deprecated_kwargs, deprecated_attribute_alias as _deprecated_attribute_alias
 from .. import WeakContribution, GlobalLagrangeMultiplier
 from ..generic import Equations, InterfaceEquations
 from .generic import get_interface_field_connection_space, TestScaling, Scaling
@@ -151,11 +152,17 @@ class PressureFixationTaylorHood(_PressureFixation):
 
     def setup(self):
         assert self.mesh is not None
-        self.pindex = self.mesh.element_pt(0).get_code_instance().get_nodal_field_index(self.pname)
+        # Off the code generator, not off element 0: a rank need not own an element of this domain
+        # under --distribute, and the error below has to be raised by all ranks or by none. Same
+        # DynamicJITCode object, one that does not depend on the partition - the reasoning is spelled
+        # out at PythonDirichletBC.setup().
+        assert self.mesh._codegen is not None
+        jitcode = self.mesh._codegen.get_code()
+        self.pindex = jitcode.get_nodal_field_index(self.pname)
         if self.pindex < 0:
-            allfields = self.mesh.element_pt(0).get_code_instance().get_nodal_field_indices()
+            allfields = jitcode.get_nodal_field_indices()
             for k,v in allfields.items():
-                print(k,v,self.mesh.element_pt(0).get_code_instance().get_nodal_field_index(k))
+                print(k,v,jitcode.get_nodal_field_index(k))
             raise RuntimeError("Missing nodal data for 'pressure'. Found only: "+str(allfields))
 
     def _select_node(self)->"Node | None":
@@ -236,7 +243,8 @@ class PressureFixationCrouzeixRaviart(_PressureFixation):
 
     def setup(self):
         assert self.mesh is not None
-        self.pindex = self.mesh.element_pt(0).get_code_instance().get_discontinuous_field_index(self.pname)
+        assert self.mesh._codegen is not None   # off the generator, not element 0: see the Taylor-Hood one above
+        self.pindex = self.mesh._codegen.get_code().get_discontinuous_field_index(self.pname)
         if self.pindex < 0:
             raise RuntimeError("Missing internal data for 'pressure'")
 
@@ -290,7 +298,8 @@ class StokesEquations(Equations):
         momentum_scheme (TimeSteppingScheme, optional): Time-stepping scheme for the momentum equation. Defaults to "BDF2".
         continuity_scheme (TimeSteppingScheme, optional): Time-stepping scheme for the continuity equation. Defaults to "BDF2".
         pressure_factor (ExpressionOrNum, optional): Multiplicative factor for the pressure in the momentum equation. Defaults to 1.
-        stress_tensor (ExpressionNumOrNone, optional): Custom stress tensor. Defaults to None.
+        stress_tensor (ExpressionNumOrNone, optional): Custom stress tensor, *replacing* the Newtonian one. Defaults to None.
+        extra_stress (ExpressionNumOrNone, optional): Additional stress tensor, *added* to whichever stress tensor is in force. This is where a Maxwell, polymeric or active stress goes; see :py:class:`~pyoomph.equations.electrohydrodynamics.MaxwellStressEquations` for the electric one. Defaults to None.
         velocity_name (str, optional): Name of the velocity field. Defaults to "velocity".
         pressure_name (str, optional): Name of the pressure field. Defaults to "pressure".
         DG_alpha (ExpressionNumOrNone, optional): If using Discontinuous Galerkin discretisation, set penalty coefficient alpha for jump terms of the stress tensor. Defaults to None.
@@ -298,9 +307,15 @@ class StokesEquations(Equations):
         pressure_test_scaling_factor (float, optional): Multiplicative scaling factor for the pressure test function. Defaults to 1.0.
         hele_shaw_thickness (ExpressionOrNum, optional): Adds a Hele-Shaw drag term to the bulk force i.e -12*mu*u/delta**2, with the given thickness as parameter. Defaults to None.
         GCL (bool, optional): If True, the Geometric Conservation Law is enforced in the ALE formulation of the (Navier-)Stokes equations. Defaults to False.
+
+    .. note::
+        **Scaling to set on problem level.** With ``GCL=True`` and a non-Boussinesq density, the
+        continuity equation is tested with ``1/scale_factor("mass_density")``. ``mass_density`` is
+        no field of the system, so it has to be set by ``problem.set_scaling(mass_density=...)`` --
+        an unset scale is unity, which silently mis-scales a dimensional problem.
     """
     def __init__(self, *, dynamic_viscosity:ExpressionOrNum=1.0, mode:Literal["TH","CR","SV","C1","C2","D2D1","D1D0","D2TBD1","mini","C2DL"]="TH", bulkforce:ExpressionNumOrNone=None, fluid_props:"AnyFluidProperties | None"=None, gravity:ExpressionNumOrNone=None, boussinesq:bool=False, mass_density:ExpressionNumOrNone=None,
-                 pressure_sign_flip:bool=False,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",pressure_factor:ExpressionOrNum=1, stress_tensor:ExpressionNumOrNone=None,velocity_name="velocity",pressure_name="pressure",DG_alpha:ExpressionNumOrNone=None,symmetric_test_function:Literal['auto'] | bool='auto',pressure_test_scaling_factor:float=1, hele_shaw_thickness:ExpressionNumOrNone=None,GCL:bool=False ):
+                 pressure_sign_flip:bool=False,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",pressure_factor:ExpressionOrNum=1, stress_tensor:ExpressionNumOrNone=None,extra_stress:ExpressionNumOrNone=None,velocity_name="velocity",pressure_name="pressure",DG_alpha:ExpressionNumOrNone=None,symmetric_test_function:Literal['auto'] | bool='auto',pressure_test_scaling_factor:float=1, hele_shaw_thickness:ExpressionNumOrNone=None,GCL:bool=False ):
         super().__init__()
         self.gravity = gravity  # Some gravity direction, i.e. g*<unit vector of direction>
         if mode not in {"CR","TH","C1","C2","SV","D2TBD1","D2D1","D1D0","mini","C2DL"}:
@@ -344,6 +359,7 @@ class StokesEquations(Equations):
         self.continuity_scheme:TimeSteppingScheme=continuity_scheme
         self.pressure_factor=pressure_factor
         self.stress_tensor=stress_tensor
+        self.extra_stress=extra_stress
         self.velocity_name=velocity_name
         self.pressure_name=pressure_name
         
@@ -408,10 +424,10 @@ class StokesEquations(Equations):
         P = self.get_scaling(self.pressure_name)
         self.set_test_scaling({self.velocity_name:X / P})
         self.set_test_scaling(pressure=X / U*self.pressure_test_scaling_factor)
-        self.add_named_numerical_factor(p_in_momentum_eq=scale_factor(self.pressure_name)*test_scale_factor(self.velocity_name)/scale_factor("spatial")*self.pressure_test_scaling_factor)
-        self.add_named_numerical_factor(div_u__in_conti_eq=scale_factor(self.velocity_name) * test_scale_factor(self.pressure_name) / scale_factor("spatial"))
+        self._add_named_numerical_factor(p_in_momentum_eq=scale_factor(self.pressure_name)*test_scale_factor(self.velocity_name)/scale_factor("spatial")*self.pressure_test_scaling_factor)
+        self._add_named_numerical_factor(div_u__in_conti_eq=scale_factor(self.velocity_name) * test_scale_factor(self.pressure_name) / scale_factor("spatial"))
 
-    def define_stress_tensor(self):
+    def define_stress_tensor(self)->Expression:
         u = var(self.velocity_name)
         p = var(self.pressure_name)
 
@@ -425,7 +441,12 @@ class StokesEquations(Equations):
             stress_tensor = 2 * visc * strain - identity_matrix() * self.pressure_factor*p*(-1 if self.pressure_sign_flip else 1)
         else:
             stress_tensor = self.stress_tensor
-        return stress_tensor
+        # stress_tensor REPLACES the Newtonian expression, extra_stress ADDS to whichever of the two
+        # is in force. Kept apart because almost every extra stress -- Maxwell, polymeric, active --
+        # is an addition, and expressing that through stress_tensor means restating the solvent part.
+        if self.extra_stress is not None:
+            stress_tensor = stress_tensor + self.extra_stress
+        return convert_to_expression(stress_tensor)
 
     def define_residuals(self):
         u, u_test = var_and_test(self.velocity_name)
@@ -582,7 +603,8 @@ class NavierStokesEquations(StokesEquations):
         momentum_scheme (TimeSteppingScheme, optional): Time-stepping scheme for the momentum equation. Defaults to "BDF2".
         continuity_scheme (TimeSteppingScheme, optional): Time-stepping scheme for the continuity equation. Defaults to "BDF2".
         pressure_factor (ExpressionOrNum, optional): Multiplicative factor for the pressure in the momentum equation. Defaults to 1.
-        stress_tensor (ExpressionNumOrNone, optional): Custom stress tensor. Defaults to None.
+        stress_tensor (ExpressionNumOrNone, optional): Custom stress tensor, *replacing* the Newtonian one. Defaults to None.
+        extra_stress (ExpressionNumOrNone, optional): Additional stress tensor, *added* to whichever stress tensor is in force. This is where a Maxwell, polymeric or active stress goes; see :py:class:`~pyoomph.equations.electrohydrodynamics.MaxwellStressEquations` for the electric one. Defaults to None.
         velocity_name (str, optional): Name of the velocity field. Defaults to "velocity".
         pressure_name (str, optional): Name of the pressure field. Defaults to "pressure".
         DG_alpha (ExpressionNumOrNone, optional): If using Discontinuous Galerkin discretisation, set coefficient alpha for stress tensor. Defaults to None.
@@ -591,13 +613,19 @@ class NavierStokesEquations(StokesEquations):
         nonlinear_factor (ExpressionNumOrNone, optional): Multiplicative factor to scale or deactivate the nonlinearity, i.e. dot(u,grad(u))). Defaults to None.        
         wrap_params_in_subexpressions (bool, optional): Wrap parameters in subexpressions using GiNaC. Defaults to True.
         GCL (bool, optional): If True, the Geometric Conservation Law is enforced in the ALE formulation of the (Navier-)Stokes equations. Defaults to False.
+
+    .. note::
+        **Scaling to set on problem level.** The nondimensionalization of the inertia term, and
+        with ``GCL`` also the test scale of the continuity equation (see
+        :ref:`StokesEquations <StokesEquations>`), uses ``scale_factor("mass_density")``. Being no
+        field of the system, it has to be set by ``problem.set_scaling(mass_density=...)``.
     """
                  
         
     def __init__(self, *, dynamic_viscosity:ExpressionOrNum=1.0, mode:Literal["TH","CR","SV","mini"]="TH", mass_density:ExpressionOrNum=1.0, bulkforce:ExpressionNumOrNone=None, fluid_props:"AnyFluidProperties | None"=None,
-                 dt_factor:ExpressionOrNum=1, nonlinear_factor:ExpressionNumOrNone=None, gravity:ExpressionNumOrNone=None, boussinesq:bool=False,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",pressure_factor:ExpressionOrNum=1,wrap_params_in_subexpressions:bool=True, stress_tensor:ExpressionNumOrNone=None,velocity_name="velocity",pressure_name="pressure",symmetric_test_function:Literal['auto'] | bool='auto',pressure_test_scaling_factor:float=1, hele_shaw_thickness:ExpressionNumOrNone=None,GCL:bool=False):
+                 dt_factor:ExpressionOrNum=1, nonlinear_factor:ExpressionNumOrNone=None, gravity:ExpressionNumOrNone=None, boussinesq:bool=False,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",pressure_factor:ExpressionOrNum=1,wrap_params_in_subexpressions:bool=True, stress_tensor:ExpressionNumOrNone=None,extra_stress:ExpressionNumOrNone=None,velocity_name="velocity",pressure_name="pressure",symmetric_test_function:Literal['auto'] | bool='auto',pressure_test_scaling_factor:float=1, hele_shaw_thickness:ExpressionNumOrNone=None,GCL:bool=False):
         super().__init__(dynamic_viscosity=dynamic_viscosity, mode=mode, bulkforce=bulkforce, fluid_props=fluid_props,
-                         gravity=gravity, boussinesq=boussinesq,momentum_scheme=momentum_scheme,continuity_scheme=continuity_scheme,pressure_factor=pressure_factor, stress_tensor=stress_tensor,velocity_name=velocity_name,pressure_name=pressure_name,symmetric_test_function=symmetric_test_function,pressure_test_scaling_factor=pressure_test_scaling_factor, hele_shaw_thickness=hele_shaw_thickness,GCL=GCL)
+                         gravity=gravity, boussinesq=boussinesq,momentum_scheme=momentum_scheme,continuity_scheme=continuity_scheme,pressure_factor=pressure_factor, stress_tensor=stress_tensor,extra_stress=extra_stress,velocity_name=velocity_name,pressure_name=pressure_name,symmetric_test_function=symmetric_test_function,pressure_test_scaling_factor=pressure_test_scaling_factor, hele_shaw_thickness=hele_shaw_thickness,GCL=GCL)
         if self.fluid_props is not None:
             self.mass_density = self.fluid_props.mass_density
         else:
@@ -613,7 +641,7 @@ class NavierStokesEquations(StokesEquations):
 
     def define_scaling(self):
         super(NavierStokesEquations, self).define_scaling()
-        self.add_named_numerical_factor(inertia_in_momentum_eq=self.dt_factor*scale_factor("mass_density") * scale_factor(self.velocity_name)*test_scale_factor(self.velocity_name) / scale_factor("temporal"))
+        self._add_named_numerical_factor(inertia_in_momentum_eq=self.dt_factor*scale_factor("mass_density") * scale_factor(self.velocity_name)*test_scale_factor(self.velocity_name) / scale_factor("temporal"))
 
     def define_residuals(self):
         super().define_residuals()  # add the Stokes part
@@ -685,15 +713,18 @@ class NavierStokesFreeSurface(InterfaceEquations):
         additional_normal_traction (ExpressionOrNum, optional): Additional normal traction. Defaults to 0.
         mass_transfer_rate (ExpressionOrNum, optional): Mass transfer rate in case there is mass transfer across the interface. Defaults to 0.        
         impose_marangoni_directly (bool, optional): If False, the weak form of grad_s(sigma) is integrated by parts. Defaults to False.
-        kinematic_bc_coordinate_sys (Optional[BaseCoordinateSystem], optional): Coordinate system for the kinematic boundary condition. Defaults to None.
+        kinematic_bc_coordsys (Optional[BaseCoordinateSystem], optional): Coordinate system for the kinematic boundary condition. Defaults to None.
         remove_redundant_kinematic_bcs (bool, optional): If True, redundant kinematic boundary conditions are removed. Defaults to True.
     """
 
 
     required_parent_type = StokesEquations
 
+    kinematic_bc_coordinate_sys = _deprecated_attribute_alias("kinematic_bc_coordinate_sys","kinematic_bc_coordsys")
+
+    @_deprecated_kwargs(kinematic_bc_coordinate_sys="kinematic_bc_coordsys")
     def __init__(self, *, surface_tension:ExpressionOrNum=1, kinbc_name:str="_kin_bc", static_interface:Literal["auto"] | bool="auto", additional_normal_traction:ExpressionOrNum=0,
-                 mass_transfer_rate:ExpressionOrNum=0,impose_marangoni_directly:bool=False,kinematic_bc_coordinate_sys:BaseCoordinateSystem | None=None,remove_redundant_kinematic_bcs=True):
+                 mass_transfer_rate:ExpressionOrNum=0,impose_marangoni_directly:bool=False,kinematic_bc_coordsys:BaseCoordinateSystem | None=None,remove_redundant_kinematic_bcs=True):
         super(NavierStokesFreeSurface, self).__init__()
         self.kinbc_name = kinbc_name
         self.static_interface = static_interface
@@ -701,7 +732,7 @@ class NavierStokesFreeSurface(InterfaceEquations):
         self.mass_transfer_rate = mass_transfer_rate
         self.additional_normal_traction = additional_normal_traction
         self.impose_marangoni_directly=impose_marangoni_directly
-        self.kinematic_bc_coordinate_sys=kinematic_bc_coordinate_sys
+        self.kinematic_bc_coordsys=kinematic_bc_coordsys
         self.remove_redundant_kinematic_bcs=remove_redundant_kinematic_bcs
 
 
@@ -773,8 +804,8 @@ class NavierStokesFreeSurface(InterfaceEquations):
                 assert isinstance(nsbulk,StokesEquations)
                 assert nsbulk.mass_density is not None
                 kin_bc+= self.mass_transfer_rate / nsbulk.mass_density
-            self.add_residual(kbc_sign*weak(kin_bc , l_test,coordinate_system=self.kinematic_bc_coordinate_sys))
-            self.add_residual(kbc_sign*weak(l , dot(n, u_test),coordinate_system=self.kinematic_bc_coordinate_sys))
+            self.add_residual(kbc_sign*weak(kin_bc , l_test,coordsys=self.kinematic_bc_coordsys))
+            self.add_residual(kbc_sign*weak(l , dot(n, u_test),coordsys=self.kinematic_bc_coordsys))
         else:
 
             kin_bc = dot(mesh_velocity() - u, n)
@@ -784,10 +815,10 @@ class NavierStokesFreeSurface(InterfaceEquations):
                 assert isinstance(nsbulk,StokesEquations)
                 assert nsbulk.mass_density is not None
                 kin_bc+= self.mass_transfer_rate / nsbulk.mass_density
-            self.add_residual(kbc_sign*weak( kin_bc , l_test,coordinate_system=self.kinematic_bc_coordinate_sys))
+            self.add_residual(kbc_sign*weak( kin_bc , l_test,coordsys=self.kinematic_bc_coordsys))
 
             dt_weight = 1
-            self.add_residual(-dt_weight*weak(l, dot(n,  R_test),coordinate_system=self.kinematic_bc_coordinate_sys))
+            self.add_residual(-dt_weight*weak(l, dot(n,  R_test),coordsys=self.kinematic_bc_coordsys))
 
         if self.impose_marangoni_directly:
             if not static:
@@ -838,7 +869,10 @@ class NavierStokesFreeSurfaceBalancedEnd(InterfaceEquations):
         inter_eqs=self.get_parent_equations(NavierStokesFreeSurface)
         assert isinstance(inter_eqs,NavierStokesFreeSurface)
         if not inter_eqs.impose_marangoni_directly: # Only when we used the surface divergence theorem, the Neumann terms are there
-            sigma=inter_eqs.surface_tension        
+            # Evaluated on the interface, not on this point domain: identical for a continuous field,
+            # but a discontinuous one lives in the interface element's internal data and cannot be read
+            # here unrestricted at all.
+            sigma=evaluate_in_domain(0+inter_eqs.surface_tension,"..")
             n = self.get_normal() # Outward pointing tangent at the interface boundary
             ns=inter_eqs.get_parent_equations(StokesEquations)
             assert isinstance(ns,StokesEquations)
@@ -896,7 +930,9 @@ class ConnectVelocityAtInterface(InterfaceEquations):
             if outside_space == "":
                 raise RuntimeError(
                     "Cannot connect field " + f + " at the interface, since it cannot find in the outer domain")
-            space=get_interface_field_connection_space(inside_space,outside_space,self.use_highest_space)
+            space=get_interface_field_connection_space(inside_space,outside_space,self.use_highest_space,
+                                                       parent_space=str(self.get_parent_domain()._coordinate_space),
+                                                       parent_dim=int(self.get_parent_domain().dimension))
             assert space!=""
             self.define_scalar_field(self.lagr_mult_prefix + f, space)
             
@@ -1306,12 +1342,16 @@ class NavierStokesContactAngle(InterfaceEquations):
                     nseq=nseq[0]
         if nseq is None:
             raise RuntimeError("Must be applied on NavierStokesFreeSurface or a MultiComponentNavierStokesInterface")
+        # The surface tension is a property of the *interface*, so it is evaluated there rather than on
+        # this point domain. For a continuous field the two are the same number, but a discontinuous
+        # one - a D0 surfactant, say - lives in the interface element's internal data and is simply not
+        # visible from a co-dimension-2 domain unrestricted: without this, sigma(Gamma) fails outright
+        # with "Cannot expand the field 'surfconc_...'".
         if isinstance(nseq,NavierStokesFreeSurface):
-            sigma = 0+nseq.surface_tension
+            sigma = evaluate_in_domain(0+nseq.surface_tension,"..")
         else:
-            # TODO: Use surface tension projection if present
             assert isinstance(nseq,MultiComponentNavierStokesInterface)
-            sigma = 0+nseq.interface_props.surface_tension
+            sigma = evaluate_in_domain(0+nseq.interface_props.surface_tension,"..")
 
         theta=self.contact_angle
         if self.cox_voinov:

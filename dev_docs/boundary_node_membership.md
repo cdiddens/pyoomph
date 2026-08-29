@@ -276,8 +276,9 @@ this work and reproducing them identically:
    `boundary_coordinates_have_been_set_up()` stays true on a node with no coordinates left. Only spurious
    zetas are lost, and `pyoomph/meshes/zeta.py` re-sets zeta on every interface-element node after each
    adapt — a candidate `//FOR PYOOMPH` tidy-up, not a blocker.
-3. **Periodic corner detection.** `pyoomph/meshes/bcs.py` uses `len(n.get_boundary_indices()) >= 2` to
-   identify corner nodes and *raises* on a master/slave mismatch. Removing a spurious second membership
+3. **Periodic corner detection.** `PeriodicBC.before_finalization`
+   (`pyoomph/equations/generic.py`, moved there when `pyoomph/meshes/bcs.py` was removed) uses
+   `len(n.get_boundary_indices()) >= 2` to identify corner nodes and *raises* on a master/slave mismatch. Removing a spurious second membership
    flips that branch — only on a mesh that already had spurious marks, but it turns a silent wrong answer
    into an exception.
 4. **Refinement patterns move on pathological meshes.**

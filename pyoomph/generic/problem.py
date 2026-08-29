@@ -3,32 +3,35 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
+import contextlib
+import json
 import glob
 import sys
 import warnings
+from .._deprecation import deprecated_kwargs as _deprecated_kwargs
 
 import scipy.sparse
 
@@ -49,10 +52,11 @@ from pathlib import Path
 import argparse
 import numpy
 from ..meshes.mesh import  AnyMesh,AnySpatialMesh,BulkTemplateMesh, MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d, ODEStorageMesh, InterfaceMesh,MeshFromTemplate,MeshFromTemplateBase,MeshTemplate
-from .codegen import EquationTree,BaseEquations, FiniteElementCodeGenerator,CombinedEquations,DummyEquations, InterfaceEquations #ODEEquations
+from .codegen import EquationTree,BaseEquations, FiniteElementCodeGenerator,DummyEquations, InterfaceEquations #ODEEquations
+from ..equations.additional import EquationCompilationFlags
 from ..solvers.generic import DefaultMatrixType, EigenSolverWhich, GenericLinearSystemSolver,GenericEigenSolver
 from ..expressions.units import *
-from ..expressions import get_global_symbol,cartesian,axisymmetric,axisymmetric_flipped,radialsymmetric,BaseCoordinateSystem,nondim,testfunction,weak,OptionalCoordinateSystem
+from ..expressions import cartesian,axisymmetric,axisymmetric_flipped,radialsymmetric,BaseCoordinateSystem,nondim,testfunction,weak,OptionalCoordinateSystem
 from ..solvers.generic import get_default_linear_solver,get_default_eigen_solver
 from ..meshes.interpolator import _DefaultInterpolatorClass,ODEInterpolator 
 from ..output.states import DumpFile
@@ -75,6 +79,7 @@ if TYPE_CHECKING:
     from ..meshes.remesher import RemesherBase
     from ..meshes.interpolator import BaseMeshToMeshInterpolator
     from .assembly import CustomAssemblyBase
+    from .bifurcation_tools import DeflationOperator
     from ..utils.num_text_out import NumericalTextOutputFile
     from ..output.latex import LaTeXPrinter
     import precice
@@ -195,8 +200,27 @@ class GenericProblemHooks:
 
 
         
+def _collocation_time_steps(NT:int,order:int)->int:
+    """``NT`` raised to what a collocation orbit of this order actually needs.
+
+    A multiple of the order, because the time mesh is built from elements of that many intervals
+    (``(nknots-1)%order`` is refused outright), and EVEN, because with an odd number of time
+    intervals a differential-algebraic problem puts a spurious Floquet multiplier on exactly ``-1``,
+    which is where a period doubling would be - see dev_docs/floquet_multipliers.md section 6.
+
+    The bifurcation GUI applies the same rule to what the user types
+    (``BifurcationController._orbit_NT``); this is the one copy of the arithmetic.
+    """
+    NT=max(2,int(NT))
+    order=max(1,int(order))
+    step=order if order%2==0 else 2*order
+    if NT%step:
+        NT=((NT//step)+1)*step
+    return NT
+
+
 class PeriodicOrbit:
-    """ 
+    """
     A class representing a periodic orbit.
     """
     def __init__(self,problem:"Problem",mode:Literal["collocation","central","bspline","BDF2","floquet"],lyap_coeff,param,omega,pvalue,pdvalue,al,order:int,GL_order:int,T_constraint:Literal["plane", "phase"]):
@@ -209,6 +233,22 @@ class PeriodicOrbit:
     def __enter__(self):
         return self
     
+    def _current_base_dofs(self)->NPFloatArray:
+        """The base (non-augmented) part of the current dof vector, in base equation order.
+
+        get_current_dofs() gathers the AUGMENTED vector, and under --distribute its rows are
+        interleaved per rank (rank 0's base rows, then rank 0's time blocks, then rank 1's ...), so
+        its first nbase entries are NOT the base block there. The handler's naive ordering says where
+        they really are; it is empty, and this is a plain slice, when not distributed.
+        """
+        handler=self._get_handler()
+        nbase=handler.get_base_ndof()
+        dofs=self.problem.get_current_dofs()[0]
+        order=handler.get_naive_equation_order()
+        if len(order):
+            return dofs[numpy.asarray(order[:nbase],dtype=numpy.int64)]
+        return dofs[:nbase]
+
     def __exit__(self,exc_type: type[BaseException] | None, exc: BaseException | None, traceback: types.TracebackType | None):
         #  Setup the history dofs for a transient continuation
         N=self.get_num_time_steps()
@@ -218,7 +258,7 @@ class PeriodicOrbit:
         history=[]
         for s in [0,-1/N,-2/N]:
             self._get_handler().set_dofs_to_interpolated_values(s) # TODO: We might need the time history for e.g. local expressions, integrals, etc. involving partial_t            
-            history.append(self.problem.get_current_dofs()[0][:self._get_handler().get_base_ndof()])
+            history.append(self._current_base_dofs())
         self._get_handler().restore_dofs()
         self.problem.deactivate_bifurcation_tracking()
         for i,h in enumerate(history):
@@ -231,11 +271,17 @@ class PeriodicOrbit:
             self.problem.time_pt().set_dt(i,dt)            
             self.problem.set_history_dofs(i,h)
         self.problem.time_stepper_pt().set_weights()
-        self.problem.shift_time_values()
-        self.problem.shift_time_values()
-        self.problem.shift_time_values()
+        # No shift_time_values() here. The history above is already in shift-before-solve form
+        # ([u(0), u(-dt), u(-2dt)]), which the shift the next solve does itself turns into
+        # levels 1=u(0), 2=u(-dt). Shifting three times here collapsed the value history to
+        # [u0,u0,u0] and refilled the Newmark velocity/acceleration slots from that, so the first
+        # step of the continuation was an impulsive restart -- exactly what sampling the orbit
+        # history was meant to avoid.
         self.problem.time_stepper_pt().undo_make_steady()
         self.problem._taken_already_an_unsteady_step=True
+        # ...and a nonzero counter, or the very first step is degraded to BDF1 (see
+        # elements_shapeinfo.cpp), which throws away the second-order history just written.
+        self.problem.timestepper.set_num_unsteady_steps_done(2)
         self.problem._last_step_was_stationary=False
         self.problem.actions_before_transient_solve()
         
@@ -270,7 +316,255 @@ class PeriodicOrbit:
         Returns the number of time steps of the discretized orbit
         """
         return self._get_handler().get_num_time_steps()
-    
+
+    def _blocks(self)->"tuple[NPFloatArray,float]":
+        """The orbit's own unknowns as ``(nT, nbase)`` time blocks, plus the nondimensional period.
+
+        Read straight out of the augmented dof vector in its naive time-major order rather than by
+        re-sampling: :py:meth:`iterate_over_samples` INTERPOLATES, and these blocks are meant to
+        reproduce the installed orbit exactly, so that it can be put back bit for bit.
+        """
+        handler=self._get_handler()
+        nbase=handler.get_base_ndof()
+        nT=handler.get_num_time_steps()
+        dofs=numpy.asarray(self.problem.get_current_dofs()[0],dtype=float)
+        order=handler.get_naive_equation_order()
+        if len(order):
+            dofs=dofs[numpy.asarray(order,dtype=numpy.int64)]
+        return dofs[:nbase*nT].reshape(nT,nbase).copy(),float(dofs[nbase*nT])
+
+    def _install_blocks(self,blocks:"NPFloatArray",T_nondim:float,mode:str,order:int,GL_order:int,
+                        T_constraint:str):
+        """Re-create the handler from stored time blocks and write them back exactly.
+
+        The counterpart of :py:meth:`_blocks`. In floquet/collocation mode the handler appends the
+        end-of-period block itself, from the current state, so handing it over as history as well
+        would make the orbit one block longer on every round trip; the other modes carry no such
+        block and hand over all of them.
+
+        activate_periodic_orbit_handler rebuilds that end-of-period block and re-nondimensionalises
+        T, so the whole augmented vector is written back afterwards - that is what makes this exact
+        rather than approximately right.
+        """
+        nT=int(blocks.shape[0])
+        if nT<2:
+            raise ValueError("A stored orbit needs at least two time points")
+        floquet_mode=mode in ("collocation","floquet")
+        history=[blocks[i] for i in range(1,nT-1 if floquet_mode else nT)]
+        self.problem.deactivate_bifurcation_tracking()
+        self.problem.set_current_dofs(blocks[0])
+        self.problem.activate_periodic_orbit_handler(
+            T_nondim*self.problem.get_scaling("temporal"),history_dofs=history,mode=mode, #type:ignore
+            order=order,GL_order=GL_order,T_constraint=T_constraint) #type:ignore
+        handler=self._get_handler()
+        if handler.get_num_time_steps()!=nT:
+            self.problem.deactivate_bifurcation_tracking()
+            raise RuntimeError("The restored orbit has {:d} time points instead of {:d}".format(
+                handler.get_num_time_steps(),nT))
+        aug=numpy.concatenate([blocks.reshape(-1),[T_nondim]])
+        naive=handler.get_naive_equation_order()
+        if len(naive):
+            full=numpy.empty_like(aug)
+            full[numpy.asarray(naive,dtype=numpy.int64)]=aug
+            aug=full
+        self.problem.set_current_dofs(aug)
+        self.mode=mode #type:ignore
+        self.order,self.GL_order=order,GL_order
+        self.T_constraint=T_constraint #type:ignore
+
+    # ---------------------------------------------------------------- stored orbits
+    #
+    # A state dump holds ONE phase of the cycle. The remaining time blocks, the period and the
+    # discretization that gives them meaning live in the handler, so they are written beside the dump
+    # as a companion ("sidecar"). The bifurcation GUI writes these for every orbit point of a diagram;
+    # what follows is the reading half, kept here rather than in the GUI so that a tagged point can be
+    # picked up by a plain script that has never heard of a diagram - see load_from_state.
+
+    @staticmethod
+    def _sidecar_paths(statefile:str)->"tuple[str,str]":
+        """``(npz, directory)`` belonging to one state dump. Derived from the name, so a stored orbit
+        can never lose track of its companion."""
+        base=statefile[:-5] if statefile.endswith(".dump") else os.path.splitext(statefile)[0]
+        return base+".orbit.npz",base+"_orbit"
+
+    @staticmethod
+    def _dof_fingerprint(problem:"Problem")->str:
+        """What a raw dof vector is only meaningful for: this equation numbering.
+
+        A state dump is partition-independent because it is written per node; the ``dofs`` sidecar
+        format is not, and neither survives a mesh adaptation. Refusing on a mismatch is the whole
+        point - a wrong orbit loads perfectly happily and looks plausible.
+
+        Only meaningful while the PLAIN system is installed: get_dof_description is sized by ndof(),
+        which is the augmented count under a handler, while its walk fills the base entries alone.
+        """
+        import hashlib
+        inds,names=problem.get_dof_description()
+        h=hashlib.sha1(numpy.asarray(inds,dtype=numpy.int64).tobytes())
+        h.update(("\0".join(str(n) for n in names)).encode("utf-8"))
+        return h.hexdigest()
+
+    @staticmethod
+    def _sidecar_stored_info(extra:Any)->"dict[Any,Any] | None":
+        """The discretization dict an npz carries, or None for one written before it was stored.
+
+        JSON in a 0-d string array rather than a pickled object array, so the npz still loads with
+        the default ``allow_pickle=False``.
+        """
+        try:
+            raw=extra["info"]
+        except (KeyError,ValueError):
+            return None
+        return json.loads(str(numpy.asarray(raw).reshape(-1)[0] if numpy.asarray(raw).ndim else numpy.asarray(raw)))
+
+    @classmethod
+    def _read_sidecar(cls,problem:"Problem",statefile:str,fallback_info:"dict[Any,Any] | None"=None):
+        """``(info, blocks, extra)`` of the orbit stored beside ``statefile``.
+
+        ``fallback_info`` is what the caller already knows about the discretization; it is used only
+        for companions written before the info was stored in the file itself.
+
+        The problem must be at the base state and carry no handler: the ``dumps`` format is read by
+        loading each block as a state file, and the ``dofs`` format checks its fingerprint here,
+        which is the last moment the base numbering can be described.
+        """
+        npzfile,dirfile=cls._sidecar_paths(statefile)
+        dumpsnpz=os.path.join(dirfile,"orbit.npz")
+        if os.path.isdir(dirfile) and os.path.exists(dumpsnpz):
+            extra=numpy.load(dumpsnpz)
+            info=cls._sidecar_stored_info(extra) or dict(fallback_info or {})
+            nT=int(info.get("nT",0))
+            if nT<2:
+                raise RuntimeError("The orbit stored in "+dirfile+" does not say how many time points "
+                                   "it has, and it was not written with that information in the file. "
+                                   "Load it through the diagram it belongs to.")
+            block_list:list[NPFloatArray]=[]
+            for i in range(nT):
+                fname=os.path.join(dirfile,"block_{:03d}.dump".format(i))
+                if not os.path.exists(fname):
+                    raise RuntimeError("The orbit belonging to this point is incomplete ("+fname+" is missing)")
+                problem.load_state(fname,ignore_outstep=True,ignore_continuation_data=True,
+                                   ignore_eigendata=True,quiet=True)
+                block_list.append(numpy.asarray(problem.get_current_dofs()[0],dtype=float))
+            return info,numpy.array(block_list),extra
+        if not os.path.exists(npzfile):
+            raise RuntimeError("The orbit belonging to this point is missing ("+npzfile+"), so "
+                               "only one phase of the cycle could be restored.")
+        extra=numpy.load(npzfile)
+        info=cls._sidecar_stored_info(extra) or dict(fallback_info or {})
+        blocks=numpy.asarray(extra["blocks"],dtype=float)
+        want=info.get("fingerprint")
+        if want and want!=cls._dof_fingerprint(problem):
+            raise RuntimeError(
+                "This orbit was stored for a different arrangement of the degrees of freedom (a "
+                "mesh adaptation, or a different number of processes), so its stored unknowns "
+                "cannot be read back. Re-compute the branch, or store orbits in the portable "
+                "format (controller.orbit_portable=True), which is partition-independent.")
+        return info,blocks,extra
+
+    @classmethod
+    def from_stored_blocks(cls,problem:"Problem",info:"dict[Any,Any]",blocks:"NPFloatArray",
+                           T_nondim:float)->"PeriodicOrbit":
+        """Re-create the handler from stored time blocks and hand back the orbit carrying it.
+
+        The stored info dict is what says which discretization to rebuild; :py:meth:`_install_blocks`
+        does the rest, so there is one copy of the block/history/permutation rules.
+        """
+        if int(blocks.shape[0])<2:
+            raise RuntimeError("A stored orbit needs at least two time points")
+        mode=str(info.get("mode","collocation"))
+        order,GL_order=int(info.get("order",3)),int(info.get("GL_order",-1))
+        T_constraint=str(info.get("T_constraint","phase"))
+        # A PeriodicOrbit to carry the settings; the handler it describes is installed by the call
+        # below, and everything read off it afterwards comes from that handler. It never emerged from
+        # a Hopf, so there is no emerging_info to speak of - get_init_ds is not available on it.
+        orbit=cls(problem,mode,None,None,0,0,0,0,order,GL_order,T_constraint) #type:ignore
+        orbit._install_blocks(blocks,T_nondim,mode,order,GL_order,T_constraint)
+        return orbit
+
+    @classmethod
+    def load_from_state(cls,problem:"Problem",statefile:str,restore_tangent:bool=True,
+                        **loadkwargs:Any)->"PeriodicOrbit":
+        """Load a stored periodic orbit - state dump plus companion - onto ``problem``.
+
+        This is what makes a point tagged in the bifurcation GUI usable from a script of its own:
+        ``output/tag01/`` holds ``state.dump``, the companion with the rest of the cycle, and the
+        mesh files both refer to, so::
+
+            orbit=PeriodicOrbit.load_from_state(problem,"output/tag01/state.dump")
+            print(orbit.get_T())
+            orbit.output_orbit("cycle")
+
+        The problem must be set up (``initialise()``) and have the same equations; the mesh comes
+        from the dump. Afterwards the orbit handler is installed, i.e. the problem solves for the
+        whole cycle at once - use ``with`` (or :py:meth:`__exit__`) to hand the cycle over to a
+        transient run, or ``deactivate_bifurcation_tracking()`` to drop it.
+
+        Args:
+            statefile: The state dump. Its companion is found beside it, by name.
+            restore_tangent: Put the stored arclength tangent of the AUGMENTED system back, so that
+                continuing the branch goes on the way it was going. Off means the next arclength
+                step picks its own direction.
+            loadkwargs: Passed on to :py:meth:`Problem.load_state` for the base dump.
+        """
+        problem.deactivate_bifurcation_tracking()
+        problem.load_state(statefile,**loadkwargs)
+        info,blocks,extra=cls._read_sidecar(problem,statefile)
+        T=float(numpy.asarray(extra["T"]).reshape(-1)[0])
+        orbit=cls.from_stored_blocks(problem,info,blocks,T)
+        if restore_tangent:
+            orbit._restore_stored_tangent(extra)
+        return orbit
+
+    def _restore_stored_tangent(self,extra:Any)->bool:
+        """Put back the arclength tangent stored with an orbit, if it still fits.
+
+        It belongs to the AUGMENTED system, so it is not in the state dump (which would drop it with
+        a note), but it is what makes a reloaded branch step on in the same direction instead of
+        guessing one. Silently declined on a length mismatch: the orbit itself is fine, only the
+        direction is unknown.
+        """
+        try:
+            ddof=numpy.asarray(extra["dof_deriv"],dtype=float)
+        except (KeyError,ValueError):
+            return False
+        if len(ddof)!=self.problem.ndof():
+            return False
+        self.problem._set_dof_direction_arclength(ddof)
+        self.problem._set_arc_length_parameter_derivative(float(numpy.asarray(extra["param_deriv"]).reshape(-1)[0]))
+        self.problem._set_arc_length_theta_sqr(float(numpy.asarray(extra["theta_sqr"]).reshape(-1)[0]))
+        return True
+
+    @contextlib.contextmanager
+    def _sampled_onto_collocation(self,NT:int | None=None,order:int=3,resolve:bool=True):
+        """Temporarily replace this orbit by a collocation sampling of it, then put it back.
+
+        Why this exists: a periodic B-spline basis is periodic BY CONSTRUCTION, so its orbit Jacobian
+        is block-circulant-banded (half-bandwidth = the spline order, wrapping at the seam) rather
+        than the block-bidiagonal chain the Floquet condensation slices. There is no end-of-period
+        degree of freedom and no wrap-around row `v_{nT-1} - v_0 = 0` to key off, which is what
+        `is_floquet_mode()` reports and why every Floquet route refuses such an orbit. See
+        dev_docs/floquet_multipliers.md.
+
+        The orbit itself is a curve, not a discretization of one, so it can be handed to a
+        discretization that DOES have that structure. What comes back is then the spectrum of the
+        collocation discretization of this orbit - the same thing change_sampling() to collocation
+        computes, which agrees with a natively-collocation orbit to nine digits on the Hopf normal
+        form (tests/test_bifurcation_gui.py::test_an_orbit_can_be_re_discretized_in_place).
+
+        The restore is in a `finally` and is deliberate: a re-solve that diverges must cost the
+        attempt and not the orbit.
+        """
+        blocks,T=self._blocks()
+        was=(self.mode,self.order,self.GL_order,self.T_constraint)
+        if NT is None:
+            NT=_collocation_time_steps(int(blocks.shape[0]),order)
+        try:
+            self.change_sampling(mode="collocation",NT=NT,order=order,do_solve=resolve)
+            yield self
+        finally:
+            self._install_blocks(blocks,T,was[0],was[1],was[2],was[3])
+
     def update_phase_constraint(self):
         """
         Updates the phase constraint history (u0) for the orbit
@@ -305,21 +599,63 @@ class PeriodicOrbit:
             Tend=float(Tend/TS)
         
         ssamples=numpy.linspace(Tstart,Tend,N,endpoint=endpoint)/T
-        print("Backing up dofs")
         self._get_handler().backup_dofs()
-        for s in ssamples:
-            self._get_handler().set_dofs_to_interpolated_values(s) # TODO: We might need the time history for e.g. local expressions, integrals, etc. involving partial_t            
-            self.problem.invalidate_cached_mesh_data()
-            Tcurr=s*T
-            if set_current_time:
-                self.problem.set_current_time(Tcurr,dimensional=False,as_float=True)
-            yield Tcurr*TS
-        print("Restoring dofs")
-        self._get_handler().restore_dofs()
-        self.problem.set_current_time(tbackup,dimensional=False,as_float=True)
+        # try/finally, because the backup is handler state: if the caller's loop body raises (or it
+        # breaks out early), an unrestored backup makes the NEXT backup_dofs() throw "the dofs have
+        # already been backed up", which is what the user then sees instead of their own error --
+        # including from PeriodicOrbit.__exit__ on the way out of the `with` block.
+        try:
+            for s in ssamples:
+                self._get_handler().set_dofs_to_interpolated_values(s) # TODO: We might need the time history for e.g. local expressions, integrals, etc. involving partial_t            
+                self.problem.invalidate_cached_mesh_data()
+                Tcurr=s*T
+                if set_current_time:
+                    self.problem.set_current_time(Tcurr,dimensional=False,as_float=True)
+                yield Tcurr*TS
+        finally:
+            self._get_handler().restore_dofs()
+            self.problem.set_current_time(tbackup,dimensional=False,as_float=True)
         
-    def get_floquet_multipliers(self,n:int | None=None,valid_threshold:float | None=10000,shift:float | None=None,ignore_periodic_unity:bool | float=False,quiet:bool=True):
-        return self.problem.get_floquet_multipliers(n=n,valid_threshold=valid_threshold,shift=shift,ignore_periodic_unity=ignore_periodic_unity,quiet=quiet)
+    def get_floquet_multipliers(self,n:int | None=None,valid_threshold:float | None=10000,shift:float | None=None,ignore_periodic_unity:bool | float=False,quiet:bool=True,method:Literal["condensed","periodic_schur","eigenproblem"]="condensed",dense_threshold:int=2000,shift_invert:bool=True,sigma:complex | None=None,sampling_NT:int | None=None,sampling_order:int=3,resolve:bool=True):
+        """See :py:meth:`~pyoomph.generic.problem.Problem.get_floquet_multipliers`.
+
+        Unlike that one, this also answers for an orbit discretized with ``mode="bspline"``, which
+        carries no explicit end-of-period degree of freedom and therefore has no structure for any of
+        the Floquet routes to key off (see :py:meth:`_sampled_onto_collocation`). Such an orbit is
+        SAMPLED onto a collocation discretization for the computation and put back afterwards,
+        unchanged - so what comes back is the spectrum of the collocation discretization of this
+        orbit, to that discretization's accuracy.
+
+        Args:
+            sampling_NT: Time points of the sampling, or None for this orbit's own count raised to
+                what collocation needs (a multiple of the order, and even - see
+                :py:func:`_collocation_time_steps`). Only used when a sampling is taken.
+            sampling_order: Collocation order of the sampling.
+            resolve: Re-solve the sampled orbit before taking the multipliers. On, because a B-spline
+                orbit satisfies the B-spline equations and not the collocation ones, so without it
+                the variational operator is evaluated at a state that is not a collocation orbit and
+                the multipliers carry an extra error of the size of that residual.
+
+        Note that after a SAMPLED call the problem's last eigenvectors are laid out over the
+        collocation discretization (``sampling_NT*nbase+1`` entries), not over this orbit's.
+        """
+        kwargs=dict(n=n,valid_threshold=valid_threshold,shift=shift,ignore_periodic_unity=ignore_periodic_unity,quiet=quiet,method=method,dense_threshold=dense_threshold,shift_invert=shift_invert,sigma=sigma)
+        if self._get_handler().is_floquet_mode():
+            return self.problem.get_floquet_multipliers(**kwargs) #type:ignore
+        if self.mode!="bspline":
+            # central/BDF2 could be sampled just as well, but they are finite-difference schemes with
+            # no accuracy to speak of and nobody continues an orbit with them; leaving them refused
+            # keeps the refusal a real statement rather than a list of exceptions.
+            raise RuntimeError("An orbit discretized with '"+str(self.mode)+"' has no Floquet "
+                               "multipliers, and cannot be sampled onto one that has. Use "
+                               "mode='collocation', 'floquet' or 'bspline'.")
+        was_mode=str(self.mode)   # change_sampling rewrites it; the message is about the orbit we own
+        with self._sampled_onto_collocation(NT=sampling_NT,order=sampling_order,resolve=resolve):
+            if not quiet:
+                print("Floquet multipliers of a '"+was_mode+"' orbit, computed on a collocation "
+                      "sampling of it with {:d} time points and order {:d}".format(
+                          self.get_num_time_steps(),sampling_order))
+            return self.problem.get_floquet_multipliers(**kwargs) #type:ignore
     
     def starts_supercritically(self):
         """
@@ -368,13 +704,16 @@ class PeriodicOrbit:
         if NT is None:
             NT=self.get_num_time_steps()
         history_dofs=[]
-        Nbase=self._get_handler().get_base_ndof()
-        for T in self.iterate_over_samples(N=NT):
-            history_dofs.append(self.problem.get_current_dofs()[0][:Nbase])
+        # endpoint=False: the orbit is periodic, so s=1 is s=0 again. Sampling with the endpoint
+        # included and then popping the last entry as the current dofs handed u(0) in TWICE (once as
+        # x0 and once as the first extra time point) and dropped u((NT-1)/NT) entirely, which
+        # phase-lagged every knot of the new discretization against the state it holds.
+        for T in self.iterate_over_samples(N=NT,endpoint=False):
+            history_dofs.append(self._current_base_dofs())
         T=self.get_T()
         self.problem.deactivate_bifurcation_tracking()
-        self.problem.set_current_dofs(history_dofs.pop())
-        self.problem.activate_periodic_orbit_handler(T,history_dofs,mode=mode,T_constraint=T_constraint,order=order,GL_order=GL_order)
+        self.problem.set_current_dofs(history_dofs[0])
+        self.problem.activate_periodic_orbit_handler(T,history_dofs[1:],mode=mode,T_constraint=T_constraint,order=order,GL_order=GL_order)
         self.mode=mode
         self.order=order
         self.GL_order=GL_order
@@ -424,9 +763,10 @@ def _teardown_spatial_mesh(m:"AnySpatialMesh") -> None:
     # by this mesh's equations before dropping the reference to them -- see the log-file
     # comment in Problem.release() for why this must happen proactively rather than being
     # left to eventual garbage collection.
-    if m._eqtree is not None and m._eqtree._equations is not None:
-        m._eqtree._equations._release_output_files()
-    m._eqtree._equations=None
+    if m._eqtree is not None:
+        for eq in m._eqtree._equations:
+            eq._release_output_files()
+        m._eqtree._equations=[]
     m._eqtree=None #type:ignore
     # Break the remaining back-references specific to the mesh's own class:
     # MeshFromTemplate1d/2d/3d hold a reference to their originating MeshTemplate (which
@@ -448,7 +788,7 @@ def _teardown_spatial_mesh(m:"AnySpatialMesh") -> None:
     # as-yet-undiscovered reference cycle remains). Callers must ensure this mesh is no longer
     # needed for anything (e.g. field interpolation into a replacement mesh) before calling
     # this, and, if unloading equation code DLLs afterwards, must do so only after this call:
-    # an element destructed afterwards would dereference its DynamicBulkElementCode's function
+    # an element destructed afterwards would dereference its DynamicJITCode's function
     # table in an already-unloaded shared library and crash.
     m._destroy_now()
 
@@ -498,6 +838,22 @@ def _destroy_superseded_mesh(m:"AnySpatialMesh") -> None:
 _TypeVarMeshTemplate=TypeVar("_TypeVarMeshTemplate",bound=MeshTemplate)
 
 #Problem with some automatic behaviour
+class InvertedElementRemeshRequest(RuntimeError):
+    """Raised from the C++ core when an element has been inside out on enough consecutive Newton
+    solves that reducing the step has clearly stopped helping, and a
+    ``RemeshWhen(on_inverted_element=True)`` is armed to remesh instead.
+
+    It is raised on **every** rank or on none - the decision is reduced across the processes before
+    it is taken, because an inversion is only seen by whichever rank happens to hold the folded
+    element while a remesh is collective.
+
+    Users do not normally see this: :py:meth:`Problem.solve` catches it, restores the last good
+    state, remeshes and retries the step. It escapes only when the retry budget
+    (:py:attr:`Problem.inversion_remesh_max_retries`) is exhausted, i.e. when remeshing did not
+    help either.
+    """
+
+
 class Problem(_pyoomph.Problem):
     """A class representing a problem in the pyoomph library.
 
@@ -512,7 +868,6 @@ class Problem(_pyoomph.Problem):
         additional_equations (Union[Literal[0], EquationTree]): Additional equations for the problem.
         continuation_data_in_states (bool): Flag indicating whether to store continuation data in the states.
         default_1d_file_extension (Union[Literal["txt", "mat"], List[Literal["txt", "mat"]]]): Default file extension for 1D files.
-        default_ccode_expression_mode (str): Default C code expression mode.
         default_spatial_integration_order (Union[int, None]): Default spatial integration order.
         default_timestepping_scheme (Literal["BDF2", "BDF1", "Newmark2"]): Default timestepping scheme.
         eigen_data_in_states (Union[int, bool]): Flag indicating whether to store eigen data in the states.
@@ -547,27 +902,42 @@ class Problem(_pyoomph.Problem):
         #self._outdir=os.path.join(os.path.dirname(scriptfile),os.path.basename(scriptfile))
         self._outdir:str = os.path.basename(scriptfile)
 
-        self._bulk_element_code_counter:int=0
-
         self._first_step:bool=True
         self._suppress_code_writing:bool=False
         self._suppress_compilation:bool=False
-        self._no_cache:bool=False
         self._debug_largest_residual:int=0
         self.ignore_command_line:bool=False
 
         self._ccode_dir:str="_ccode"
+        self._ccode_dir_is_unique:bool=False # set once _claim_unique_ccode_dir has moved us out of another Problem's way
         self._dof_selector:_DofSelector | None=None # The desired selected dofs
         self._dof_selector_used:_DofSelector | None | Literal["INVALID"]=None
 
 
-        self._use_first_order_timestepper:bool=False
         self._domains_to_remesh:set[MeshTemplate]=set()
+        #: Templates carrying a RemeshWhen(on_inverted_element=True); non-empty is what arms the
+        #: snapshot-and-retry in _solve_with_inversion_remesh().
+        self._domains_remesh_on_inversion:set[MeshTemplate]=set()
+        #: How many times one solve() call may remesh and retry after an inverted element before
+        #: giving up. A domain that stays folded should fail loudly rather than loop.
+        self.inversion_remesh_max_retries:int=3
+        #: A step that reported an inversion counts as folded when it achieved less than this fraction
+        #: of the last clean step. 1/16 is four halvings: an ordinary transient inversion costs one or
+        #: two and stays well above it, while a fold goes to the dt floor and falls far below.
+        self.inversion_remesh_dt_collapse:float=1.0/16.0
+        #: The last step achieved without any inversion report; the yardstick for the test above.
+        self._inversion_reference_dt:float | None=None
+        #: Set by actions_after_newton_solve() when a RemeshWhen fired, and acted on by
+        #: _perform_pending_remesh() once the C++ solve call has returned. A remesh must NOT happen
+        #: inside that call - see _perform_pending_remesh() for what goes wrong if it does.
+        self._remesh_requested_inside_solve:bool=False
 
         # Static condensation: the Python-side, mesh-independent form of the rules. See
         # _sync_static_condensation_rules() for why the rules are kept here at all.
         self._static_condensation_sources:dict[Any,tuple[str | None,tuple[tuple[str,tuple[int,...],str],...]]]={}
         self._static_condensation_applied:tuple[Any,...] | None=None
+        #: Never read: it exists to keep the meshes behind the id()s in _static_condensation_applied
+        #: referenced, so that a destroyed mesh cannot hand its id to its replacement.
         self._static_condensation_applied_meshes:list["AnyMesh"]=[]
         self._static_condensation_source_counter:int=0
 
@@ -616,13 +986,6 @@ class Problem(_pyoomph.Problem):
         #: whatever the initial mesh setup needed, since the reconciliation during adapt is meant to get
         #: there first. Reset it yourself to measure a particular stretch of a run.
         self._interface_conformity_repairs:int=0
-        #: Cumulative number of elements refined by the vertex-connected balance closure of
-        #: enforce_interface_conformity(): elements that touch a coupled interface at a single vertex
-        #: and carry no facet on it, which the facet-based conformity machinery cannot see and which
-        #: would otherwise be left arbitrarily coarser than the interface next to them. Counted apart
-        #: from _interface_conformity_repairs because, unlike a repair, this loses no information -
-        #: these elements have never been refined, so their sons interpolate a current father.
-        self._interface_vertex_balance_refinements:int=0
         self.remove_macro_elements_after_initial_adaption:bool | Literal["auto"]="auto" # "auto" means: Only if the coordinates are free
         #: In distributed runs, we call load balance after each non-uniform adaptions
         self.call_load_balance_in_initial_adaption=False
@@ -732,6 +1095,15 @@ class Problem(_pyoomph.Problem):
         # one step and loses one adaptation, so a continued run drifted away from the uninterrupted
         # one it is supposed to reproduce. None until the first transient solve of the session.
         self._suggested_next_dt:float | None=None
+        # Nondimensional endtime of the run statement currently executing, written into every state
+        # file it produces. On loading it goes to _loaded_run_statement_endtime, which is how a
+        # --runmode continue tells a state written in the MIDDLE of a run statement (resume it, dt and
+        # all) from one written by an earlier statement that has since finished (start the next
+        # statement normally). None until the first run statement of the session, and for state files
+        # older than 0.1.5. It is deliberately NOT cleared when a run statement returns: a state saved
+        # right after one still belongs to it.
+        self._run_statement_endtime:float | None=None
+        self._loaded_run_statement_endtime:float | None=None
         self._where_expression="True"
 
         self._dump_header = "pyoomph_dump"
@@ -739,11 +1111,17 @@ class Problem(_pyoomph.Problem):
         # element/node numbering, which is what makes states of distributed problems possible at all
         # and lets serial and distributed runs read each other's files. 0.1.1 adds the sharding field
         # to the header. 0.1.2 adds the adaptive time stepper's suggested next dt. 0.1.3 adds the
-        # tracers' rolling position history, which the trail plots are drawn from. Older files still load.
-        self._dump_version = "0.1.4"
+        # tracers' rolling position history, which the trail plots are drawn from. 0.1.4 adds the
+        # interface/skeleton element data. 0.1.5 adds the endtime of the run statement that wrote the
+        # file, so a --runmode continue can tell a state written in the middle of a run statement from
+        # one written by an earlier statement that has since finished. Older files still load.
+        self._dump_version = "0.1.5"
         self._last_bc_setting="init"
 
         self._output_step:int=0
+        # Leftover of the removed can_continue_section(): never incremented any more, but the state
+        # file writes it in its fixed prefix (see _define_state_file), so dropping it would make every
+        # existing dump unreadable.
         self._continue_section_step:int=0
         self._continue_section_step_loaded:int=0
         self._nondim_time_after_last_run_statement=0 # Required for continue
@@ -771,9 +1149,7 @@ class Problem(_pyoomph.Problem):
         self._last_arclength_parameter=None
         self._taken_already_an_unsteady_step=False
         self._last_step_was_stationary=None
-        self._already_set_ic = False
         self._resetting_first_step=False
-        self._in_transient_newton_solve=False
         
         self._hooks:list[GenericProblemHooks]=[]
         
@@ -811,10 +1187,13 @@ class Problem(_pyoomph.Problem):
         self._abort_current_run=False
 
         self._custom_assembler:CustomAssemblyBase | None=None
+        self._deflation_operator:"DeflationOperator | None"=None
 
-        self.default_ccode_expression_mode:str="" # Try to factor all expressions with "factor"
-        #: Debugging the Jacobian by finite differences with a given epsilon (None or <=0 means no debugging). 
-        self.debug_jacobian_by_fd_epsilon:float | None=-1 
+        #: Code generation settings used on every domain, unless a domain (or one of its parent
+        #: domains) overrides individual ones by adding an
+        #: :py:class:`~pyoomph.equations.additional.EquationCompilationFlags`. The values here are
+        #: the defaults of the code generator itself (see ``FiniteElementCode`` in src/codegen.cpp).
+        self.equation_compilation_flags:"EquationCompilationFlags"=EquationCompilationFlags(analytical_position_jacobian=True,analytical_jacobian=True,warn_on_large_numerical_factor=0.0,debug_jacobian_epsilon=0.0,ccode_expression_mode="",with_adaptivity=True,jacobian_hoist_min_cost=-1,split_rjm_by_flag=True,split_rjm_by_hang=True)
         self.extra_compiler_flags:list[str]=[]
         
         #: After analyzing the Jacobian, a field with an empty Jacobian row will be pinned automatically
@@ -830,6 +1209,13 @@ class Problem(_pyoomph.Problem):
         
         #: Set e.g. to {"domain/velocity_*":"u","domain/pressure":"p"} to automatically setup field split IS for PETSc with names "u" and "p". If None, the default split is set like the field indices in the Jacobian information file, i.e. using "0", "1", etc. as prefixes
         self.petsc_fieldsplit=None
+
+        #: Layout(s) for the global dof numbering, e.g.
+        #: ``NodalBlockOrdering("domain/velocity_x","domain/velocity_y","domain/pressure")``, or a list
+        #: of layouts for a problem with several meshes. None (the default) keeps oomph-lib's own
+        #: numbering, which puts every nodal value of a mesh before any element-internal one. See
+        #: pyoomph.generic.dof_ordering.
+        self.dof_ordering=None
         
         #: When set to True, we apply Dirichlet boundary conditions by removing the corresponding dofs from the system. This yields a smaller matrix, but iterative solvers using strided block matrices will run into troubles. If False, all DirichletBCs are kept in the dof vector and the matrix is augmented accordingly.
         self.apply_Dirichlet_BCs_by_dof_removing=True
@@ -838,10 +1224,10 @@ class Problem(_pyoomph.Problem):
         self.project_initial_conditions=False
 
     # Use weak(u,psi) instead of vectorial U*Psi for the symmetry-breaking constraint
-    def improve_pitchfork_tracking_on_unstructured_meshes(self,coord_sys:"OptionalCoordinateSystem"=None,pos_coord_sys:"OptionalCoordinateSystem"=None):
+    def _improve_pitchfork_tracking_on_unstructured_meshes(self,coordsys:"OptionalCoordinateSystem"=None,pos_coordsys:"OptionalCoordinateSystem"=None):
         self._improved_pitchfork_tracking_on_unstructured_meshes=True
-        self._improved_pitchfork_tracking_coordinate_system=coord_sys
-        self._improved_pitchfork_tracking_position_coordinate_system=pos_coord_sys
+        self._improved_pitchfork_tracking_coordinate_system=coordsys
+        self._improved_pitchfork_tracking_position_coordinate_system=pos_coordsys
         #self.enable_store_local_dof_pt_in_elements()
 
     def abort_current_run(self):
@@ -849,32 +1235,6 @@ class Problem(_pyoomph.Problem):
         """
         self._abort_current_run=True
 
-    def can_continue_section(self, id:str | None=None) -> bool:
-        if id is not None:
-            raise RuntimeError("TODO: id for continue sections")
-        if not self._initialised:
-            self.initialise()
-
-#		if self.write_states:
-#			raise RuntimeError("Section grouping by can_continue_section works only with write_states=False")
-
-        if self._runmode != "continue":
-
-            statedir:str = os.path.join(self.get_output_directory(), "_states")
-            Path(statedir).mkdir(parents=True, exist_ok=True)
-            statefname:str = os.path.join(statedir, "state_{:06d}.dump".format(self._continue_section_step))
-            self.save_state(statefname)
-            self._continue_section_step += 1
-            return False
-
-
-        if self._continue_section_step_loaded>self._continue_section_step:
-            self._continue_section_step += 1
-            print("SKIPPING CONTINUE SECTION")
-            return True
-        else:
-            return False
-        
     # Shortcut to add a (GlobalLagrangeMultiplier(name=equation_contribution)+Scaling(name=scaling)+TestScaling(name=testscaling))@domain and return var(name,domain=domain),testfunction(name,domain=domain)
     def add_global_dof(self,name:str,equation_contribution:ExpressionOrNum=0,*,scaling:ExpressionNumOrNone=None,testscaling:ExpressionNumOrNone=None,domain:str="globals",only_for_stationary_solve:bool=False,initial_condition:ExpressionNumOrNone=None,set_zero_on_normal_mode_eigensolve:bool=True):
         """
@@ -945,7 +1305,7 @@ class Problem(_pyoomph.Problem):
         """
         self._mesh_data_cache.clear(only_eigens)
 
-    def set_tolerance_for_singular_jacobian(self,tol:float):
+    def _set_tolerance_for_singular_jacobian(self,tol:float):
         _pyoomph.set_tolerance_for_singular_jacobian(tol)  
         
     def get_current_normal_mode_k(self,dimensional:bool=True):  
@@ -964,7 +1324,7 @@ class Problem(_pyoomph.Problem):
         """
         if not isinstance(eqs,EquationTree): #type: ignore
             err=ValueError("Cannot add "+str(eqs)+' to the system. Equations need to be restricted via <equation> @ "<name in equation tree>"')
-            eqs.add_exception_info(err)
+            eqs._add_exception_info(err)
         if not self._during_initialization:
             raise RuntimeError("You cannot use add_equations outside define_problem (or in functions called from there). Use additional_equations+=... instead, if you want to add something before initialization.")
         if not hasattr(self,"_equation_system") or self._equation_system is None:
@@ -993,7 +1353,7 @@ class Problem(_pyoomph.Problem):
                 raise RuntimeError("Cannot get equations at "+path)
             else:
                 return None
-        return eqtree._equations
+        return eqtree if eqtree._equations else None
 
 
     @overload
@@ -1075,8 +1435,8 @@ class Problem(_pyoomph.Problem):
         For each element this forms random vectors Y and C and compares the analytic Hessian-vector
         product ``d2R_i/(du_j du_k) Y_i C_k`` against a finite difference of the *analytic* Jacobian
         along C. It therefore validates the Hessian only relative to the Jacobian; combine it with
-        :py:attr:`debug_jacobian_by_fd_epsilon`, which validates the Jacobian against finite
-        differences of the residual, to pin down the whole chain.
+        ``equation_compilation_flags.debug_jacobian_epsilon``, which validates the Jacobian against
+        finite differences of the residual, to pin down the whole chain.
 
         Requires the analytic Hessian to have been generated, i.e.
         ``setup_for_stability_analysis(analytic_hessian=True)`` before initialisation.
@@ -1150,29 +1510,13 @@ class Problem(_pyoomph.Problem):
                 raise RuntimeError("No equations found at the path "+str(path))
             else:
                 return
-        eqs = eqtree._equations 
-        if isinstance(eqs, CombinedEquations):
-            if (of_type is None) or (isinstance(of_type, CombinedEquations)):
-                if only_if(eqs):
-                    eqtree._equations = DummyEquations() 
-                    eqtree._equations._problem=self
-            else:
-                if of_type is None:
-                    if only_if(eqs):
-                        eqtree._equations = DummyEquations() 
-                        eqtree._equations._problem=self
-                else:
-                    eqs._subelements = [e for e in eqs._subelements if not (isinstance(e, of_type) and only_if(e))] 
-                    if len(eqs._subelements) == 0: 
-                        eqtree._equations = DummyEquations() 
-                        eqtree._equations._problem=self
-        else:
-            if (of_type is not None):
-                if not isinstance(eqs, of_type):
-                    return
-            if eqs is not None and only_if(eqs):
-                eqtree._equations = DummyEquations() 
-                eqtree._equations._problem=self
+        def drop(eq:BaseEquations)->bool:
+            return (of_type is None or isinstance(eq, of_type)) and only_if(eq)
+        eqtree._equations = [eq for eq in eqtree._equations if not drop(eq)]
+        if not eqtree._equations:
+            # A domain with no equations at all is not a valid tree node - the codegen still has
+            # to exist for the mesh that was built from it.
+            eqtree._equations = [DummyEquations()]
 
     def get_default_timestepping_scheme(self,order:int) -> Literal['Newmark2', 'BDF2', 'BDF1']:
         if order==2:
@@ -1253,8 +1597,9 @@ class Problem(_pyoomph.Problem):
                 cg=m.get_code_gen()
                 cg._code=None
                 cg._set_problem(None) #type:ignore
-                if m._eqtree is not None and m._eqtree._equations is not None:
-                    m._eqtree._equations._release_output_files()
+                if m._eqtree is not None:
+                    for eq in m._eqtree._equations:
+                        eq._release_output_files()
                 m._eqtree=None
                 m._element=None
                 m._set_problem(None,None) #type:ignore
@@ -1288,16 +1633,19 @@ class Problem(_pyoomph.Problem):
             ref=getattr(solver_cb, "_current_problem_ref", None)
             if ref is not None and ref() is self:
                 solver_cb._current_problem_ref = None # type:ignore
-        # set_custom_assembler() (used e.g. for deflation/bifurcation tracking, see
-        # bifurcation_tools.py) creates a plain Python-level mutual reference: this Problem's
-        # own _custom_assembler points to the assembler, and the assembler's own "problem"
-        # attribute points back here. Break it explicitly rather than relying on cyclic gc
-        # picking it up eventually.
+        # set_custom_assembler() (bifurcation tracking, see bifurcation_tools.py) and
+        # set_deflation_operator() both create a plain Python-level mutual reference: this Problem's
+        # own attribute points to the object, and that object's own "problem" attribute points back
+        # here. Break both explicitly rather than relying on cyclic gc picking them up eventually.
         if self._custom_assembler is not None:
             self._custom_assembler.problem=None #type:ignore
             self._custom_assembler=None
-        # define_problem_for_additional_cartesian_stability_investigation()/
-        # define_problem_for_axial_symmetry_breaking_investigation() (normal-mode/azimuthal
+        if self._deflation_operator is not None:
+            self._deflation_operator.problem=None #type:ignore
+            self._deflation_operator=None
+            self.residual_scale_hook_active=False
+        # _define_problem_for_additional_cartesian_stability_investigation()/
+        # _define_problem_for_axial_symmetry_breaking_investigation() (normal-mode/azimuthal
         # stability setup) install a lambda here that closes over "self" - a plain Python
         # self-referential cycle (self -> _residual_mapping_functions -> lambda -> self).
         # Break it explicitly instead of relying on cyclic gc, same rationale as above.
@@ -1315,7 +1663,7 @@ class Problem(_pyoomph.Problem):
         self._open_log_file("",False)
         # Run gc.collect() BEFORE unloading the compiled-equation-code DLLs, not after: any
         # mesh/element C++ object destructed after the DLLs are unloaded would dereference a
-        # dangling codeinst/function-table pointer into already-dlclose()'d memory and crash.
+        # dangling jitcode/function-table pointer into already-dlclose()'d memory and crash.
         # This ordering only starts to matter once the cycle-breaking above actually lets
         # gc.collect() free such objects here instead of leaving that to interpreter exit.
         gc.collect()
@@ -1595,7 +1943,7 @@ class Problem(_pyoomph.Problem):
         self._declare_static_condensation_rules(("condense_element_private_dofs",self._static_condensation_source_counter),
                                                 domain,[("",(),"element_private")])
 
-    def get_all_values_at_current_time(self,with_pos:bool)->tuple[NPFloatArray,NPBoolArray,NPFloatArray]:
+    def _get_all_values_at_current_time(self,with_pos:bool)->tuple[NPFloatArray,NPBoolArray,NPFloatArray]:
         dofs,positional_dof=self.get_current_dofs()
         pinned=self.get_current_pinned_values(with_pos)
         return numpy.array(dofs),positional_dof,numpy.array(pinned) #type:ignore
@@ -1618,7 +1966,7 @@ class Problem(_pyoomph.Problem):
         if n>=len(self._last_eigenvectors):
             raise RuntimeError("Cannot set eigenfunction "+str(n)+" as dofs, since we have calculated only "+str(len(self._last_eigenvectors))+" eigenfunctions")
         with_pos=not additive_mesh_positions
-        actual_dofs,positional_dofs,pinned_values=self.get_all_values_at_current_time(with_pos)
+        actual_dofs,positional_dofs,pinned_values=self._get_all_values_at_current_time(with_pos)
         if eigenvector_position_scale is None:
             eigenvector_position_scale=self.eigenvector_position_scale
         newpinned=self.setup_pinned_values_of_eigenfunction(numpy.array(pinned_values),n,mode) #type:ignore
@@ -1681,34 +2029,35 @@ class Problem(_pyoomph.Problem):
         """
         return self._coordinate_system
 
-    def set_coordinate_system(self,csys:Literal["axisymmetric", "axisymmetric_flipped", "cartesian", "radialsymmetric"] | BaseCoordinateSystem):                
+    @_deprecated_kwargs(csys="coordsys")
+    def set_coordinate_system(self,coordsys:Literal["axisymmetric", "axisymmetric_flipped", "cartesian", "radialsymmetric"] | BaseCoordinateSystem):                
         """Set the default coordinate system at problem level. 
         You can specify coordinate systems also at equation level, but if you don't do, the coordinate system will default to this one.
 
         Args:
-            csys (Union[Literal["axisymmetric","axisymmetric_flipped","cartesian","radialsymmetric"],BaseCoordinateSystem]): The coordinate system to set as default.
+            coordsys (Union[Literal["axisymmetric","axisymmetric_flipped","cartesian","radialsymmetric"],BaseCoordinateSystem]): The coordinate system to set as default. The former name ``csys`` is deprecated, but still accepted.
 
         Raises:
             RuntimeError: Raised in case we do not set a valid coordinate system 
         """
-        if csys is None:
+        if coordsys is None:
             raise RuntimeError("Cannot set the problem coordinate system to None")
         csysd:BaseCoordinateSystem
-        if isinstance(csys,str):
-            if csys=="axisymmetric":
+        if isinstance(coordsys,str):
+            if coordsys=="axisymmetric":
                 csysd=axisymmetric
-            elif csys=="axisymmetric_flipped":
+            elif coordsys=="axisymmetric_flipped":
                 csysd=axisymmetric_flipped
-            elif csys=="cartesian":
+            elif coordsys=="cartesian":
                 csysd=cartesian
-            elif csys=="radialsymmetric":
+            elif coordsys=="radialsymmetric":
                 csysd=radialsymmetric
             else:
-                raise RuntimeError("Unknown coordinate system: "+csys)
-        elif not isinstance(csys,BaseCoordinateSystem):
-            raise RuntimeError("Unknown coordinate system: "+str(csys))
+                raise RuntimeError("Unknown coordinate system: "+coordsys)
+        elif not isinstance(coordsys,BaseCoordinateSystem):
+            raise RuntimeError("Unknown coordinate system: "+str(coordsys))
         else:
-            csysd=csys
+            csysd=coordsys
         self._coordinate_system=csysd
 
 
@@ -1809,8 +2158,18 @@ class Problem(_pyoomph.Problem):
 
     def set_num_threads(self,nthread:int | None):
         """
-        Set how many threads the linear solver may use. Most direct solvers are internally threaded, so
-        this is what decides whether a serial run keeps one core or several busy.
+        Set how many threads the element assembly and the linear solver may use. Most direct solvers
+        are internally threaded, and pyoomph's own element loop is threaded with OpenMP, so this is
+        what decides whether a serial run keeps one core or several busy.
+
+        The threaded element loop is bit-identical to the serial one - it changes the time and nothing
+        else - and it declines by itself, saying why once, wherever it cannot apply (a finite-difference
+        Jacobian, an assembly-time diagnostic switched on, a build without OpenMP).
+
+        A threaded direct SOLVER, on the other hand, is not bit-reproducible, so a converged state can
+        differ in its last digits between one thread and several. That is unchanged by, and unrelated
+        to, the threaded assembly; if you want the two effects apart, set the assembly count on its own
+        with ``problem._set_num_assembly_threads(n)``.
 
         The count is remembered on the problem, not just handed to the current solver: it is applied
         again to any backend selected later with :py:meth:`set_linear_solver`. Passing ``None`` leaves
@@ -1825,6 +2184,9 @@ class Problem(_pyoomph.Problem):
             nthread (Optional[int]): Number of threads, or ``None`` for the backend's own default.
         """
         self._num_threads=nthread
+        # None means "the backend's own default" for the solver, but the element loop has no such
+        # notion: it is either serial or told a number, and serial is the default.
+        self._set_num_assembly_threads(1 if nthread is None else max(1,nthread))
         if self._lasolver is not None:
             if isinstance(self._lasolver,str):
                 self.set_linear_solver(self._lasolver)
@@ -1853,12 +2215,59 @@ class Problem(_pyoomph.Problem):
         These callers assemble the eigenproblem matrices themselves and read the result as a square
         global matrix, which it stops being once the rows are partitioned across ranks -- scipy then
         raises about an indptr length, several frames away from the feature the user asked for. The
-        augmented-system ones (bifurcation tracking, periodic orbits) additionally sit on top of
+        remaining ones (the Lyapunov exponents, the periodic driving response, the multi-assembly
+        tensor cache, and the Python custom assembler behind get_hopf_lyapunov_coefficient's
+        HopfTracker route) additionally sit on top of
         sparse_assemble_row_or_column_compressed_base_problem, which throws "This likely does not work
         in distributed parallel" from C++. Failing here names the feature instead.
+
+        Bifurcation tracking through the C++ handlers, periodic orbits with their Floquet
+        multipliers, and -- since the normal form left the custom multi-assembly the way deflation
+        did -- left eigenvectors and branch switching, used to be on that list and are not any more.
+        See dev_docs/mpi_augmented_systems.md, dev_docs/floquet_multipliers.md section 10 and
+        dev_docs/branch_switching.md.
+        refine_eigenfunction() is here for the history-dof reason instead of an assembly one:
+        Problem::set_history_dofs refuses when distributed.
         """
         if self.is_distributed():
             raise RuntimeError(what+" is not supported on a distributed (--distribute) problem yet. Run it without --distribute (plain eigenvalue solving via SLEPc does work distributed).")
+
+    def _require_no_distributed_periodic_refinement(self,what:str,nchanged:int|None=None)->None:
+        """Stop with a clear message when a distributed mesh with periodic nodes has been refined.
+
+        Mesh::distribute() ends with setup_tree_forest(), which rebuilds the tree neighbours by
+        matching shared nodes. A periodic master and its copy are two distinct Node pointers, so the
+        TreeRoot::Neighbour_periodic links that BulkElementBase::connect_periodic_tree installed do
+        not survive. Refining afterwards therefore mints ordinary, non-periodic nodes along the seam
+        and the solution quietly stops being periodic. Refinement BEFORE distribution is unaffected,
+        which is where the initial uniform refinement happens.
+
+        Checked AFTER the fact, with ``nchanged`` the number of elements the adaption actually
+        touched: initialise() runs its initial adaption loop on every problem, adaptive or not, so a
+        check beforehand would refuse every distributed periodic run over an adapt that was going to
+        be a no-op anyway. Pass ``nchanged=None`` for a caller that unconditionally refines.
+
+        Both branches below are collective on every rank, whatever this rank happens to hold: the
+        periodic nodes may all sit on one partition, and a RuntimeError raised on that rank alone
+        would leave the others waiting in the next collective.
+        """
+        if not self.is_distributed():
+            return
+        local_periodic = 0
+        for name,mesh in self._meshdict.items():
+            if isinstance(mesh,ODEStorageMesh):
+                continue
+            if mesh.has_periodic_nodes():
+                local_periodic = 1
+                break
+        if get_mpi_nproc()>1:
+            has_periodic = get_mpi_sum(local_periodic)>0
+            changed = True if nchanged is None else get_mpi_sum(int(nchanged))>0
+        else:
+            has_periodic = local_periodic>0
+            changed = True if nchanged is None else int(nchanged)>0
+        if has_periodic and changed:
+            raise RuntimeError(what+" of a distributed (--distribute) problem whose mesh has periodic boundaries is not supported: the periodic tree connections do not survive Mesh::distribute(), so the refined seam would silently stop being periodic. The run is stopped rather than continuing on a mesh that would no longer be periodic. Either drop --distribute, or do all refinement before distribution (a finer base mesh plus initial_adaption_steps=0). See dev_docs/distributed_periodic_bc.md.")
 
     def _require_no_bifurcation_tracking(self,what:str)->None:
         """Stop with a clear message if ``what`` is being attempted while a tracker is installed.
@@ -2160,7 +2569,7 @@ class Problem(_pyoomph.Problem):
         self._equation_system._do_output(self._output_step, stage, only_every_step=True)
 
 
-    def init_output(self,redefined:bool=False):
+    def _init_output(self,redefined:bool=False):
         cinfo:dict[str,Any] | None=None
         if redefined:
             cinfo={"redefined":True}
@@ -2178,9 +2587,6 @@ class Problem(_pyoomph.Problem):
         pass
         #raise NotImplementedError("Please override the function define_problem to create the mesh(es) and so on")
 
-
-    def flush_mesh_templates(self):
-        self._meshtemplate_list=[]
 
     def add_mesh(self,mesh:_TypeVarMeshTemplate)->_TypeVarMeshTemplate:
         """
@@ -2254,7 +2660,7 @@ class Problem(_pyoomph.Problem):
                 b._elemental_error_max_override=mesh_errs[i]
                 
         if self._adapt_eigenindex is not None and self._last_eigenvectors is not None and len(self._last_eigenvectors)>self._adapt_eigenindex:
-            _pyoomph.set_use_eigen_Z2_error_estimators(True)
+            self.set_use_eigen_Z2_error_estimators(True)
             evect=self._last_eigenvectors[self._adapt_eigenindex]
             has_imag=numpy.amax(numpy.absolute(numpy.imag(evect)))>0.00001*numpy.amax(numpy.absolute(numpy.real(evect)))
             #print("EIG AS DOF")
@@ -2297,7 +2703,7 @@ class Problem(_pyoomph.Problem):
             for _name,mesh in self._meshdict.items():
                 if isinstance(mesh,ODEStorageMesh): continue
                 repair_hanging(mesh)
-            _pyoomph.set_use_eigen_Z2_error_estimators(False)
+            self.set_use_eigen_Z2_error_estimators(False)
             #print("RESET")
 
         # The desired_ndof controller runs HERE, on the raw estimator errors and before any override
@@ -2391,7 +2797,7 @@ class Problem(_pyoomph.Problem):
             dof_deriv=self.get_arclength_dof_derivative_vector()
             if len(dof_deriv)>0:
                 has_arclength_data=True
-                _actual_dofs,_positional_dofs,pinned_values=self.get_all_values_at_current_time(True)            
+                _actual_dofs,_positional_dofs,pinned_values=self._get_all_values_at_current_time(True)            
                 dof_current=self.get_arclength_dof_current_vector()
                 self.set_current_pinned_values(0*pinned_values,True,5)
                 self.set_current_pinned_values(0*pinned_values,True,6)
@@ -2404,7 +2810,7 @@ class Problem(_pyoomph.Problem):
                 messed_around_in_history=True
             
         if self._adapt_eigenindex is not None:
-            _actual_dofs,_positional_dofs,pinned_values=self.get_all_values_at_current_time(True)
+            _actual_dofs,_positional_dofs,pinned_values=self._get_all_values_at_current_time(True)
             self.set_current_pinned_values(0*pinned_values,True,3)
             self.set_current_pinned_values(0*pinned_values,True,4)
             self.set_history_dofs(3,numpy.real(self._last_eigenvectors[self._adapt_eigenindex]))
@@ -2745,10 +3151,15 @@ class Problem(_pyoomph.Problem):
                 print("DESIRED NDOF: "+str(ndof)+" -> "+str(self.desired_ndof)+", unrefining the "+str(m)+" best of "+str(nelem)+" elements (min_permitted_error="+str(thresh)+")")
 
     def _adapt(self) -> tuple[int, int]:
+        self._require_no_deflation("Mesh adaptation")
         nref,nunref=self._adapt_with_interfacial_errors()
+        self._require_no_distributed_periodic_refinement("Mesh adaptation",nref+nunref)
         return nref,nunref
 
-    def compile_meshes(self):
+    def _compile_meshes(self):
+        # Only now does every domain's codegen know its coordinate space (it is set while the fields are
+        # defined), which is what the junction check compares.
+        self._check_coupled_interface_junctions()
         for _,mesh in self._meshdict.items():
             if isinstance(mesh,ODEStorageMesh):
                 mesh._compile_bulk_equations() 
@@ -2800,12 +3211,12 @@ class Problem(_pyoomph.Problem):
                 # get_problem() resolves it live via the C++ side (see mesh.py). ODEStorageMesh
                 # instances can be reused across a redefine_problem() cycle with a new owning
                 # Problem, so still need re-stamping here - preserving the existing compiled
-                # code instance (if any), since _set_problem() would otherwise reset it to None.
+                # code (if any), since _set_problem() would otherwise reset it to None.
                 if isinstance(mesh,ODEStorageMesh):
                     mesh._set_problem(self,mesh.get_code_gen()._code)
                 assert mesh._eqtree is not None
-                assert mesh._eqtree._equations is not None
-                mesh._eqtree._equations.get_combined_equations()._problem=self
+                assert mesh._eqtree._equations
+                mesh._eqtree._problem=self
                 if isinstance(mesh,ODEStorageMesh): continue
                 mesh._pre_compile_interface_equations(tree_depth)
 
@@ -2833,14 +3244,14 @@ class Problem(_pyoomph.Problem):
                 u=nondim(fn,tag=["flag:only_base_mode"]) 
                 utest=testfunction(fn,dimensional=False)
                 # This will give a nice mass matrix! The Jacobian will be J_lk=psi^l*psi^k*dx                
-                eqs.add_residual(weak(u,utest,coordinate_system=self._improved_pitchfork_tracking_coordinate_system),destination="_simple_mass_matrix_of_defined_fields")
+                eqs.add_residual(weak(u,utest,coordsys=self._improved_pitchfork_tracking_coordinate_system),destination="_simple_mass_matrix_of_defined_fields")
             if eqs.get_current_code_generator()._coordinates_as_dofs and (eqs.get_parent_domain() is None) : # Only accumulate on the moving bulk domain
                 u=nondim("mesh",tag=["flag:only_base_mode"]) 
                 utest=testfunction("mesh",dimensional=False)
                 cs=self._improved_pitchfork_tracking_coordinate_system
                 if self._improved_pitchfork_tracking_position_coordinate_system:
                     cs=self._improved_pitchfork_tracking_position_coordinate_system
-                eqs.add_residual(weak(u,utest,coordinate_system=cs),destination="_simple_mass_matrix_of_defined_fields")
+                eqs.add_residual(weak(u,utest,coordsys=cs),destination="_simple_mass_matrix_of_defined_fields")
             # Residuals not writtten to C, wont be used
             eqs.get_current_code_generator().set_ignore_residual_assembly("_simple_mass_matrix_of_defined_fields")
             
@@ -2867,7 +3278,30 @@ class Problem(_pyoomph.Problem):
             #eqs.get_current_code_generator().set_remove_underived_modes(self._cartesian_normal_mode_stability.real_contribution_name,set([1]))
             #eqs.get_current_code_generator().set_remove_underived_modes(self._cartesian_normal_mode_stability.imag_contribution_name,set([1]))
 
+    def _require_single_rank(self,what:str)->None:
+        """Stop with a clear message if ``what`` is being attempted on more than one MPI process.
+
+        Distinct from :py:meth:`_require_non_distributed`, which is about ``--distribute`` alone:
+        this is about ``nproc > 1`` at all. The Python custom-assembler pipeline goes through
+        ``Problem::sparse_assemble_row_or_column_compressed_base_problem``, which throws for a plain
+        replicated ``mpirun`` as well -- and its residual/Jacobian handoff ignores the distribution
+        the caller built them on, so a run that got past the throw would write past the end of a
+        DoubleVector rather than fail (B2 of dev_docs/mpi_augmented_systems.md). Refusing where the
+        user switched the feature on names it, instead of arriving five frames deep from C++.
+        """
+        from .mpi import get_mpi_nproc
+        if get_mpi_nproc()>1:
+            raise RuntimeError(what+" only works on a single process. It goes through the Python "
+                               "custom-assembly pipeline, which is not implemented for MPI (see "
+                               "dev_docs/mpi_augmented_systems.md Part II). Run it without mpirun.")
+
     def set_custom_assembler(self,assm:"CustomAssemblyBase | None") -> None:
+        if assm is not None:
+            # Stage 0 of dev_docs/mpi_augmented_systems.md section 10, finally possible: the normal
+            # form left this pipeline the way deflation did, so the only things still on it are the
+            # CustomBifurcationTracker family and DeflationAssemblyHandler, none of which has ever
+            # worked under MPI.
+            self._require_single_rank("The custom assembler ("+type(assm).__name__+")")
         if self._custom_assembler:
             self._custom_assembler.finalize()
             
@@ -2881,6 +3315,60 @@ class Problem(_pyoomph.Problem):
 
     def get_custom_assembler(self) -> "CustomAssemblyBase | None":
         return self._custom_assembler
+
+    def set_deflation_operator(self,op:"DeflationOperator | None")->None:
+        """Install (or remove) a deflation operator.
+
+        Unlike :meth:`set_custom_assembler`, this leaves the assembly alone: the residual is
+        multiplied by the operator's scalar factor in C++ (``Problem::apply_residual_scale_factor``)
+        and the linear solver rescales the Newton step. Everything else -- the elemental assembly, the
+        frozen sparsity pattern, the choice of backend, MPI -- is the ordinary path, which is why
+        deflation works under ``mpirun`` and ``--distribute`` while the custom-assembler trackers do
+        not. See dev_docs/deflation.md.
+        """
+        if op is not None:
+            # The Newton step is rescaled by a scalar AFTER the linear solve, so anything that
+            # rewrites the system between the solve and the dof update sees an increment that no
+            # longer matches what it eliminated.
+            if self.use_static_condensation:
+                raise RuntimeError("Deflation cannot be combined with static condensation: the condensed "
+                                   "system's eliminated dofs are reconstructed from the Newton increment, "
+                                   "which deflation rescales afterwards. Switch use_static_condensation off.")
+            if self.get_bifurcation_tracking_mode()!="":
+                raise RuntimeError("Deflation cannot be combined with bifurcation tracking. Deactivate the "
+                                   "tracking first (deactivate_bifurcation_tracking()).")
+            op._set_problem(self)
+        self._deflation_operator=op
+        self.residual_scale_hook_active=op is not None
+
+    def get_deflation_operator(self)->"DeflationOperator | None":
+        return self._deflation_operator
+
+    def _require_no_deflation(self,what:str)->None:
+        """Stop with a clear message if ``what`` would change the dof vector under a deflation
+        operator that holds solutions expressed in the OLD one.
+
+        Every known solution is a vector of the current dof numbering. Adapting or remeshing changes
+        both the length and the meaning of that numbering, so the stored solutions become a set of
+        numbers about a mesh that no longer exists. The length check in ``add_known_solution`` would
+        catch the next registration but not the deflation factor computed from the ones already
+        there, which would simply be wrong -- and on a refinement that happens to preserve the dof
+        count, not even that.
+        """
+        if self._deflation_operator is not None and len(self._deflation_operator)>0:
+            raise RuntimeError(what+" is not possible while a deflation operator holds known solutions: "
+                               "they are dof vectors of the current numbering, which "+what.lower()+
+                               " changes. Call clear_known_solutions() first, or run the deflated search "
+                               "on a fixed mesh.")
+
+    def get_residual_scale_factor(self)->float:
+        """The scalar the assembled residual is multiplied by; 1 unless deflation is active.
+
+        Called from C++ once per residual assembly, and only while ``residual_scale_hook_active``.
+        """
+        if self._deflation_operator is None:
+            return 1.0
+        return self._deflation_operator.residual_scale()
     
 
     def get_custom_residuals_jacobian(self, info:_pyoomph.CustomResJacInfo) -> None:
@@ -2943,7 +3431,7 @@ class Problem(_pyoomph.Problem):
         if isinstance(other,MeshTemplate):
             self.add_mesh(other)
         elif isinstance(other,EquationTree):
-            if other._equations is not None:
+            if other._equations:
                 raise RuntimeError("You try to add an EquationTree to the Problem with Equations defined on the root level. This is not allowed. Please restrict all Equations to a domain using e.g. @'domain'")
             
             self.additional_equations+=other        
@@ -3001,7 +3489,10 @@ class Problem(_pyoomph.Problem):
         # once, and caches its derivatives, instead of leaving redundant libm calls for the compiler to
         # eliminate), and once it is used -ffast-math adds under a percent. On polynomial weak forms the
         # flag is within noise either way, since -O3 -march=native is already the default.
-        self.cmdlineparser.add_argument('--fast-math', help="activate fast math compiler flags (only with distutils, not with tcc). Rarely pays off: consider wrapping expensive terms in subexpression() instead, which is faster and does not change the arithmetic", action='store_true')
+        # What actually mattered in that measurement was -fno-math-errno, the one part of -ffast-math
+        # that changes no arithmetic - and that is now a DEFAULT (SystemCCompiler._compute_preargs), so
+        # what is left under this flag is only the reassociating half.
+        self.cmdlineparser.add_argument('--fast-math', help="activate fast math compiler flags (only with distutils, not with tcc). Rarely pays off: the part that mattered (-fno-math-errno) is already on by default, and wrapping expensive terms in subexpression() beats the rest without changing the arithmetic", action='store_true')
         self.cmdlineparser.add_argument('--distribute',help="Distribute mesh in parallel",action='store_true')
         # Registered here mainly so that it shows up in --help and is consumed rather than handed on
         # to PETSc as an unrecognised option; it is read from sys.argv much earlier than this, in
@@ -3023,13 +3514,14 @@ class Problem(_pyoomph.Problem):
         self.cmdlineparser.add_argument("--largest_residuals",help="Debug the largest residuals",type=int,default=self._debug_largest_residual)
         self.cmdlineparser.add_argument("--generate_precice_cfg",help="Generate some parts of a preCICE configuration file from the coupling equations",action="store_true")
         self.cmdlineparser.add_argument("--quick-test",help="Stops after the first successful Newton method. Useful for quick testing",action="store_true")
+        self.cmdlineparser.add_argument("--omp",help="Use N threads for the element assembly and for the linear solver (default: 1, i.e. the serial element loop)",type=int,default=None,metavar="N")
 
     def parse_cmd_line(self):
         from ..materials.generic import MaterialProperties
         if self.ignore_command_line:
-            self.cmdlineargs, self.further_cmdlineargs = self.cmdlineparser.parse_known_args(args="")
+            self.cmdlineargs,_ = self.cmdlineparser.parse_known_args(args="")
         else:
-            self.cmdlineargs, self.further_cmdlineargs = self.cmdlineparser.parse_known_args()
+            self.cmdlineargs,_ = self.cmdlineparser.parse_known_args()
         if self.cmdlineargs.superlu:
             self.set_linear_solver("superlu")
         elif self.cmdlineargs.petsc:
@@ -3042,6 +3534,11 @@ class Problem(_pyoomph.Problem):
             self.set_linear_solver("petsc_mumps")
         elif self.cmdlineargs.accelerate:
             self.set_linear_solver("accelerate")
+
+        # After the solver choice above, not before: set_linear_solver re-applies the stored thread
+        # count anyway, but doing it in this order means one call settles both halves.
+        if self.cmdlineargs.omp is not None:
+            self.set_num_threads(max(1,self.cmdlineargs.omp))
 
         if self.cmdlineargs.tcc:
             self.set_c_compiler("tcc")
@@ -3079,7 +3576,6 @@ class Problem(_pyoomph.Problem):
             self._suppress_compilation=True
 
         if self.cmdlineargs.no_cache:
-            self._no_cache=True
             from .jit_cache import set_enabled
             set_enabled(False)
 
@@ -3257,7 +3753,20 @@ class Problem(_pyoomph.Problem):
                 if not self.is_quiet():
                     print("PARAMETER ", varname, "SET TO",newvalue)
 
+    def _push_dof_ordering(self):
+        """Hand the requested dof layouts to the C++ side, which rebuilds the permutation from them
+        inside the next assign_eqn_numbers().
+
+        Pushed here rather than when the attribute is set, so that assigning problem.dof_ordering at
+        any point before the numbering has the same effect, and so that the field patterns are
+        resolved against the fields the problem actually ended up with."""
+        from .dof_ordering import _normalise
+        self._clear_dof_ordering_specs()
+        for o in _normalise(self.dof_ordering):
+            o._apply_to(self)
+
     def before_assigning_equation_numbers(self,dof_selector:"_DofSelector | None"):
+        self._push_dof_ordering()
         for hook in self._hooks:
             hook.before_assigning_equation_numbers(dof_selector,True)
         self._equation_system._before_assigning_equations(dof_selector)         
@@ -3371,7 +3880,11 @@ class Problem(_pyoomph.Problem):
         self._agree_on_domains_to_remesh()
         if len(self._domains_to_remesh)>0:
             if (self._solve_in_arclength_conti is None) and self.do_call_remeshing_when_necessary:
-                self.force_remesh(self._domains_to_remesh)
+                # RECORD the request; the remesh itself happens in _perform_pending_remesh(), after
+                # the C++ solve call has returned. Doing it here corrupts the dof vector - see there.
+                # The gate is evaluated here, where the old behaviour evaluated it, so that a
+                # remesh suppressed during arclength continuation stays suppressed.
+                self._remesh_requested_inside_solve=True
         self.invalidate_cached_mesh_data()
         if self._custom_assembler:
             self._custom_assembler.actions_after_successful_newton_solve()
@@ -3387,6 +3900,23 @@ class Problem(_pyoomph.Problem):
             print("QUICK TEST: STOPPING AFTER FIRST SUCCESSFUL NEWTON SOLVE")
             self.release()
             sys.exit(0)
+
+    def _rank_independent_template_order(self)->"list[MeshTemplate]":
+        """Every mesh template in use, in an order that is the same on every MPI rank.
+
+        _meshtemplate_list is built by define_problem() and _meshdict by _link_geometry_and_equations,
+        i.e. both in the same order everywhere. A set of templates is not: it iterates by id(), so
+        the order in which the domains would be remeshed - and hence the node and element numbering
+        of the rebuilt meshes - differed from rank to rank. The templates a remesher created later
+        (GmshRemesher2d.get_new_template()) are in _meshdict but not in _meshtemplate_list, so both
+        have to be walked.
+        """
+        templates=list(self._meshtemplate_list)
+        for _mn,_msh in self._meshdict.items():
+            t=getattr(_msh,"_templatemesh",None)
+            if t is not None and t not in templates:
+                templates.append(t)
+        return templates
 
     def _agree_on_domains_to_remesh(self):
         """Make the pending remeshing requests unanimous over the MPI processes.
@@ -3410,11 +3940,7 @@ class Problem(_pyoomph.Problem):
         # the other went on, and the next collective paired a boundary merge with a file output.
         # _meshdict is built in the same order everywhere too, so adding the templates in use keeps
         # the list rank-independent.
-        templates=list(self._meshtemplate_list)
-        for _mn,_msh in self._meshdict.items():
-            t=getattr(_msh,"_templatemesh",None)
-            if t is not None and t not in templates:
-                templates.append(t)
+        templates=self._rank_independent_template_order()
         if not any(t.remesher is not None for t in templates):
             return  # nothing can ever ask, so do not pay for a collective after every solve
         agreed=get_mpi_any_list([t in self._domains_to_remesh for t in templates])
@@ -3438,6 +3964,143 @@ class Problem(_pyoomph.Problem):
         if len(self._domains_to_remesh)>0:
             return True
         return False
+
+    def _solve_with_inversion_remesh(self, do_solve:Callable[[],Any]) -> Any:
+        """Run one oomph-lib solve call, remeshing and retrying if the mesh has folded.
+
+        Armed only by ``RemeshWhen(on_inverted_element=True)``; without it this is ``do_solve()``.
+
+        **Why a remesh is the right answer at all.** Every existing response to an inversion is "take
+        a smaller step" - the adaptive timestepper halves dt, the arclength loop scales Ds by 2/3 -
+        and there is a class of problem where no step size works. If the deformation is prescribed as
+        a function of time, the fold sits at a fixed *time*: halving dt only approaches it more
+        slowly, and the mesh is folded at t_fold + eps for every eps > 0. Measured on
+        `dev_docs/examples/inverted_element_notch.py`: 189 rejections, dt driven from 6e-3 to the
+        1e-12 floor, t frozen at the fold time to six digits, and the run dies.
+
+        **What distinguishes that from an ordinary transient inversion, and what does not.** Counting
+        inversions does not: an intermediate Newton iterate can be inside out on a mesh whose
+        converged states are all fine (the first assembly of a step has the boundary at its new
+        prescribed position and the interior still at the old one), and such an episode produces just
+        as many reports as a real fold does. Three counting rules were built and measured on the notch
+        case, and all three fire on the transient episode at t = 0.126, pre-empting the quality-based
+        trigger that would have remeshed one step later from a converged state - which took a
+        configuration that reaches t = 1.02 down to t = 0.31. A safety net that makes a working setup
+        fail is worse than no safety net.
+
+        What does distinguish them is the thing section 3.2 of the dev doc actually diagnosed:
+        **at a fold, time stops advancing.** A transient inversion costs a rejection or two and the
+        step then completes at a normal size; a fold drives dt to the floor while t stays put. So the
+        test here is on the step that was achieved, not on how many times anything inverted - which
+        also settles the open question in section 5.3 of that document in favour of the ratio.
+
+        **Why the C++ escalation threshold is armed only for the retry.** Once a remesh has happened
+        because of a fold, an inversion on the *fresh* mesh means the remesh did not help, and there is
+        nothing to gain by grinding dt down again to find that out. So the retry runs with the
+        threshold set, which turns the next report straight into another attempt.
+
+        Collective throughout: the report is reduced across the ranks before anyone sees it,
+        `_snapshot_state`/`_restore_state` go through `save_state`/`load_state`, and `force_remesh` is
+        collective - so every rank takes the same branch.
+        """
+        if not self._domains_remesh_on_inversion:
+            return do_solve()
+
+        def time_now()->float:
+            return float(self.get_current_time(as_float=True,dimensional=False))
+
+        def attempt(arm_threshold:bool)->tuple[bool,Any]:
+            """(fold_suspected, result). Raises anything that is not an inversion failure."""
+            n0=self._get_inversion_reports()
+            t0=time_now()
+            self._inversion_remesh_threshold=1 if arm_threshold else 0
+            try:
+                res=do_solve()
+            except InvertedElementRemeshRequest:
+                return True,None       # armed retry: the fresh mesh inverted straight away
+            except RuntimeError:
+                # The adaptive loop gave up (dt below Minimum_dt, say). That is a fold if inversions
+                # are why it gave up, and somebody else's problem if not.
+                if self._get_inversion_reports()>n0:
+                    return True,None
+                raise
+            finally:
+                self._inversion_remesh_threshold=0
+            if self._get_inversion_reports()==n0:
+                # A clean step. It sets the yardstick the next stalled one is measured against.
+                dt_done=time_now()-t0
+                if dt_done>0:
+                    self._inversion_reference_dt=dt_done
+                return False,res
+            # Inversions were reported AND the step still completed. Fold or transient? Compare the
+            # step actually taken against the last clean one: a transient gives up a factor of two or
+            # four, a fold gives up everything.
+            dt_done=time_now()-t0
+            ref=self._inversion_reference_dt
+            if ref is None or dt_done<=0:
+                return False,res
+            return (dt_done<ref*self.inversion_remesh_dt_collapse),res
+
+        snapshot=self._snapshot_state()
+        for i in range(self.inversion_remesh_max_retries+1):
+            fold,res=attempt(arm_threshold=(i>0))
+            if not fold:
+                return res
+            if i>=self.inversion_remesh_max_retries:
+                raise InvertedElementRemeshRequest(
+                    "The mesh kept folding after "+str(i)+" remeshes. Either the domain itself is "
+                    "degenerating, in which case no remesh can help, or the remesher is reproducing the "
+                    "same bad mesh. Problem.inversion_remesh_max_retries raises the budget.")
+            if not self.is_quiet():
+                print("INVERTED ELEMENT: the step collapsed without getting past the fold; restoring "
+                      "the last good state and remeshing (attempt "+str(i+1)+" of "+
+                      str(self.inversion_remesh_max_retries)+")")
+            self._restore_state(snapshot)
+            self.force_remesh(self._domains_remesh_on_inversion)
+            snapshot=self._snapshot_state()   # the old one describes the old mesh
+
+    def _perform_pending_remesh(self) -> bool:
+        """Carry out a remesh that a RemeshWhen asked for during the solve that has just returned.
+
+        **The remesh may not happen inside the C++ call, which is why this exists.**
+        ``oomph::Problem::adaptive_unsteady_newton_solve()`` snapshots the dofs by FLAT INDEX before
+        the step::
+
+            Vector<double> dofs_current(n_dof_local);
+            for (i < n_dof_local) dofs_current[i] = dof(i);
+
+        and, if the step is then rejected on temporal error, restores them the same way::
+
+            for (i < dofs_current.size()) dof(i) = dofs_current[i];
+
+        ``actions_after_newton_solve()`` runs between those two, from inside ``newton_solve()``. A
+        remesh there changes both ``ndof`` and the meaning of every index, so the restore writes the
+        old mesh's values into unrelated dofs of the new one - and, whenever the remesh SHRANK the
+        system, straight past the end of ``Dof_pt``, which is an out-of-bounds write through a
+        garbage pointer.
+
+        Observed, not reasoned: a 619 -> 1081 remesh inside a step that was then rejected turned a
+        converged state into ``Initial Maximum residuals 2981`` and the retry into
+        ``Maximum residuals inf``; the step was rejected 26 more times, halving dt each time and
+        restoring the same corrupt snapshot, until the run died with "Max. residual has been
+        exceeded". Nothing in that message points at remeshing.
+
+        So: detect inside, decide inside, remesh outside - the same rule
+        ``dev_docs/mesh_construction.md`` section 5.1 arrives at for inverted elements.
+
+        Collective, like ``force_remesh()`` itself: the flag is already unanimous, because
+        ``_agree_on_domains_to_remesh()`` made the domain set unanimous before it was set.
+        """
+        if not self._remesh_requested_inside_solve:
+            return False
+        self._remesh_requested_inside_solve=False
+        if len(self._domains_to_remesh)==0:
+            # actions_before_newton_solve() clears the set at the start of every solve, so a request
+            # raised by a step that was subsequently retried is re-raised by the retry. Reaching here
+            # with an empty set therefore means the last solve did not ask after all.
+            return False
+        self.force_remesh(self._domains_to_remesh)
+        return True
 
     def remesh_if_necessary(self) -> bool:
         """
@@ -3551,7 +4214,7 @@ class Problem(_pyoomph.Problem):
         if depth==0:
             res:set[str]=set()
             for m in self._meshtemplate_list:
-                res.update(m.available_domains())
+                res.update(m._available_domains())
             return res,"Available domains"
         path=node.get_full_path().lstrip("/").split("/")
         templ=None
@@ -3564,7 +4227,7 @@ class Problem(_pyoomph.Problem):
         if depth==1:
             # Exactly the boundaries this domain touches with a whole facet, i.e. the same subset the
             # generated mesh will end up with.
-            return set(templ.get_domain(path[0]).get_adjacent_boundary_names()),"Boundaries of '"+path[0]+"'"
+            return set(templ._get_domain(path[0]).get_adjacent_boundary_names()),"Boundaries of '"+path[0]+"'"
         if depth==2:
             # _find_interface_intersections() inserts every permutation, so "domain/left/top" is present
             # iff "domain/top/left" is; filtering on the prefix therefore gives the codim-2 children.
@@ -3577,7 +4240,7 @@ class Problem(_pyoomph.Problem):
         domset:set[str]=set()
         for m in self._meshtemplate_list:
             m._do_define_geometry(self) 
-            mydoms=set(m.available_domains())
+            mydoms=set(m._available_domains())
             inters=domset.intersection(mydoms)
             if len(inters)>0:
                 raise RuntimeError("Following domains are added multiple times: "+str(inters))
@@ -3600,7 +4263,7 @@ class Problem(_pyoomph.Problem):
             inters=m._find_interface_intersections()
             for im in inters:
                 dom=im.split("/")[0]
-                if dom in self._equation_system._children and self._equation_system._children[dom]._equations is not None:
+                if dom in self._equation_system._children and self._equation_system._children[dom]._equations:
                     self._interinter_connections.add(im)
         if len(self._interinter_connections)>0:
             self._equation_system._fill_interinter_connections(self._interinter_connections)
@@ -3617,16 +4280,14 @@ class Problem(_pyoomph.Problem):
         #TODO: ODEs added to the root
         for meshname,eqtree in self._equation_system.get_children().items(): 
             #Find the mesh that generates the mesh we want to have
-            if eqtree._equations is None: 
+            if not eqtree._equations:
                 raise RuntimeError("Empty bulk equations")
             mesh=None
             for m in self._meshtemplate_list:
                 if m.has_domain(meshname):
                     mesh=MeshFromTemplate(self,m,meshname,eqtree)
                     self._meshdict[meshname]=mesh
-                    assert eqtree._equations is not None
-                    eqtree._equations._mesh=mesh  #type:ignore
-            if eqtree._equations._is_ode(): 
+            if eqtree._is_ode(): 
                 if mesh is not None:
                     if not isinstance(mesh,ODEStorageMesh):
                         raise RuntimeError("Cannot add an ODE to a spatial mesh yet")
@@ -3643,6 +4304,9 @@ class Problem(_pyoomph.Problem):
                     raise RuntimeError("No mesh template with a domain named '"+meshname+'" was added, but there are equations defined on this domain. Available domains are '+str(avdoms))
 
         self._equation_system._create_dummy_domains_for_DG(self) 
+        # _after_fill_dummy_equations() above may have grafted whole domains onto the tree (see
+        # _adopt_nodes_added_after_fill); they were never walked by _fill_dummy_equations.
+        self._equation_system._adopt_nodes_added_after_fill(self)
         self._equation_system._finalize_equations(self,second_loop=True) 
         if not self.is_quiet():
             print("SOLVING THE FOLLOWING SYSTEM:\n"+str(self._equation_system))
@@ -3673,6 +4337,7 @@ class Problem(_pyoomph.Problem):
         if interpolator is None:
             interpolator=self.mesh_interpolator
         self._ccode_dir = code_dir
+        self._ccode_dir_is_unique = True # explicitly chosen by the caller; never second-guess it
 
         if not self.is_initialised():
             self.initialise()
@@ -3693,7 +4358,7 @@ class Problem(_pyoomph.Problem):
         if len(self._meshdict) == 0:
             raise RuntimeError("No mesh or ODE added to the problem, do it in the define_problem() method")
 
-        self.compile_meshes()
+        self._compile_meshes()
 
         self.rebuild_global_mesh_from_list(rebuild=True)
         
@@ -3716,7 +4381,7 @@ class Problem(_pyoomph.Problem):
             raise NotImplementedError("Not implemented yet: Redefining the problem with distribution...")
             self.distribute()
 
-        self.init_output(redefined=True)
+        self._init_output(redefined=True)
         self.rebuild_global_mesh_from_list(rebuild=True)
         self.reapply_boundary_conditions()
 
@@ -3736,7 +4401,12 @@ class Problem(_pyoomph.Problem):
                     interpolators[name]=interpolator(omesh,newmesh)
                 elif isinstance(newmesh,ODEStorageMesh) and isinstance(omesh,ODEStorageMesh):
                     interpolators[name]=ODEInterpolator(omesh,newmesh)
-                omesh.get_eqtree()._before_mesh_to_mesh_interpolation(interpolators[name])
+        # As in force_remesh(): every hook sees the whole set, since one of them may have to
+        # configure a neighbouring domain's transfer.
+        for _, interp in interpolators.items():
+            interp.remesh_group=interpolators
+        for name in interpolators.keys():
+            old_mesh_dict[name].get_eqtree()._before_mesh_to_mesh_interpolation(interpolators[name])
 
         if num_adapt > 0:
             no_need_to_reassign = False
@@ -3926,9 +4596,9 @@ class Problem(_pyoomph.Problem):
         if self._setup_azimuthal_stability_code:
             if  self._setup_additional_cartesian_stability_code:
                 raise RuntimeError("Cannot set up both azimuthal and additional cartesian coordinate stability simultaneously yet")
-            self.define_problem_for_axial_symmetry_breaking_investigation()
+            self._define_problem_for_axial_symmetry_breaking_investigation()
         elif self._setup_additional_cartesian_stability_code:
-            self.define_problem_for_additional_cartesian_stability_investigation()
+            self._define_problem_for_additional_cartesian_stability_investigation()
         if self.additional_equations != 0:
             self.add_equations(self.additional_equations)
 
@@ -3938,7 +4608,7 @@ class Problem(_pyoomph.Problem):
         if len(self._meshdict)==0:
             raise RuntimeError("No mesh or ODE added to the problem, do it in the define_problem() method")
 
-        self.compile_meshes()
+        self._compile_meshes()
         #print("MESH COMPILE DONE")
 
         if get_mpi_rank()==0:
@@ -4088,7 +4758,7 @@ class Problem(_pyoomph.Problem):
 
         self._initialised = True
         self._during_initialization=False
-        self.init_output()
+        self._init_output()
         self.rebuild_global_mesh_from_list(rebuild=True)
         self.reapply_boundary_conditions()
 
@@ -4202,6 +4872,7 @@ class Problem(_pyoomph.Problem):
                 print("BUILDING GLOBAL MESH FROM LIST")
             self.build_global_mesh()
         for mt in self._meshtemplate_list:
+            self._assign_interface_topological_ids()
             mt._connect_opposite_elements(self._equation_system) 
 
 
@@ -4275,12 +4946,6 @@ class Problem(_pyoomph.Problem):
         self.invalidate_cached_mesh_data()
         if self._custom_assembler:
             self._custom_assembler.actions_after_setting_initial_condition()
-
-
-
-    def get_time_symbol(self,with_scaling:bool=True) -> Expression:
-        return get_global_symbol("t")*(self.get_scaling("temporal") if with_scaling else 1)
-
 
     def actions_before_adapt(self):
         for m in self._interfacemeshes:
@@ -4356,6 +5021,38 @@ class Problem(_pyoomph.Problem):
             # The snapshot/refit carries every discontinuous space now (see
             # dev_docs/internal_facet_fields.md), so there is nothing left to refuse.
         super().distribute()
+        self._require_no_distributed_periodic_position_dofs()
+
+
+    def _require_no_distributed_periodic_position_dofs(self)->None:
+        """Stop if periodic boundaries are combined with a moving mesh on a distributed problem.
+
+        make_periodic() aliases only a node's VALUES, never its positions -- oomph-lib says so itself
+        in the warning in BoundaryNode<SolidNode>::make_periodic -- so a periodic copy's position dofs
+        are its own. Distribution keeps the copy out of the halo scheme entirely (it owns no values,
+        and the two sides of a seam are too far apart for any partition to pair them up), which is
+        exactly what independent position dofs would have needed: they would be numbered on every rank
+        that holds the copy rather than on one.
+
+        Checked after super().distribute(), because Problem::distribute() assigns the equation numbers
+        at its very end and there is nothing to read before that. Collective: the periodic nodes can
+        all sit on one partition, and on a rank where the copy is a halo its dofs read as pinned.
+        """
+        if not self.is_distributed():
+            # mpirun -n 1, or fewer elements than ranks: Problem::distribute() declined to do
+            # anything, so there is no halo scheme for the position dofs to fall out of.
+            return
+        local = 0
+        for _name,mesh in self._meshdict.items():
+            if isinstance(mesh,ODEStorageMesh):
+                continue
+            if mesh.has_periodic_position_dofs():
+                local = 1
+                break
+        if get_mpi_nproc()>1:
+            local = get_mpi_sum(local)
+        if local>0:
+            raise RuntimeError("Periodic boundaries on a moving (ALE) mesh are not supported with --distribute: only the nodal values are shared between a periodic node and its master, never the positions, so the copy's position degrees of freedom are its own and cannot be carried by the distributed halo scheme. Note that the two sides' coordinates do not coincide even in serial -- use Lagrange multipliers if you need that. See dev_docs/distributed_periodic_bc.md.")
 
 
     def actions_before_distribute(self):
@@ -4403,7 +5100,7 @@ class Problem(_pyoomph.Problem):
                     e=e.get_father_element()
                     e.set_macro_element(None, False)
 
-    def describe_equation(self,dofindex:int) -> str:
+    def _describe_equation(self,dofindex:int) -> str:
         res = "unknown(" + str(dofindex) + ")"
         for mesh_name, mesh in self._meshdict.items():
             if isinstance(mesh,ODEStorageMesh):
@@ -4496,6 +5193,31 @@ class Problem(_pyoomph.Problem):
         if self._custom_assembler:
             self._custom_assembler.actions_after_equation_numbering()
 
+    def _merge_dof_description_over_ranks(self,doflist:NPIntArray,dofnames:list[str])->NPIntArray:
+        """Complete the per-rank dof description of :py:meth:`get_dof_description` into the global one.
+
+        A rank can only classify the dofs its own elements reach, so on a distributed problem each of
+        them comes out of the mesh walk with holes where somebody else's part of the mesh is. The type
+        indices are comparable across ranks because the mesh tree, and with it the name list, comes
+        from the same equation tree everywhere - which is checked rather than assumed, since names that
+        disagree would relabel dofs instead of failing.
+
+        Elementwise MAX is the merge: unassigned is -1, and where two ranks both classified a dof they
+        each took whichever mesh came later in the walk, so the larger index is also the one a serial
+        run would have arrived at (an interface is walked after its bulk).
+        """
+        if not self.is_distributed():
+            return doflist
+        from .mpi import get_mpi_nproc,get_mpi_world_comm,get_mpi_elementwise_max
+        comm=get_mpi_world_comm()
+        if get_mpi_nproc()<=1 or comm is None:
+            return doflist
+        if any(other!=dofnames for other in comm.allgather(dofnames)): #type:ignore
+            if not self.is_quiet():
+                print("Cannot merge the dof description across the ranks: they do not agree on the dof type names. Describing this rank's part of the mesh only.")
+            return doflist
+        return get_mpi_elementwise_max(doflist)
+
     def get_dof_description(self):
         """
         Returns two arrays containing the description of the degrees of freedom.
@@ -4504,11 +5226,19 @@ class Problem(_pyoomph.Problem):
         
         For a simple Poisson equation for a field ``u`` on a line domain name ``"domain"``, the first returned array will contain numbers between 0 and 2 (dof-type indices), and the second array will contain the type names ``["domain/u", "domain/left/u", "domain/right/u"]``.
         Note how the boundaries get their own dof-type indices.
-                        
+
+        On a distributed (``--distribute``) problem this is collective: each rank can only describe the
+        dofs its own elements reach, so the per-rank answers are merged and every rank returns the same
+        full-length description - which is what the callers need, since the residual vector they index
+        it with is gathered as well.
+
         Returns:
             A pair of arrays containing the dof-type indices and the type names to classify the degrees of freedom.
         """
-        doflist:NPIntArray=numpy.array([],dtype=numpy.int32) #type:ignore
+        # Full length and all-unassigned from the start. Deriving the length from the first mesh that
+        # answers instead used to leave it at zero on a rank whose first mesh is empty, and every later
+        # mesh then silently described nothing.
+        doflist:NPIntArray=numpy.full(self.ndof(),-1,dtype=numpy.int32) #type:ignore
         dofnames:list[str] = []
 
         def process(m:AnyMesh):
@@ -4518,23 +5248,26 @@ class Problem(_pyoomph.Problem):
             #if numpy.all(types<0):
             #	print("MESH "+m.get_full_name()+" does not identify any dofs...")
             #print(m.get_full_name(),types,names)
-            if len(doflist)==0:
-                doflist = numpy.array(types,dtype=numpy.int32) #type:ignore
             offset = len(dofnames)
             trunk = m.get_full_name()
             for n in names:
                 dofnames.append(trunk + "/" + n)
-            for k in range(len(doflist)):
-                if k>=len(types):
-                    raise RuntimeError("Strange. Should not happen: "+m.get_full_name()+" NAMES: "+str(names)+" TYPES: "+str(types),"DOFLIST: "+str(doflist))
-                if types[k] >= 0:
-                    doflist[k] = offset + types[k]
+            # A mesh without a compiled code (and only such a mesh) describes nothing at all. It still
+            # has to be walked, so that its interfaces contribute their names in the same order here as
+            # on every other rank.
+            if len(types):
+                if len(types)!=len(doflist):
+                    raise RuntimeError("Mesh "+m.get_full_name()+" described "+str(len(types))+" dofs, but the problem has "+str(len(doflist)))
+                assigned=types>=0
+                doflist[assigned]=offset+types[assigned]
             if not isinstance(m,ODEStorageMesh):
                 for im in m._interfacemeshes.values(): 
                     process(im)
 
         for _, bm in self._meshdict.items():
             process(bm)
+
+        doflist=self._merge_dof_description_over_ranks(doflist,dofnames)
 
         if numpy.any(doflist<0): #type:ignore
             if self.get_bifurcation_tracking_mode()=="azimuthal":
@@ -4601,7 +5334,7 @@ class Problem(_pyoomph.Problem):
         return analyse_jacobian_singularity(self,k=k,ntop=ntop,quiet=quiet,**kwargs)
 
 
-    def search_dof_in_mesh(self,mesh:AnyMesh,dofindex:int):
+    def _search_dof_in_mesh(self,mesh:AnyMesh,dofindex:int):
         location = None
         typ = None
         if not isinstance(mesh,ODEStorageMesh):
@@ -4688,7 +5421,7 @@ class Problem(_pyoomph.Problem):
                             dofindex-=ndof_base
                         elif splt[-1].endswith("__(ImEigen)"):
                             dofindex-=2*ndof_base
-                    location,typ=self.search_dof_in_mesh(mesh,dofindex)
+                    location,typ=self._search_dof_in_mesh(mesh,dofindex)
                     if location is None or typ is None:
                         print("   ... cannot find any node or element containing this dof...")
                     else:
@@ -4700,12 +5433,12 @@ class Problem(_pyoomph.Problem):
                 for ism in range(self.nsub_mesh()):
                     submesh=self.mesh_pt(ism)
                     assert isinstance(submesh,(MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d,InterfaceMesh,ODEStorageMesh))
-                    location, typ = self.search_dof_in_mesh(submesh, dofindex)
+                    location, typ = self._search_dof_in_mesh(submesh, dofindex)
                     if location is not None and typ is not None:
                         print("     but found in mesh "+submesh.get_full_name()+" at " + str(location) + ". Type: " + typ)
                     else:
                         print(" 		not found in mesh "+submesh.get_full_name())
-                    #print("DESCRIBE",self.describe_equation(dofindex))
+                    #print("DESCRIBE",self._describe_equation(dofindex))
                     for e in submesh.elements():
                         for d in range(e.ndof()):
                             if e.eqn_number(d)==dofindex:
@@ -4756,6 +5489,136 @@ class Problem(_pyoomph.Problem):
                 print(paramstr)
         for h in self._hooks:
             h.actions_after_newton_step()
+
+    def _check_coupled_interface_junctions(self):
+        """Refuse a junction where coupled interfaces share a multiplier slot but the domains meeting
+        there do not share an element space.
+
+        An interface field is a nodal value on the BULK node and Mesh::resolve_interface_dof_id() keys the
+        slot on the NAME alone, so a domain owning two coupled interfaces has ONE multiplier on the node
+        where they meet. Its residual then enforces the SUM of the two coupling conditions,
+        (u - u_first) + (u - u_second) = 0, rather than each of them.
+
+        That is deliberate, and it is load-bearing when every domain around the junction carries the same
+        space: the remaining multipliers still force the two conditions individually, and merging removes
+        a redundancy that would otherwise leave the Jacobian singular. Measured on a four-domain cross
+        point (dev_docs/interface_refinement_coupling.md section 14.4): all-C1 gives rank 13 of 13 with the
+        shared name against 13 of 14 with distinct ones.
+
+        As soon as ONE domain at the junction carries a different space that redundancy disappears --
+        distinct names go to rank 18 of 18 -- and the merged system is no longer equivalent. It stays FULL
+        RANK and Newton converges, so nothing downstream notices; it simply solves a different problem.
+        Measured max|u-y| 2.6e-2 against 1.1e-16, with the error sitting exactly on the cross point.
+
+        Note what the criterion has to be. The offending domain need not be a NEIGHBOUR of the one that
+        owns the shared slot: in the measured case A owns both slots and touches only B and C, all three
+        C1, and it is D -- which meets A at the cross point and nowhere else -- that breaks it. So the test
+        is over every domain at the junction, found by connecting the boundaries that meet pairwise.
+
+        There is no silent option here, so this refuses. A distinct lagr_mult_prefix per interface is
+        correct in every configuration measured, at the price of the singular Jacobian above should the
+        junction later become homogeneous; with_removed_overconstraining() is the other escape hatch.
+        Making that trade automatic needs the redundancy counted from the junction topology, which is its
+        own piece of work.
+        """
+        from ..equations.generic import ConnectFieldsAtInterface
+        from ..equations.ALE import ConnectMeshAtInterface
+
+        def coupled_multiplier_names(domtree,bname:str)->set[str]:
+            """The multiplier names a coupled interface on domtree/bname puts on domtree's own nodes."""
+            child=domtree.get_children().get(bname)
+            if child is None or child._equations is None or child._codegen is None:
+                return set()
+            if child._codegen._get_opposite_interface() is None:
+                return set()
+            # _equations is a plain list of Equations at this point in the setup, not yet the combined
+            # object that carries get_equation_of_type().
+            eqs=child._equations if isinstance(child._equations,(list,tuple)) else [child._equations]
+            names:set[str]=set()
+            for c in eqs:
+                if isinstance(c,ConnectFieldsAtInterface):
+                    for finner,fouter in c.fields.items():
+                        names.add(c.lagr_mult_prefix+finner+"_"+fouter)
+                elif isinstance(c,ConnectMeshAtInterface):
+                    assert domtree._codegen is not None
+                    for f in ["mesh_x","mesh_y","mesh_z"][0:domtree._codegen.get_nodal_dimension()]:
+                        names.add(c.lagr_mult_prefix+f)
+            return names
+
+        for m in self._meshtemplate_list:
+            # (a) Which boundaries meet each other at a node, as an undirected graph. Only boundaries
+            # that actually carry a coupled interface take part -- otherwise an outer corner such as
+            # "A/A_B/top" would merge the cross point with an unrelated wall.
+            pairs:list[tuple[str,str,str]]=[]  # (domain, boundary, boundary)
+            for inter in m._find_interface_intersections():
+                parts=inter.split("/")
+                if len(parts)<3:
+                    continue
+                dom=parts[0]
+                domtree=self._equation_system.get_children().get(dom)
+                if domtree is None or domtree._codegen is None:
+                    continue
+                def has_opposite(b:str,domtree:"EquationTree"=domtree)->bool:
+                    child=domtree.get_children().get(b)
+                    return (child is not None and child._codegen is not None
+                            and child._codegen._get_opposite_interface() is not None)
+                coupled=[b for b in parts[1:] if coupled_multiplier_names(domtree,b) or has_opposite(b)]
+                for k in range(len(coupled)):
+                    for l in range(k+1,len(coupled)):
+                        pairs.append((dom,coupled[k],coupled[l]))
+            if not pairs:
+                continue
+            # (b) Connected components of that graph are the junctions.
+            parent:dict[str,str]={}
+            def find(x:str)->str:
+                parent.setdefault(x,x)
+                while parent[x]!=x:
+                    parent[x]=parent[parent[x]]; x=parent[x]
+                return x
+            def union(a:str,b:str):
+                ra,rb=find(a),find(b)
+                if ra!=rb: parent[ra]=rb
+            for _dom,b1,b2 in pairs:
+                union(b1,b2)
+            junctions:dict[str,set[tuple[str,str]]]={}   # component -> {(domain, boundary)}
+            for dom,b1,b2 in pairs:
+                junctions.setdefault(find(b1),set()).update({(dom,b1),(dom,b2)})
+            # (c) Per junction: is any slot shared, and are all the domains there in one space?
+            for _root,members in junctions.items():
+                doms={d for d,_b in members}
+                children=self._equation_system.get_children()
+                spaces={str(cast("FiniteElementCodeGenerator",children[d]._codegen)._coordinate_space)
+                        for d in doms if children.get(d) is not None
+                        and children[d]._codegen is not None}
+                spaces.discard("")
+                if len(spaces)<2:
+                    continue
+                for d in sorted(doms):
+                    domtree=self._equation_system.get_children().get(d)
+                    if domtree is None:
+                        continue
+                    bs=sorted(b for dd,b in members if dd==d)
+                    shared:dict[str,list[str]]={}
+                    for b in bs:
+                        for n in coupled_multiplier_names(domtree,b):
+                            shared.setdefault(n,[]).append(b)
+                    for name,bnds in sorted(shared.items()):
+                        if len(bnds)<2:
+                            continue
+                        raise RuntimeError(
+                            "The coupled interfaces "+", ".join(d+"/"+b for b in bnds)+" meet at a shared "
+                            "node and use the same Lagrange multiplier '"+name+"', so they share ONE "
+                            "multiplier slot there -- but the domains meeting at that junction ("
+                            +", ".join(sorted(doms))+") do not all carry the same element space ("
+                            +", ".join(sorted(spaces))+"). The shared multiplier then enforces the SUM of "
+                            "the coupling conditions instead of each of them, and the result is a "
+                            "converged but WRONG solution: measured max|u-u_exact| 2.6e-2 against 1.1e-16, "
+                            "full rank, Newton converging in one step. See "
+                            "dev_docs/interface_refinement_coupling.md section 14.4.\n"
+                            "Give the interfaces distinct multipliers with a different lagr_mult_prefix "
+                            "per interface -- correct in every configuration measured, at the price of a "
+                            "singular Jacobian should the junction later become homogeneous -- or remove "
+                            "the redundant constraint explicitly with with_removed_overconstraining().")
 
     def _collect_coupled_interfaces(self) -> list[tuple[AnySpatialMesh,str,AnySpatialMesh,str,list[float]]]:
         """Every declared opposite-interface connection, expressed on the BULK meshes.
@@ -4857,12 +5720,25 @@ class Problem(_pyoomph.Problem):
         """Apply what _defer_uneven_initial_refinement held back, once distribution is done."""
         if not deferred:
             return
+        self._require_no_distributed_periodic_refinement("Deferred initial uniform refinement")
         self.actions_before_adapt()
         for mesh,extra in deferred:
             for _ in range(extra):
                 mesh.refine_uniformly()
         self.relink_external_data()
         self.actions_after_adapt() # repairs the conformity this just broke
+
+    def _assign_interface_topological_ids(self):
+        """Give every node its cross-domain topological identity, before anything asks for one.
+
+        C++ does this at the end of every adaptation (TemplatedMeshBase::adapt_finalise), which covers the
+        adapt path but not mesh generation or the initial uniform refinement -- and the opposite-element
+        matcher runs after those too. Idempotent and cheap once every node already has one.
+        """
+        for m in self._meshdict.values():
+            if isinstance(m,ODEStorageMesh) or isinstance(m,InterfaceMesh):
+                continue
+            m._assign_interface_topological_ids()
 
     def enforce_interface_conformity(self) -> int:
         """Make both sides of every coupled interface carry identical boundary facets.
@@ -4875,9 +5751,9 @@ class Problem(_pyoomph.Problem):
 
         The same fixed point also closes the VERTEX-connected balance: an element touching a coupled
         interface at a single vertex carries no facet, so none of the above can see it, and it would
-        otherwise be left arbitrarily coarser than the interface beside it. Those refinements are
-        accumulated into :py:attr:`_interface_vertex_balance_refinements` instead, since they are a
-        grading closure inside one mesh rather than a conformity repair.
+        otherwise be left arbitrarily coarser than the interface beside it. Those refinements are not
+        counted in the return value, since they are a grading closure inside one mesh rather than a
+        conformity repair.
 
         Collective under MPI: every process must call it. Returns the number of elements refined to
         repair facet conformity.
@@ -4889,8 +5765,7 @@ class Problem(_pyoomph.Problem):
         conns=self._collect_coupled_interfaces()
         if not conns:
             return 0
-        n,nvert=_pyoomph._enforce_interface_conformity(conns,40) #type:ignore
-        self._interface_vertex_balance_refinements+=nvert
+        n,_nvert=_pyoomph._enforce_interface_conformity(conns,40) #type:ignore
         # How much repairing this had to do. Zero is the good case and the interesting one: it means the
         # two sides agreed BEFORE they acted (the flag reconciliation in _adapt_with_interfacial_errors
         # got there first), rather than one of them being refined back afterwards. A repair is correct
@@ -4945,6 +5820,7 @@ class Problem(_pyoomph.Problem):
             print("REBUILDING GLOBAL MESH")
         self.rebuild_global_mesh()
         for m in self._meshtemplate_list:
+            self._assign_interface_topological_ids()
             m._connect_opposite_elements(self._equation_system)
         # After the whole loop above, not inside it: this is COLLECTIVE, and rebuild_after_adapt() can
         # throw per-rank (a non-conforming 3d skeleton, say), which would leave the ranks that did not
@@ -4977,7 +5853,31 @@ class Problem(_pyoomph.Problem):
             
 
 
-    def compile_bulk_element_code(self,elementtype:FiniteElementCodeGenerator,bulkmesh:AnyMesh,subname:str) -> _pyoomph.DynamicBulkElementInstance:
+    def _claim_unique_ccode_dir(self,subname:str)->None:
+        """Move this Problem's generated code out of the way of another live Problem's.
+
+        Two Problems default to the same output directory and the same "_ccode" below it, so two
+        same-named domains compile to the same .so path. dlopen dedupes by inode and only bumps a
+        refcount, so the second Problem would silently be handed the first one's compiled equations
+        while its own compiler overwrote that file underneath the live mapping. Checked at the point
+        of collision rather than in __init__, so the ordinary single-Problem layout is untouched and
+        a loop that reuses one variable for many Problems does not accumulate directories.
+        """
+        if self._outdir is None or self._ccode_dir_is_unique:
+            return
+        ext=cast("_pyoomph.SharedLibCCompiler",self.get_ccompiler()).get_shared_lib_extension()
+        if not _pyoomph.jit_library_is_loaded(os.path.join(self._outdir,self._ccode_dir,subname)+ext):
+            return
+        base=self._ccode_dir
+        n=1
+        while _pyoomph.jit_library_is_loaded(os.path.join(self._outdir,base+"_"+str(n),subname)+ext):
+            n+=1
+        self._ccode_dir=base+"_"+str(n)
+        self._ccode_dir_is_unique=True
+        print("Another Problem in this process already uses "+base+"; this one compiles its equations into "+self._ccode_dir+" instead")
+
+    def _compile_bulk_element_code(self,elementtype:FiniteElementCodeGenerator,bulkmesh:AnyMesh,subname:str) -> _pyoomph.DynamicJITCode:
+        self._claim_unique_ccode_dir(subname)
         if self._outdir is not None:
             destpath=os.path.join(self._outdir,self._ccode_dir)
             Path(destpath).mkdir(parents=True, exist_ok=True)
@@ -5033,7 +5933,6 @@ class Problem(_pyoomph.Problem):
 
         mpi_barrier()
         #print("REt MPI")
-        self._bulk_element_code_counter=self._bulk_element_code_counter+1
         return res
 
 
@@ -5145,7 +6044,7 @@ class Problem(_pyoomph.Problem):
         #if azimuthal_stability:
         #    self.set_analytic_hessian_products(False) # We may not use it here!
         if improve_pitchfork_on_unstructured_mesh:
-            self.improve_pitchfork_tracking_on_unstructured_meshes(coord_sys=improve_pitchfork_coordsys,pos_coord_sys=improve_pitchfork_position_coordsys)
+            self._improve_pitchfork_tracking_on_unstructured_meshes(coordsys=improve_pitchfork_coordsys,pos_coordsys=improve_pitchfork_position_coordsys)
         if shared_shapes_for_multi_assemble is not None:
             self._shared_shapes_for_multi_assemble=shared_shapes_for_multi_assemble
         if azimuthal_stability:
@@ -5301,12 +6200,16 @@ class Problem(_pyoomph.Problem):
         # What n_unaugmented_dofs records is the dof count at the moment an augmentation was
         # INSTALLED, so !=0 means "a handler is installed", NOT "the dof vector grew":
         # AugmentedAssemblyHandler.initialize() sets it for every subclass, including the ones that
-        # append no dofs at all -- DeflationAssemblyHandler.define_augmented_dofs() is empty, and
-        # deflated_continuation() then yields to the caller with the operator still installed
-        # (keep_deflation_operator_active=True) precisely so that eigenproblems can be solved there.
-        # With no extra dofs the dof vector, its distribution and the assembled matrices are the base
-        # problem's, and the eigensolve is exactly the unaugmented one, so only a genuinely longer
-        # vector is refused here.
+        # append no dofs at all. With no extra dofs the dof vector, its distribution and the assembled
+        # matrices are the base problem's, and the eigensolve is exactly the unaugmented one, so only
+        # a genuinely longer vector is refused here.
+        #
+        # Deflation used to be the example of a handler that adds no dofs; it is not a handler at all
+        # any more (Problem.set_deflation_operator, dev_docs/deflation.md), so n_unaugmented_dofs
+        # stays 0 while it is installed. Eigensolving during deflated_continuation() -- which the
+        # tutorial does, with keep_deflation_operator_active=True -- therefore does not reach this
+        # guard, and it sees the ordinary, undeflated matrices as it must: the deflation factor scales
+        # the RESIDUAL, and the eigenproblem is assembled from the Jacobian and mass matrix.
         _n_unaug=self._get_n_unaugmented_dofs() #type:ignore
         if _n_unaug!=0 and _n_unaug!=self.ndof():
             raise RuntimeError("Cannot solve an eigenproblem while a custom augmented system (add_augmented_dofs / a CustomBifurcationTracker) adds dofs to the problem ("+str(_n_unaug)+" base dofs vs "+str(self.ndof())+" now). Remove the augmentation first.")
@@ -5395,6 +6298,18 @@ class Problem(_pyoomph.Problem):
             self._last_eigenvalues=self._last_eigenvalues[filtered_indices]
             self._last_eigenvectors=self._last_eigenvectors[filtered_indices]        
 
+        # This is the BASE mode (or, while a normal-mode tracker is installed, the tracked one - see
+        # the docstring), and either way the per-eigenvalue mode arrays of whatever ran before belong
+        # to eigenvalues that are no longer here. They are read POSITIONALLY, so leaving them in place
+        # labelled these ones with somebody else's modes: after solve_eigenproblem(3, azimuthal_m=5),
+        # a plain solve_eigenproblem(3) reported its base-state eigenvalues as m=5 and
+        # _critical_normal_mode() answered ("m", 5) for them; with a matching length (a scan of 2
+        # modes, then a plain solve of twice the count) the bifurcation GUI showed half of a
+        # base-state spectrum under m=5. The mode-scan branch below fills them in again for its own
+        # spectrum, and solve()/arclength_continuation() already clear them for the same reason.
+        self._last_eigenvalues_m=None
+        self._last_eigenvalues_k=None
+
         #self._last_eigenvectors=numpy.transpose(self._last_eigenvectors)
         if (not self.is_quiet()) and (not quiet) :
             if report_accuracy:
@@ -5468,8 +6383,16 @@ class Problem(_pyoomph.Problem):
                 startvector=self._adapted_eigeninfo[0].copy()
             else:
                 startvector=None
-            if self.get_eigen_solver().supports_target():                
-                self.solve_eigenproblem(resolve_neigen,v0=startvector,target=self._adapted_eigeninfo[1],shift=self._adapted_eigeninfo[1],azimuthal_m=self._adapted_eigeninfo[2],normal_mode_k=self._adapted_eigeninfo[3])
+            # A COMPLEX eigenvalue (a Hopf pair) needs supports_complex_target(): a real PETSc/SLEPc
+            # build answers supports_target() and then quietly keeps only Re(lambda), so the re-solve
+            # after adaptation would come back with a different mode than the one being followed. An
+            # untargeted re-solve is the honest fallback there.
+            _adapted_target=self._adapted_eigeninfo[1]
+            _can_target=(self.get_eigen_solver().supports_complex_target()
+                         if numpy.abs(numpy.imag(_adapted_target))>1e-8
+                         else self.get_eigen_solver().supports_target())
+            if _can_target:
+                self.solve_eigenproblem(resolve_neigen,v0=startvector,target=_adapted_target,shift=_adapted_target,azimuthal_m=self._adapted_eigeninfo[2],normal_mode_k=self._adapted_eigeninfo[3])
             else:
                 self.solve_eigenproblem(resolve_neigen,v0=startvector,azimuthal_m=self._adapted_eigeninfo[2],normal_mode_k=self._adapted_eigeninfo[3])
         self._adapted_eigeninfo=None
@@ -5494,7 +6417,7 @@ class Problem(_pyoomph.Problem):
             self._set_globally_convergent_newton_method(globally_convergent_newton)
         return old
     
-    def is_global_parameter_used(self,param:str | _pyoomph.GiNaC_GlobalParam)->bool:
+    def _is_global_parameter_used(self,param:str | _pyoomph.GiNaC_GlobalParam)->bool:
         if isinstance(param,str):
             if param not in self.get_global_parameter_names():
                 return False
@@ -5577,13 +6500,30 @@ class Problem(_pyoomph.Problem):
         if kind is not None:
             self.set_arc_length_parameter(scale_arc_length=False)
 
-    def _arclength_weighted_square_norm(self,v:"NPFloatArray")->float:
-        """``||v||_W^2`` for the configured inner product, or NaN if it cannot be formed."""
+    def _arclength_weighted_square_norm(self,v:"NPFloatArray")->"tuple[float,int]":
+        """``||v||_W^2`` for the configured inner product, and how many leading entries it covered.
+
+        Returns ``(w, m)``; ``w`` is NaN if the norm cannot be formed. ``m`` is ``len(v)`` except while
+        a bifurcation tracker is installed. There the dof vector is the AUGMENTED one -
+        ``[du/ds, dY/ds, dparameter/ds]`` for a fold - while the mass matrix is assembled on the BASE
+        rows alone, which is precisely what makes an eigenproblem solvable during tracking at all
+        (Problem::BaseDofDistributionScope). Multiplying the two used to raise "dimension mismatch"
+        from scipy: a 1x1 M against a length-3 tangent on the ODE fold of test_bifurcation_gui.
+
+        The metric is therefore taken over the base block, which is also the only part that HAS a mass
+        matrix - the eigenvector rows carry no integration weights and no continuum meaning - and the
+        caller divides by the matching block of v, so theta^2 comes out as the ratio it is defined to
+        be and equals what the same base tangent would give with no tracker installed.
+
+        The existing _get_n_unaugmented_dofs() guard in the caller does not cover this: that sentinel
+        is only non-zero for a CUSTOM augmented system (add_augmented_dofs / CustomBifurcationTracker),
+        and stays 0 under the built-in fold/pitchfork/Hopf handlers.
+        """
         kind=self._arclength_inner_product
         if callable(kind):
-            return float(kind(v))
+            return float(kind(v)),len(v)
         if kind=="ndof":
-            return float(numpy.dot(v,v))/len(v)
+            return float(numpy.dot(v,v))/len(v),len(v)
         # "l2"/"mass": the mass matrix carries the integration weights, so v^T M v is the integral of
         # the squared field. Dividing by the volume (1^T M 1, which telescopes to the domain measure for
         # a partition-of-unity basis) turns it into a mean square, i.e. a number of the size of the
@@ -5592,11 +6532,38 @@ class Problem(_pyoomph.Problem):
         n, _M_nzz, _M_nr, M_val, M_ci, M_rs, *_rest = self.assemble_eigenproblem_matrices(0.0) #type:ignore
         M=csr_matrix((M_val,M_ci,M_rs),shape=(n,n))
         if M.nnz==0:
-            return float("nan")   # no time derivatives anywhere: there is no mass matrix to weight with
+            return float("nan"),len(v)   # no time derivatives anywhere: there is no mass matrix to weight with
         volume=float(M.sum())
         if not (volume>0):
-            return float("nan")
-        return float(v.dot(M.dot(v)))/volume
+            return float("nan"),len(v)
+        handler=self.assembly_handler_pt()
+        if isinstance(handler,_pyoomph.PeriodicOrbitHandler):
+            # A periodic orbit's unknown is a whole cycle: nT copies of the base dofs, then the period.
+            # Its natural norm is the base one AVERAGED OVER THE CYCLE - which is what makes ds on an
+            # orbit branch buy the same physical step as ds on the stationary branch it came off.
+            # Taking the augmented vector as one long dof list instead (which is what leaving theta^2
+            # at 1 does) charges the sum over all nT blocks, so dparam/ds falls off as 1/sqrt(nT*Ndof):
+            # measured on the Hopf normal form, 0.164 at nT=12, 0.107 at nT=30, 0.0766 at nT=60, i.e.
+            # exactly the ratio of the square roots. Doubling the time resolution then halved the
+            # parameter movement per step for the same ds and the same orbit.
+            #
+            # ONE assembly of M for every block. On a nonlinear mass matrix that is the base state's,
+            # not each phase's; a metric is a weighting rather than a measurement, and paying nT
+            # assemblies per step to refine it would cost more than the whole step.
+            #
+            # The blocks are the leading nT*n entries, in that order: PeriodicOrbitHandler numbers
+            # time-major and get_naive_equation_order() is a permutation only when DISTRIBUTED, which
+            # the caller refuses outright.
+            nT=int(handler.get_num_time_steps())
+            m=nT*n
+            if nT<1 or len(v)!=m+1:
+                return float("nan"),len(v)
+            blocks=numpy.asarray(v[:m],dtype=float).reshape(nT,n).T   # (n, nT), one column per time
+            return float(numpy.einsum("ij,ij->",blocks,M.dot(blocks)))/(nT*volume),m
+        if len(v)<n:
+            return float("nan"),len(v)   # fewer dofs than mass-matrix rows: nothing sensible to form
+        vb=v[:n] if len(v)>n else v
+        return float(vb.dot(M.dot(vb)))/volume,n
 
     def _retune_arclength_theta(self)->float:
         """Re-derive theta^2 from the configured inner product. Returns the factor to rescale ds by.
@@ -5614,6 +6581,20 @@ class Problem(_pyoomph.Problem):
             return 1.0
         if self._get_n_unaugmented_dofs()!=0:
             return 1.0   # bifurcation tracking: the dof vector is the augmented one, M would not match
+        # A periodic orbit is augmented too, but does not say so through the count above:
+        # start_orbit_tracking() only swaps the assembly handler and never runs the augmentation
+        # bookkeeping, so n_unaugmented_dofs stays 0. It used to be refused here, on the grounds that
+        # the mass matrix would be assembled on the nT*Ndof+1 orbit distribution - which is not what
+        # happens: assemble_eigenproblem_matrices restricts to the BASE rows under the orbit handler
+        # exactly as it does under a bifurcation tracker (measured: n = 2 on a two-dof ODE with nT = 31
+        # installed). What the refusal cost was theta^2 = 1 on every orbit, i.e. oomph's raw dof sum
+        # over the whole cycle - see the orbit branch of _arclength_weighted_square_norm.
+        #
+        # A CALLABLE weighting is still refused: it was written against the base dof vector and handing
+        # it an augmented one would quietly weight something else.
+        if (isinstance(self.assembly_handler_pt(),_pyoomph.PeriodicOrbitHandler)
+                and callable(self._arclength_inner_product)):
+            return 1.0
         v=self.get_arclength_dof_derivative_vector()
         current=self.get_arclength_dof_current_vector()
         # oomph keeps Dof_derivative and Dof_current as two independent vectors and does NOT always
@@ -5641,10 +6622,15 @@ class Problem(_pyoomph.Problem):
             # No tangent yet (the first step), or sitting at a fold where dp/ds vanishes and z cannot be
             # formed. Either way there is nothing to renormalise; leave the metric as it is.
             return 1.0
-        w=self._arclength_weighted_square_norm(v)
+        w,m=self._arclength_weighted_square_norm(v)
         if not numpy.isfinite(w) or w<=0.0:
             return 1.0
-        theta_new=w/vv
+        # Divided by the SAME block the norm covered: under a bifurcation tracker that is the base one,
+        # and using the full augmented vv there would dilute theta^2 by the eigenvector rows.
+        vv_metric=vv if m==len(v) else float(numpy.dot(v[:m],v[:m]))
+        if vv_metric<=0.0 or not numpy.isfinite(vv_metric):
+            return 1.0
+        theta_new=w/vv_metric
         theta_old=self.get_arc_length_theta_sqr()
         if not numpy.isfinite(theta_new) or theta_new<=0.0 or theta_new==theta_old:
             return 1.0
@@ -5683,12 +6669,6 @@ class Problem(_pyoomph.Problem):
         """
         if spatial_adapt>0 and self.get_bifurcation_tracking_mode()!="":
             raise RuntimeError("Cannot perform spatial adaptation during arclength continuation when bifurcation tracking is active. You can do the arclength step with spatial_adapt=0 followed by a solve(spatial_adapt="+str(spatial_adapt)+") to achieve a similar effect.")
-        if self.is_distributed() and self.get_bifurcation_tracking_mode()!="":
-            # Arclength continuation needs the dofs at history time levels (Problem::get_dofs(t,...)),
-            # which are still refused when distributed -- otherwise this dies several frames deep in
-            # C++ with a message about history dofs rather than about the thing being attempted.
-            # Locating a bifurcation with solve() does work distributed; continuing it does not yet.
-            raise RuntimeError("Arclength continuation while bifurcation tracking is active is not supported on a distributed (--distribute) problem yet (it needs history dofs, which are not distributed). A plain solve() to locate the bifurcation does work distributed.")
         self._activate_solver_callback()        
         self.invalidate_cached_mesh_data()
         if not self.is_initialised():
@@ -5713,7 +6693,7 @@ class Problem(_pyoomph.Problem):
         if parameter not in self.get_global_parameter_names():
             raise RuntimeError("Cannot perform arclength continuation in parameter '" + parameter + "' since it is not part of the problem")
         
-        if self.warn_about_unused_global_parameters and not self.is_global_parameter_used(parameter):
+        if self.warn_about_unused_global_parameters and not self._is_global_parameter_used(parameter):
             if self.warn_about_unused_global_parameters=="error":
                 raise RuntimeError("Arclength continuation in the global parameter '" + parameter + "', which is used in the problem. This may lead to unexpected behaviour. Have you defined it with define_global_parameter? Or have you overridden it by e.g. '" + parameter + "=<value>' instead of '" + parameter + ".value=<value>'? Have you defined it via define_global_parameter? Or have you overridden it by e.g. '" + parameter + "=<value>' instead of '" + parameter + ".value=<value>'?  Set <Problem>.warn_about_unused_global_parameters to False to suppress this error.")
             else:
@@ -6197,8 +7177,72 @@ class Problem(_pyoomph.Problem):
             raise RuntimeError("Cannot find out whether a solution is stable when bifurcation tracking is active")
         return numpy.real(self._last_eigenvalues[0])<=0 #type:ignore
 
+    def _critical_normal_mode(self,eigenindex:int=0)->"tuple[str,float] | None":
+        """``("m", value)`` or ``("k", value)`` when the eigenpair at ``eigenindex`` belongs to a
+        NON-trivial normal mode, and ``None`` when it is a base-mode (m = 0 / k = 0) one.
+
+        The tracked mode is asked first: while an azimuthal or Cartesian normal-mode tracker is
+        installed, the mode is whatever its own global parameter holds, and the per-eigenvalue arrays
+        describe whatever eigensolve happened to run last, which need not be the tracker's.
+
+        Those arrays are read positionally, so they are trusted only when they are as long as
+        :py:meth:`get_last_eigenvalues` - an array left over from an earlier mode scan describes
+        eigenvalues that are no longer there.
+        """
+        mode=self.get_bifurcation_tracking_mode()
+        if mode=="azimuthal" and self._azimuthal_mode_param_m is not None:
+            m=float(self._azimuthal_mode_param_m.value)
+            return ("m",m) if m!=0 else None
+        if mode=="cartesian_normal_mode" and self._normal_mode_param_k is not None:
+            k=float(self._normal_mode_param_k.value)
+            return ("k",k) if abs(k)>1e-7 else None
+        n=len(self._last_eigenvalues) if self._last_eigenvalues is not None else 0
+        ms=self._last_eigenvalues_m
+        if ms is not None and len(ms)==n and 0<=eigenindex<n and float(ms[eigenindex])!=0:
+            return ("m",float(ms[eigenindex]))
+        ks=self._last_eigenvalues_k
+        if ks is not None and len(ks)==n and 0<=eigenindex<n and abs(float(ks[eigenindex]))>1e-7:
+            return ("k",float(ks[eigenindex]))
+        return None
+
+    def _refuse_at_normal_mode_bifurcation(self,what:str,eigenindex:int=0,
+                                          mode:"tuple[str,float] | None"=None):
+        """Refuse ``what`` when the critical eigenpair is a normal mode rather than a base-mode one.
+
+        Everything built on a normal form - the classification, the branch switch, the orbit a Hopf
+        sheds - assumes the bifurcating branch is a direction in THIS dof vector. At an azimuthal
+        m != 0 or a Cartesian k != 0 bifurcation it is not: the eigenfunction varies as exp(i*m*phi)
+        (or exp(i*k*x)) and the solution it gives birth to breaks the very symmetry these degrees of
+        freedom impose, so it is not representable here at any amplitude. Nothing about that shows up
+        as a failure - the eigenvector has the base-mode length and every matrix contraction goes
+        through - so without this the normal form comes out as a plausible fold/pitchfork built from
+        the BASE-mode Hessian contracted with a mode-m eigenvector, which is the coefficient of
+        nothing, and the "switch" that follows converges back onto the branch it started from.
+        """
+        # ``mode`` lets a caller that knows the answer say so: the bifurcation GUI reaches this from
+        # a point loaded off a diagram, where the tracker is long gone and the last eigensolve was a
+        # base-mode one, so nothing on the problem remembers which mode the bifurcation belonged to.
+        found=mode if mode is not None else self._critical_normal_mode(eigenindex)
+        if found is None:
+            return
+        kind,value=found
+        if kind=="m":
+            name="azimuthal mode m = {:g}".format(value)
+            phase,direction="exp(i*m*phi)","azimuthal"
+        else:
+            name="Cartesian normal mode k = {:g}".format(value)
+            phase,direction="exp(i*k*x)","extra Cartesian"
+        raise RuntimeError(
+            what+" is not possible at a bifurcation of a normal mode (here the "+name+"). Its "
+            "eigenfunction varies as "+phase+", so the branch it sheds breaks the symmetry this dof "
+            "vector is built on and is not representable in it at all - and a normal form computed "
+            "here would contract the base-mode Hessian with a mode-"+kind+" eigenvector, which is "
+            "the coefficient of nothing. Follow that branch in a problem that resolves the "+
+            direction+" direction explicitly. Continuing the bifurcation itself does work: keep the "
+            "tracker on and use arclength_continuation in a second parameter.")
+
     def classify_bifurcation(self,parameter:"str | _pyoomph.GiNaC_GlobalParam | None"=None,eigenindex:int=0,
-                             assume:str | None=None)->dict[str,Any]:
+                             assume:str | None=None,fd_eps:float | None=None)->dict[str,Any]:
         """Normal form of the bifurcation the problem is currently sitting at.
 
         The returned dict names the bifurcation in ``["type"]`` - ``"fold"``, ``"transcritical"``,
@@ -6213,13 +7257,24 @@ class Problem(_pyoomph.Problem):
         Needs an analytic Hessian, so the problem must have been set up with
         ``setup_for_stability_analysis(analytic_hessian=True)``.
 
+        Refused at a bifurcation of an azimuthal ``m != 0`` or Cartesian ``k != 0`` normal mode: the
+        normal form would be the base-mode Hessian contracted with a mode-``m`` eigenvector, and the
+        branch it describes cannot be represented in these degrees of freedom.
+
         Args:
             parameter: The parameter the bifurcation is in. Defaults to the one being tracked.
             eigenindex: Which computed eigenpair is the critical one. Defaults to the first.
             assume: ``"fold"`` or ``"branch_point"`` to decide that question rather than have it read
                 off the normal form. Worth passing whenever the branch itself already answers it - a
                 continuation that walked THROUGH the point without the parameter turning around did
-                not pass a fold.
+                not pass a fold. ``"pitchfork"`` or ``"transcritical"`` likewise force the second
+                decision, which the problem's symmetry usually answers better than the numbers do -
+                note that an imperfect pitchfork, one whose symmetry is broken by an inexact boundary
+                condition or a non-symmetric mesh, genuinely IS a transcritical and is now reported
+                as one.
+            fd_eps: Relative step of the finite difference that supplies the third derivative (there
+                is none in the code generator, so ``b3`` has to come from a difference of the
+                analytic Hessian). Defaults to ``1e-5``, near the ``eps_mach**(1/3)`` optimum.
 
         Returns:
             The normal-form dictionary.
@@ -6227,6 +7282,7 @@ class Problem(_pyoomph.Problem):
         from .bifurcation_tools import NormalFormCalculator
         if isinstance(parameter,_pyoomph.GiNaC_GlobalParam):
             parameter=parameter.get_name()
+        self._refuse_at_normal_mode_bifurcation("Computing a normal form",eigenindex)
         if self.get_bifurcation_tracking_mode()=="":
             # get_normal_form reads the critical eigenpair from the last eigensolve. While tracking is
             # active that already IS the critical one and solve_eigenproblem would refuse to run.
@@ -6241,7 +7297,7 @@ class Problem(_pyoomph.Problem):
                 print("Warning: classifying a bifurcation where the critical eigenvalue has real part "+
                       "{:.3g}, which is not zero. This does not look like a bifurcation, and the normal ".format(critical)+
                       "form of a regular point is meaningless.")
-        return NormalFormCalculator(self).get_normal_form(parameter,eigenindex=eigenindex,assume=assume)
+        return NormalFormCalculator(self,fd_eps=fd_eps).get_normal_form(parameter,eigenindex=eigenindex,assume=assume)
 
     def switch_branch(self,parameter:"str | _pyoomph.GiNaC_GlobalParam",normal_form:dict[str,Any] | None=None,
                       offset:float | None=None,direction:int=1,relative_offset:float=0.02,
@@ -6278,7 +7334,8 @@ class Problem(_pyoomph.Problem):
             direction: ``+1`` or ``-1`` to pick which of the two branches through the bifurcation is
                 predicted first; both are tried either way. For a pitchfork this is the only thing that
                 tells its two arms apart - they sit on the same side of the parameter and differ in the
-                sign of the amplitude.
+                sign of the amplitude - and the landing is accepted only if it moved along the
+                requested direction, so which arm is reached is a guarantee and not a hope.
             relative_offset: Used when ``offset`` is not given.
             max_newton_iterations: For the solve onto the new branch.
             quiet: Suppress the progress messages.
@@ -6297,12 +7354,20 @@ class Problem(_pyoomph.Problem):
 
         Raises:
             RuntimeError: If the bifurcation is a fold (one branch, which turns around - there is
-                nothing to switch to), or if its normal form carries no branch predictor.
+                nothing to switch to), if it is a Hopf (which sheds a periodic orbit rather than a
+                second steady branch - see :py:meth:`switch_to_hopf_orbit`), if it belongs to an
+                azimuthal ``m != 0`` or Cartesian ``k != 0`` normal mode (the branch it sheds breaks
+                the symmetry this dof vector is built on and cannot be represented in it), or if its
+                normal form carries no branch predictor.
         """
         if isinstance(parameter,str):
             param=self.get_global_parameter(parameter)
         else:
             param=parameter
+        # Before anything else, and not left to classify_bifurcation: the caller may hand a normal
+        # form in, which is what the bifurcation GUI does, and that path would otherwise never see
+        # the guard.
+        self._refuse_at_normal_mode_bifurcation("Branch switching")
         if normal_form is None:
             normal_form=self.classify_bifurcation(param)
         kind=normal_form.get("type")
@@ -6310,6 +7375,16 @@ class Problem(_pyoomph.Problem):
             raise RuntimeError("A fold has only one branch through it, which turns around - there is "
                                "nothing to switch to. Arclength continuation passes around a fold by "
                                "itself.")
+        if kind=="hopf":
+            # Not merely unsupported: a Hopf's normal form DOES carry both predictor keys, so the
+            # guard below cannot catch it, and its perturbation_predictor takes (dp, omega*t) and
+            # returns an absolute state - calling it with one argument gave a bare TypeError from
+            # inside a lambda. The bifurcation GUI routes a Hopf to switch_to_orbit() before it ever
+            # gets here, so this is the plain-script path only.
+            raise RuntimeError("A Hopf sheds a periodic ORBIT, not a second steady branch, so there "
+                               "is no steady branch to switch to. Use Problem.switch_to_hopf_orbit() "
+                               "instead: it computes the first Lyapunov coefficient and builds the "
+                               "orbit guess from it.")
         param_predictor=normal_form.get("param_predictor")
         perturbation_predictor=normal_form.get("perturbation_predictor")
         if param_predictor is None or perturbation_predictor is None:
@@ -6358,13 +7433,28 @@ class Problem(_pyoomph.Problem):
                                        "freedom".format(du.size,base.size))
                 param.value=p0+dp
                 self.set_current_dofs(base+du)
+                failed=False
                 try:
                     self.solve(max_newton_iterations=max_newton_iterations)
                 except Exception:
+                    failed=True
+                # OUTSIDE the try, and collective, so that every rank reaches it whether or not it
+                # was the one that failed. Insurance rather than a known bug: oomph's own convergence
+                # and max-residual tests already allreduce (DoubleVector::max, and
+                # consume_newton_abort_request), so the ranks normally agree. What is not covered is
+                # a rank-dependent linear-solver failure or a Python exception out of an actions_*
+                # hook - and a rank that took `continue` while the others carried on deadlocks at the
+                # next collective instead of failing, which is how B6 of
+                # dev_docs/mpi_augmented_systems.md cost a 600 s hang. Every other break and continue
+                # in this ladder is driven by rank-identical data: param.value is Python-side, the
+                # dof accessors gather and scatter by global equation number, and the dot product
+                # below runs on vectors that are identical on every rank.
+                from .mpi import get_mpi_nproc,get_mpi_any
+                if get_mpi_nproc()>1:
+                    failed=get_mpi_any(failed)
+                if failed:
                     continue
                 moved=numpy.array(self.get_current_dofs()[0])-base
-                if numpy.linalg.norm(moved)<=1e-9:
-                    continue          # did not leave the bifurcation at all
                 # What separates the two branches is the AMPLITUDE IN THE CRITICAL MODE: du points
                 # along it, the branch we came from has none of it (the normal form's own splitting
                 # puts that branch's tangent in the complement of the kernel). So project what Newton
@@ -6378,8 +7468,15 @@ class Problem(_pyoomph.Problem):
                 # get_arclength_dof_derivative_vector() is EMPTY unless an arclength continuation ran
                 # in this session - after go_to_param, or on a diagram loaded from disk, every
                 # candidate was rejected out of hand and the switch always reported failure.
+                #
+                # SIGNED, not abs(): a pitchfork's two arms differ only in the sign of the amplitude,
+                # so abs() accepted a landing on the arm opposite the one `direction` asked for and
+                # then reported it as that direction's result. Nothing becomes unreachable - `sides`
+                # tries both signs either way - the landings are just attributed correctly now. The
+                # test also subsumes the absolute |moved| <= 1e-9 check that used to sit above it,
+                # which was meaningless on a dof vector of arbitrary scale.
                 du_norm=float(numpy.linalg.norm(du))
-                if abs(float(numpy.dot(moved,du)))<0.1*du_norm*du_norm:
+                if float(numpy.dot(moved,du))<0.1*du_norm*du_norm:
                     continue
                 landed=dp
                 used_pside=pside
@@ -6500,7 +7597,10 @@ class Problem(_pyoomph.Problem):
         Args:
             parameter: The parameter to change in order to find the bifurcation. If None, we track the current eigenbranch, i.e. Re(lambda) will be found and is not necessarily 0.
             bifurcation_type (Optional[Literal["hopf", "fold", "pitchfork", "azimuthal"]]): The type of bifurcation to track. Defaults to None, i.e. auto-detect.
-            blocksolve (bool): Flag indicating whether to use block solve. Defaults to False. Should be kept False.
+            blocksolve (bool): **Refused.** Passing True raises: upstream's block linear solvers cast the
+                installed handler to oomph-lib's own FoldHandler/HopfHandler with a static_cast, which
+                pyoomph's handlers are not, so the fold and Hopf paths segfault and every other type
+                ignores the flag. See the error message and dev_docs/mpi_augmented_systems.md section 4.
             eigenvector (Optional[Union[NPFloatArray, NPComplexArray, int]]): The eigenvector to use for tracking. Defaults to None, which means the eigenvector corresponding to the eigenvalue with largest real part. Can be either an index or a custom vector.
             omega (Optional[float]): The omega value for Hopf bifurcation tracking. Defaults to None, then it will be Im(lambda).
             azimuthal_mode (Optional[int]): The azimuthal mode for azimuthal bifurcation tracking. Defaults to None.
@@ -6512,6 +7612,35 @@ class Problem(_pyoomph.Problem):
                 problem is. This is recommended for very large systems. It does not move the bifurcation itself,
                 only the (always arbitrary) amplitude of the reported eigenfunction.
         """
+
+        if blocksolve:
+            # Refused OUTRIGHT, and not only under MPI, because it does not work anywhere.
+            #
+            # blocksolve installs one of oomph-lib's own block linear solvers,
+            # AugmentedBlockFoldLinearSolver or BlockHopfLinearSolver. Both begin with
+            #
+            #     FoldHandler* handler_pt = static_cast<FoldHandler*>(problem_pt->assembly_handler_pt());
+            #
+            # (assembly_handler.cc) and then call a FoldHandler method on the result. pyoomph installs
+            # MyFoldHandler/MyHopfHandler, which derive from oomph::AssemblyHandler and NOT from those
+            # classes, so the static_cast reinterprets an unrelated object and the first member access
+            # is undefined behaviour. Measured: a plain serial Bratu fold track dies with
+            # "Caught signal number 11 SEGV" from inside PETSc's error handler, with the default linear
+            # solver and with petsc_mumps alike. It is not an MPI problem and never was - the guard
+            # that used to sit here only covered --distribute, so the serial and replicated crashes
+            # went straight through it.
+            #
+            # For every OTHER bifurcation type the flag was silently ignored (only fold and Hopf ever
+            # installed a block solver; the pitchfork one is commented out in problem.cpp), which is
+            # its own small lie and is why this refuses rather than warns.
+            raise RuntimeError(
+                "blocksolve=True is not supported and cannot be: oomph-lib's block linear solvers "
+                "static_cast the assembly handler to their own FoldHandler/HopfHandler, and pyoomph's "
+                "handlers do not derive from those, so fold and Hopf tracking segfault while every "
+                "other bifurcation type ignores the flag entirely. This is true serially as well as "
+                "under mpirun and --distribute. Drop the argument (the default, blocksolve=False, is "
+                "the full augmented solve and is what every tested path uses). "
+                "See dev_docs/mpi_augmented_systems.md section 4.")
 
         # Distributed (--distribute) support is decided per bifurcation type AFTER the type has been
         # resolved (see the check further down); no blanket refusal here anymore.
@@ -6625,7 +7754,7 @@ class Problem(_pyoomph.Problem):
             if not parameter in self.get_global_parameter_names():
                 raise RuntimeError("Cannot perform bifurcation tracking in parameter '"+parameter+"' since it is not part of the problem")
             
-            if self.warn_about_unused_global_parameters and not self.is_global_parameter_used(parameter):
+            if self.warn_about_unused_global_parameters and not self._is_global_parameter_used(parameter):
                 if self.warn_about_unused_global_parameters=="error":
                     raise RuntimeError("Bifurcation tracking in the global parameter '" + parameter + "', which is used in the problem. This may lead to unexpected behaviour. Set <Problem>.warn_about_unused_global_parameters to False to suppress this error.")
                 else:
@@ -6639,8 +7768,8 @@ class Problem(_pyoomph.Problem):
             _distributed_supported={"fold","hopf","pitchfork","azimuthal","cartesian_normal_mode"}
             if bifurcation_type not in _distributed_supported:
                 raise RuntimeError("Bifurcation tracking of type '"+str(bifurcation_type)+"' is not supported on a distributed (--distribute) problem yet. Run it without --distribute.")
-            if blocksolve:
-                raise RuntimeError("blocksolve=True is not supported for bifurcation tracking on a distributed (--distribute) problem")
+            # blocksolve used to be refused here, as though it were a distributed-only restriction. It
+            # is refused unconditionally at the top of this method now: it segfaults serially too.
         self._bifurcation_tracking_parameter_name=parameter
         if bifurcation_type=="fold":
 #            must_reapply_bcs=self._equation_system._before_eigen_solve(self.get_eigen_solver(), 0)
@@ -6832,7 +7961,6 @@ class Problem(_pyoomph.Problem):
         Returns:
             PeriodicOrbit: The resulting periodic orbit. Note that it still must be solved, i.e. it is only the provided guess at this stage.
         """
-        self._require_non_distributed("Periodic orbit tracking")
         self.deactivate_bifurcation_tracking()
         self.time_stepper_pt().make_steady()
         if len(history_dofs)==0:
@@ -6855,6 +7983,14 @@ class Problem(_pyoomph.Problem):
         elif mode=="bspline":
             if order<1:
                 raise ValueError("Invalid bspline order: "+str(order))
+            # Mirror PeriodicBSplineBasis's own requirements here, so that a too-coarse orbit is a
+            # ValueError mentioning the number of time steps rather than a C++ throw about knots.
+            if order>7:
+                raise ValueError("Invalid bspline order: "+str(order)+". At most 7 is supported, since the periodic wrap of the B-spline recursion overruns the augmented knot vector beyond that")
+            nknots=len(history_dofs)+2 # what the handler builds for a non-floquet mode
+            min_knots=max(4,2*order,order+4) # >=order+4 because the periodic augmentation reads order+3 knots from each end
+            if nknots<min_knots:
+                raise ValueError("Too few time steps for a bspline orbit of order "+str(order)+": "+str(len(history_dofs)+1)+" time steps give "+str(nknots)+" knots, but at least "+str(min_knots)+" are needed (i.e. at least "+str(min_knots-1)+" time steps)")
             self._start_orbit_tracking(history_dofs,T_nd,order,GL_order,knots,T_constraint_mode)
         elif mode=="central":
             self._start_orbit_tracking(history_dofs,T_nd,-1,-1,knots,T_constraint_mode)
@@ -6904,6 +8040,11 @@ class Problem(_pyoomph.Problem):
         
         from .bifurcation_tools import get_hopf_lyapunov_coefficient    
         
+        # First, so that an azimuthal or Cartesian normal-mode Hopf says what is actually wrong: the
+        # check below would refuse it too, but as "Hopf tracking not activated", which is not the
+        # problem - the tracker IS a Hopf tracker, its mode is just not one this dof vector can hold
+        # the resulting orbit in (a rotating or travelling wave, not a standing oscillation).
+        self._refuse_at_normal_mode_bifurcation("Switching onto the periodic orbit a Hopf sheds")
         if self._bifurcation_tracking_parameter_name is None or self.get_bifurcation_tracking_mode()!="hopf" or len(self.get_last_eigenvalues())!=1:
             raise ValueError("Hopf bifurcation tracking not activated or solved. Please call activate_bifurcation_tracking first, then solve. Then call this routine.")        
         # Store the information from the Hopf tracker
@@ -6926,16 +8067,32 @@ class Problem(_pyoomph.Problem):
         # Get the Lyapunov coefficient
         if dparam is not None and orbit_amplitude is not None:
             parameter.value+=dparam
-            sign=1 if dparam>0 else 0
+            # +-1, like the dlam the Lyapunov coefficient returns in the other branch. It is only
+            # consumed by the parameter step below, which this branch has already taken, but a 0 here
+            # meant the two branches disagreed about what `sign` is.
+            sign=1 if dparam>0 else -1
             al=orbit_amplitude
             qR,qI=numpy.real(q),numpy.imag(q)
+            # Normalized to unit length, exactly as get_hopf_lyapunov_coefficient() does in the other
+            # branch; otherwise "orbit_amplitude" is measured in whatever norm the Hopf tracker's
+            # eigenfunction happened to come out with, and means something different in each branch.
+            qnorm=numpy.sqrt(numpy.dot(qR,qR)+numpy.dot(qI,qI))
+            if qnorm<=0:
+                raise ValueError("The Hopf eigenfunction is zero; cannot build an orbit guess from it")
+            qR,qI=qR/qnorm,qI/qnorm
             lyap_coeff=0
+            # eps is documented as ignored here (the docstring says so twice), but it still scaled
+            # the guess: with its default 0.01 a requested orbit_amplitude came out at 2% of itself.
+            amplitude=2*orbit_amplitude*amplitude_factor
+            param_step=dparam
         else:
             lyap_coeff,sign,al,qR,qI=get_hopf_lyapunov_coefficient(self,param,omega=omega,q=q,FD_delta=FD_delta,FD_param_delta=FD_param_delta)
             print("AL",al,"QR MAGNITUDE",numpy.linalg.norm(qR+1j*qI))
             if dparam:
-                eps=numpy.sqrt(abs(dparam))        
+                eps=numpy.sqrt(abs(dparam))
             parameter.value+=-eps**2*sign
+            amplitude=2*eps*al*amplitude_factor
+            param_step=-eps**2*sign
         u0=self.get_current_dofs()[0]
         
         if patch_number_of_nodes and mode=="collocation":            
@@ -6947,9 +8104,9 @@ class Problem(_pyoomph.Problem):
             
         
         T=2*numpy.pi/omega*self.get_scaling("temporal")
-        upert=lambda t: u0+2*eps*al*amplitude_factor*numpy.real(numpy.exp(1j*omega*t)*(qR+1j*qI))
-        print("Amplitude perturbation factor:",2*eps*al*amplitude_factor)
-        print("Parameter step",-eps**2*sign)
+        upert=lambda t: u0+amplitude*numpy.real(numpy.exp(1j*omega*t)*(qR+1j*qI))
+        print("Amplitude perturbation factor:",amplitude)
+        print("Parameter step",param_step)
         history_dofs=[]
         for t in numpy.linspace(0,2*numpy.pi/omega,NT,endpoint=False):
             history_dofs.append(upert(t))        
@@ -6957,14 +8114,15 @@ class Problem(_pyoomph.Problem):
         self.activate_periodic_orbit_handler(T,history_dofs[1:],mode,order=order,GL_order=GL_order,T_constraint=T_constraint)
         history_dofs.append(history_dofs[0])
         res=PeriodicOrbit(self,mode,lyap_coeff,param,omega,pvalue,parameter.value,al,order,GL_order,T_constraint)
-        orbit_base_ndof=cast(_pyoomph.PeriodicOrbitHandler,self.assembly_handler_pt()).get_base_ndof()
         ncnt:int | None=None
         avg_dists0:float | None=None
         if check_collapse_to_stationary:
             avg_dists0=0
             ncnt=0
             for T in res.iterate_over_samples():
-                dofs=self.get_current_dofs()[0][:orbit_base_ndof]
+                # Not get_current_dofs()[0][:nbase]: under --distribute the augmented rows are
+                # interleaved per rank, which is what _current_base_dofs() exists for.
+                dofs=res._current_base_dofs()
                 avg_dists0+=(numpy.dot(numpy.array(history_dofs[ncnt])-numpy.array(u0),numpy.array(dofs)-numpy.array(u0)))
                 ncnt+=1
             assert avg_dists0 is not None and ncnt is not None
@@ -6978,7 +8136,7 @@ class Problem(_pyoomph.Problem):
                 avg_dists=0.0
                 i=0
                 for T in res.iterate_over_samples():
-                    dofs=self.get_current_dofs()[0][:orbit_base_ndof]
+                    dofs=res._current_base_dofs()
                     add=numpy.dot(numpy.array(history_dofs[i])-numpy.array(u0),numpy.array(dofs)-numpy.array(u0))
                     #print("adding",add,numpy.amax(numpy.absolute(numpy.array(history_dofs[i])-numpy.array(u0))))
                     avg_dists+=add
@@ -6997,10 +8155,12 @@ class Problem(_pyoomph.Problem):
                     if skip:
                         continue
                     if i==0:
-                        start=self.get_current_dofs()[0][:orbit_base_ndof]
+                        start=res._current_base_dofs()
                     else:
-                        dist=numpy.linalg.norm(numpy.array(start)-numpy.array(self.get_current_dofs()[0][:orbit_base_ndof]))
-                        if dist>1e-5*avg_dists0:
+                        dist=numpy.linalg.norm(numpy.array(start)-numpy.array(res._current_base_dofs()))
+                        # avg_dists0 is a squared radius, so the threshold is taken against its root
+                        # to compare a length with a length.
+                        if dist>1e-5*numpy.sqrt(abs(avg_dists0)):
                             nontrivial=True
                             skip=True
                     i+=1
@@ -7009,9 +8169,26 @@ class Problem(_pyoomph.Problem):
                     #print("DOT",numpy.sqrt(numpy.dot(numpy.array(history_dofs[i])-numpy.array(u0),numpy.array(dofs)-numpy.array(u0))))
         return res
         
-    def get_floquet_multipliers(self,n:int | None=None,valid_threshold:float | None=10000,shift:float | None=None,ignore_periodic_unity:bool | float=False,quiet:bool=True)->NPComplexArray:
-        """
-        TODO; Add documentation
+    def get_floquet_multipliers(self,n:int | None=None,valid_threshold:float | None=10000,shift:float | None=None,ignore_periodic_unity:bool | float=False,quiet:bool=True,method:Literal["condensed","periodic_schur","eigenproblem"]="condensed",dense_threshold:int=2000,shift_invert:bool=True,sigma:complex | None=None)->NPComplexArray:
+        """Calculates the Floquet multipliers of the currently tracked periodic orbit.
+
+        The orbit must be discretized in a mode that carries an explicit degree of freedom at the end
+        of the period, i.e. ``mode="collocation"`` (the default) or ``mode="floquet"``, and it must be
+        solved before this is called.
+
+        Args:
+            n: Number of multipliers to compute. Defaults to all of them (the number of degrees of freedom of the underlying problem).
+            valid_threshold: Only used by ``method="eigenproblem"``: eigenvalues above this magnitude are discarded as spurious.
+            shift: Only used by ``method="eigenproblem"``: shift handed to the eigensolver.
+            ignore_periodic_unity: Remove the trivial multiplier 1 (which always exists, due to the time-shift invariance of the orbit) from the result. If ``True``, a tolerance of 1e-5 is used.
+            quiet: Suppress the eigensolver output, and the accuracy report of the trivial multiplier.
+            method: ``"condensed"`` (default) condenses the block bidiagonal orbit Jacobian into the monodromy matrix, which yields exactly the multipliers and nothing else. ``"periodic_schur"`` computes the same multipliers by a periodic Schur (periodic QR) sweep, which never forms the product and is therefore more accurate for multipliers many orders of magnitude below the dominant one, at a considerably higher cost. ``"eigenproblem"`` is the older formulation, which solves one large singular eigenproblem over all time points and filters the result.
+            dense_threshold: Only used by ``method="condensed"``: above this number of degrees of freedom, only the dominant multipliers are computed by default, and the monodromy matrix is applied matrix-free rather than formed whenever few enough of them are wanted.
+            shift_invert: Only used by the matrix-free route: seek the multipliers near ``sigma`` rather than by largest magnitude. Plain Arnoldi converges badly when they are clustered, which is the normal case for a PDE orbit.
+            sigma: The shift for ``shift_invert``. Defaults to just outside the unit circle, where the stability question lives.
+
+        Returns:
+            NPComplexArray: The Floquet multipliers, sorted by ascending magnitude.
         """
         # Main ideas from here: https://arxiv.org/html/2407.18230v1#S2.E6
         from .. import _pyoomph_core as _pyoomph
@@ -7020,34 +8197,62 @@ class Problem(_pyoomph.Problem):
         if not isinstance(orbit_handler,_pyoomph.PeriodicOrbitHandler):
             raise RuntimeError("Periodic orbit handler not active. Call activate_periodic_orbit_handler first, then solve the orbit, then call this function")
         if not orbit_handler.is_floquet_mode():
-            raise RuntimeError("Floquet mode not active. Call activate_periodic_orbit_handler with mode='floquet' first, then solve the orbit, then call this function")
+            # This method works on whatever handler is installed, and this one carries no explicit
+            # end-of-period degree of freedom for any of the routes to key off. PeriodicOrbit knows
+            # its own discretization and can sample a B-spline orbit onto one that does.
+            raise RuntimeError("Floquet mode not active. Call activate_periodic_orbit_handler with mode='floquet' first, then solve the orbit, then call this function. For a mode='bspline' orbit, call get_floquet_multipliers() on the PeriodicOrbit object instead: it samples the orbit onto a collocation discretization for the computation and puts this one back.")
         nbase=orbit_handler.get_base_ndof()
+        if n is not None and n<=0:
+            raise ValueError("Invalid number of Floquet multipliers requested: "+str(n))
+
+        if method in ("condensed","periodic_schur"):
+            # n=None is passed on rather than resolved here: the condensed method only defaults to
+            # "all of them" while the monodromy is small enough to be formed.
+            return self._get_floquet_multipliers_condensed(n=n,ignore_periodic_unity=ignore_periodic_unity,quiet=quiet,dense_threshold=dense_threshold,shift=shift,valid_threshold=valid_threshold,periodic_schur=(method=="periodic_schur"),shift_invert=shift_invert,sigma=sigma)
+        elif method!="eigenproblem":
+            raise ValueError("Invalid method for the Floquet multipliers: "+str(method))
         if n is None:
             n=nbase
-        if n<=0:
-            raise ValueError("Invalid number of Floquet multipliers requested: "+str(n))
-        
-        Jfull=self.assemble_jacobian(with_residual=False)        
+
+        # This formulation slices "the last row/column" as the T equation and puts the identity mass
+        # block on the last nbase rows, i.e. it assumes the naive time-major [u_0|...|u_{nT-1}|T]
+        # ordering. Under --distribute the gathered augmented matrix is interleaved per rank instead
+        # (see _to_time_major() in floquet.py), so every block sliced here would be the wrong one --
+        # and it would return plausible-looking multipliers rather than fail.
+        if len(orbit_handler.get_naive_equation_order()):
+            raise NotImplementedError("method='eigenproblem' does not support a distributed problem: the gathered augmented matrix is rank-interleaved, not time-major. Use the default method='condensed' (or 'periodic_schur'), which reorders it.")
+
+        Jfull=self.assemble_jacobian(with_residual=False)
         nMat=Jfull.shape[0]-1
-        Jfull=Jfull[:nMat,:nMat] # Remove the T equation        
+        Jfull=Jfull[:nMat,:nMat] # Remove the T equation
         Mdiag=numpy.zeros(nMat)
-        Mdiag[nMat-nbase:]=1.0 
-        Mfull=scipy.sparse.csr_matrix(scipy.sparse.diags_array(Mdiag).tocsr()) # Make the mass matrix         
+        Mdiag[nMat-nbase:]=1.0
+        Mfull=scipy.sparse.csr_matrix(scipy.sparse.diags_array(Mdiag).tocsr()) # Make the mass matrix
         eigs,eigv,_,_=self.get_eigen_solver().solve(neval=n,custom_J_and_M=(Jfull,Mfull),shift=shift,quiet=quiet) # Solve the eigenproblem
-        valid_eigs=numpy.array([e for e in eigs if numpy.isfinite(e) and not numpy.isnan(e)])
+        # The non-finite filter must be applied to the eigenVECTORS as well. It used to compact only
+        # the eigenvalues, after which the valid_threshold indices - which index the compacted array -
+        # were used to slice the uncompacted eigv, pairing every multiplier with the wrong vector as
+        # soon as the solver returned a single inf/nan.
+        finite_inds=numpy.argwhere(numpy.isfinite(eigs)).flatten()
+        valid_eigs=numpy.asarray(eigs)[finite_inds]
+        eigv=eigv[finite_inds,:]
         if valid_threshold is not None:
-            valid_inds=numpy.argwhere(numpy.abs(valid_eigs)<valid_threshold).flatten()            
+            valid_inds=numpy.argwhere(numpy.abs(valid_eigs)<valid_threshold).flatten()
             eigv=eigv[valid_inds,:]
-            valid_eigs=valid_eigs[valid_inds]        
+            valid_eigs=valid_eigs[valid_inds]
         gamms:NPComplexArray=1/(1-valid_eigs) #type:ignore
-        
+
+        # BEFORE the unity filter: the even-interval half of this looks at the +1 multipliers, which
+        # that filter is about to delete.
+        self._warn_about_collocation_artefact_multipliers(gamms)
+
         if ignore_periodic_unity is True:
             ignore_periodic_unity=1e-5
         if ignore_periodic_unity is not False:
             unity_eigval=numpy.argwhere(numpy.abs(gamms-1)<ignore_periodic_unity).flatten()            
             if unity_eigval.size>0:
                 if unity_eigval.size>1:
-                    print("WARNING: Found multiple unity Floquet multipliers. Usually, only one is present (except at distinct bifurcations of the orbit) ")
+                    print("WARNING: Found multiple unity Floquet multipliers. Usually only one is present -- but a bifurcation of the orbit is not the only other explanation: with an even number of time intervals an algebraic direction lands on +1 too (see _warn_about_collocation_artefact_multipliers).")
                 gamms=numpy.delete(gamms,unity_eigval)
                 eigv=numpy.delete(eigv,unity_eigval,axis=0)  # TODO: Check if this is correct
         # Sort by magnitude
@@ -7056,6 +8261,103 @@ class Problem(_pyoomph.Problem):
         eigv=eigv[sortinds,:]
         self._last_eigenvalues=gamms
         self._last_eigenvectors=numpy.c_[eigv,numpy.zeros(eigv.shape[0])]
+        self._last_eigenvalues_m=None
+        self._last_eigenvalues_k=None
+        return gamms
+
+    #: Distance from -1 (or +1) within which a Floquet multiplier is taken to BE the collocation
+    #: artefact of _warn_about_collocation_artefact_multipliers rather than merely near it. The
+    #: artefact is exact -- verified to 1e-14 -- so anything this loose is the artefact or is sitting
+    #: on the bifurcation itself, and both are worth saying out loud.
+    floquet_artefact_tolerance:float=1e-6
+
+    def _warn_about_collocation_artefact_multipliers(self,gamms:NPComplexArray)->None:
+        """Say so when a multiplier is where Gauss collocation puts an ALGEBRAIC direction.
+
+        A differential-algebraic orbit has directions with no time derivative, and the honest
+        multiplier for those is 0. Gauss-Legendre collocation does not give 0, because it is not
+        stiffly accurate (``|R(inf)| = 1``): the perturbation of an algebraic direction is the
+        degree-``order`` polynomial vanishing at the ``order`` Gauss points of the element, those
+        points are symmetric about the midpoint, so its value at the end of an element is
+        ``(-1)**order`` times its value at the start, and over the orbit that accumulates to exactly
+        ``(-1)**n_intervals``. See dev_docs/floquet_multipliers.md section 6.
+
+        **Which lands it on -1 for an odd number of intervals -- exactly where a period-doubling
+        bifurcation lives.** That is the reason this warning exists: the number is not wrong, but read
+        as physics it says "the orbit is period doubling here" when nothing of the sort is happening,
+        and nothing in the returned array distinguishes the two. An even number of intervals moves it
+        onto +1 instead, next to the trivial multiplier, where it is harmless to a stability verdict
+        but makes the multiplicity of 1 look like a bifurcation of its own.
+
+        Deliberately keyed on the SIGNATURE (a multiplier sitting on +-1 to machine precision, with the
+        matching interval parity) rather than on proving the problem is a DAE. Proving it means asking
+        for a mass matrix, and assembling one while the orbit handler is installed is refused by name;
+        the signature costs nothing and is what the reader has to act on anyway.
+
+        Not gated on ``quiet``, which suppresses the eigensolver's own chatter and the trivial
+        multiplier's accuracy report -- not a warning about the meaning of the answer.
+        """
+        if len(gamms)==0:
+            return
+        handler=self.assembly_handler_pt()
+        try:
+            n_intervals=int(handler.get_num_time_steps())-1  #type:ignore
+        except Exception:
+            return  # no interval count to reason about; say nothing rather than guess
+        if n_intervals<1:
+            return
+        tol=self.floquet_artefact_tolerance
+        target=-1.0 if (n_intervals%2) else 1.0
+        hits=numpy.argwhere(numpy.abs(gamms-target)<tol).flatten()
+        if hits.size==0:
+            return
+        if target<0:
+            print("WARNING: "+str(hits.size)+" Floquet multiplier(s) sit on -1 to within "+str(tol)+
+                  ", and this orbit has an ODD number of time intervals ("+str(n_intervals)+"). If the "
+                  "problem is differential-algebraic, that is where Gauss collocation puts an algebraic "
+                  "direction whose true multiplier is 0 -- not a period doubling. Re-solve the orbit with "
+                  "an EVEN number of intervals: the artefact moves to +1, a genuine period doubling stays "
+                  "at -1. See dev_docs/floquet_multipliers.md section 6.")
+        elif hits.size>1:
+            # One +1 is the trivial multiplier of the time-shift invariance and is expected.
+            print("WARNING: "+str(hits.size)+" Floquet multipliers sit on +1 to within "+str(tol)+
+                  ". One is the trivial multiplier of the orbit's time-shift invariance; with an EVEN "
+                  "number of time intervals ("+str(n_intervals)+") a differential-algebraic direction "
+                  "lands there too, so a multiplicity of 1 here is not by itself a bifurcation. See "
+                  "dev_docs/floquet_multipliers.md section 6.")
+
+    def _get_floquet_multipliers_condensed(self,n:int | None,ignore_periodic_unity:bool | float,quiet:bool,dense_threshold:int,shift:float | None,valid_threshold:float | None,periodic_schur:bool=False,shift_invert:bool=True,sigma:complex | None=None)->NPComplexArray:
+        """Floquet multipliers by condensing the block bidiagonal orbit Jacobian; see pyoomph.generic.floquet."""
+        from .floquet import floquet_multipliers
+        # These two only ever existed to tame the singular eigenproblem formulation. The condensation
+        # has no spurious eigenvalues to threshold away and needs no shift, so silently accepting them
+        # would leave the caller believing they still did something.
+        if shift is not None:
+            print("WARNING: 'shift' is ignored by the condensed Floquet method; pass method='eigenproblem' to use it")
+        if valid_threshold is not None and valid_threshold!=10000:
+            print("WARNING: 'valid_threshold' is ignored by the condensed Floquet method; pass method='eigenproblem' to use it")
+
+        gamms,eigv=floquet_multipliers(self,n=n,quiet=quiet,dense_threshold=dense_threshold,periodic_schur=periodic_schur,shift_invert=shift_invert,sigma=sigma)
+
+        # BEFORE the unity filter: the even-interval half of this looks at the +1 multipliers, which
+        # that filter is about to delete.
+        self._warn_about_collocation_artefact_multipliers(gamms)
+
+        if ignore_periodic_unity is True:
+            ignore_periodic_unity=1e-5
+        if ignore_periodic_unity is not False:
+            unity_eigval=numpy.argwhere(numpy.abs(gamms-1)<ignore_periodic_unity).flatten()
+            if unity_eigval.size>0:
+                if unity_eigval.size>1:
+                    print("WARNING: Found multiple unity Floquet multipliers. Usually only one is present -- but a bifurcation of the orbit is not the only other explanation: with an even number of time intervals an algebraic direction lands on +1 too (see _warn_about_collocation_artefact_multipliers).")
+                gamms=numpy.delete(gamms,unity_eigval)
+                eigv=numpy.delete(eigv,unity_eigval,axis=0)
+        # Sort by magnitude, as the eigenproblem method does, so callers can keep indexing from the end
+        sortinds=numpy.argsort(numpy.abs(gamms))
+        gamms=gamms[sortinds]
+        eigv=eigv[sortinds,:]
+        self._last_eigenvalues=gamms
+        self._last_eigenvectors=eigv
         self._last_eigenvalues_m=None
         self._last_eigenvalues_k=None
         return gamms
@@ -7177,13 +8479,26 @@ class Problem(_pyoomph.Problem):
         return numpy.array(neweigen)
 
     
-    def define_problem_for_axial_symmetry_breaking_investigation(self):
+    def _define_problem_for_axial_symmetry_breaking_investigation(self):
         from ..expressions.coordsys import AxisymmetryBreakingCoordinateSystem
         self._azimuthal_mode_param_m = self.get_global_parameter(self._azimuthal_stability.azimuthal_param_m_name)
         coordsys = AxisymmetryBreakingCoordinateSystem(self._azimuthal_mode_param_m.get_symbol())
         oldcoordsys=self.get_coordinate_system()
         if oldcoordsys is not None:
-            if isinstance(oldcoordsys,AxisymmetryBreakingCoordinateSystem):
+            from ..expressions.coordsys import AxisymmetricCoordinateSystem
+            # The replacement system below is built fresh and carries the (r,z,phi) layout, so a
+            # flipped axis would be dropped here without a word and the base state would silently
+            # change meaning. Refuse instead.
+            if isinstance(oldcoordsys,AxisymmetricCoordinateSystem) and oldcoordsys.use_x_as_symmetry_axis:
+                raise RuntimeError("Azimuthal stability analysis does not support "
+                                   "use_x_as_symmetry_axis: the azimuthal normal mode coordinate "
+                                   "system assumes that x is the radius. Swap the mesh coordinates "
+                                   "so that the symmetry axis is y.")
+            # AxisymmetricCoordinateSystem, not the breaking subclass: the old system is the one the
+            # problem was written with, which is a plain axisymmetric one in every case except
+            # re-entry, so testing for the subclass meant the setting was only ever carried over
+            # from a system this method had already installed itself - i.e. never, in practice.
+            if isinstance(oldcoordsys,AxisymmetricCoordinateSystem):
                 coordsys.cartesian_error_estimation=oldcoordsys.cartesian_error_estimation
         self.set_coordinate_system(coordsys)
 
@@ -7196,7 +8511,7 @@ class Problem(_pyoomph.Problem):
 
 
 
-    def define_problem_for_additional_cartesian_stability_investigation(self):
+    def _define_problem_for_additional_cartesian_stability_investigation(self):
         from ..expressions.coordsys import CartesianCoordinateSystemWithAdditionalNormalMode
         self._normal_mode_param_k = self.get_global_parameter(self._cartesian_normal_mode_stability.normal_mode_param_k_name)
         coordsys = CartesianCoordinateSystemWithAdditionalNormalMode(self._normal_mode_param_k.get_symbol())
@@ -7273,6 +8588,19 @@ class Problem(_pyoomph.Problem):
             alleigenvals:NPComplexArray=numpy.array([],dtype=numpy.complex128) #type:ignore
             alleigenvects:NPComplexArray=numpy.array([],dtype=numpy.complex128) #type:ignore
             minfoL:list[int | float]=[]
+            # Settle the equation numbering ONCE for the whole scan. AxisymmetryBC keeps the axis
+            # conditions pinned strongly as long as only the base mode has been solved and releases them
+            # - imposing the same zeros by matrix manipulation instead - as soon as a mode != 0 is asked
+            # for, which changes ndof. A scan starting at m=0 therefore produced a first block of
+            # eigenvectors shorter than all the others, and stacking them below died in numpy with
+            # "all the input array dimensions except for the concatenation axis must match exactly".
+            # Doing the release up front costs nothing and leaves the base-mode spectrum unchanged: the
+            # manipulator imposes exactly the conditions the pinning did, which is checked in
+            # tests/test_azimuthal_mode_list.py.
+            nonzero=[ms for ms in vlist if ms!=0]
+            if nonzero:
+                param.value=nonzero[0]
+                self.actions_before_eigen_solve(must_not_renumber=tracking)
             for ms in vlist:
                 param.value = ms
                 self.actions_before_eigen_solve(must_not_renumber=tracking)
@@ -7282,10 +8610,19 @@ class Problem(_pyoomph.Problem):
                 else:
                     alleigenvals:NPComplexArray=numpy.hstack([alleigenvals,self.get_last_eigenvalues().copy()]) #type:ignore
                 minfoL+=[ms]*len(self.get_last_eigenvalues())
+                evects=numpy.array(self.get_last_eigenvectors()).copy()
                 if len(alleigenvects)==0:
-                    alleigenvects:NPComplexArray= numpy.array(self.get_last_eigenvectors()).copy() #type:ignore
+                    alleigenvects:NPComplexArray= evects #type:ignore
                 else:
-                    alleigenvects:NPComplexArray=numpy.vstack([alleigenvects,numpy.array(self.get_last_eigenvectors()).copy()]) #type:ignore
+                    if evects.shape[1:]!=alleigenvects.shape[1:]:
+                        # Some other equation renumbered per mode; say which mode and what changed rather
+                        # than letting numpy report two array shapes.
+                        raise RuntimeError("The eigenvectors of mode "+str(ms)+" have length "+str(evects.shape[-1])+
+                                           " while the earlier modes of this scan gave "+str(alleigenvects.shape[-1])+
+                                           ". Something changed which degrees of freedom are pinned between the modes, "
+                                           "so their eigenvectors cannot be combined into one spectrum. Solve the modes "
+                                           "one at a time to see them separately.")
+                    alleigenvects:NPComplexArray=numpy.vstack([alleigenvects,evects]) #type:ignore
 
             if sort:
                 if target:
@@ -7415,9 +8752,7 @@ class Problem(_pyoomph.Problem):
             lastres:ExpressionOrNum=0
             for t in timestep: #type:ignore
                 assert isinstance(t,(float,int,Expression)) or t is None
-                self._in_transient_newton_solve=True
                 lastres=self.solve(timestep=t,spatial_adapt=spatial_adapt,shift_values=shift_values,temporal_error=temporal_error,max_newton_iterations=max_newton_iterations,newton_relaxation_factor=newton_relaxation_factor,suppress_resolve_after_adapt=suppress_resolve_after_adapt,newton_solver_tolerance=newton_solver_tolerance,globally_convergent_newton=globally_convergent_newton)
-                self._in_transient_newton_solve=False
             return lastres
 
         timestep_normalized=False
@@ -7496,8 +8831,18 @@ class Problem(_pyoomph.Problem):
                 self._last_eigenvectors=numpy.array([self._get_bifurcation_eigenvector()],dtype=numpy.complex128) #type:ignore
                 if self.get_bifurcation_tracking_mode()=="azimuthal":
                     self._last_eigenvalues_m=numpy.array([int(self._azimuthal_mode_param_m.value)],dtype=numpy.int32) #type:ignore
+                    self._last_eigenvalues_k=None
                 elif self.get_bifurcation_tracking_mode()=="cartesian_normal_mode":
                     self._last_eigenvalues_k=numpy.array([self._normal_mode_param_k.value]) #type:ignore
+                    self._last_eigenvalues_m=None
+                else:
+                    # Cleared, like arclength_continuation does: _last_eigenvalues has just been cut
+                    # down to the single tracked value, so a mode array left over from an earlier
+                    # scan describes eigenvalues that are no longer there. It is read positionally
+                    # (get_last_eigenmodes_m()[i] is the mode of eigenvalue i), so a stale one made
+                    # the tracked eigenvalue answer with the mode of whatever the scan found first.
+                    self._last_eigenvalues_m=None
+                    self._last_eigenvalues_k=None
                 self._last_eigenvectors=self.process_eigenvectors(self._last_eigenvectors)
             else:
                 self._last_eigenvalues_m=None
@@ -7519,11 +8864,16 @@ class Problem(_pyoomph.Problem):
             self._last_step_was_stationary=False
             assert isinstance(timestep,(float,int))
             if spatial_adapt==0:                
-                if temporal_error is None:
-                    desired_dt=timestep                    
-                    self.unsteady_newton_solve(timestep,shift_values)
-                else:
-                    desired_dt=self.adaptive_unsteady_newton_solve(timestep,temporal_error,shift_values)
+                def run_once()->float:
+                    if temporal_error is None:
+                        self.unsteady_newton_solve(timestep,shift_values)
+                        return timestep
+                    return self.adaptive_unsteady_newton_solve(timestep,temporal_error,shift_values)
+                # These two do not go through _solve_with_adapt_recovery(), so they need both wrappers
+                # here: the inverted-element retry around the call, and the deferred remesh of
+                # actions_after_newton_solve() after it. The adaptive one is the call both exist for.
+                desired_dt=self._solve_with_inversion_remesh(run_once)
+                self._perform_pending_remesh()
                 self._first_step=False
                 self._suggested_next_dt=desired_dt
                 self.actions_after_transient_solve()
@@ -7663,6 +9013,10 @@ class Problem(_pyoomph.Problem):
 
         starttime = self.get_current_time()
         keep_state_dt=False
+        # Stamps every state file this run statement writes with which statement wrote it, so a
+        # --runmode continue can tell whether it is resuming INTO this statement or merely starting it
+        # for the first time. See _loaded_run_statement_endtime below.
+        self._run_statement_endtime=float(endtime/self.get_scaling("temporal"))
         _tfactor,_tunit=assert_dimensional_value(starttime-endtime)
         if _tfactor>=0.0:
             # Deliberately returns without clearing _continue_dt_pending: a run statement the state
@@ -7677,12 +9031,24 @@ class Problem(_pyoomph.Problem):
                 et=float(endtime/self.get_scaling("temporal"))
                 progress=(ct-self._nondim_time_after_last_run_statement)/(et-self._nondim_time_after_last_run_statement)
                 numouts=int(numouts*(1-progress))
-            timestep = self.timestepper.time_pt().dt(0) * self.get_scaling("temporal")
-            self._first_step=False # TODO This would be better stored in the state file so that a solve from state_000000 will still have it true
+            # Whether this run has already left the first (BDF1-degraded) step behind is the step
+            # counter's business, and that one comes out of the state file. Forcing it False here was
+            # wrong for a state written before any unsteady step - state_000000 of a run resumed
+            # immediately - which then skipped the degraded start the uninterrupted run took.
+            self._first_step=self.timestepper.get_num_unsteady_steps_done()==0
             # This is the run statement being resumed: the dt the run had worked its way up to is the
             # one to carry on with. Without this, startstep below would throw it away and a continued
             # adaptive run would restart from the tiny initial step after every interruption.
-            keep_state_dt=self.use_state_dt_when_continue and self._continue_dt_pending
+            # Is the state we loaded one that THIS run statement wrote, i.e. are we resuming in the
+            # middle of it? If it was written by a different statement - a script's
+            # run(0.4,timestep=A) followed by run(1.0,timestep=B), stopped after the first of them
+            # wrote its last output - then this one was never entered, and nothing about it should
+            # come from that state: it starts with its own initial step, exactly as it would in an
+            # uninterrupted run. (Without this, B silently inherited A.) Old state files carry no
+            # such stamp, so they keep the previous behaviour.
+            resuming_into_this_statement=(self._loaded_run_statement_endtime is None
+                                          or self._loaded_run_statement_endtime==self._run_statement_endtime)
+            keep_state_dt=self.use_state_dt_when_continue and self._continue_dt_pending and resuming_into_this_statement
             self._continue_dt_pending=False
             if keep_state_dt and self._suggested_next_dt is not None:
                 # Not dt(0): that is the step already taken, and resuming with it would take one extra
@@ -7690,6 +9056,15 @@ class Problem(_pyoomph.Problem):
                 # would no longer step where the uninterrupted one did. The suggestion is the step the
                 # interrupted run was about to take, so picking it up here reproduces it exactly.
                 timestep = self._suggested_next_dt * self.get_scaling("temporal")
+            elif resuming_into_this_statement and (timestep is None or temporal_error is not None):
+                # Fall back on the step the state was written at only when this run statement has no
+                # fixed step of its own to insist on. A run(timestep=dt) without temporal adaptivity
+                # does have one, and dt(0) is NOT it: the loop below shortens steps to land exactly on
+                # the output times, so the last step before a state file is routinely a clamped one.
+                # Taking that as the new nominal dt made every resumed fixed-step run continue with a
+                # shorter step than the uninterrupted one - a different time discretisation, not just
+                # a different round-off (0.037 -> 0.026 in the test case).
+                timestep = self.timestepper.time_pt().dt(0) * self.get_scaling("temporal")
 
         #TODO Further checking for the end time
         single_step_desired=False
@@ -7764,6 +9139,22 @@ class Problem(_pyoomph.Problem):
                 currentdt=1.00001*remaining*TS
 
         nextdt_was_clamped_for_output:ExpressionNumOrNone=None # When clamping a time step to hit the next output dt, enlarge it afterwards
+
+        # Undo such a clamp BEFORE writing anything, not after. output() is also where the state file
+        # is written, and the _suggested_next_dt it stores is read back by a --runmode continue as
+        # "the step the interrupted run was about to take". The step just taken was shortened to land
+        # exactly on this output time, so restoring the full step afterwards left the file holding the
+        # clamped one: every resumed run then carried on with the short step (0.037 -> 0.026 in a plain
+        # run(timestep=0.037,outstep=0.1)), which is a different time discretisation from the
+        # uninterrupted run, not a round-off away from it.
+        def _restore_clamped_nextdt(ndt:ExpressionOrNum)->ExpressionOrNum:
+            nonlocal nextdt_was_clamped_for_output
+            if nextdt_was_clamped_for_output is not None:
+                ndt=max(1.0,float(nextdt_was_clamped_for_output/ndt))*ndt
+                nextdt_was_clamped_for_output=None
+            self._suggested_next_dt=float(ndt/TS)
+            return ndt
+
         first_step=True
         while self.get_current_time(as_float=True, dimensional=False) < float(endtime / TS):
             if self._abort_current_run:
@@ -7772,13 +9163,17 @@ class Problem(_pyoomph.Problem):
             tnd = self.get_current_time(as_float=True, dimensional=False)
             if ndouttimes is not None:
                 # Check if the current timestep would exceed the next output
-                currind:int = numpy.nonzero(ndouttimes <= tnd)[0] #type:ignore
+                # The tolerance is what keeps a rounding sliver from becoming a time step, exactly as
+                # at the end of the loop. A run resumed by --runmode continue rebuilds this grid from
+                # its own start time, and the instant it is resuming AT then lands an ulp above tnd
+                # instead of on it: the clamp below asked for a dt of ~5e-17, which the Newton solver
+                # cannot converge, and a continued run(numouts=...) died on its first step.
+                currind:int = numpy.nonzero(ndouttimes <= tnd + 1e-8*float(currentdt/TS))[0] #type:ignore
                 currind = -1 if len(currind) == 0 else currind[-1] #type:ignore
                 nextndout = ndouttimes[currind + 1] #type:ignore
                 if tnd + float(currentdt / TS) * 1.01 > nextndout:
                     currentdt = (nextndout - tnd) * TS
 
-            self._in_transient_newton_solve=True
             nextdt = self.solve(timestep=currentdt, temporal_error=temporal_error,spatial_adapt=spatial_adapt,newton_solver_tolerance=newton_solver_tolerance,do_not_set_IC=do_not_set_IC,globally_convergent_newton=globally_convergent_newton,max_newton_iterations=max_newton_iterations,suppress_resolve_after_adapt=suppress_resolve_after_adapt)
             if first_step and float(nextdt/currentdt)>=1.0-1e-14:
                 if single_step_desired:
@@ -7789,7 +9184,6 @@ class Problem(_pyoomph.Problem):
                 single_step_desired=False
                 
             first_step=False
-            self._in_transient_newton_solve=False
             if max_newton_to_increase_time_step is not None and float(nextdt/TS)>float(currentdt/TS*1.00001):
                 last_res=self.get_last_residual_convergence()
                 if len(last_res)>max_newton_to_increase_time_step:
@@ -7797,19 +9191,15 @@ class Problem(_pyoomph.Problem):
                     nextdt=currentdt
 
             if isinstance(outstep,bool) and outstep == True:
+                nextdt=_restore_clamped_nextdt(nextdt)
                 self.output()
-                if nextdt_was_clamped_for_output is not None:
-                        nextdt=max(1.0,float(nextdt_was_clamped_for_output/nextdt))*nextdt
-                        nextdt_was_clamped_for_output=None
             elif outstep != False:
                 tndnew = self.get_current_time(as_float=True, dimensional=False)
                 nextindA = numpy.nonzero(ndouttimes <= tndnew)[0] #type:ignore
                 nextind:int = -1 if len(nextindA) == 0 else nextindA[-1] #type:ignore
                 if nextind > currind: #type:ignore
+                    nextdt=_restore_clamped_nextdt(nextdt)
                     self.output()
-                    if nextdt_was_clamped_for_output is not None:
-                        nextdt=max(1.0,float(nextdt_was_clamped_for_output/nextdt))*nextdt
-                        nextdt_was_clamped_for_output=None
                 else:
                     # Not an output time, so the outputs marked output_every_step still get their line
                     # here. Guarded by the else branch rather than done unconditionally: on an output
@@ -7849,6 +9239,182 @@ class Problem(_pyoomph.Problem):
         return currentdt
     
 
+    def _dof_coordinates(self)->NPFloatArray:
+        """Where every degree of freedom sits in space, as an ``(ndof,3)`` array.
+
+        A dof that has no place -- ODE and global-parameter data, and anything the mesh walk below
+        cannot reach -- is left as ``nan`` in all three columns; a dof of a mesh of lower dimension
+        keeps ``nan`` in the unused columns, so a caller has to look at the finite entries only.
+
+        Element-internal data (a discontinuous pressure, say) is given the centroid of its element:
+        it belongs to the element, and the centroid is the same point however the mesh was cut up.
+
+        On a distributed problem this is collective. A rank only walks its own part of the mesh, so
+        it comes out with holes where somebody else's nodes are, exactly as
+        :py:meth:`get_dof_description` does, and the per-rank answers are merged the same way.
+        """
+        ndof=self.ndof()
+        coords:NPFloatArray=numpy.full((ndof,3),numpy.nan) #type:ignore
+
+        def assign(data,x:list[float]):
+            for vi in range(data.nvalue()):
+                eq=data.eqn_number(vi)
+                if 0<=eq<ndof:
+                    coords[eq,:len(x)]=x
+
+        def process(m:AnyMesh):
+            if isinstance(m,ODEStorageMesh):
+                return
+            for node in m.nodes():
+                x=[node.x(xi) for xi in range(node.ndim())]
+                assign(node,x)
+                assign(node.variable_position_pt(),x)
+            for e in m.elements():
+                if e.ninternal_data()==0:
+                    continue
+                nn=e.nnode()
+                if nn==0:
+                    continue
+                cx=[0.0,0.0,0.0]
+                ndim=0
+                for ni in range(nn):
+                    n=e.node_pt(ni)
+                    ndim=n.ndim()
+                    for xi in range(ndim):
+                        cx[xi]+=n.x(xi)
+                centroid=[cx[xi]/nn for xi in range(ndim)]
+                for di in range(e.ninternal_data()):
+                    assign(e.internal_data_pt(di),centroid)
+            for im in m._interfacemeshes.values():
+                process(im)
+
+        for _,bm in self._meshdict.items():
+            process(bm)
+
+        if self.is_distributed():
+            from .mpi import get_mpi_nproc,get_mpi_elementwise_max
+            if get_mpi_nproc()>1:
+                # Elementwise max is the merge, as in _merge_dof_description_over_ranks. Where two
+                # ranks both know a dof (a halo node) they know the same position, so the max is that
+                # position; where one does not, it contributes the sentinel. It has to be a sentinel
+                # rather than nan, because nan wins every comparison and would erase what the other
+                # rank knew.
+                sentinel=-1e300
+                filled=numpy.where(numpy.isnan(coords),sentinel,coords) #type:ignore
+                merged=numpy.asarray(get_mpi_elementwise_max(filled))
+                coords=numpy.where(merged<=sentinel,numpy.nan,merged) #type:ignore
+        return coords
+
+    def _deflation_random_perturbation(self,amplitude:float,rng:"numpy.random.Generator",resolution:int=12,cache:"dict[str,Any] | None"=None)->NPFloatArray:
+        """A random dof perturbation that does not depend on how the problem is partitioned.
+
+        The drivers used to draw ``(rng.random(ndof)-0.5)*amplitude``, which is reproducible only for
+        a FIXED partition: ``distribute()`` renumbers the dofs, so global index i is a different node
+        at np=2 than at np=3 and the same seed then explores a different search. That is not a
+        cosmetic difference -- deflated continuation over the pitchfork found three branches serially
+        and one under ``--distribute`` with the test's seed, and the other way round with seed 0.
+
+        So the perturbation is drawn as a FIELD instead: one
+        :py:class:`~pyoomph.expressions.utils.DeterministicRandomField` per dof type, over the
+        bounding box of the mesh, evaluated at the coordinates of each dof. Both inputs are
+        partition-independent -- the dof type description is merged over the ranks, and a node's
+        position is its position on whichever rank owns it -- so every configuration draws the same
+        perturbation of the same solution field.
+
+        A smooth interpolated field is also a better search direction than white noise: what a
+        deflated search has to do is leave the basin of the known solution, and the low modes of the
+        problem are where the other branches are.
+
+        Dofs with no place (:py:meth:`_dof_coordinates` returns ``nan`` for them) fall back to an
+        index-drawn value per dof type. Those are ODE and global-parameter dofs, which are replicated
+        rather than partitioned, so their order is partition-independent as well.
+
+        The random field itself costs nothing worth measuring; the mesh walks behind it do (at 65k
+        dofs: 3 ms for the field, 140 ms for :py:meth:`_dof_coordinates` and 19 ms for
+        :py:meth:`get_dof_description`). Pass ``cache``, a dict owned by the caller, to do them once
+        per search rather than once per perturbation - the drivers do. It is dropped whenever the
+        number of dofs changes, and a deflated search cannot renumber without that (adaptation is
+        refused while solutions are known).
+        """
+        from ..expressions.utils import DeterministicRandomField
+        ndof=self.ndof()
+        if ndof==0:
+            return numpy.zeros(0)
+        if cache is None:
+            cache={}
+        if cache.get("ndof")!=ndof:
+            # Everything that depends on the numbering and the geometry rather than on this draw. The
+            # mesh walks dominate the cost by two orders of magnitude, and the per-type index lists
+            # below are what is left once they are gone: computing them per try instead cost more than
+            # the random field itself (11 ms against 4 ms on a 36k-dof 3D problem with 21 dof types).
+            cache.clear()
+            cache["ndof"]=ndof
+            coords=self._dof_coordinates()
+            located=numpy.isfinite(coords).any(axis=1)
+            cache["located_any"]=bool(numpy.any(located))
+            if cache["located_any"]:
+                _types,names=self.get_dof_description()
+                types=numpy.asarray(_types,dtype=numpy.int64)
+                # The directions that actually vary: a 2D mesh leaves the third column nan everywhere,
+                # and a direction of zero extent (a flat interface) would be a degenerate box.
+                active=[d for d in range(3)
+                        if numpy.all(numpy.isfinite(coords[located,d]))
+                        and float(numpy.amax(coords[located,d])-numpy.amin(coords[located,d]))>0.0]
+                cache["min_x"]=[float(numpy.amin(coords[located,d])) for d in active]
+                cache["max_x"]=[float(numpy.amax(coords[located,d])) for d in active]
+                cache["ntypes"]=len(names)
+                blocks=[]
+                # -1 is "the mesh walk did not classify this dof"; here that is a type of its own, not
+                # an error -- those dofs still have to be perturbed.
+                for ti in range(-1,len(names)):
+                    of_type=types==ti
+                    if not numpy.any(of_type):
+                        continue
+                    here=numpy.flatnonzero(of_type&located) if active else numpy.zeros(0,dtype=numpy.int64)
+                    rest=numpy.flatnonzero(of_type&(~located)) if active else numpy.flatnonzero(of_type)
+                    blocks.append((ti,here,coords[here][:,active] if len(here) else None,rest))
+                cache["blocks"]=blocks
+        if not cache["located_any"]:
+            # Nothing is anywhere: a pure ODE problem. There is no field to draw, and the dof order of
+            # ODE data is the same on every rank anyway, so this is the plain draw the drivers used
+            # before -- kept bit-for-bit, so that a seed tuned on an ODE problem still finds what it
+            # found (tests/test_deflation.py pins one).
+            return (rng.random(ndof)-0.5)*amplitude
+        # One seed for this draw, so that successive tries differ and the whole sequence still follows
+        # the driver's seeded generator.
+        seed=int(rng.integers(0,2**31-1))
+        pert:NPFloatArray=numpy.zeros(ndof) #type:ignore
+        for ti,here,pts,rest in cache["blocks"]:
+            if pts is not None and len(here):
+                field=DeterministicRandomField(min_x=cache["min_x"],max_x=cache["max_x"],
+                                               amplitude=amplitude,Nresolution=resolution,
+                                               seed=(seed+ti+1)%(2**31-1))
+                pert[here]=field.evaluate_at(pts)
+            if len(rest):
+                sub=numpy.random.default_rng([seed,ti+1]).random(len(rest))
+                pert[rest]=(sub-0.5)*amplitude
+        return pert
+
+    @staticmethod
+    def _deflation_solution_is_new(U:NPFloatArray,known:Iterable[NPFloatArray],tolerance:float)->bool:
+        """Is ``U`` distinct from every solution in ``known``?
+
+        Deflation guarantees Newton cannot converge ONTO a known solution, but it does not stop it
+        converging arbitrarily CLOSE to one: at a bifurcation point the branches meet, and the
+        deflated solve then returns the known solution again to the last few digits. Without this the
+        drivers open a fresh branch for it, which is where the one-point stub branches in the
+        deflated-continuation diagram came from.
+
+        Both vectors are the globally gathered dof vector, so this is the same number on every rank
+        and needs no reduction.
+        """
+        nU=float(numpy.linalg.norm(U))
+        for W in known:
+            scale=max(1.0,nU,float(numpy.linalg.norm(W)))
+            if float(numpy.linalg.norm(U-W))<=tolerance*scale:
+                return False
+        return True
+
     def deflated_solve_by_eigenperturbation(self, eigenindex:int=0, keep_deflation_active:bool=False, perturbation_factor:float=1,deflation_alpha:float=0.1,deflation_power:int=2,*, max_newton_iterations:int | None=None, newton_relaxation_factor:float | None=None, newton_solver_tolerance:float | None=None, globally_convergent_newton:bool=False):        
         """Tries to find another stationary solution by deflation. The procedure is implemented according to 'Deflation techniques for finding distinct solutions of nonlinear partial differential equations' by
 Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/1410.5620.pdf .
@@ -7866,24 +9432,27 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         if self.get_last_eigenvectors() is None or len(self.get_last_eigenvectors())<=eigenindex:            
             raise ValueError("No eigenvector at index "+str(eigenindex)+" available to perturb. Please solve the eigenproblem first.")
 
-        from .bifurcation_tools import DeflationAssemblyHandler        
-        old=self.get_custom_assembler()
-        if not isinstance(old, DeflationAssemblyHandler):
-            defl=DeflationAssemblyHandler(alpha=deflation_alpha, p=deflation_power)
-            self.set_custom_assembler(defl)            
-            defl.add_known_solution(self.get_current_dofs()[0])  
+        from .bifurcation_tools import DeflationOperator
+        old=self.get_deflation_operator()
+        if old is None:
+            defl=DeflationOperator(alpha=deflation_alpha, p=deflation_power)
+            self.set_deflation_operator(defl)
+            defl.add_known_solution(self.get_current_dofs()[0])
         else:
             defl=old
-        self.perturb_dofs(self.get_last_eigenvectors()[0]*perturbation_factor)
+        # numpy.real, and the requested index rather than the first: an eigenvector is complex in
+        # general and only its real part is a direction in dof space, and validating eigenindex above
+        # and then perturbing with [0] made the argument a no-op.
+        self.perturb_dofs(numpy.real(self.get_last_eigenvectors()[eigenindex])*perturbation_factor)
         self.solve(max_newton_iterations=max_newton_iterations,newton_relaxation_factor=newton_relaxation_factor,newton_solver_tolerance=newton_solver_tolerance,globally_convergent_newton=globally_convergent_newton)
         
         if not keep_deflation_active:
-            self.set_custom_assembler(old)
+            self.set_deflation_operator(old)
         else:
             defl.add_known_solution(self.get_current_dofs()[0])
             
 
-    def iterate_over_multiple_solutions_by_deflation(self,deflation_alpha:float=0.1,deflation_p:int=2,perturbation_amplitude:float=0.5,max_newton_iterations:int | None=None,newton_relaxation_factor:float | None=None,use_eigenperturbation:bool=False,skip_initial_solution:bool=False,num_random_tries:int=1,keep_deflation_operator_active:bool=False)-> Generator[NPFloatArray,None,None]:
+    def iterate_over_multiple_solutions_by_deflation(self,deflation_alpha:float=0.1,deflation_p:int=2,perturbation_amplitude:float=0.5,max_newton_iterations:int | None=None,newton_relaxation_factor:float | None=None,use_eigenperturbation:bool=False,skip_initial_solution:bool=False,num_random_tries:int=1,keep_deflation_operator_active:bool=False,random_seed:int | None=0,distinct_solution_tolerance:float=1e-6,deflation_scale:float | None=None)-> Generator[NPFloatArray,None,None]:
         """Tries to find multiple stationary solutions by deflation. The procedure is implemented according to 'Deflation techniques for finding distinct solutions of nonlinear partial differential equations' by
 Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/1410.5620.pdf .
 
@@ -7893,17 +9462,51 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             perturbation_amplitude (float, optional): Perturbation amplitude to move away from the previous solution. Defaults to 0.5.
             max_newton_iterations (Optional[int], optional): Optional override of the number of Newton iterations to try. Defaults to None.
             newton_relaxation_factor (Optional[float], optional): Optional override of the Newton relaxation factor. Defaults to None.
+            random_seed: Seed of the random perturbations. Pass None for a different sequence every run. Defaults to 0.
 
         Yields:
             The found solutions as lists of degrees of freedom
             
         """        
             
-        from .bifurcation_tools import DeflationAssemblyHandler
-        deflation=DeflationAssemblyHandler(alpha=deflation_alpha,p=deflation_p)
+        # A caller is free to walk away from this generator half-way -- the bifurcation GUI's Abort
+        # button does exactly that -- and the operator must come off when they do. Plain trailing code
+        # after the last yield does NOT run when a generator is closed; a finally does, so the body is
+        # delegated and the teardown put here.
+        try:
+            for _sol in self._iterate_over_multiple_solutions_by_deflation(
+                    deflation_alpha=deflation_alpha,deflation_p=deflation_p,
+                    perturbation_amplitude=perturbation_amplitude,max_newton_iterations=max_newton_iterations,
+                    newton_relaxation_factor=newton_relaxation_factor,use_eigenperturbation=use_eigenperturbation,
+                    skip_initial_solution=skip_initial_solution,num_random_tries=num_random_tries,
+                    keep_deflation_operator_active=keep_deflation_operator_active,random_seed=random_seed,
+                    distinct_solution_tolerance=distinct_solution_tolerance,deflation_scale=deflation_scale):
+                yield _sol
+        finally:
+            if not keep_deflation_operator_active:
+                self.set_deflation_operator(None)
+
+    def _iterate_over_multiple_solutions_by_deflation(self,deflation_alpha:float=0.1,deflation_p:int=2,perturbation_amplitude:float=0.5,max_newton_iterations:int | None=None,newton_relaxation_factor:float | None=None,use_eigenperturbation:bool=False,skip_initial_solution:bool=False,num_random_tries:int=1,keep_deflation_operator_active:bool=False,random_seed:int | None=0,distinct_solution_tolerance:float=1e-6,deflation_scale:float | None=None)-> Generator[NPFloatArray,None,None]:
+        """The body of :py:meth:`iterate_over_multiple_solutions_by_deflation`; see there."""
+        from .bifurcation_tools import DeflationOperator
+        # A dedicated generator, seeded by default: the search is a sequence of random perturbations,
+        # so with the global numpy state it was irreproducible from one run to the next -- and under
+        # MPI every rank would draw a DIFFERENT perturbation, converge differently, and take different
+        # branches of the code below, which is how ranks end up in mismatched collectives.
+        rng=numpy.random.default_rng(random_seed)
+        # The mesh walks behind the perturbation, done once per search instead of once per try.
+        perturbation_cache:dict[str,Any]={}
+        deflation=DeflationOperator(alpha=deflation_alpha,p=deflation_p)
         if not self.is_initialised():
             self.initialise()
-        self.set_custom_assembler(deflation)
+        # The length the deflation measures ||U-W|| in, so that deflation_alpha is dimensionless. The
+        # perturbation amplitude is the honest choice: it is already the user's statement of how far
+        # away a different solution might be, and it is the only length available when the state being
+        # deflated is the trivial one. Without it, alpha carries units of ||U-W||^-p and the same
+        # physics written in different units is a different deflation problem.
+        deflation.scale=float(deflation_scale) if deflation_scale is not None \
+                        else max(abs(perturbation_amplitude),1e-300)*numpy.sqrt(max(self.ndof(),1))
+        self.set_deflation_operator(deflation)
         
         self.solve(max_newton_iterations=max_newton_iterations,newton_relaxation_factor=newton_relaxation_factor)
         numtries=1
@@ -7919,7 +9522,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             yield U
         deflation.add_known_solution(U)
         while True:
-            new_sols=[]
+            new_sols:list[NPFloatArray]=[]
             for i,Ustart in enumerate(found_sols):    
                 
                 if use_eigenperturbation:
@@ -7928,6 +9531,9 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                         numtries+=1
                         self.solve(max_newton_iterations=max_newton_iterations,newton_relaxation_factor=newton_relaxation_factor)
                         Unew=self.get_current_dofs()[0]
+                        if not self._deflation_solution_is_new(Unew,found_sols+new_sols,distinct_solution_tolerance):
+                            print("Eigenperturbation of solution "+str(i)+" converged back onto a known solution. Skipping.")
+                            continue
                         self.solve_eigenproblem(1)
                         eigv=numpy.real(self.get_last_eigenvectors()[0])
                         eigv=eigv/numpy.amax(abs(eigv))
@@ -7936,14 +9542,17 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                         deflation.add_known_solution(Unew)
                         
                         yield Unew
-                    except:
+                    except Exception:
                         print("Eigenperturbation of solution "+str(i)+" failed to converge. Trying random perturbation")
                 for j in range(num_random_tries):
-                    self.set_current_dofs(Ustart+(numpy.random.rand(self.ndof())-0.5)*(perturbation_amplitude))
+                    self.set_current_dofs(Ustart+self._deflation_random_perturbation(perturbation_amplitude,rng,cache=perturbation_cache))
                     try:
                         numtries+=1
                         self.solve(max_newton_iterations=max_newton_iterations,newton_relaxation_factor=newton_relaxation_factor)
                         Unew=self.get_current_dofs()[0]
+                        if not self._deflation_solution_is_new(Unew,found_sols+new_sols,distinct_solution_tolerance):
+                            print("Random perturbation "+str(j+1)+"/"+str(num_random_tries)+" of solution "+str(i)+" converged back onto a known solution. Skipping.")
+                            continue
                         new_sols.append(Unew)
                         if use_eigenperturbation:
                             self.solve_eigenproblem(1)
@@ -7952,19 +9561,19 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                             eigen_perts.append(eigv*perturbation_amplitude)
                         deflation.add_known_solution(Unew)
                         yield Unew
-                    except:
+                    except Exception:
                         print("Random perturbation "+str(j+1)+"/"+str(num_random_tries)+" of solution "+str(i)+" failed to converge")
             if len(new_sols)==0:
                 print("No new solutions found. Stopping deflation. Found in total "+str(len(found_sols))+" in "+str(numtries)+" attempts.")
                 if not keep_deflation_operator_active:
-                    self.set_custom_assembler(None)
+                    self.set_deflation_operator(None)
                 self.set_current_dofs(U)                
                 return
             else:
                 found_sols+=new_sols
                 
 
-    def deflated_continuation(self,deflation_alpha:float=0.1,deflation_p:int=2,perturbation_amplitude:float=0.5,max_newton_iterations:int | None=None,newton_relaxation_factor:float | None=None,use_eigenperturbation:bool=False,skip_initial_solution:bool=False,num_random_tries:int=1,max_branches:int | None=None,branch_continue_iterations:int=10,**param_range):
+    def deflated_continuation(self,deflation_alpha:float=0.1,deflation_p:int=2,perturbation_amplitude:float=0.5,max_newton_iterations:int | None=None,newton_relaxation_factor:float | None=None,use_eigenperturbation:bool=False,skip_initial_solution:bool=False,num_random_tries:int=1,max_branches:int | None=None,branch_continue_iterations:int=10,random_seed:int | None=0,distinct_solution_tolerance:float=1e-6,deflation_scale:float | None=None,**param_range):
         """Scan over a parameter range and try to find multiple solutions for each parameter step by deflation
         This is an implemetation according to: The computation of disconnected bifurcation diagrams by Patrick E. Farrell, Casper H. L. Beentjes, Ásgeir Birkisson
         https://arxiv.org/pdf/1603.00809.pdf
@@ -7977,13 +9586,33 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             newton_relaxation_factor: Optional override of the Newton relaxation factor during deflated search for additional solutions. Defaults to None.
             use_eigenperturbation: Whether to use eigen perturbation for the next solution during deflation. Defaults to False.            
             num_random_tries: Number of random tries for finding solutions during deflation. Defaults to 1.
+            random_seed: Seed of the random perturbations. Pass None for a different sequence every run. Defaults to 0.
             max_branches: Maximum number of branches to find. Defaults to None.
             branch_continue_iterations: Number of iterations for continuing branches. Defaults to 10.
             
         Yields:
             A tuple of branch index (from 0 to ...), the current parameter value and the current degrees of freedom (dofs) for the solution.
         """ 
-        from .bifurcation_tools import DeflationAssemblyHandler
+        # See iterate_over_multiple_solutions_by_deflation: a caller that stops consuming this
+        # generator (the GUI's Abort) must still get the operator taken off the problem.
+        try:
+            for _item in self._deflated_continuation(
+                    deflation_alpha=deflation_alpha,deflation_p=deflation_p,
+                    perturbation_amplitude=perturbation_amplitude,max_newton_iterations=max_newton_iterations,
+                    newton_relaxation_factor=newton_relaxation_factor,use_eigenperturbation=use_eigenperturbation,
+                    skip_initial_solution=skip_initial_solution,num_random_tries=num_random_tries,
+                    max_branches=max_branches,branch_continue_iterations=branch_continue_iterations,
+                    random_seed=random_seed,distinct_solution_tolerance=distinct_solution_tolerance,
+                    deflation_scale=deflation_scale,**param_range):
+                yield _item
+        finally:
+            self.set_deflation_operator(None)
+
+    def _deflated_continuation(self,deflation_alpha:float=0.1,deflation_p:int=2,perturbation_amplitude:float=0.5,max_newton_iterations:int | None=None,newton_relaxation_factor:float | None=None,use_eigenperturbation:bool=False,skip_initial_solution:bool=False,num_random_tries:int=1,max_branches:int | None=None,branch_continue_iterations:int=10,random_seed:int | None=0,distinct_solution_tolerance:float=1e-6,deflation_scale:float | None=None,**param_range):
+        """The body of :py:meth:`deflated_continuation`; see there."""
+        from .bifurcation_tools import DeflationOperator
+        rng=numpy.random.default_rng(random_seed)   # see iterate_over_multiple_solutions_by_deflation
+        perturbation_cache:dict[str,Any]={}
         param=None
         rang=None
         for k,v in param_range.items():
@@ -7995,6 +9624,10 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         if param is None:
             raise RuntimeError("Please specify a parameter range like e.g. parameter_name=linspace(0,1,10)")
         assert rang is not None # rang is always set together with param in the loop above
+        # As iterate_over_multiple_solutions_by_deflation() does. Without it a parameter defined in
+        # define_problem() -- which has not run yet -- is reported as not existing.
+        if not self.is_initialised():
+            self.initialise()
         if param not in self.get_global_parameter_names():
             raise RuntimeError("Please specify a parameter that is defined in the problem")
         param_obj=self.get_global_parameter(param)
@@ -8004,14 +9637,14 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         self.go_to_param({param:rang.pop(0)})
         self.solve()
         branch_index=0
-        for dofs in self.iterate_over_multiple_solutions_by_deflation(max_newton_iterations=max_newton_iterations,perturbation_amplitude=perturbation_amplitude,deflation_alpha=deflation_alpha,deflation_p=deflation_p,newton_relaxation_factor=newton_relaxation_factor,use_eigenperturbation=use_eigenperturbation,skip_initial_solution=skip_initial_solution,num_random_tries=num_random_tries,keep_deflation_operator_active=True):
+        for dofs in self.iterate_over_multiple_solutions_by_deflation(max_newton_iterations=max_newton_iterations,perturbation_amplitude=perturbation_amplitude,deflation_alpha=deflation_alpha,deflation_p=deflation_p,newton_relaxation_factor=newton_relaxation_factor,use_eigenperturbation=use_eigenperturbation,skip_initial_solution=skip_initial_solution,num_random_tries=num_random_tries,keep_deflation_operator_active=True,random_seed=random_seed,distinct_solution_tolerance=distinct_solution_tolerance,deflation_scale=deflation_scale):
             active_branches[branch_index]=dofs
             yield branch_index,param_obj.value,dofs
             branch_index+=1            
-        deflator=cast(DeflationAssemblyHandler,self._custom_assembler)
+        deflator=cast(DeflationOperator,self._deflation_operator)
         if len(active_branches)==0:
             print("No solution found to start with")
-            self.set_custom_assembler(None)
+            self.set_deflation_operator(None)
             return
         
         for pv in rang:
@@ -8029,7 +9662,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                     deflator.add_known_solution(newdofs)
                     active_branches[bi]=newdofs
                     yield bi,param_obj.value,newdofs
-                except:
+                except Exception:
                     branches_to_remove.append(bi)
             
             # It could have happened that we accidentially switched branches due to the order of the deflation selection
@@ -8037,13 +9670,23 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             new_branches_to_remove=[]
             for bind_to_rem in branches_to_remove:
                 switch_index=None
-                mindist=numpy.linalg.norm(active_branches[bind_to_rem]-old_branches[bind_to_rem])
+                # inf, not the distance from this branch's own stored dofs to itself: the branch
+                # FAILED to continue, so active_branches[bind_to_rem] was never updated and still
+                # equals old_branches[bind_to_rem]. That made mindist exactly zero, no candidate could
+                # ever beat it, and the whole reordering below was dead code. (It also used to assign
+                # to cdist instead of mindist, so it would not have tracked the minimum either.)
+                mindist=numpy.inf
                 for other_branch,otherdofs in active_branches.items():
                     if other_branch in branches_to_remove:
                         continue
                     cdist=numpy.linalg.norm(otherdofs-old_branches[bind_to_rem])
-                    if cdist<mindist:
-                        cdist=mindist
+                    # "Nearest survivor" alone is not a swap: on the pitchfork the trivial branch is
+                    # simply the closest thing to a lower branch that has just died, and taking it over
+                    # renames the trivial branch halfway through the diagram. A swap means the survivor
+                    # landed on the DEAD branch's old position rather than on its own, so require that
+                    # too.
+                    if cdist<mindist and cdist<numpy.linalg.norm(otherdofs-old_branches[other_branch]):
+                        mindist=float(cdist)
                         switch_index=other_branch
                 if switch_index is not None:
                     print("Switching branch {} with {}".format(bind_to_rem,switch_index))
@@ -8063,17 +9706,28 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                     
                     print("Checking for a new solution",branch_index,branches_to_remove)
                     self.set_current_dofs(dofs)
-                    self.perturb_dofs((numpy.random.rand(self.ndof())-0.5)*(perturbation_amplitude))
+                    self.perturb_dofs(self._deflation_random_perturbation(perturbation_amplitude,rng,cache=perturbation_cache))
                     param_obj.value=pv
                     try:                    
                         self.solve(max_newton_iterations=max_newton_iterations,newton_relaxation_factor=newton_relaxation_factor)
-                        print("Found new solution after ",len(self.get_last_residual_convergence()),"steps",self.get_last_residual_convergence())
                         newdofs=self.get_current_dofs()[0]
+                        known=list(active_branches.values())+list(branches_to_add.values())
+                        if not self._deflation_solution_is_new(newdofs,known,distinct_solution_tolerance):
+                            # A branch that has just been continued and one found by deflation can be
+                            # the same solution: at a bifurcation the branches meet, and the deflated
+                            # solve lands back on the known one to the last few digits. Opening a
+                            # branch for it is what produced the one-point stubs in the diagram.
+                            print("Deflation converged back onto an existing branch. Not opening a new one.")
+                            remaining_perturbation_tries-=1
+                            if remaining_perturbation_tries<=0:
+                                success=False
+                            continue
+                        print("Found new solution after ",len(self.get_last_residual_convergence()),"steps",self.get_last_residual_convergence())
                         deflator.add_known_solution(newdofs)
                         branches_to_add[branch_index]=newdofs                        
                         yield branch_index,param_obj.value,newdofs
                         branch_index+=1
-                    except:
+                    except Exception:
                         remaining_perturbation_tries-=1
                         if remaining_perturbation_tries<=0:
                             success=False
@@ -8083,7 +9737,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             for bi,newdofs in branches_to_add.items():
                 active_branches[bi]=newdofs
         
-        self.set_custom_assembler(None)
+        self.set_deflation_operator(None)
         return
 
     def _check_distributed_remeshing_scope(self,remeshers:list["RemesherBase"],num_adapt:int | None)->None:
@@ -8183,10 +9837,10 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         Only the domains that were actually replaced: their meshes are new and carry no directives yet,
         while an untouched domain still holds its own and would collect a duplicate per remesh. Call
         only after ``rebuild_global_mesh_from_list()``, which is what points every code generator -
-        the interface ones included - at its new mesh; ``register_refinement_directives`` reads
+        the interface ones included - at its new mesh; ``_register_refinement_directives`` reads
         ``codegen._mesh``."""
         for _name,newmesh in new_meshes.items():
-            newmesh.get_eqtree()._register_refinement_directives()
+            newmesh.get_eqtree()._register_all_refinement_directives()
 
     def _redistribute_after_remeshing(self)->None:
         """Partition the rebuilt meshes again, since remeshing replaces them whole and replicated.
@@ -8219,10 +9873,42 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         for m in meshes:
             m.assign_global_base_element_indices()
 
+        # The ODE meshes are the one thing a remesh does NOT rebuild: they have no geometry, so they
+        # come into the second distribute() still carrying the halo marks of the first one, while every
+        # other mesh has just been regenerated whole and replicated. oomph then re-partitions a mesh
+        # that thinks it is already partitioned, and the ranks can come out deferring to each other -
+        # rank 0 "the owner is rank 1", rank 1 "the owner is rank 0" - so the element is owned by
+        # nobody and its dof is never numbered. On hanging_droplet.py that dof is globals/p_gas, the
+        # gas pressure enforcing the droplet volume: the constraint silently disappears (12097 dofs
+        # instead of 12098) and the next Newton solve diverges from 1.1 to 1e10.
+        #
+        # Put them back into the state the bulk meshes are in - undistributed, owned by everyone -
+        # and let the distribute below assign ownership from scratch, as it does at startup.
+        for _m in self._meshdict.values():
+            if isinstance(_m,ODEStorageMesh):
+                _m.get_element().set_halo_owner(-1)
+
         if not self.is_quiet():
             print("REDISTRIBUTING THE REMESHED PROBLEM")
         self.actions_before_distribute()
         self.distribute()
+        # Put the nodes back where the macro elements say they are. distribute() builds the halo
+        # copies of the elements a rank does not own, and oomph-lib places their nodes itself rather
+        # than taking the positions the mesh already has; on a strongly curved boundary that lands
+        # somewhere else. Measured on a coalesced axisymmetric drop (a spline with a thin bridge in
+        # it): three nodes came out up to 1.4e-2 away from where the owning rank has them, so the two
+        # ranks held the same node at two positions. check_halo_consistency() reports six mismatches,
+        # merging the mesh data refuses ("Nodes identified across processes disagree on their
+        # position"), and oomph's own warning about that state is that adaptation and equation
+        # numbering diverge between the processes.
+        #
+        # Idempotent for every other node: force_remesh() maps the nodes onto the macro elements just
+        # before the interpolation, and the interpolation only writes position HISTORY, never the
+        # current position. A no-op where there are no macro elements left, i.e. on a moving mesh,
+        # whose macro elements remove_macro_elements() has already stripped.
+        for _m in self._meshdict.values():
+            if not isinstance(_m,ODEStorageMesh):
+                _m.map_nodes_on_macro_elements()
         self.actions_after_distribute()
 
     def _is_uniformly_refined(self,mesh:"AnySpatialMesh")->bool:
@@ -8236,6 +9922,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         return len(levels)<=1
 
     def force_remesh(self, only_domains:set[MeshTemplate] | None=None, num_adapt:int | None=None,interpolator:type["BaseMeshToMeshInterpolator"] | None=None):
+        self._require_no_deflation("Remeshing")
         if interpolator is None:
             interpolator=self.mesh_interpolator
         if self._debug_remeshing:
@@ -8245,7 +9932,13 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             self.output()
         remeshers:list["RemesherBase"] = []
         if only_domains is not None:
-            for t in only_domains:
+            # In the problem's own template order, never in the order of the given set: see
+            # _rank_independent_template_order(). A template the problem does not know about at all
+            # can only be appended in the caller's order, but _agree_on_domains_to_remesh() already
+            # warns that such a request cannot be made unanimous.
+            ordered=[t for t in self._rank_independent_template_order() if t in only_domains]
+            ordered+=[t for t in only_domains if t not in ordered]
+            for t in ordered:
                 if t.remesher is not None:
                     remeshers.append(t.remesher)
         else:
@@ -8272,7 +9965,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             if len(dof_deriv)>0:
                 dof_current=self.get_arclength_dof_current_vector()
                 # Store the arclength in the history
-                _actual_dofs,_positional_dofs,pinned_values=self.get_all_values_at_current_time(True)            
+                _actual_dofs,_positional_dofs,pinned_values=self._get_all_values_at_current_time(True)            
                 self.set_current_pinned_values(0*pinned_values,True,5)
                 self.set_current_pinned_values(0*pinned_values,True,6)
                 self.set_history_dofs(5,dof_deriv)
@@ -8282,6 +9975,10 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                 
         
                 
+        # A run of "consecutive solves that inverted" is a statement about the mesh being replaced,
+        # so it must not carry over: see Problem::reset_inversion_counter.
+        self._reset_inversion_counter()
+
         self.actions_before_remeshing(remeshers)
         for r in remeshers:
             r.remesh()
@@ -8336,6 +10033,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                 print("REBUILDING GLOBAL MESH")
             self.rebuild_global_mesh()
         for mt in self._meshtemplate_list:
+            self._assign_interface_topological_ids()
             mt._connect_opposite_elements(self._equation_system) 
 
         self.rebuild_global_mesh_from_list(rebuild=True)
@@ -8365,11 +10063,17 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
 
 
         for name, newmesh in new_meshes.items():
-            
             oldmesh = old_meshes[name]
             #oldmesh.prepare_interpolation() # This one will change the Lagrangian coordinates!
             interpolators[name]=interpolator(oldmesh,newmesh)
-            oldmesh.get_eqtree()._before_mesh_to_mesh_interpolation(interpolators[name])
+        # All of them first, and only then the hooks: an equation on a boundary that two domains
+        # SHARE (a free surface between two phases) is dispatched with its own domain's interpolator
+        # only, yet has to configure the transfer on both sides of that boundary. See
+        # BaseMeshToMeshInterpolator.remesh_group.
+        for _, interp in interpolators.items():
+            interp.remesh_group=interpolators
+        for name in new_meshes.keys():
+            old_meshes[name].get_eqtree()._before_mesh_to_mesh_interpolation(interpolators[name])
 
         if num_adapt > 0:
             no_need_to_reassign = False
@@ -8420,7 +10124,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
     def _define_state_header(self,state:DumpFile)->str:
         """Read or write the header of a state file: what it is, which format version, and how it is sharded.
 
-        Shared by define_state_file and _get_time_of_state_file, which peeks at the first entries
+        Shared by _define_state_file and _get_time_of_state_file, which peeks at the first entries
         without reading the rest - so the order of these entries is part of the format and the two must
         not drift apart. Returns the version."""
         state.string_data(lambda: self._dump_header, lambda s: state.assert_equal(s, self._dump_header))
@@ -8446,7 +10150,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         return t,s
 
     # This function defines the state file, i.e. storing or reading all relevant information of the current status of the simulations
-    def define_state_file(self, state:DumpFile,ignore_loading_eigendata:bool=False,ignore_continuation_data=False,additional_info={}):
+    def _define_state_file(self, state:DumpFile,ignore_loading_eigendata:bool=False,ignore_continuation_data=False,additional_info={}):
         # The header comes first and in that order, because _get_time_of_state_file peeks at the entries
         # up to the output step without reading the rest. Both go through _define_state_header.
         self._define_state_header(state)
@@ -8455,7 +10159,8 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         state.float_data(lambda: self.get_current_time(dimensional=True, as_float=True),lambda t: self.set_current_time(t, dimensional=True, as_float=True))
         self._output_step = state.int_data(lambda: self._output_step, lambda s: s)
 
-        # Continue section step
+        # Continue section step - always 0 since can_continue_section() was removed, but the slot has
+        # to stay where it is, or old state files no longer line up.
         self._continue_section_step_loaded=state.int_data(lambda: self._continue_section_step,lambda v:v)
 
         # From here on, you can in principle modify. Of course, old state files are incompatible once you add/remove anything here
@@ -8472,8 +10177,8 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         new_meshes:dict[str,MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d] = {}
         old_meshes:dict[str,MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d]= {}
         for _i,templ in enumerate(self._meshtemplate_list):
-            old=templ.get_template()
-            new=templ.define_state_file(state,additional_info=additional_info)
+            old=templ._get_template()
+            new=templ._define_state_file(state,additional_info=additional_info)
             if not state.save:
 #                print("OLD VS NEW",old,new)
                 if old!=new:
@@ -8507,8 +10212,9 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                     if not self.is_quiet():
                         print("REBUILDING GLOBAL MESH")
                     self.rebuild_global_mesh()
+                self._assign_interface_topological_ids()
                 for mt in self._meshtemplate_list:
-                    mt._connect_opposite_elements(self._equation_system) 
+                    mt._connect_opposite_elements(self._equation_system)
 
                 self.rebuild_global_mesh_from_list(rebuild=True)
                 self.reapply_boundary_conditions()
@@ -8570,6 +10276,16 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             # different point in time. Clear it, so run() falls back to the dt that was last taken.
             self._suggested_next_dt=None
 
+        # Which run statement was executing when this was written (NaN when none was, e.g. an explicit
+        # save_state between run calls). Only a state written by the very statement we are resuming
+        # into may hand it its time step; see the continue branch of run().
+        if state.version_at_least(0,1,5):
+            _run_endtime=state.float_data(lambda: float("nan") if self._run_statement_endtime is None else self._run_statement_endtime, lambda v: v)
+            if not state.save:
+                self._loaded_run_statement_endtime=None if math.isnan(_run_endtime) else _run_endtime
+        elif not state.save:
+            self._loaded_run_statement_endtime=None
+
         # Mesh list
         nummeshes = len(self._meshdict)
         nummeshes = state.int_data(lambda: nummeshes, lambda n: state.assert_equal(n, nummeshes)) #type:ignore
@@ -8579,7 +10295,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             assert meshname in self._meshdict.keys()
             mesh = self._meshdict[meshname]
             assert not isinstance(mesh,InterfaceMesh)            
-            mesh.define_state_file(state,additional_info={})
+            mesh._define_state_file(state,additional_info={})
         # Interface and skeleton element data, i.e. everything a facet field owns: DL/D0 and the nodal
         # DG spaces alike live in the interface element's own internal Data, and no other block of the
         # file holds them. Without this the file could only reproduce the bulk state and would refit
@@ -8595,7 +10311,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             n_if = state.int_data(lambda: n_if, lambda n: n) #type:ignore
             if state.save:
                 for _m in imeshes:
-                    state.string_data(lambda _m=_m: _m.get_full_name(), lambda s: s)
+                    state.string_data(lambda _m=_m: _m.get_full_name(), lambda s: s) #type:ignore[misc] # late binding by default argument
                     save_interface_state(_m, state)
             else:
                 self._pending_interface_states = {}
@@ -8676,7 +10392,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             if not state.save and not ignore_continuation_data:
                 # PARKED, not applied here. The meshes have been read by this point but the equation
                 # numbering has not been rebuilt yet - rebuild_global_mesh_from_list, actions_after_adapt
-                # and reapply_boundary_conditions all run after define_state_file returns. So ndof is
+                # and reapply_boundary_conditions all run after _define_state_file returns. So ndof is
                 # still the OLD problem's, and applying a tangent belonging to the file's (adapted) mesh
                 # threw "Mismatching size in the dof direction vector" for any state saved on a refined
                 # mesh. Same reason the interface values are parked for _apply_interface_states().
@@ -8692,6 +10408,21 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                 
 
         
+    def backup_state(self, quiet:bool=True)->IO[bytes]:
+        """Write the full state of the problem to a memory buffer, so that it can be restored with load_state. 
+        This is a convenience wrapper around save_state that uses an in-memory stream instead
+        
+        
+        Args:
+            quiet (bool): If True, suppresses output messages during the backup process. Default is True.
+        
+        Returns:
+            IO[bytes]: A binary stream containing the serialized state of the problem.
+        """
+        buf=io.BytesIO()
+        self.save_state(buf,quiet=quiet)
+        buf.seek(0)
+        return buf
 
 
     def save_state(self, fname:str | IO[bytes],relative_to_output:bool=False,quiet:bool=False)->None:
@@ -8707,9 +10438,12 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
 
         Writing to a FILE is collective under MPI in every case, distributed or not: no rank returns
         before the file is complete on disk, so a load_state of it right afterwards is safe. Writing
-        to a stream is rank-local, since the stream is."""
+        to a stream is rank-local when the problem is not distributed. When it IS, the merged stream
+        is broadcast so that every rank ends up holding the same complete state -- load_state needs
+        every rank to read the whole thing back."""
         distributed=self.is_distributed()
         to_file=isinstance(fname,str)
+
         # Every rank holds the whole problem when it is not distributed, so one of them writing the
         # FILE is enough. The others used to return right here - and then raced ahead into a
         # load_state of that very file while rank 0 was still writing it: FileNotFoundError on one
@@ -8727,7 +10461,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             if relative_to_output:
                 assert isinstance(fname,str), "relative_to_output makes no sense when writing to a stream"
                 fname=os.path.join(self.get_output_directory(),fname)
-            # On a DISTRIBUTED problem all ranks walk through define_state_file - that is where they
+            # On a DISTRIBUTED problem all ranks walk through _define_state_file - that is where they
             # hand their part of the mesh over - but only rank 0 writes anything, the others send
             # their bytes to /dev/null, because the result is one merged, partition-independent
             # stream.
@@ -8740,7 +10474,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             writes_here = (get_mpi_rank()==0) or (not distributed)
             dump = DumpFile(fname if writes_here else os.devnull, True,compression_level=self.states_compression_level)
             try:
-                self.define_state_file(dump)
+                self._define_state_file(dump)
                 dump.write_footer("EOF_pyoomph")
                 dump.close()
             except BaseException as e:
@@ -8749,13 +10483,35 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         # otherwise leave the others waiting in the next collective - the run would hang instead of
         # reporting the failure - and for a FILE they also pin every rank here until it is written.
         if distributed:
-            # Every rank ran define_state_file, so any of them can be the one that failed.
+            # Every rank ran _define_state_file, so any of them can be the one that failed.
             mpi_share_any_failure(error,context="writing the state file")
         elif to_file:
             # Only rank 0 wrote; the others skipped the section entirely and learn about it here.
             mpi_share_root_failure(error,context="writing the state file")
         elif error is not None:
             raise error # a per-rank private stream: nothing to agree on
+        if distributed and not to_file and error is None:
+            # A DISTRIBUTED stream save left rank 0 holding the whole merged state and every other
+            # rank holding NOTHING -- measured at np=2 --distribute, 5726 bytes against 0 -- because
+            # the merge above sends the non-root ranks' bytes to /dev/null. That is right for a file,
+            # where there is one; for a stream "the file" is each rank's own private object.
+            #
+            # Broadcast rather than refuse, because load_state needs every rank to read the whole
+            # state back and _snapshot_state already had to do exactly this broadcast for itself. Left
+            # alone it does not fail, it HANGS: load_state of the empty stream raises on the non-root
+            # ranks while rank 0 loads happily, and the ranks then split -- the one that raised leaves
+            # for load_state's mpi_share_any_failure barrier while the others are still inside
+            # _load_state's own collectives (reapply_boundary_conditions -> assign_eqn_numbers ->
+            # MPI_Alltoall). That barrier cannot catch it: it sits AFTER _load_state, which is itself
+            # collective.
+            comm=get_mpi_world_comm()
+            if comm is not None and get_mpi_nproc()>1:
+                payload=comm.bcast(fname.getvalue() if get_mpi_rank()==0 else None,root=0) #type:ignore
+                if get_mpi_rank()>0:
+                    fname.seek(0) #type:ignore
+                    fname.truncate(0) #type:ignore
+                    fname.write(payload) #type:ignore
+                    fname.seek(0) #type:ignore
 
 
     def load_state(self, fname:str | IO[bytes],ignore_outstep:bool=False,relative_to_output:bool=False,ignore_eigendata:bool=False,ignore_continuation_data:bool=False,additional_info:dict[Any,Any]={},quiet:bool=False):
@@ -8778,7 +10534,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
     def _apply_parked_continuation_data(self):
         """Apply the continuation tangent read from a state file, once the equations are renumbered.
 
-        Parked during define_state_file because ndof is not final there yet; see the note at the parking
+        Parked during _define_state_file because ndof is not final there yet; see the note at the parking
         site. A length that still does not match is dropped with a message instead of raising: that
         happens for a file written while a bifurcation tracker was active (the vector has the augmented
         length and means nothing on the plain system) and for one whose mesh cannot be restored, and a
@@ -8804,7 +10560,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
     def _apply_interface_states(self):
         """Push the interface/skeleton element data read from a state file onto the rebuilt meshes.
 
-        Separate from reading because the elements are rebuilt in between; see define_state_file. An
+        Separate from reading because the elements are rebuilt in between; see _define_state_file. An
         interface named in the file but absent now, or an element whose key is not in the file, is left
         alone: that is a mesh which has changed since the file was written, and the rebuild's own
         transfer is a better answer there than nothing."""
@@ -8829,7 +10585,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             assert isinstance(fname,str), "relative_to_output makes no sense when reading from a stream"
             fname=os.path.join(self.get_output_directory(),fname)
 
-        _pyoomph.set_interpolate_new_interface_dofs(False) # We may not interpolate the additional dofs on newly constructed interface nodes
+        self.set_interpolate_new_interface_dofs(False) # We may not interpolate the additional dofs on newly constructed interface nodes
         self.invalidate_cached_mesh_data()
         dump = DumpFile(fname, False)
         good=dump.check_footer("EOF_pyoomph")
@@ -8838,7 +10594,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         for m in self._interfacemeshes:
             m.clear_before_adapt()
         oldoutstep=self._output_step
-        self.define_state_file(dump,ignore_loading_eigendata=ignore_eigendata,ignore_continuation_data=ignore_continuation_data,additional_info=additional_info)
+        self._define_state_file(dump,ignore_loading_eigendata=ignore_eigendata,ignore_continuation_data=ignore_continuation_data,additional_info=additional_info)
         self.invalidate_cached_mesh_data()
         if ignore_outstep:
             self._output_step=oldoutstep
@@ -8885,7 +10641,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             self.actions_before_transient_solve()
         elif self._last_bc_setting=="stationary":
             self.actions_before_stationary_solve()
-        _pyoomph.set_interpolate_new_interface_dofs(True) # Activate the interpolation again, good for spatial adaptivity
+        self.set_interpolate_new_interface_dofs(True) # Activate the interpolation again, good for spatial adaptivity
         return True
 
     ############################################################################################
@@ -8906,16 +10662,10 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             self.save_state(fname,quiet=True)
             return fname
         buf=io.BytesIO()
+        # save_state now broadcasts the merged stream itself when distributed -- this method used to
+        # do that here, and it was the only thing standing between a plain user save_state(BytesIO())
+        # on a --distribute problem and a hang in the load_state that followed.
         self.save_state(buf,quiet=True)
-        if self.is_distributed():
-            # save_state merges the mesh into ONE partition-independent stream that only rank 0 ends
-            # up holding, while load_state needs every rank to read the whole thing. So the buffer
-            # has to travel; that broadcast is the only extra cost a distributed snapshot has.
-            comm=get_mpi_world_comm()
-            assert comm is not None
-            return cast(bytes,comm.bcast(buf.getvalue() if get_mpi_rank()==0 else None,root=0))
-        # Not distributed: every rank holds the whole problem and wrote its own complete buffer
-        # (save_state skips the redundant-writer guard for streams), so there is nothing to share.
         return buf.getvalue()
 
     def _state_snapshot_name(self)->str:
@@ -9004,11 +10754,20 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
 
     def _solve_with_adapt_recovery(self,spatial_adapt:int,transient:bool,shift_values:bool,do_solve:Callable[[int,bool],Any])->Any:
         """Run the oomph-lib solve call, letting :py:attr:`adaptive_resolve_recovery` handle a failed
-        re-solve after an adaptation. Without a policy this is just ``do_solve(...)``."""
-        policy=self.adaptive_resolve_recovery
-        if policy is None or not policy.active or spatial_adapt<=0:
-            return do_solve(spatial_adapt,shift_values)
-        return policy.run(self,do_solve,spatial_adapt,shift_values,transient)
+        re-solve after an adaptation. Without a policy this is just ``do_solve(...)``.
+
+        Also the point at which a remesh requested during the solve is carried out - see
+        :py:meth:`_perform_pending_remesh` for why it cannot happen inside the call."""
+        def run_once()->Any:
+            policy=self.adaptive_resolve_recovery
+            if policy is None or not policy.active or spatial_adapt<=0:
+                return do_solve(spatial_adapt,shift_values)
+            return policy.run(self,do_solve,spatial_adapt,shift_values,transient)
+        res=self._solve_with_inversion_remesh(run_once)
+        # Deliberately NOT in a finally: a solve that threw leaves a state nothing should be
+        # remeshed from, and the request stays pending for the next successful solve.
+        self._perform_pending_remesh()
+        return res
 
     def _adaptive_solve_checkpoint(self,isolve:int,just_adapted:bool)->None:
         """Called from oomph-lib immediately before and after every adapt() in an adaptive solve."""
@@ -9120,63 +10879,6 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
 
 
     # Called from load_balance
-    def _build_mesh(self):
-        print("Building mesh in Python","On enter, we have",self.nsub_mesh(),"submeshes, and the mesh dict keys are: "+str(self._meshdict.keys()))
-        for meshname,eqtree in self._equation_system.get_children().items(): 
-            #Find the mesh that generates the mesh we want to have
-            if eqtree._equations is None: 
-                raise RuntimeError("Empty bulk equations")
-            mesh=None
-            for m in self._meshtemplate_list:
-                if m.has_domain(meshname):
-                    previous_mesh=self._meshdict.get(meshname,None)
-                    assert previous_mesh is None or isinstance(previous_mesh,(MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d))
-                    mesh=MeshFromTemplate(self,m,meshname,eqtree,previous_mesh=previous_mesh)
-
-                    self._meshdict[meshname]=mesh
-                    assert eqtree._equations is not None
-                    eqtree._equations._mesh=mesh  #type:ignore
-                    eqtree.get_code_gen()._mesh=mesh
-                    mesh._finalise_creation()
-                    print("Mesh '"+meshname+"' generated from template '"+str(m)+"'","NELEMENTS: ",mesh.nelement())
-            if eqtree._equations._is_ode(): 
-                if mesh is not None:
-                    if not isinstance(mesh,ODEStorageMesh):
-                        raise RuntimeError("Cannot add an ODE to a spatial mesh yet")
-                mesh=ODEStorageMesh(self,eqtree,meshname)
-                eqtree.get_code_gen()._mesh=mesh 
-                eqtree.get_code_gen().set_latex_printer(self.latex_printer)
-                self._meshdict[meshname]=mesh
-                raise RuntimeError("ODE meshes are not fully implemented yet. Please check whether this works")
-            else:
-                if mesh is None:
-                    #print(str(self._equation_system))
-                    avdoms=set()
-                    for m in self._meshtemplate_list:
-                        avdoms.update(set(m._domains.keys()))
-                    raise RuntimeError("No mesh template with a domain named '"+meshname+'" was added, but there are equations defined on this domain. Available domains are '+str(avdoms))
-        print("Finished building mesh in Python")
-        print("Mesh dict keys: "+str(self._meshdict.keys()))
-        self._interfacemeshes=[]
-        print(self._interfacemeshes)
-        self.rebuild_global_mesh_from_list(rebuild=False)
-        #self.rebuild_global_mesh()
-        print("NSUBMESH",self.nsub_mesh())
-        import gc
-        gc.collect()
-        gc.collect()
-        gc.collect()
-        gc.collect()
-        self.rebuild_global_mesh()
-        
-        self.invalidate_cached_mesh_data()
-        #eqs=self._equation_system.get_by_path("domain")
-        
-        #out=cast(CombinedEquations,eqs)
-        #out.
-        #print(eqs)
-        #exit()
-        
     def load_balance(self):
         if not self.is_distributed():
             return

@@ -1,5 +1,7 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #
 #  @section LICENSE
 #
@@ -149,6 +151,31 @@ def _eigenvector_norms(p, index=0):
             "evect_absmax": float(numpy.amax(numpy.absolute(ev)))}
 
 
+def _converged_max_residual(p):
+    """max|R| of the augmented system, measured the way the tracking solve converged it.
+
+    Problem.solve() is a STATIONARY solve: it makes every timestepper steady, converges, and restores
+    them to unsteady before returning. So a get_residuals() call afterwards assembles the UNSTEADY
+    Jacobian - including the BDF d/dt term - while the tracker converged the steady one, and the
+    eigenvector rows J*Y come out at the size of that d/dt term rather than at the Newton tolerance.
+    On the pitchfork case that is 8.3e-4 against Newton's own 3.5e-11: same dofs to the last bit, same
+    parameter, only 225 of 452 rows differ and they are exactly the J*Y ones.
+
+    Making the timesteppers steady for the measurement is what makes this number mean what the
+    caller's comment says it means.
+    """
+    n = p.ntime_stepper()
+    was_steady = [p.time_stepper_pt(i).is_steady() for i in range(n)]
+    for i in range(n):
+        p.time_stepper_pt(i).make_steady()
+    try:
+        return float(numpy.amax(numpy.absolute(p.get_residuals())))
+    finally:
+        for i in range(n):
+            if not was_steady[i]:
+                p.time_stepper_pt(i).undo_make_steady()
+
+
 def _sorted_spectrum(evals):
     """Eigenvalues in a comparable order. Numbering-independent, so it survives distribute()."""
     ev = numpy.array(sorted(evals, key=lambda z: (round(numpy.real(z), 9), round(numpy.imag(z), 9))))
@@ -243,7 +270,7 @@ def fold_case(N=8, lam0=4.0, outdir=None, eigenvector_scaling="unit", with_guess
             "param": float(p.lam.value),
             # The residual of the CONVERGED augmented system: a tracking solve that "converged" onto
             # a system assembled inconsistently across ranks shows up here and nowhere else.
-            "max_residual": float(numpy.amax(numpy.absolute(p.get_residuals()))),
+            "max_residual": _converged_max_residual(p),
         }
         res.update(_eigenvector_norms(p))
         if with_eigen:
@@ -287,7 +314,7 @@ def hopf_case(N=20, B0=2.5, outdir=None, with_eigen=False):
             # The Hopf frequency lives on rank 0's dof vector alone when distributed, so this also
             # certifies that synchronise() broadcast it back to the other ranks.
             "omega": float(p._get_bifurcation_omega()),
-            "max_residual": float(numpy.amax(numpy.absolute(p.get_residuals()))),
+            "max_residual": _converged_max_residual(p),
         }
         res.update(_eigenvector_norms(p))
         if with_eigen:
@@ -328,7 +355,23 @@ class ReactionDiffusionEquations(Equations):
 
 
 class PitchforkProblem(Problem):
-    """Reaction-diffusion on a unit square with u=0 all around: pitchfork at lam = 2*pi^2."""
+    """Reaction-diffusion on a rectangle with u=0 all around: pitchfork at the first Dirichlet mode.
+
+    A 1 x 1.05 rectangle rather than the unit square, and the aspect ratio is load-bearing. On the
+    SQUARE the (1,2) and (2,1) Dirichlet modes are degenerate by symmetry -- here at lam-59.26 and
+    lam-29.63 twice -- and _eigen_during_tracking asks for exactly 4 eigenvalues, so the truncation
+    falls INSIDE that degenerate pair. Which of the two a Krylov solver returns in the fourth slot is
+    then its own business: under --distribute the tracked half came back with both copies of -29.63
+    and the untracked half with one copy plus the next mode at -79.18, and the A/B assertion compared
+    two spectra that were both correct. Verified at n=6, where both halves agree entry for entry, and
+    by 1 x 1.05, which splits the pair to -29.63/-26.87 and makes n=4 unambiguous again.
+
+    Not a solver defect and not worth a tolerance: an nev cut inside a degenerate cluster has no
+    well-defined answer, so the fix is to not put one there. The bifurcation is unaffected -- it is
+    still the symmetry breaking of u=0 in the first mode, only at lam = pi^2*(1 + 1/1.05^2).
+    """
+
+    ASPECT = 1.05
 
     def __init__(self, N=8):
         super().__init__()
@@ -336,7 +379,7 @@ class PitchforkProblem(Problem):
         self.lam = self.define_global_parameter(lam=1)
 
     def define_problem(self):
-        self += RectangularQuadMesh(N=self.N)
+        self += RectangularQuadMesh(N=self.N, size=[1.0, self.ASPECT])
         eqs = ReactionDiffusionEquations(self.lam)
         for b in ["left", "right", "top", "bottom"]:
             eqs += DirichletBC(u=0) @ b
@@ -394,7 +437,7 @@ def _reaction_case(prob, bifurcation_type, lam_start, lam_step, azimuthal_m, out
             "distributed": bool(p.is_distributed()),
             "param": float(p.lam.value),
             "omega": float(p._get_bifurcation_omega()),
-            "max_residual": float(numpy.amax(numpy.absolute(p.get_residuals()))),
+            "max_residual": _converged_max_residual(p),
         }
         res.update(_eigenvector_norms(p))
         if with_eigen:

@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -47,15 +47,15 @@ namespace pyoomph
 	// Sets up a single dummy "node" purely so the generic shape-buffer machinery has something to
 	// allocate against; the element has no actual continuous or DL spaces (nnode_of_space and
 	// nnode_DL are forced to 0), only D0 fields.
-	BulkElementODE0d::BulkElementODE0d(DynamicBulkElementInstance *code_inst, oomph::TimeStepper *tstepper) : timestepper(tstepper)
+	BulkElementODE0d::BulkElementODE0d(DynamicJITCode *jit_code, oomph::TimeStepper *tstepper) : timestepper(tstepper)
 	{
 		//std::cout << "CONSTRUCT BULK ODE 0D " << this << std::endl;
-		this->codeinst = code_inst;
-		eleminfo.elem_ptr = this;
+		this->jitcode = jit_code;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		eleminfo.nnode = 1; // One dummy node... Necessary to create the buffers
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 0;
 		eleminfo.nnode_DL = 0;
-		eleminfo.nodal_dim = codeinst->get_func_table()->nodal_dim;
+		eleminfo.nodal_dim = jitcode->get_func_table()->nodal_dim;
 		this->set_nodal_dimension(eleminfo.nodal_dim);
 		this->set_integration_scheme(&Default_integration_scheme);
 		allocate_discontinous_fields();
@@ -73,7 +73,7 @@ namespace pyoomph
 	// Copies the current D0 field values into a flat buffer for export to numpy.
 	void BulkElementODE0d::to_numpy(double *dest)
 	{
-		unsigned nD0 = codeinst->get_func_table()->info_D0.numfields;
+		unsigned nD0 = jitcode->get_func_table()->info_D0.numfields;
 		for (unsigned int i = 0; i < nD0; i++)
 			dest[i] = this->internal_data_pt(i)->value(0); // TODO Scaling
 	}
@@ -92,14 +92,14 @@ namespace pyoomph
 	// (C1/C1TB/C2/C2TB/DL) degenerate to a single shape function that is identically 1.
 	PointElement0d::PointElement0d()
 	{
-		eleminfo.elem_ptr = this;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		eleminfo.nnode = 1;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 1;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 1;
 		eleminfo.nnode_of_space[SPACE_INDEX_C2] = 1;
 		eleminfo.nnode_of_space[SPACE_INDEX_C2TB] = 1;
 		eleminfo.nnode_DL = 1;
-		eleminfo.nodal_dim = codeinst->get_func_table()->nodal_dim;
+		eleminfo.nodal_dim = jitcode->get_func_table()->nodal_dim;
 		this->set_nodal_dimension(eleminfo.nodal_dim);
 		allocate_discontinous_fields();
 	}
@@ -177,12 +177,12 @@ namespace pyoomph
 	// nodal (Q1) space, and DL uses the same linear shape functions on its own discontinuous copy.
 	BulkElementLine1dC1::BulkElementLine1dC1()
 	{
-		eleminfo.elem_ptr = this;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		eleminfo.nnode = 2;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 2;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 2;
 		eleminfo.nnode_DL = 2;
-		eleminfo.nodal_dim = codeinst->get_func_table()->nodal_dim;
+		eleminfo.nodal_dim = jitcode->get_func_table()->nodal_dim;
 		this->set_nodal_dimension(eleminfo.nodal_dim);
 		allocate_discontinous_fields();
 	}
@@ -278,14 +278,14 @@ namespace pyoomph
 	// discontinuous linear copy living on its own 2 "nodes".
 	BulkElementLine1dC2::BulkElementLine1dC2()
 	{
-		eleminfo.elem_ptr = this;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		eleminfo.nnode = 3;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 2;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 2;
 		eleminfo.nnode_of_space[SPACE_INDEX_C2] = 3;
 		eleminfo.nnode_of_space[SPACE_INDEX_C2TB] = 3;
 		eleminfo.nnode_DL = 2;
-		eleminfo.nodal_dim = codeinst->get_func_table()->nodal_dim;
+		eleminfo.nodal_dim = jitcode->get_func_table()->nodal_dim;
 		this->set_nodal_dimension(eleminfo.nodal_dim);
 		allocate_discontinous_fields();
 	}
@@ -391,12 +391,12 @@ namespace pyoomph
 	// tetrahedral elements. Otherwise the same linear (2-node) element as BulkElementLine1dC1.
 	BulkTElementLine1dC1::BulkTElementLine1dC1()
 	{
-		eleminfo.elem_ptr = this;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		eleminfo.nnode = 2;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 2;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 2;
 		eleminfo.nnode_DL = 2;
-		eleminfo.nodal_dim = codeinst->get_func_table()->nodal_dim;
+		eleminfo.nodal_dim = jitcode->get_func_table()->nodal_dim;
 		this->set_nodal_dimension(eleminfo.nodal_dim);
 		allocate_discontinous_fields();
 	}
@@ -448,14 +448,14 @@ namespace pyoomph
 	// [0,1]) convention -- the 1-d edge element of quadratic triangular/tetrahedral meshes.
 	BulkTElementLine1dC2::BulkTElementLine1dC2()
 	{
-		eleminfo.elem_ptr = this;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		eleminfo.nnode = 3;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 2;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 2;		
 		eleminfo.nnode_of_space[SPACE_INDEX_C2] = 3;
 		eleminfo.nnode_of_space[SPACE_INDEX_C2TB] = 3;
 		eleminfo.nnode_DL = 2;
-		eleminfo.nodal_dim = codeinst->get_func_table()->nodal_dim;
+		eleminfo.nodal_dim = jitcode->get_func_table()->nodal_dim;
 		this->set_nodal_dimension(eleminfo.nodal_dim);
 		allocate_discontinous_fields();
 	}
@@ -631,34 +631,34 @@ namespace pyoomph
 	// bounding that face, in a fixed order (used e.g. to build the face's outline or to identify it geometrically).
 	std::vector<pyoomph::Node*> BulkElementLine1dC1::get_vertex_nodes_of_face(const int &face) const
 	{
-      if (face==-1) return {dynamic_cast<pyoomph::Node*>(this->node_pt(0))};
-	  else if (face==1) return {dynamic_cast<pyoomph::Node*>(this->node_pt(1))};	  
+      if (face==-1) return {static_cast<pyoomph::Node*>(this->node_pt(0))};
+	  else if (face==1) return {static_cast<pyoomph::Node*>(this->node_pt(1))};	  
 	  else throw_runtime_error("Invalid face index for line element");
 	}
 
 	std::vector<pyoomph::Node*> BulkElementLine1dC2::get_vertex_nodes_of_face(const int &face) const
 	{
-	  if (face==-1) return {dynamic_cast<pyoomph::Node*>(this->node_pt(0))};
-	  else if (face==1) return {dynamic_cast<pyoomph::Node*>(this->node_pt(2))};
+	  if (face==-1) return {static_cast<pyoomph::Node*>(this->node_pt(0))};
+	  else if (face==1) return {static_cast<pyoomph::Node*>(this->node_pt(2))};
 	  else throw_runtime_error("Invalid face index for line element");
 	}
 
 	std::vector<pyoomph::Node*> BulkTElementLine1dC1::get_vertex_nodes_of_face(const int &face) const
 	{
-	  if (face==-1) return {dynamic_cast<pyoomph::Node*>(this->node_pt(0))};
-	  else if (face==1) return {dynamic_cast<pyoomph::Node*>(this->node_pt(1))};	  
+	  if (face==-1) return {static_cast<pyoomph::Node*>(this->node_pt(0))};
+	  else if (face==1) return {static_cast<pyoomph::Node*>(this->node_pt(1))};	  
 	  else throw_runtime_error("Invalid face index for line element");
 	}
 
 	std::vector<pyoomph::Node*> BulkTElementLine1dC2::get_vertex_nodes_of_face(const int &face) const
 	{
-	  if (face==-1) return {dynamic_cast<pyoomph::Node*>(this->node_pt(0))};
-	  else if (face==1) return {dynamic_cast<pyoomph::Node*>(this->node_pt(2))};
+	  if (face==-1) return {static_cast<pyoomph::Node*>(this->node_pt(0))};
+	  else if (face==1) return {static_cast<pyoomph::Node*>(this->node_pt(2))};
 	  else throw_runtime_error("Invalid face index for line element");
 	}
 
-	oomph::FaceElement * BulkElementLine1dC1::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) { return new InterfaceElementPoint0d(jitcode, this, face_index); }
-	oomph::FaceElement * BulkElementLine1dC2::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) { return new InterfaceElementPoint0d(jitcode, this, face_index); }
-	oomph::FaceElement * BulkTElementLine1dC1::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) { return new InterfaceElementPoint0d(jitcode, this, face_index); }
-	oomph::FaceElement * BulkTElementLine1dC2::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) { return new InterfaceElementPoint0d(jitcode, this, face_index); }
+	oomph::FaceElement * BulkElementLine1dC1::construct_face_element(DynamicJITCode *interface_jitcode, int face_index) { return new InterfaceElementPoint0d(interface_jitcode, this, face_index); }
+	oomph::FaceElement * BulkElementLine1dC2::construct_face_element(DynamicJITCode *interface_jitcode, int face_index) { return new InterfaceElementPoint0d(interface_jitcode, this, face_index); }
+	oomph::FaceElement * BulkTElementLine1dC1::construct_face_element(DynamicJITCode *interface_jitcode, int face_index) { return new InterfaceElementPoint0d(interface_jitcode, this, face_index); }
+	oomph::FaceElement * BulkTElementLine1dC2::construct_face_element(DynamicJITCode *interface_jitcode, int face_index) { return new InterfaceElementPoint0d(interface_jitcode, this, face_index); }
 }

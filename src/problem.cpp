@@ -71,6 +71,7 @@ namespace pyoomph
 		dest.dX_psi |= src.dX_psi;
 		dest.d2x_psi |= src.d2x_psi;
 		dest.d2X_psi |= src.d2X_psi;
+		dest.dx_psi_dcoord |= src.dx_psi_dcoord;
 	}
 
 	void RequiredShapes_merge(JITFuncSpec_RequiredShapes_FiniteElement_t *src, JITFuncSpec_RequiredShapes_FiniteElement_t *dest)
@@ -127,7 +128,7 @@ namespace pyoomph
 	// continuous/DG spaces that are actually present, determines the dominant space used for the element's
 	// nodal positions, and merges the "required shapes" flags of all residual/Jacobian/Hessian/integral/
 	// extremum/Z2-flux/tracer-advection contributions into a single merged_required_shapes).
-	DynamicBulkElementCode::DynamicBulkElementCode(Problem *prob, CCompiler *ccompiler, std::string fnam, FiniteElementCode *elem) : problem(prob), compiler(ccompiler), filename(fnam), functable(NULL), element_class(elem), so_handle(NULL)
+	DynamicJITCode::DynamicJITCode(Problem *prob, CCompiler *ccompiler, std::string fnam, FiniteElementCode *cg, pyoomph::Mesh *bm) : problem(prob), compiler(ccompiler), filename(fnam), functable(NULL), code_gen(cg), so_handle(NULL), bulkmesh(bm)
 	{
 		JIT_ELEMENT_init_SPEC initfunc = ccompiler->get_init_func();
 		if (!initfunc)
@@ -153,7 +154,7 @@ namespace pyoomph
 		// pyoomph_core's own - which would otherwise be a real hazard on Windows, where a DLL's
 		// static CRT can have its own private heap distinct from the calling process's.
 		{
-			std::string dn = elem->get_domain_name();
+			std::string dn = cg->get_domain_name();
 			functable->domain_name = (char *)malloc(sizeof(char) * (dn.size() + 1));
 			memcpy(functable->domain_name, dn.c_str(), dn.size() + 1);
 		}
@@ -214,11 +215,15 @@ namespace pyoomph
 
 		// Merge the required shapes to add all external data
 		JITFuncSpec_RequiredShapes_FiniteElement *merged = &(functable->merged_required_shapes);
+		// The assembled contributions are merged separately as well; see the field's declaration.
+		JITFuncSpec_RequiredShapes_FiniteElement *assembly = &(functable->assembly_required_shapes);
 
 		for (unsigned int i = 0; i < functable->num_res_jacs; i++)
 		{
 			RequiredShapes_merge(&functable->shapes_required_ResJac[i], merged);
 			RequiredShapes_merge(&functable->shapes_required_Hessian[i], merged);
+			RequiredShapes_merge(&functable->shapes_required_ResJac[i], assembly);
+			RequiredShapes_merge(&functable->shapes_required_Hessian[i], assembly);
 		}
 		RequiredShapes_merge(&functable->shapes_required_IntegralExprs, merged);
 		RequiredShapes_merge(&functable->shapes_required_LocalExprs, merged);
@@ -229,7 +234,6 @@ namespace pyoomph
 		functable->handle = so_handle;
 
 		// Export the functions to call
-		functable->get_element_size = _pyoomph_get_element_size;
 		functable->invoke_callback = _pyoomph_invoke_callback;
 		functable->invoke_multi_ret = _pyoomph_invoke_multi_ret;
 		functable->fill_shape_buffer_for_point = _pyoomph_fill_shape_buffer_for_point;
@@ -238,11 +242,34 @@ namespace pyoomph
 			integral_function_map[functable->integral_expressions_names[i]] = i;
 		for (unsigned int i = 0; i < functable->numextremum_expressions; i++)
 			extremum_function_map[functable->extremum_expressions_names[i]] = i;
+
+		// Sized here rather than in the member initialiser list: the ED0 field count only
+		// becomes known once initfunc() above has filled the function table.
+		linked_external_data = ExternalDataLinkVector(functable->info_ED0.numfields);
+	}
+
+	// Every shared library currently loaded by ANY Problem in this process, mapped to the code that
+	// loaded it. dlopen dedupes by inode and only bumps a refcount, so a second Problem that resolves
+	// an element code to a path already loaded gets the FIRST Problem's compiled image handed back -
+	// silently, and after its own compiler has already overwritten that file underneath the live
+	// mapping. The observed symptom was a second Problem quietly computing the first one's equations;
+	// on codes whose layout differs enough, the rewritten mapping instead takes the process down
+	// inside dlsym. Neither is detectable from the return value of dlopen, so the collision is caught
+	// here instead. Entries are removed by ~DynamicJITCode, so loading the same path again after the
+	// first Problem has been destroyed is fine - which is what redefine_problem() relies on.
+	static std::map<std::string, DynamicJITCode *> __loaded_jit_libraries;
+
+	// Whether some Problem in this process currently has this shared library loaded. The Python side
+	// asks before it compiles, so that a second Problem can be given its own code directory rather
+	// than run into the error in load_jit_code below.
+	bool jit_library_is_loaded(const std::string &fname)
+	{
+		return __loaded_jit_libraries.count(fname) > 0;
 	}
 
 	// Cleans up the function table (invoking the code's own clean_up callback first, if any) and closes
 	// the dlopen handle of the compiled shared library.
-	DynamicBulkElementCode::~DynamicBulkElementCode()
+	DynamicJITCode::~DynamicJITCode()
 	{
 		// std::cout << "UNLOADING ELEMENT CODE " << filename << " FUNCTABLE " << functable << " SO HANDLE " << so_handle  << std::endl << std::flush;
 		// std::cout << "COMPILER  " << compiler  << std::endl << std::flush;
@@ -275,16 +302,20 @@ namespace pyoomph
 		}
 		so_handle = NULL;
 		functable = NULL;
+
+		auto it = __loaded_jit_libraries.find(filename);
+		if (it != __loaded_jit_libraries.end() && it->second == this)
+			__loaded_jit_libraries.erase(it);
 	}
 
-	int DynamicBulkElementCode::get_integral_function_index(std::string n)
+	int DynamicJITCode::get_integral_function_index(std::string n)
 	{
 		if (!integral_function_map.count(n))
 			return -1;
 		return integral_function_map[n];
 	}
 
-	int DynamicBulkElementCode::get_extremum_function_index(std::string n)
+	int DynamicJITCode::get_extremum_function_index(std::string n)
 	{
 		if (!extremum_function_map.count(n))
 			return -1;
@@ -292,9 +323,9 @@ namespace pyoomph
 	}
 
 	// Looks up the residual/Jacobian contribution named "name" in this code and, if found and non-NULL,
-	// makes it the active one (functable->current_res_jac) for subsequent assembly calls into this code.
+	// makes it the active one (get_current_res_jac(functable)) for subsequent assembly calls into this code.
 	// Returns 1 on success, 0 if no matching (non-NULL) contribution exists.
-	unsigned DynamicBulkElementCode::_set_solved_residual(std::string name)
+	unsigned DynamicJITCode::_set_solved_residual(std::string name)
 	{
 		int res_jac_index = -1;
 		for (unsigned int i = 0; i < functable->num_res_jacs; i++)
@@ -307,15 +338,11 @@ namespace pyoomph
 				break;
 			}
 		}
-		functable->current_res_jac = res_jac_index;
+		set_current_res_jac(functable, res_jac_index);
 		if (res_jac_index >= 0)
 			return 1;
 		else
 			return 0;
-	}
-	DynamicBulkElementInstance *DynamicBulkElementCode::factory_instance(pyoomph::Mesh *bulkmesh)
-	{
-		return new DynamicBulkElementInstance(this, bulkmesh);
 	}
 
 	//////////////////////////////////////////
@@ -323,67 +350,41 @@ namespace pyoomph
 	// Rebuilds the deduplicated elemental_data list from the (name-indexed) link entries: for each link,
 	// finds or inserts its Data pointer in elemental_data and records the resulting position as the
 	// link's elemental_index (the index the compiled element code uses to address this external data).
-	void ExternalDataLinkVector::reindex_elemental_data()
+	// Only links that some contribution actually assembles are registered - see the header for why the
+	// output-only ones are left out. The two passes matter: a Data object shared between an
+	// output-only field and an assembled one is registered by the latter, and the former then simply
+	// finds it and addresses it through the element as before.
+	void ExternalDataLinkVector::reindex_elemental_data(const int *field_contribution_index)
 	{
+		// Same lever as the bulk/opposite attachment split, so the whole stage can be A/B-ed on one binary.
+		static const bool __disabled = getenv("PYOOMPH_DISABLE_ASSEMBLY_EXTDATA_SPLIT") != NULL;
 		elemental_data.clear();
 		for (unsigned int i = 0; i < this->size(); i++)
 		{
-			int found = -1;
-			for (unsigned int e = 0; e < elemental_data.size(); e++)
-			{
-				if (elemental_data[e] == this->at(i).data)
-				{
-					found = e;
-					break;
-				}
-			}
-			if (found < 0)
-			{
-				found = elemental_data.size();
+			if (!__disabled && field_contribution_index && field_contribution_index[i] == -2)
+				continue;
+			if (std::find(elemental_data.begin(), elemental_data.end(), this->at(i).data) == elemental_data.end())
 				elemental_data.push_back(this->at(i).data);
-			}
-			this->at(i).elemental_index = found;
+		}
+		for (unsigned int i = 0; i < this->size(); i++)
+		{
+			auto found = std::find(elemental_data.begin(), elemental_data.end(), this->at(i).data);
+			this->at(i).elemental_index = (found == elemental_data.end() ? -1 : found - elemental_data.begin());
 		}
 	}
 
 	///////////////////////////////////////////
 
-	// Constructs a new instance of code d bound to mesh bm; allocates the (initially empty) external-data
-	// link slots sized to the code's declared ED0 (external-data-field) count.
-	DynamicBulkElementInstance::DynamicBulkElementInstance(DynamicBulkElementCode *d, pyoomph::Mesh *bm) : dyn(d), // local_field_to_global_field_index_C1(d->functable->numfields_C1,-1),
-																												   //		local_field_to_global_field_index_C2(d->functable->numfields_C2,-1),
-																												   //		local_global_parameter_to_global_index(d->functable->numglobal_params,-1),
-																										   linked_external_data(d->functable->info_ED0.numfields),
-																										   bulkmesh(bm)
-	{
-		/*
-		  for (unsigned int i=0; i<d->functable->num_nullified_bulk_residuals;i++)
-		  {
-			std::string fn=d->functable->nullified_bulk_residuals[i];
-			int index;
-			if (fn=="coordinate_x") index=-1;
-			else if (fn=="coordinate_y") index=-2;
-			else if (fn=="coordinate_z") index=-3;
-			else
-			{
-			  index=get_nodal_field_index(fn);
-			  if (index==-1) throw_runtime_error("Cannot nullify the bulk DoF " +fn);
-			}
-			nullify_bulk_residuals.insert(index);
-		  }
-		 */
-	}
-
 	// Binds the external field named "name" (as declared by the compiled code's ED0 space) to a specific
 	// (Data, index) pair, and patches the code's contribution name for that field (used in diagnostic
 	// output such as get_jacobian_information_string()) to full_source_name so it reflects where the
 	// linked value actually comes from. Throws if "name" is not among the code's required external fields.
-	void DynamicBulkElementInstance::link_external_data(std::string name, oomph::Data *data, int index,std::string full_source_name)
+	void DynamicJITCode::link_external_data(std::string name, oomph::Data *data, int index,std::string full_source_name)
 	{
 		int found = -1;
-		for (unsigned int i = 0; i < dyn->functable->info_ED0.numfields; i++)
+		for (unsigned int i = 0; i < functable->info_ED0.numfields; i++)
 		{
-			if (name == std::string(dyn->functable->info_ED0.fieldnames[i]))
+			if (name == std::string(functable->info_ED0.fieldnames[i]))
 			{
 				found = i;
 				break;
@@ -393,31 +394,31 @@ namespace pyoomph
 			throw_runtime_error("Cannot link external data '" + name + "' since this is not required by the equation code");
 		linked_external_data[found] = ExternalDataLink(data, index);
 		// Replace the residual and jacobian information as well
-		std::string look_for=this->get_element_class()->get_full_domain_name()+"/"+name;
-		for (unsigned int i = 0; i < dyn->functable->contribution_entries_size; i++)
+		std::string look_for=this->get_code_gen()->get_full_domain_name()+"/"+name;
+		for (unsigned int i = 0; i < functable->contribution_entries_size; i++)
 		{
-			std::string res_name = dyn->functable->contribution_names[i];
+			std::string res_name = functable->contribution_names[i];
 			if (res_name == look_for)
 			{
-				free((char*)dyn->functable->contribution_names[i]);
-				dyn->functable->contribution_names[i] = strdup(full_source_name.c_str());
+				free((char*)functable->contribution_names[i]);
+				functable->contribution_names[i] = strdup(full_source_name.c_str());
 				break;
 			}
 		}
-		linked_external_data.reindex_elemental_data();
+		linked_external_data.reindex_elemental_data(functable->info_ED0.field_contribution_index);
 	}
 
 	// Maps every nodal field name to its index into the node's value array, in the order in which the
 	// element code lays out nodal fields: first the "base bulk" fields of all present continuous spaces,
 	// then the base-bulk fields of all present DG spaces, then the remaining (non-base-bulk, i.e.
 	// interface-only) fields of the continuous spaces, then the remaining fields of the DG spaces.
-	std::map<std::string, unsigned> DynamicBulkElementInstance::get_nodal_field_indices()
+	std::map<std::string, unsigned> DynamicJITCode::get_nodal_field_indices()
 	{
 		std::map<std::string, unsigned> res;
 		unsigned offs = 0;
-		for (unsigned int si=0;si<dyn->functable->num_present_continuous_spaces;si++)
+		for (unsigned int si=0;si<functable->num_present_continuous_spaces;si++)
 		{
-			auto *space = dyn->functable->present_continuous_spaces[si];
+			auto *space = functable->present_continuous_spaces[si];
 			for (unsigned int i = 0; i < space->numfields_basebulk; i++)
 			{
 				res[space->fieldnames[i]] = offs + i;
@@ -426,9 +427,9 @@ namespace pyoomph
 		}		
 
 
-		for (unsigned int si=0;si<dyn->functable->num_present_dg_spaces;si++)
+		for (unsigned int si=0;si<functable->num_present_dg_spaces;si++)
 		{
-			auto *space = dyn->functable->present_dg_spaces[si];
+			auto *space = functable->present_dg_spaces[si];
 			for (unsigned int i = 0; i < space->numfields_basebulk; i++)
 			{
 				res[space->fieldnames[i]] = offs + i;
@@ -438,9 +439,9 @@ namespace pyoomph
 
 
 		// Now the additional ones
-		for (unsigned int si=0;si<dyn->functable->num_present_continuous_spaces;si++)
+		for (unsigned int si=0;si<functable->num_present_continuous_spaces;si++)
 		{
-			auto *space = dyn->functable->present_continuous_spaces[si];
+			auto *space = functable->present_continuous_spaces[si];
 			for (unsigned int i = 0; i < space->numfields - space->numfields_basebulk; i++)
 			{
 				res[space->fieldnames[i + space->numfields_basebulk]] = offs + i;
@@ -448,9 +449,9 @@ namespace pyoomph
 			offs += space->numfields - space->numfields_basebulk;
 		}
 
-		for (unsigned int si=0;si<dyn->functable->num_present_dg_spaces;si++)
+		for (unsigned int si=0;si<functable->num_present_dg_spaces;si++)
 		{
-			auto *space = dyn->functable->present_dg_spaces[si];
+			auto *space = functable->present_dg_spaces[si];
 			for (unsigned int i = 0; i < space->numfields - space->numfields_basebulk; i++)
 			{
 				res[space->fieldnames[i + space->numfields_basebulk]] = offs + i;
@@ -465,36 +466,36 @@ namespace pyoomph
 	// Maps every elemental (internal, non-nodal) field name to its index among the element's internal
 	// Data values: DL (discontinuous Lagrange, one value per element node) fields first, then D0
 	// (piecewise-constant) fields, offset after the DL ones.
-	std::map<std::string, unsigned> DynamicBulkElementInstance::get_elemental_field_indices()
+	std::map<std::string, unsigned> DynamicJITCode::get_elemental_field_indices()
 	{
 		std::map<std::string, unsigned> res;
-		for (unsigned int i = 0; i < dyn->functable->info_DL.numfields; i++)
+		for (unsigned int i = 0; i < functable->info_DL.numfields; i++)
 		{
-			res[dyn->functable->info_DL.fieldnames[i]] = i;
+			res[functable->info_DL.fieldnames[i]] = i;
 		}
-		for (unsigned int i = 0; i < dyn->functable->info_D0.numfields; i++)
+		for (unsigned int i = 0; i < functable->info_D0.numfields; i++)
 		{
-			res[dyn->functable->info_D0.fieldnames[i]] = i + dyn->functable->info_DL.numfields;
+			res[functable->info_D0.fieldnames[i]] = i + functable->info_DL.numfields;
 		}
 		return res;
 	}
 
 	// Index of a DL or D0 (discontinuous/elemental) field by name, offset by internal_offset_new so it
 	// directly indexes into the element's internal Data array; -1 if not a discontinuous field.
-	int DynamicBulkElementInstance::get_discontinuous_field_index(std::string name)
+	int DynamicJITCode::get_discontinuous_field_index(std::string name)
 	{
-		for (unsigned int i = 0; i < dyn->functable->info_DL.numfields; i++)
+		for (unsigned int i = 0; i < functable->info_DL.numfields; i++)
 		{
-			if (!strcmp(name.c_str(), dyn->functable->info_DL.fieldnames[i]))
+			if (!strcmp(name.c_str(), functable->info_DL.fieldnames[i]))
 			{
-				return i + dyn->functable->info_DL.internal_offset_new;
+				return i + functable->info_DL.internal_offset_new;
 			}
 		}
-		for (unsigned int i = 0; i < dyn->functable->info_D0.numfields; i++)
+		for (unsigned int i = 0; i < functable->info_D0.numfields; i++)
 		{
-			if (!strcmp(name.c_str(), dyn->functable->info_D0.fieldnames[i]))
+			if (!strcmp(name.c_str(), functable->info_D0.fieldnames[i]))
 			{
-				return i + dyn->functable->info_D0.internal_offset_new;
+				return i + functable->info_D0.internal_offset_new;
 			}
 		}
 		return -1;
@@ -502,11 +503,11 @@ namespace pyoomph
 
 	// Index of a base-bulk nodal field by name (offset by the space's nodal_offset_basebulk into the
 	// node's value array); -1 if "name" is not a base-bulk field of any present continuous space.
-	int DynamicBulkElementInstance::get_nodal_field_index(std::string name)
+	int DynamicJITCode::get_nodal_field_index(std::string name)
 	{
-		for (unsigned int si=0;si<dyn->functable->num_present_continuous_spaces;si++)
+		for (unsigned int si=0;si<functable->num_present_continuous_spaces;si++)
 		{
-			auto *space = dyn->functable->present_continuous_spaces[si];
+			auto *space = functable->present_continuous_spaces[si];
 			for (unsigned int i = 0; i < space->numfields_basebulk; i++)
 			{
 				if (!strcmp(name.c_str(), space->fieldnames[i]))
@@ -519,7 +520,7 @@ namespace pyoomph
 	}
 
 	// Forwards to the bulk mesh's interface-dof-id registry, adding a new id for field n if not present yet
-	unsigned DynamicBulkElementInstance::resolve_interface_dof_id(std::string n)
+	unsigned DynamicJITCode::resolve_interface_dof_id(std::string n)
 	{
 		//std::cout << "->Resolving interface dof for field " << n << " on mesh " <<  this->get_bulk_mesh() << std::endl;
 		return this->get_bulk_mesh()->resolve_interface_dof_id(n);
@@ -530,13 +531,13 @@ namespace pyoomph
 	// interface dof id in the function table's interface_dof_indices array so that interface elements can
 	// find the additional dof slot on shared nodes. Required whenever this instance participates in an
 	// interface coupling. Returns the resolved field-name -> dof-id map for convenience.
-	std::map<std::string, unsigned> DynamicBulkElementInstance::setup_interface_dof_indices()
+	std::map<std::string, unsigned> DynamicJITCode::setup_interface_dof_indices()
 	{
 		std::map<std::string, unsigned> res;		
 
-		for (unsigned int i = 0; i < dyn->functable->num_present_continuous_spaces; i++	)
+		for (unsigned int i = 0; i < functable->num_present_continuous_spaces; i++	)
 		{
-			JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info= dyn->functable->present_continuous_spaces[i];
+			JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info= functable->present_continuous_spaces[i];
 
 			if (space_info->interface_dof_indices) {
 				free(space_info->interface_dof_indices);
@@ -560,11 +561,11 @@ namespace pyoomph
 	}
 
 	// Returns the name of the function space ("C2","C1",...,"DL","D0") a field belongs to, or "" if unknown
-	std::string DynamicBulkElementInstance::get_space_of_field(std::string name)
+	std::string DynamicJITCode::get_space_of_field(std::string name)
 	{
-		for (unsigned int si=0;si<dyn->functable->num_present_continuous_spaces;si++)
+		for (unsigned int si=0;si<functable->num_present_continuous_spaces;si++)
 		{
-			auto *space = dyn->functable->present_continuous_spaces[si];
+			auto *space = functable->present_continuous_spaces[si];
 			for (unsigned int i = 0; i < space->numfields_basebulk; i++)
 			{
 				if (!strcmp(name.c_str(), space->fieldnames[i]))
@@ -574,9 +575,9 @@ namespace pyoomph
 			}
 		}
 
-		for (unsigned int si=0;si<dyn->functable->num_present_dg_spaces;si++)
+		for (unsigned int si=0;si<functable->num_present_dg_spaces;si++)
 		{
-			auto *space = dyn->functable->present_dg_spaces[si];
+			auto *space = functable->present_dg_spaces[si];
 			for (unsigned int i = 0; i < space->numfields_basebulk; i++)
 			{
 				if (!strcmp(name.c_str(), space->fieldnames[i]))
@@ -586,16 +587,16 @@ namespace pyoomph
 			}
 		}
 		
-		for (unsigned int i = 0; i < dyn->functable->info_DL.numfields; i++)
+		for (unsigned int i = 0; i < functable->info_DL.numfields; i++)
 		{
-			if (!strcmp(name.c_str(), dyn->functable->info_DL.fieldnames[i]))
+			if (!strcmp(name.c_str(), functable->info_DL.fieldnames[i]))
 			{
 				return "DL";
 			}
 		}
-		for (unsigned int i = 0; i < dyn->functable->info_D0.numfields; i++)
+		for (unsigned int i = 0; i < functable->info_D0.numfields; i++)
 		{
-			if (!strcmp(name.c_str(), dyn->functable->info_D0.fieldnames[i]))
+			if (!strcmp(name.c_str(), functable->info_D0.fieldnames[i]))
 			{
 				return "D0";
 			}
@@ -605,36 +606,36 @@ namespace pyoomph
 
 	// Placeholder for consistency checks of the instance's field/parameter binding; currently a no-op,
 	// the binding checks it used to perform are now handled elsewhere (kept here, commented out, for reference)
-	void DynamicBulkElementInstance::sanity_check()
+	void DynamicJITCode::sanity_check()
 	{
 		/*
-		 for (unsigned int i=0;i<dyn->functable->numglobal_params;i++)
+		 for (unsigned int i=0;i<functable->numglobal_params;i++)
 		 {
-			if (local_global_parameter_to_global_index[i]<0) throw_runtime_error("Elemental parameter "+std::string(dyn->functable->global_paramnames[i])+" not bound");
+			if (local_global_parameter_to_global_index[i]<0) throw_runtime_error("Elemental parameter "+std::string(functable->global_paramnames[i])+" not bound");
 		 }
 		*/
 		/*
-		 for (unsigned int i=0;i<dyn->functable->numfields_C2;i++)
+		 for (unsigned int i=0;i<functable->numfields_C2;i++)
 		 {
-			if (local_field_to_global_field_index_C2[i]<0) throw_runtime_error("C2 field "+std::string(dyn->functable->fieldnames_C2[i])+" not bound");
+			if (local_field_to_global_field_index_C2[i]<0) throw_runtime_error("C2 field "+std::string(functable->fieldnames_C2[i])+" not bound");
 		 }
-		 for (unsigned int i=0;i<dyn->functable->numfields_C1;i++)
+		 for (unsigned int i=0;i<functable->numfields_C1;i++)
 		 {
-			if (local_field_to_global_field_index_C1[i]<0) throw_runtime_error("C1 field "+std::string(dyn->functable->fieldnames_C1[i])+" not bound");
+			if (local_field_to_global_field_index_C1[i]<0) throw_runtime_error("C1 field "+std::string(functable->fieldnames_C1[i])+" not bound");
 		 }
 		*/
 	}
 
     // Whether this instance's compiled code has any residual/Jacobian contribution that depends on the
     // named global parameter (i.e. the parameter is among the code's registered global params).
-    bool DynamicBulkElementInstance::has_parameter_contribution(const std::string &param)
+    bool DynamicJITCode::has_parameter_contribution(const std::string &param)
 	{
 		if (!this->get_problem()->has_global_parameter(param))
 			return false;
 		pyoomph::GlobalParameterDescriptor * parameter=this->get_problem()->get_global_parameter(param);
-		for (unsigned int i = 0; i < dyn->functable->numglobal_params; i++)
+		for (unsigned int i = 0; i < functable->numglobal_params; i++)
 		{
-			if (dyn->functable->global_paramindices[i] == parameter->get_global_index())
+			if (functable->global_paramindices[i] == parameter->get_global_index())
 				return true;
 		}
 		return false;
@@ -730,31 +731,22 @@ namespace pyoomph
 	unsigned Problem::get_max_dt_order() const
 	{
 		unsigned max_order = 0;
-		for (unsigned int i = 0; i < bulk_element_codes.size(); i++)
+		for (unsigned int i = 0; i < jit_codes.size(); i++)
 		{
-			max_order = std::max(max_order, (unsigned)bulk_element_codes[i]->functable->max_dt_order);
+			max_order = std::max(max_order, (unsigned)jit_codes[i]->functable->max_dt_order);
 		}
 		return max_order;
 	}
 
-	// Deletes all loaded DynamicBulkElementCode objects (closing their shared libraries) and all global
+	// Deletes all loaded DynamicJITCode objects (closing their shared libraries) and all global
 	// parameter descriptors, and releases the cached eigenproblem matrices. Used both from the destructor
 	// and explicitly (e.g. before recompiling/reloading equation code).
 	void Problem::unload_all_dlls(bool clear_all)
 	{		
-		for (unsigned int i=0;i< this->nsub_mesh();i++)
-		{
-			Mesh *m=dynamic_cast<Mesh *>(this->mesh_pt(i));
-			for (unsigned int j=0;j<m->nelement();j++)
-			{
-				BulkElementBase *e=dynamic_cast<BulkElementBase *>(m->element_pt(j));
-				DynamicBulkElementInstance *dyninst=dynamic_cast<DynamicBulkElementInstance *>(e);
-				if (dyninst)
-				{
-					dyninst->linked_external_data.clear();
-				}
-			}
-		}
+		// A loop over all elements used to sit here, cross-casting each one to the JIT code class and
+		// clearing its external data links. BulkElementBase and the JIT code class are unrelated
+		// types, so that dynamic_cast always yielded NULL and the clear() never ran once - removed
+		// rather than "fixed", since nothing has ever depended on it happening.
 		if (clear_all)
 		{
 			for (unsigned int i=0;i< this->nsub_mesh();i++)
@@ -784,12 +776,12 @@ namespace pyoomph
 		if (pyoomph_verbose)
 			std::cout << "Unloading all DLLs" << std::endl
 					  << std::flush;
-		for (unsigned int i = 0; i < bulk_element_codes.size(); i++)
+		for (unsigned int i = 0; i < jit_codes.size(); i++)
 		{
 			if (pyoomph_verbose)
-				std::cout << "Unloading DLL " << bulk_element_codes[i]->get_file_name() << std::endl
+				std::cout << "Unloading DLL " << jit_codes[i]->get_file_name() << std::endl
 						  << std::flush;
-			delete bulk_element_codes[i];
+			delete jit_codes[i];
 		}
 		if (pyoomph_verbose)
 			std::cout << "DLLs unloaded " << std::endl
@@ -800,7 +792,7 @@ namespace pyoomph
 			delete gp.second;
 		}
 
-		bulk_element_codes.clear();
+		jit_codes.clear();
 
 		global_params_by_name.clear();
 
@@ -824,7 +816,7 @@ namespace pyoomph
 	{
 		// if (meshtemplate) delete meshtemplate; meshtemplate=NULL;
 		// for (unsigned int i=0;i<fields_by_index.size();i++) delete fields_by_index[i];
-		unload_all_dlls();
+		Problem::unload_all_dlls(); // qualified: a destructor cannot dispatch to an override anyway
 		// if (this->compiler) delete this->compiler;
 		if (logfile)
 		{
@@ -835,33 +827,49 @@ namespace pyoomph
 		}
 	}
 
-	Problem::Problem() : oomph::Problem(), compiler(NULL), logfile(NULL), _is_quiet(false), bulk_element_codes(0) // , meshtemplate(new MeshTemplate(this))
+	Problem::Problem() : oomph::Problem(), compiler(NULL), logfile(NULL), _is_quiet(false), jit_codes(0) // , meshtemplate(new MeshTemplate(this))
 	{
 	}
 
-	// Loads (or returns the already-loaded) DynamicBulkElementCode for the shared library dynamic_lib,
-	// associates it with element_class (which fills in the callback function pointers of the function
-	// table), and binds each of the code's declared global parameters to the corresponding
-	// GlobalParameterDescriptor's value in this problem (creating parameters as needed).
-	DynamicBulkElementCode *Problem::load_dynamic_bulk_element_code(std::string dynamic_lib, FiniteElementCode *element_class)
+	// Loads the shared library dynamic_lib as a new DynamicJITCode bound to bulkmesh, associates it
+	// with code_gen (which fills in the callback function pointers of the function table), and binds
+	// each of the code's declared global parameters to the corresponding GlobalParameterDescriptor's
+	// value in this problem (creating parameters as needed).
+	DynamicJITCode *Problem::load_jit_code(std::string dynamic_lib, FiniteElementCode *code_gen, pyoomph::Mesh *bulkmesh)
 	{
-		for (unsigned int i = 0; i < bulk_element_codes.size(); i++)
+		// This used to silently hand back the already-loaded code for a repeated file name, on the
+		// premise that one compiled library could serve several domains. It cannot: the returned
+		// object kept the *first* compilation's code generator, which redefine_problem() has by then
+		// replaced, and it now also carries the first compilation's bulk mesh. Every domain and
+		// interface compiles to its own uniquely named trunk, so a collision here means two of them
+		// were written to the same path - report it instead of corrupting one of them.
+		//
+		// Checked against every library loaded in the PROCESS, not just this Problem's own jit_codes:
+		// the damage dlopen's inode dedupe does (see __loaded_jit_libraries) is worst precisely when
+		// the two codes belong to different Problems, because nothing else in either of them would
+		// ever notice.
+		auto already = __loaded_jit_libraries.find(dynamic_lib);
+		if (already != __loaded_jit_libraries.end())
 		{
-			if (bulk_element_codes[i]->get_file_name() == dynamic_lib)
-				return bulk_element_codes[i];
+			const bool other_problem = already->second->get_problem() != this;
+			throw_runtime_error("Two element codes resolved to the same shared library '" + dynamic_lib + "'." +
+								(other_problem
+									 ? std::string(" They belong to two different Problems that are alive at the same time. Give each Problem its own output directory (set_output_directory) or its own code directory, so that their generated code does not share a file name.")
+									 : std::string(" If this happened during redefine_problem(), pass a code_dir that differs from the current one.")));
 		}
 		CCompiler *ccompiler = this->get_ccompiler();
-		bulk_element_codes.push_back(new DynamicBulkElementCode(this, ccompiler, dynamic_lib, element_class));
-		element_class->fill_callback_info(bulk_element_codes.back()->functable);
-		auto *ft = bulk_element_codes.back()->functable;
+		jit_codes.push_back(new DynamicJITCode(this, ccompiler, dynamic_lib, code_gen, bulkmesh));
+		__loaded_jit_libraries[dynamic_lib] = jit_codes.back();
+		code_gen->fill_callback_info(jit_codes.back()->functable);
+		auto *ft = jit_codes.back()->functable;
 		for (unsigned int i = 0; i < ft->numglobal_params; i++)
 		{
 			//		std::cout << "LINKING GLOBAL PARAM " << i << " of " << functable->numglobal_params << std::endl;
-			//		std::cout << "codeinst->get_problem()->get_global_parameter(functable->global_paramindices[i]) << std::endl;
+			//		std::cout << "jitcode->get_problem()->get_global_parameter(functable->global_paramindices[i]) << std::endl;
 			ft->global_parameters[i] = &(this->get_global_parameter(ft->global_paramindices[i])->value());
 		}
 
-		return bulk_element_codes.back();
+		return jit_codes.back();
 	}
 
 	/*
@@ -897,9 +905,9 @@ namespace pyoomph
 		{
 			for (unsigned int i=0;i<removed_fields_due_to_missing_jacobian_row_or_col.size();i++) removed_fields_due_to_missing_jacobian_row_or_col[i]=false;
 		}
-		for (unsigned int i = 0; i < bulk_element_codes.size(); i++)
+		for (unsigned int i = 0; i < jit_codes.size(); i++)
 		{
-			numfound += bulk_element_codes[i]->_set_solved_residual(name);
+			numfound += jit_codes[i]->_set_solved_residual(name);
 		}
 		if (!numfound && raise_error)
 		{
@@ -1050,6 +1058,309 @@ namespace pyoomph
 			}
 		}
 		/////		
+	}
+
+	// Builds the permutation for the active layout. Empty mode, or anything this build does not
+	// recognise, means "no opinion" and the numbering oomph assigned stands.
+	//
+	// "reverse" is a TEST layout and nothing else: it is the cheapest permutation that is a genuine
+	// bijection and moves essentially every dof, which is exactly what is wanted to prove that the
+	// renumbering machinery is transparent to the answer. The layouts that are worth having
+	// (nodal-block for AMG, element-block for condensation) are built on Mesh::visit_global_dofs and
+	// come next; this one stays as the null hypothesis they are tested against.
+	// Defined further down, next to condensation_row_cuts, the other caller that wants a block-aligned
+	// row split.
+	static std::vector<unsigned> snap_cuts_to_blocks(const std::vector<std::pair<int, int>> &blocks,
+													 unsigned nproc, unsigned nd);
+
+	// Glob match, '*' and '?' only, as used on the field names of a dof ordering spec. Written out
+	// rather than taken from <fnmatch.h> because that header is POSIX and pyoomph builds on Windows.
+	static bool dof_ordering_glob(const char *pat, const char *str)
+	{
+		const char *star = NULL, *ss = str;
+		while (*str)
+		{
+			if (*pat == '?' || *pat == *str) { pat++; str++; }
+			else if (*pat == '*') { star = pat++; ss = str; }
+			else if (star) { pat = star + 1; str = ++ss; }
+			else return false;
+		}
+		while (*pat == '*') pat++;
+		return !*pat;
+	}
+
+	// Builds the permutation for the active layout. Empty mode and no specs means "no opinion", and
+	// the numbering oomph assigned stands.
+	//
+	// "reverse" is a TEST layout and nothing else: the cheapest permutation that is a genuine bijection
+	// and moves essentially every dof, which is what is wanted to prove that the renumbering machinery
+	// is transparent to the answer. It is the null hypothesis the real layouts are tested against.
+	bool Problem::build_dof_permutation(std::vector<long> &perm, unsigned long n)
+	{
+		if (dof_ordering_mode == "reverse")
+		{
+			perm.resize(n);
+			for (unsigned long i = 0; i < n; i++) perm[i] = (long)(n - 1 - i);
+			return true;
+		}
+		if (dof_ordering_mode != "")
+			throw_runtime_error("Unknown dof ordering mode '" + dof_ordering_mode + "'");
+		if (dof_ordering_specs.empty()) return false;
+		return build_dof_permutation_from_specs(perm, n);
+	}
+
+	// Turns the user's field patterns into a permutation.
+	//
+	// The vocabulary is get_global_field_names() -- "domain/velocity_x", "domain/top/lambda",
+	// "domain/coordinate_x" -- because that is the one name for a field that already exists in C++,
+	// already covers interface-only fields and nodal positions, and is what petsc_fieldsplit takes. It
+	// deliberately does NOT distinguish a field's boundary-restricted dofs from its bulk ones
+	// ("domain/left/u" and "domain/u" are both the field "domain/u"): for a layout that is the right
+	// granularity, since a block wants a node's fields together whether or not the node is on a
+	// boundary.
+	bool Problem::build_dof_permutation_from_specs(std::vector<long> &perm, unsigned long n)
+	{
+		const std::vector<std::string> fnames = this->get_global_field_names();
+		const unsigned nf = (unsigned)fnames.size();
+		if (!nf) return false;
+
+		// Resolve the patterns once per field, not once per dof. First spec that names a field wins,
+		// and within a spec the pattern's position is the field's rank inside a block.
+		const int nspec = (int)dof_ordering_specs.size();
+		std::vector<int> spec_of_field(nf, -1), rank_of_field(nf, 0);
+		std::vector<char> pattern_used(0);
+		for (int s = 0; s < nspec; s++)
+		{
+			const DofOrderingSpec &sp = dof_ordering_specs[s];
+			pattern_used.assign(sp.patterns.size(), 0);
+			for (unsigned f = 0; f < nf; f++)
+			{
+				if (spec_of_field[f] >= 0) continue;
+				for (unsigned q = 0; q < sp.patterns.size(); q++)
+				{
+					if (!dof_ordering_glob(sp.patterns[q].c_str(), fnames[f].c_str())) continue;
+					spec_of_field[f] = s;
+					rank_of_field[f] = (int)q;
+					pattern_used[q] = 1;
+					break;
+				}
+			}
+			for (unsigned q = 0; q < sp.patterns.size(); q++)
+			{
+				// A pattern that names nothing is a typo in a field name, and silently ignoring it gives
+				// the user a layout that is not the one they asked for while reporting success. The
+				// available names are listed because they are not guessable ("domain/coordinate_x" for a
+				// mesh position, and a field of an interface carries that interface's full path).
+				if (pattern_used[q]) continue;
+				std::string avail;
+				for (unsigned f = 0; f < nf; f++) avail += (f ? ", " : "") + fnames[f];
+				throw_runtime_error("The dof ordering pattern '" + sp.patterns[q] +
+									"' matches none of this problem's fields, or only fields already "
+									"claimed by an earlier ordering. Available: " + avail);
+			}
+		}
+
+		// NOT get_dof_to_global_field_index_mapping(): that one sizes its buffer with ndof(), which reads
+		// Dof_distribution_pt->nrow() -- and the distribution is rebuilt BELOW this hook, so inside it
+		// ndof() still reports the previous numbering's size (zero on the first call). Sizing by n, the
+		// length of the dof pointer vector being handed to us, is the only correct thing here. Getting
+		// this wrong is silent: the buffer simply came out the wrong length and the layout declined.
+		std::vector<int> field_of_dof(n, -1);
+		for (unsigned im = 0; im < this->nsub_mesh(); im++)
+		{
+			pyoomph::Mesh *m = dynamic_cast<pyoomph::Mesh *>(this->mesh_pt(im));
+			if (m) m->fill_dof_to_global_field_index_buffer(field_of_dof);
+		}
+
+		// Per dof: which spec claims it, and which group of that spec it belongs to. The group is
+		// identified by a POINTER (the node, or the element that claimed it first) and then collapsed to
+		// the smallest equation number in it, so that groups keep the relative order the mesh gave them
+		// and a layout that is already satisfied comes out as the identity.
+		std::vector<int> spec_of_dof(n, -1), rank_of_dof(n, 0);
+		std::vector<const void *> group_of_dof(n, NULL);
+		for (unsigned long e = 0; e < n; e++)
+		{
+			const int f = field_of_dof[e];
+			if (f < 0 || (unsigned)f >= nf) continue;
+			spec_of_dof[e] = spec_of_field[f];
+			rank_of_dof[e] = rank_of_field[f];
+		}
+
+		for (unsigned im = 0; im < this->nsub_mesh(); im++)
+		{
+			pyoomph::Mesh *m = dynamic_cast<pyoomph::Mesh *>(this->mesh_pt(im));
+			if (!m) continue;
+			m->visit_global_dofs([&](const Mesh::DofVisit &v)
+								 {
+									 if (v.eqn < 0 || (unsigned long)v.eqn >= n) return;
+									 const int s = spec_of_dof[v.eqn];
+									 if (s < 0) return;
+									 if (group_of_dof[v.eqn]) return; // first claim wins
+									 // A node's dofs group by the node, so its positions and its values
+									 // land in one block even though they live in different Data. An
+									 // element-local one groups by the element that reported it first,
+									 // which for a cell-interior bubble node is the only element there
+									 // is - that is what makes a Crouzeix-Raviart block contiguous.
+									 group_of_dof[v.eqn] = dof_ordering_specs[s].by_element
+															   ? (const void *)v.element
+															   : (v.node ? (const void *)v.node : (const void *)v.element);
+								 });
+		}
+
+		std::map<const void *, long> group_min;
+		for (unsigned long e = 0; e < n; e++)
+		{
+			if (spec_of_dof[e] < 0) continue;
+			if (!group_of_dof[e]) { spec_of_dof[e] = -1; continue; } // named, but no mesh reported it
+			std::map<const void *, long>::iterator it = group_min.find(group_of_dof[e]);
+			if (it == group_min.end()) group_min[group_of_dof[e]] = (long)e;
+			else if ((long)e < it->second) it->second = (long)e;
+		}
+
+		// The sort key. Unclaimed dofs trail, in their original order: a layout says where the dofs it
+		// names go, and inventing a position for the others would make adding one pattern move
+		// everything.
+		std::vector<unsigned long> order(n);
+		for (unsigned long e = 0; e < n; e++) order[e] = e;
+		std::vector<long> gmin(n, 0);
+		for (unsigned long e = 0; e < n; e++)
+			if (spec_of_dof[e] >= 0) gmin[e] = group_min[group_of_dof[e]];
+		std::stable_sort(order.begin(), order.end(),
+						 [&](unsigned long a, unsigned long b)
+						 {
+							 const int sa = spec_of_dof[a] < 0 ? nspec : spec_of_dof[a];
+							 const int sb = spec_of_dof[b] < 0 ? nspec : spec_of_dof[b];
+							 if (sa != sb) return sa < sb;
+							 if (sa == nspec) return a < b;
+							 if (gmin[a] != gmin[b]) return gmin[a] < gmin[b];
+							 if (rank_of_dof[a] != rank_of_dof[b]) return rank_of_dof[a] < rank_of_dof[b];
+							 return a < b;
+						 });
+
+		perm.assign(n, 0);
+		for (unsigned long i = 0; i < n; i++) perm[order[i]] = (long)i;
+
+		// Record the blocks in the numbering just produced. A group's dofs are contiguous there by
+		// construction (the sort key is group-major), so one pass over the new order finds the runs.
+		// Singletons are skipped: a block of one cannot be cut through.
+		dof_ordering_blocks.clear();
+		unsigned long i0 = 0;
+		while (i0 < n)
+		{
+			const unsigned long e0 = order[i0];
+			unsigned long i1 = i0 + 1;
+			if (spec_of_dof[e0] >= 0)
+				while (i1 < n && spec_of_dof[order[i1]] == spec_of_dof[e0] &&
+					   group_of_dof[order[i1]] == group_of_dof[e0])
+					i1++;
+			if (i1 - i0 > 1) dof_ordering_blocks.push_back(std::make_pair((int)i0, (int)(i1 - 1)));
+			i0 = i1;
+		}
+		return true;
+	}
+
+	// A row split whose cut points fall between the layout's blocks rather than inside them.
+	//
+	// Only a REPLICATED run needs this. Distributed, each rank's dofs are one contiguous global range
+	// by construction (synchronise_eqn_numbers) and the permutation was rank-local, so no block can
+	// straddle a rank; the caller hands back the dof distribution there instead.
+	std::vector<unsigned> Problem::dof_ordering_row_cuts()
+	{
+		if (dof_ordering_blocks.empty()) return std::vector<unsigned>();
+		if (!Communicator_pt || Communicator_pt->nproc() < 2) return std::vector<unsigned>();
+#ifdef OOMPH_HAS_MPI
+		// Problem_has_been_distributed is an MPI-only member of oomph::Problem; in a build without
+		// MPI there is nothing to distribute, so the replicated path below is the only one anyway.
+		if (Problem_has_been_distributed) return std::vector<unsigned>();
+#endif
+		const unsigned nd = this->ndof();
+		if (nd < static_cast<unsigned>(Communicator_pt->nproc())) return std::vector<unsigned>();
+		return snap_cuts_to_blocks(dof_ordering_blocks, Communicator_pt->nproc(), nd);
+	}
+
+	// Rewrites every equation number this problem owns through perm, and permutes Dof_pt to match.
+	//
+	// The Data enumeration mirrors synchronise_eqn_numbers()' bump loops rather than the field-aware
+	// walk of Mesh::visit_global_dofs, and deliberately so: this has to move EVERY dof, including any
+	// no field description reaches, or the numbering would end up self-inconsistent. Same reason it
+	// iterates Data::nvalue() rather than a field count.
+	void Problem::apply_dof_permutation(const std::vector<long> &perm, oomph::Vector<double *> &dof_pt)
+	{
+		const unsigned long n = dof_pt.size();
+		{
+			// NOT under PARANOID, which is off in every normal build (PYOOMPH_PARANOID defaults to OFF).
+			// A non-bijective perm silently aliases two dofs onto one row and surfaces much later as a
+			// Jacobian that is singular for no visible reason -- precisely the bug a layout under
+			// development produces, so the check has to be present in the build people actually use.
+			// One O(n) pass and an n-byte array, against a permutation that is already O(n log n) inside
+			// an assign_eqn_numbers() whose elemental pass is ~96% of the total; it does not register.
+			std::vector<char> seen(n, 0);
+			for (unsigned long i = 0; i < n; i++)
+			{
+				if (perm[i] < 0 || (unsigned long)perm[i] >= n)
+					throw_runtime_error("The dof permutation for mode '" + dof_ordering_mode + "' maps " +
+										std::to_string(i) + " to " + std::to_string(perm[i]) +
+										", which is outside [0," + std::to_string(n) + ").");
+				if (seen[perm[i]])
+					throw_runtime_error("The dof permutation for mode '" + dof_ordering_mode +
+										"' is not a bijection: two dofs map to " + std::to_string(perm[i]) + ".");
+				seen[perm[i]] = 1;
+			}
+		}
+
+		oomph::Vector<double *> permuted(n, NULL);
+		for (unsigned long i = 0; i < n; i++) permuted[perm[i]] = dof_pt[i];
+		dof_pt = permuted;
+
+		auto remap = [&perm, n](oomph::Data *d)
+		{
+			const unsigned nval = d->nvalue();
+			for (unsigned v = 0; v < nval; v++)
+			{
+				const long eq = d->eqn_number(v);
+				if (eq < 0) continue; // pinned, constrained, halo: not a dof, not in perm
+				if ((unsigned long)eq >= n) continue;
+				d->eqn_number(v) = perm[eq];
+			}
+		};
+
+		for (unsigned i = 0; i < this->nglobal_data(); i++) remap(this->global_data_pt(i));
+
+		oomph::Mesh *const gm = this->mesh_pt();
+		if (!gm) return;
+
+		const unsigned long nel = gm->nelement();
+		for (unsigned long e = 0; e < nel; e++)
+		{
+			oomph::GeneralisedElement *el = gm->element_pt(e);
+			const unsigned nint = el->ninternal_data();
+			for (unsigned i = 0; i < nint; i++) remap(el->internal_data_pt(i));
+		}
+
+		const unsigned long nnod = gm->nnode();
+		for (unsigned long j = 0; j < nnod; j++)
+		{
+			oomph::Node *nod = gm->node_pt(j);
+			// A periodic ("copy") node does not own its equation numbers: make_periodic() points its
+			// Eqn_number array at the master's, and master and copy are both in Node_pt. Remapping both
+			// would apply perm twice to the same long, i.e. perm[perm[eq]]. Same guard, and the same
+			// reason, as the bump loops in synchronise_eqn_numbers().
+			if (!nod->is_a_copy()) remap(nod);
+			oomph::SolidNode *snod = dynamic_cast<oomph::SolidNode *>(nod);
+			if (snod && !snod->position_is_a_copy()) remap(snod->variable_position_pt());
+		}
+	}
+
+	// See the base declaration in oomph-lib's problem.h for where this is called from and why there.
+	void Problem::reorder_global_eqn_numbers(oomph::Vector<double *> &dof_pt)
+	{
+		// The overwhelmingly common case: no layout asked for, and not even a permutation buffer touched.
+		dof_ordering_blocks.clear();
+		if (dof_ordering_mode == "" && dof_ordering_specs.empty()) return;
+		const unsigned long n = dof_pt.size();
+		if (!n) return;
+		if (!build_dof_permutation(dof_permutation_buffer, n)) return;
+		apply_dof_permutation(dof_permutation_buffer, dof_pt);
 	}
 
 	// Performs the standard oomph-lib equation numbering, then lets every InterfaceMesh update its
@@ -1237,6 +1548,32 @@ namespace pyoomph
 		}
 	}
 
+	// Multiplies the residual in place by the deflation factor M(U) (1.0, i.e. a no-op, unless a
+	// deflation operator is installed - see get_residual_scale_factor()). A scalar times a row block
+	// is correct on any distribution and needs no communication, which is the whole reason deflation
+	// can ride on the ordinary assembly rather than the custom-assembler pipeline.
+	void Problem::apply_residual_scale_factor(oomph::DoubleVector &residuals)
+	{
+		if (!residual_scale_hook_active) return;
+		const double s = this->get_residual_scale_factor();
+		if (s == 1.0) return;
+		const unsigned n = residuals.nrow_local();
+		double *v = residuals.values_pt();
+		for (unsigned i = 0; i < n; i++) v[i] *= s;
+	}
+
+	// This rank's block of the dof vector, in the order the dof distribution numbers it. Serially and
+	// on a replicated run that is the whole vector; under --distribute it is the owned rows only.
+	// get_current_dofs() gathers instead, which is the right contract for its callers but costs
+	// O(ndof) per rank - deflation reads this on every residual assembly.
+	std::vector<double> Problem::get_local_dof_values()
+	{
+		const unsigned n = this->GetDofPtr().size();
+		std::vector<double> res(n);
+		for (unsigned i = 0; i < n; i++) res[i] = *(this->GetDofPtr()[i]);
+		return res;
+	}
+
 #ifdef OOMPH_HAS_MPI
 	// Fresh dof halo scheme for the CURRENT equation numbering. Deletes the previous scheme first:
 	// oomph's setup_dof_halo_scheme() plain-overwrites Halo_scheme_pt, which both leaks and -- worse --
@@ -1284,7 +1621,7 @@ namespace pyoomph
 			pyoomph::Mesh *m = dynamic_cast<pyoomph::Mesh *>(this->mesh_pt(ism));
 			for (unsigned int in = 0; in < m->nnode(); in++)
 			{
-				auto *n = dynamic_cast<pyoomph::Node *>(m->node_pt(in));
+				auto *n = static_cast<pyoomph::Node *>(m->node_pt(in));
 				auto *vp = n->variable_position_pt();
 				for (unsigned int iv = 0; iv < vp->nvalue(); iv++)
 				{
@@ -1330,20 +1667,54 @@ namespace pyoomph
     void Problem::get_dofs(const unsigned& t, oomph::DoubleVector& dofs) const
 	{
 #ifdef OOMPH_HAS_MPI
-	  // oomph-lib declares the HISTORY dof accessors unsupported for distributed problems and guards
-	  // them with a PARANOID throw -- but pyoomph builds with PARANOID off by default, in which case
-	  // the guard vanishes and the loops below silently corrupt the heap: eqn_number() is a GLOBAL
-	  // equation number while the vector holds only this rank's rows. Refuse instead. The current-time
-	  // accessors (get_dofs/set_dofs without t) are distribution-aware and unaffected.
+	  // oomph-lib's own get_dofs(t,...) builds the vector on the dof distribution -- this rank's rows
+	  // -- and then indexes it by GLOBAL equation number, which is why it guards itself with a
+	  // PARANOID throw that vanishes in pyoomph's default build. Do the same walk here, writing only
+	  // the rows this rank owns; a halo copy's equation number falls outside the range and is skipped,
+	  // since the rank that owns it writes it.
 	  if (this->distributed())
-	    throw_runtime_error("History dof values (time level t>0) are not implemented for distributed problems. "
-	                        "Only the current dof values are available under --distribute.");
+	  {
+	    // Reading only, but oomph-lib's global_data_pt()/mesh_pt() accessors have no const overload
+	    // (and Global_data_pt is private), so a non-const alias is the only way in from a const method.
+	    Problem *self = const_cast<Problem *>(this);
+	    dofs.build(this->dof_distribution_pt(), 0.0);
+	    const unsigned first_row = this->dof_distribution_pt()->first_row();
+	    const unsigned n_row_local = this->dof_distribution_pt()->nrow_local();
+	    auto store = [&](int eqn_number, double value)
+	    {
+	      if (eqn_number >= 0 && (unsigned)eqn_number >= first_row && (unsigned)eqn_number < first_row + n_row_local)
+	        dofs[(unsigned)eqn_number - first_row] = value;
+	    };
+	    for (unsigned i = 0, ni = self->nglobal_data(); i < ni; i++)
+	      for (unsigned j = 0, nj = self->global_data_pt(i)->nvalue(); j < nj; j++)
+	        store(self->global_data_pt(i)->eqn_number(j), self->global_data_pt(i)->value(t, j));
+	    for (unsigned i = 0, ni = self->mesh_pt()->nelement(); i < ni; i++)
+	    {
+	      oomph::GeneralisedElement *ele_pt = self->mesh_pt()->element_pt(i);
+	      for (unsigned j = 0, nj = ele_pt->ninternal_data(); j < nj; j++)
+	      {
+	        oomph::Data *d_pt = ele_pt->internal_data_pt(j);
+	        for (unsigned k = 0, nk = d_pt->nvalue(); k < nk; k++) store(d_pt->eqn_number(k), d_pt->value(t, k));
+	      }
+	    }
+	    for (unsigned i = 0, ni = self->mesh_pt()->nnode(); i < ni; i++)
+	    {
+	      oomph::Node *n_pt = self->mesh_pt()->node_pt(i);
+	      for (unsigned j = 0, nj = n_pt->nvalue(); j < nj; j++) store(n_pt->eqn_number(j), n_pt->value(t, j));
+	      // ...and the moving-mesh position dofs oomph-lib forgets, as in the serial branch below.
+	      pyoomph::Node *pn_pt = dynamic_cast<pyoomph::Node *>(n_pt);
+	      if (!pn_pt) continue;
+	      for (unsigned j = 0, nj = pn_pt->variable_position_pt()->nvalue(); j < nj; j++)
+	        store(pn_pt->variable_position_pt()->eqn_number(j), pn_pt->variable_position_pt()->value(t, j));
+	    }
+	    return;
+	  }
 #endif
       oomph::Problem::get_dofs(t,dofs);
 	  //std::cout << "GET HISTORY DOFS " << t << std::endl;
 	  for (unsigned i = 0, ni = mesh_pt()->nnode(); i < ni; i++)
       {
-       pyoomph::Node* node_pt = dynamic_cast<pyoomph::Node*>(mesh_pt()->node_pt(i));
+       pyoomph::Node* node_pt = static_cast<pyoomph::Node*>(mesh_pt()->node_pt(i));
 	   if (!node_pt) continue;
        for (unsigned j = 0, nj = node_pt->variable_position_pt()->nvalue(); j < nj; j++)
        {        
@@ -1361,21 +1732,54 @@ namespace pyoomph
 	void Problem::set_dofs(const unsigned& t, oomph::DoubleVector& dof_pt)
 	{
 #ifdef OOMPH_HAS_MPI
-	  // oomph-lib declares the HISTORY dof accessors unsupported for distributed problems and guards
-	  // them with a PARANOID throw -- but pyoomph builds with PARANOID off by default, in which case
-	  // the guard vanishes and the loops below silently corrupt the heap: eqn_number() is a GLOBAL
-	  // equation number while the vector holds only this rank's rows. Refuse instead. The current-time
-	  // accessors (get_dofs/set_dofs without t) are distribution-aware and unaffected.
+	  // As in get_dofs(t,...): write only the rows this rank owns, by the same range test, and then
+	  // let the halo exchange carry them to the other ranks' copies. Data::add_values_to_vector sends
+	  // every time level (it loops to ntstorage()), so synchronise_all_dofs() propagates history
+	  // values and not just the current ones -- which is what makes this possible at all.
 	  if (this->distributed())
-	    throw_runtime_error("History dof values (time level t>0) are not implemented for distributed problems. "
-	                        "Only the current dof values are available under --distribute.");
+	  {
+	    const unsigned first_row = this->dof_distribution_pt()->first_row();
+	    const unsigned n_row_local = this->dof_distribution_pt()->nrow_local();
+	    auto fetch = [&](int eqn_number, double &out) -> bool
+	    {
+	      if (eqn_number < 0 || (unsigned)eqn_number < first_row || (unsigned)eqn_number >= first_row + n_row_local) return false;
+	      out = dof_pt[(unsigned)eqn_number - first_row];
+	      return true;
+	    };
+	    double v = 0.0;
+	    for (unsigned i = 0, ni = nglobal_data(); i < ni; i++)
+	      for (unsigned j = 0, nj = global_data_pt(i)->nvalue(); j < nj; j++)
+	        if (fetch(global_data_pt(i)->eqn_number(j), v)) global_data_pt(i)->set_value(t, j, v);
+	    for (unsigned i = 0, ni = mesh_pt()->nelement(); i < ni; i++)
+	    {
+	      oomph::GeneralisedElement *ele_pt = mesh_pt()->element_pt(i);
+	      for (unsigned j = 0, nj = ele_pt->ninternal_data(); j < nj; j++)
+	      {
+	        oomph::Data *d_pt = ele_pt->internal_data_pt(j);
+	        for (unsigned k = 0, nk = d_pt->nvalue(); k < nk; k++)
+	          if (fetch(d_pt->eqn_number(k), v)) d_pt->set_value(t, k, v);
+	      }
+	    }
+	    for (unsigned i = 0, ni = mesh_pt()->nnode(); i < ni; i++)
+	    {
+	      oomph::Node *n_pt = mesh_pt()->node_pt(i);
+	      for (unsigned j = 0, nj = n_pt->nvalue(); j < nj; j++)
+	        if (fetch(n_pt->eqn_number(j), v)) n_pt->set_value(t, j, v);
+	      pyoomph::Node *pn_pt = dynamic_cast<pyoomph::Node *>(n_pt);
+	      if (!pn_pt) continue;
+	      for (unsigned j = 0, nj = pn_pt->variable_position_pt()->nvalue(); j < nj; j++)
+	        if (fetch(pn_pt->variable_position_pt()->eqn_number(j), v)) pn_pt->variable_position_pt()->set_value(t, j, v);
+	    }
+	    this->synchronise_all_dofs();
+	    return;
+	  }
 #endif
 	 oomph::Problem::set_dofs(t,dof_pt);
 	 //std::cout << "SET HISTORY DOFS " << t << std::endl;
 	 // But oomph-lib forgot the variable position pt of moving nodes...
      for (unsigned i = 0, ni = mesh_pt()->nnode(); i < ni; i++)
      {
-      pyoomph::Node* node_pt = dynamic_cast<pyoomph::Node*>(mesh_pt()->node_pt(i));
+      pyoomph::Node* node_pt = static_cast<pyoomph::Node*>(mesh_pt()->node_pt(i));
 	  if (!node_pt) continue;
       for (unsigned j = 0, nj = node_pt->variable_position_pt()->nvalue(); j < nj; j++)
       {        
@@ -1392,21 +1796,54 @@ namespace pyoomph
     void Problem::set_dofs(const unsigned& t, oomph::Vector<double*>& dof_pt)
 	{
 #ifdef OOMPH_HAS_MPI
-	  // oomph-lib declares the HISTORY dof accessors unsupported for distributed problems and guards
-	  // them with a PARANOID throw -- but pyoomph builds with PARANOID off by default, in which case
-	  // the guard vanishes and the loops below silently corrupt the heap: eqn_number() is a GLOBAL
-	  // equation number while the vector holds only this rank's rows. Refuse instead. The current-time
-	  // accessors (get_dofs/set_dofs without t) are distribution-aware and unaffected.
+	  // As in get_dofs(t,...): write only the rows this rank owns, by the same range test, and then
+	  // let the halo exchange carry them to the other ranks' copies. Data::add_values_to_vector sends
+	  // every time level (it loops to ntstorage()), so synchronise_all_dofs() propagates history
+	  // values and not just the current ones -- which is what makes this possible at all.
 	  if (this->distributed())
-	    throw_runtime_error("History dof values (time level t>0) are not implemented for distributed problems. "
-	                        "Only the current dof values are available under --distribute.");
+	  {
+	    const unsigned first_row = this->dof_distribution_pt()->first_row();
+	    const unsigned n_row_local = this->dof_distribution_pt()->nrow_local();
+	    auto fetch = [&](int eqn_number, double &out) -> bool
+	    {
+	      if (eqn_number < 0 || (unsigned)eqn_number < first_row || (unsigned)eqn_number >= first_row + n_row_local) return false;
+	      out = *(dof_pt[(unsigned)eqn_number]);
+	      return true;
+	    };
+	    double v = 0.0;
+	    for (unsigned i = 0, ni = nglobal_data(); i < ni; i++)
+	      for (unsigned j = 0, nj = global_data_pt(i)->nvalue(); j < nj; j++)
+	        if (fetch(global_data_pt(i)->eqn_number(j), v)) global_data_pt(i)->set_value(t, j, v);
+	    for (unsigned i = 0, ni = mesh_pt()->nelement(); i < ni; i++)
+	    {
+	      oomph::GeneralisedElement *ele_pt = mesh_pt()->element_pt(i);
+	      for (unsigned j = 0, nj = ele_pt->ninternal_data(); j < nj; j++)
+	      {
+	        oomph::Data *d_pt = ele_pt->internal_data_pt(j);
+	        for (unsigned k = 0, nk = d_pt->nvalue(); k < nk; k++)
+	          if (fetch(d_pt->eqn_number(k), v)) d_pt->set_value(t, k, v);
+	      }
+	    }
+	    for (unsigned i = 0, ni = mesh_pt()->nnode(); i < ni; i++)
+	    {
+	      oomph::Node *n_pt = mesh_pt()->node_pt(i);
+	      for (unsigned j = 0, nj = n_pt->nvalue(); j < nj; j++)
+	        if (fetch(n_pt->eqn_number(j), v)) n_pt->set_value(t, j, v);
+	      pyoomph::Node *pn_pt = dynamic_cast<pyoomph::Node *>(n_pt);
+	      if (!pn_pt) continue;
+	      for (unsigned j = 0, nj = pn_pt->variable_position_pt()->nvalue(); j < nj; j++)
+	        if (fetch(pn_pt->variable_position_pt()->eqn_number(j), v)) pn_pt->variable_position_pt()->set_value(t, j, v);
+	    }
+	    this->synchronise_all_dofs();
+	    return;
+	  }
 #endif
      oomph::Problem::set_dofs(t,dof_pt);
 	 //std::cout << "SET HISTORY DOFS " << t << std::endl;
 	 // But oomph-lib forgot the variable position pt of moving nodes...
      for (unsigned i = 0, ni = mesh_pt()->nnode(); i < ni; i++)
      {
-      pyoomph::Node* node_pt = dynamic_cast<pyoomph::Node*>(mesh_pt()->node_pt(i));
+      pyoomph::Node* node_pt = static_cast<pyoomph::Node*>(mesh_pt()->node_pt(i));
 	  if (!node_pt) continue;
       for (unsigned j = 0, nj = node_pt->variable_position_pt()->nvalue(); j < nj; j++)
       {        
@@ -1423,8 +1860,11 @@ namespace pyoomph
 	// length (must match ndof()) and that t is within the timestepper's available history storage.
 	void Problem::set_history_dofs(unsigned t, const std::vector<double> &inp)
 	{
+		// 'inp' is indexed by GLOBAL equation number while 'dofs' is built on the dof distribution,
+		// i.e. this rank's rows -- so the fill loop below is a scatter, not a copy, exactly as in
+		// set_current_dofs(). Writing ndof() entries into it used to overrun the heap by
+		// ndof()-nrow_local doubles per call when distributed.
 		oomph::DoubleVector dofs;
-		dofs.build(this->dof_distribution_pt(), 0.0);
 		if (inp.size() != this->ndof())
 		{
 			std::ostringstream oss; oss << "Try to set dofs of length " << inp.size() << " while problem has " << this->ndof() << " dofs";
@@ -1432,8 +1872,7 @@ namespace pyoomph
 		}
 		if (t>=this->time_stepper_pt()->ntstorage()) 
 		        throw_runtime_error("Wrong history offset");
-		for (unsigned int i = 0; i < this->ndof(); i++)
-			dofs[i] = inp[i];
+		scatter_global_to_double_vector(inp, dofs, this->dof_distribution_pt());
 		this->set_dofs(t, dofs);
 	}
 
@@ -1459,8 +1898,8 @@ namespace pyoomph
 				{
 					for (unsigned int iv = 0; iv < n->ndim(); iv++)
 					{
-						if (dynamic_cast<pyoomph::Node *>(n)->variable_position_pt()->is_pinned(iv))
-							res.push_back(dynamic_cast<pyoomph::Node *>(n)->variable_position_pt()->value(iv));
+						if (static_cast<pyoomph::Node *>(n)->variable_position_pt()->is_pinned(iv))
+							res.push_back(static_cast<pyoomph::Node *>(n)->variable_position_pt()->value(iv));
 					}
 				}
 			}
@@ -1629,6 +2068,81 @@ namespace pyoomph
 		return true;
 	}
 
+	// --- Inverted elements ---------------------------------------------------------------------
+	//
+	// Why any of this exists: the detector throws from inside the element loop, and that loop is split
+	// by element across the ranks in BOTH MPI modes. The rank holding the folded element left the loop
+	// while the others were still inside the assembly's collectives, so `mpirun -n 2` on a folding mesh
+	// hung instead of reporting anything - measured on dev_docs/examples/inverted_element_notch.py.
+	// Inside this scope the detector records instead of throwing, every rank finishes the loop, and
+	// raise_if_any() then reduces and throws on all of them or on none.
+
+	Problem::InvertedElementScope::InvertedElementScope(Problem *p) : prob(p)
+	{
+		// Nested scopes are possible (get_jacobian assembles residuals too on some paths); only the
+		// outermost one owns the flag, so an inner destructor cannot reopen the immediate throw.
+		outer = (prob->inverted_element_scope_depth++ == 0);
+		if (outer)
+		{
+			BulkElementBase::inverted_elements_detected = 0;
+			BulkElementBase::inverted_element_message.clear();
+		}
+	}
+
+	Problem::InvertedElementScope::~InvertedElementScope()
+	{
+		prob->inverted_element_scope_depth--;
+	}
+
+	void Problem::InvertedElementScope::raise_if_any()
+	{
+		if (!outer) return;
+		bool seen = (BulkElementBase::inverted_elements_detected > 0);
+#ifdef OOMPH_HAS_MPI
+		if (prob->communicator_pt() && prob->communicator_pt()->nproc() > 1)
+		{
+			// MPI_MAX over one int, on a path that is collective anyway - the same shape of agreement
+			// consume_newton_abort_request() makes, and for the same reason: the condition is seen by
+			// whichever rank happens to hold the element, while the response has to be unanimous.
+			int mine = seen ? 1 : 0, any = 0;
+			MPI_Allreduce(&mine, &any, 1, MPI_INT, MPI_MAX, prob->communicator_pt()->mpi_comm());
+			seen = (any != 0);
+		}
+#endif
+		if (!seen) return;
+
+		// A rank that saw nothing has no message of its own; say so rather than reporting an empty one.
+		std::string msg = BulkElementBase::inverted_element_message;
+		if (msg.empty()) msg = "An inverted element was detected on another process.";
+
+		BulkElementBase::inverted_elements_detected = 0;
+		BulkElementBase::inverted_element_message.clear();
+
+		// One report per assembly that saw one, however many integration points of however many
+		// elements were involved.
+		prob->inversion_reports_in_this_solve_call++;
+
+		// Escalate once this solve() call has absorbed enough of them that reducing the step is
+		// clearly not the answer. See inversion_remesh_threshold in problem.hpp for why the count is
+		// per CALL rather than per run of consecutive solves - the run-based proxy the design proposed
+		// was measured and does not work.
+		//
+		// Unanimous by construction: the "seen" flag above is already reduced over the ranks and the
+		// counter is incremented on every rank, so every rank reaches the same verdict here without a
+		// second collective.
+		if (prob->inversion_remesh_threshold > 0 &&
+			prob->inversion_reports_in_this_solve_call >= prob->inversion_remesh_threshold)
+		{
+			std::ostringstream oss;
+			oss << "An inverted element has been reported " << prob->inversion_reports_in_this_solve_call
+				<< " times while trying to take this step, so reducing the step is not curing it. "
+				<< "Remeshing instead." << std::endl
+				<< msg;
+			throw pyoomph::InvertedElementRemeshRequest(oss.str());
+		}
+		throw oomph::InvertedElementError(msg, OOMPH_CURRENT_FUNCTION, OOMPH_EXCEPTION_LOCATION);
+	}
+
 	void Problem::get_residuals(oomph::DoubleVector &residuals)
 	{
 		// Before anything else, including the halo sync: an abandoned solve should cost nothing.
@@ -1649,15 +2163,23 @@ namespace pyoomph
 			// "abandon the solve" when no solve is running.
 			throw oomph::NewtonSolverError(0, std::numeric_limits<double>::max());
 		}
+		// One assembly pass: the dof vector is fixed for its whole duration, so each element's hanging
+		// values need re-deriving at most once (see HangInterpPassScope). The MPI sync below is itself
+		// a full interpolate sweep, and it stamps, so its work is then not repeated per element.
+		HangInterpPassScope __hang_pass;
+		// Defer any inverted-element report until every rank is out of the (collective) element loop.
+		InvertedElementScope __inv(this);
 		sync_hanging_values_if_parallel(this);
 		if (!use_custom_residual_jacobian)
 		{
 			get_residuals_by_elemental_assembly(residuals);
+			__inv.raise_if_any();
 			if (!this->dirichlets_by_removing_from_dof_vector)
 			{
 				if (this->bifurcation_tracking_mode!="") throw_runtime_error("TODO: Cannot remove dirichlet dofs from the residual vector by matrix manipulation when bifurcation tracking is active, since the user-provided residual vector would still contain contributions from the dirichlet dofs, which would be wrong");
 				this->remove_dirichlets_by_matrix_manipulation(residuals);
 			}
+	apply_residual_scale_factor(residuals);
 		}
 		else
 		{
@@ -1682,6 +2204,7 @@ namespace pyoomph
 	// normal elemental assembly and the custom-residual-Jacobian path (there identified by parameter name).
 	void Problem::get_derivative_wrt_global_parameter(double* const& parameter_pt,oomph::DoubleVector& result)
 	{
+		HangInterpPassScope __hang_pass; // see Problem::get_residuals
 		if (!use_custom_residual_jacobian)
 		{
 			get_derivative_wrt_global_parameter_elemental_assembly(parameter_pt,result);
@@ -1718,16 +2241,20 @@ namespace pyoomph
 	// Top-level Jacobian assembly entry point; same dispatch/Dirichlet-handling pattern as get_residuals()
 	void Problem::get_jacobian(oomph::DoubleVector &residuals, oomph::CRDoubleMatrix &jacobian)
 	{
+		HangInterpPassScope __hang_pass; // see Problem::get_residuals
+		InvertedElementScope __inv(this); // see Problem::get_residuals
 		sync_hanging_values_if_parallel(this);
 		last_jacobian_was_condensed = false;
 		if (!use_custom_residual_jacobian)
 		{
 			get_jacobian_by_elemental_assembly(residuals, jacobian);
+			__inv.raise_if_any();
 			if (!this->dirichlets_by_removing_from_dof_vector)
 			{
 				if (this->bifurcation_tracking_mode!="") throw_runtime_error("TODO: Cannot remove dirichlet dofs from the jacobian matrix by matrix manipulation when bifurcation tracking is active, since the user-provided jacobian matrix would still contain contributions from the dirichlet dofs, which would be wrong");
 				this->remove_dirichlets_by_matrix_manipulation(residuals,&jacobian);
 			}
+			apply_residual_scale_factor(residuals);
 			// Static condensation comes LAST, after the Dirichlet manipulation, and that order is forced.
 			// Condensation is an exact algebraic elimination of whatever linear system it is given, so it
 			// has to be given the FINAL one; remove_dirichlets_by_matrix_manipulation() replaces a
@@ -1765,7 +2292,10 @@ namespace pyoomph
 			// coming out of a Newton solve hands in a matrix oomph-lib has already distributed, which
 			// is why this went unnoticed; _assemble_residual_jacobian(), i.e. Problem.assemble_jacobian()
 			// from Python, passes a fresh CRDoubleMatrix and segfaulted whenever a Python-side custom
-			// assembler (a CustomBifurcationTracker, deflation, ...) was installed.
+			// assembler (a CustomBifurcationTracker) was installed. Note the copy loop still writes
+			// info.residuals.size() entries regardless of what the caller's distribution says -- see
+			// dev_docs/mpi_augmented_systems.md B2, which is still open and is why this whole branch
+			// is refused under MPI.
 			if (!jacobian.distribution_built())
 			{
 				oomph::LinearAlgebraDistribution dist(this->communicator_pt(), info.residuals.size(), false);
@@ -1812,20 +2342,24 @@ namespace pyoomph
 			throw_runtime_error("Unknown param to set " + nam);
 	}
 
-	// Toggles the internal __replace_RJM_by_param_deriv pointer, which, when non-NULL, makes subsequent
+	// Toggles this Problem's replace_RJM_by_param_deriv pointer, which, when non-NULL, makes subsequent
 	// residual/Jacobian/mass-matrix assembly calls return the derivative w.r.t. the named global
 	// parameter instead of the normal residual/Jacobian/mass matrix (used internally e.g. for parameter
 	// derivative computations that must reuse the same elemental assembly loop machinery).
+	//
+	// This is a latch with no scope guard, and it is reachable from Python: an exception raised between
+	// the "on" and the "off" call leaves the Problem assembling parameter derivatives. It used to be a
+	// process-wide global, so that also left every OTHER Problem doing so.
 	void Problem::_replace_RJM_by_param_deriv(std::string name, bool active)
 	{
 		if (!active)
-			__replace_RJM_by_param_deriv = NULL;
+			replace_RJM_by_param_deriv = NULL;
 		else
 		{
 			if (!global_params_by_name.count(name))
 				throw_runtime_error("Cannot replace residuals/jacobian/mass matrix by parameter derivatives for global parameter " + name + ", since it is not present in the problem");
 			auto *p = global_params_by_name[name];
-			__replace_RJM_by_param_deriv = &(p->value());
+			replace_RJM_by_param_deriv = &(p->value());
 		}
 	}
 
@@ -1866,47 +2400,68 @@ namespace pyoomph
 		this->calculate_continuation_derivatives(&(p->value()));
 	}
 
-	// d(dof)/ds (arclength derivative) as a plain std::vector, exposing oomph-lib's internal Dof_derivative
+	// oomph-lib keeps Dof_derivative and Dof_current on the DOF DISTRIBUTION, i.e. this rank's rows
+	// only when the problem is distributed. Everything on the Python side of these three functions
+	// deals in GLOBAL dof vectors -- get_history_dofs()/set_history_dofs(), which is what
+	// remesh_handler_during_continuation() carries the tangent through, and get_current_dofs() --
+	// so these gather on the way out and scatter on the way in, and the two ends now agree.
+	//
+	// They did not. remesh_handler_during_continuation() reads the tangent back with
+	// get_history_dofs() (global, ndof long) and handed it to update_dof_vectors_for_continuation(),
+	// which required nrow_local: under --distribute that threw "Mismatch in size of ddof and current
+	// dof vectors" out of the middle of go_to_param(), so the hanging-droplet tutorial never reached
+	// its base state at all. The reverse direction was wrong too and would have written a local-length
+	// vector into a global history slot. Serially and under plain mpirun both are the identity, which
+	// is why this only ever showed with --distribute.
+	static void gather_local_dof_array_to_global(pyoomph::Problem *prob, const oomph::Vector<double> &src,
+												 std::vector<double> &res)
+	{
+		if (src.size() == 0) { res.clear(); return; } // "no continuation state", which callers test for
+		oomph::DoubleVector v(prob->dof_distribution_pt(), 0.0);
+		const unsigned n = v.nrow_local();
+		for (unsigned i = 0; i < n && i < src.size(); i++) v[i] = src[i];
+		pyoomph::Problem::gather_double_vector_to_global(v, res);
+	}
+
+	// d(dof)/ds (arclength derivative) as a plain std::vector, GLOBALLY indexed on every rank
 	std::vector<double> Problem::get_arclength_dof_derivative_vector()
 	{
-		std::vector<double> res(Dof_derivative.size());
-		for (unsigned i = 0; i < res.size(); i++)
-			res[i] = dof_derivative(i);
+		std::vector<double> res;
+		gather_local_dof_array_to_global(this, Dof_derivative, res);
 		return res;
 	}
 
-	// Dof values at the last continuation step (oomph-lib's internal Dof_current), as a std::vector
+	// Dof values at the last continuation step (oomph-lib's internal Dof_current), globally indexed
 	std::vector<double> Problem::get_arclength_dof_current_vector()
 	{
-		std::vector<double> res(Dof_current.size());
-		for (unsigned i = 0; i < res.size(); i++)
-			res[i] = dof_current(i);
+		std::vector<double> res;
+		gather_local_dof_array_to_global(this, Dof_current, res);
 		return res;
 	}
 
-    // Writes ddof/curr (locally distributed dof-derivative and current-dof vectors) into oomph-lib's
-    // internal Dof_derivative/Dof_current, resizing them first if necessary; used to seed/restore the
-    // arclength continuation state (e.g. from Python-side branch switching).
+    // Writes ddof/curr -- GLOBALLY indexed dof-derivative and current-dof vectors, ndof long on every
+    // rank -- into oomph-lib's internal Dof_derivative/Dof_current, which hold this rank's rows.
+    // See the comment on get_arclength_dof_derivative_vector() for why the boundary is global.
     void Problem::update_dof_vectors_for_continuation(const std::vector<double> &ddof, const std::vector<double> &curr)
     {
 		if (ddof.size() != curr.size()) throw_runtime_error("Mismatch in size of ddof and curr");
-		unsigned ndof_local = Dof_distribution_pt->nrow_local();
-		if (ddof.size() != ndof_local)
+		const unsigned ndof_local = Dof_distribution_pt->nrow_local();
+		if (ddof.size() != this->ndof())
 		{
-			throw_runtime_error("Mismatch in size of ddof and current dof vectors");
+			throw_runtime_error("Mismatch in size of ddof (" + std::to_string(ddof.size()) +
+								") and the problem's dof count (" + std::to_string(this->ndof()) +
+								"). These vectors are indexed GLOBALLY, as get_history_dofs() and "
+								"get_arclength_dof_derivative_vector() return them.");
 		}
-		if (Dof_derivative.size() != ndof_local)
-		{
-			Dof_derivative.resize(ndof_local, 0.0);
-		}
-		if (Dof_current.size() != ndof_local)
-		{
-			Dof_current.resize(ndof_local, 0.0);
-		}
+		if (Dof_derivative.size() != ndof_local) Dof_derivative.resize(ndof_local, 0.0);
+		if (Dof_current.size() != ndof_local) Dof_current.resize(ndof_local, 0.0);
+		// Take this rank's slice. first_row() is 0 and nrow_local() is ndof unless distributed, so
+		// this is the old loop verbatim in every other case.
+		const unsigned first = Dof_distribution_pt->first_row();
 		for (unsigned i = 0; i < ndof_local; i++)
 		{
-			Dof_derivative[i] = ddof[i];
-			Dof_current[i] = curr[i];
+			Dof_derivative[i] = ddof[first + i];
+			Dof_current[i] = curr[first + i];
 		}
     }
 
@@ -1924,16 +2479,29 @@ namespace pyoomph
 
 
     // Installs oomph-lib's MyFoldHandler (fold/limit-point bifurcation tracking assembly handler) with a
+	// Backstop for the Python refusal in Problem.activate_bifurcation_tracking(). oomph-lib's block
+	// linear solvers open with
+	//     FoldHandler* handler_pt = static_cast<FoldHandler*>(problem_pt->assembly_handler_pt());
+	// (assembly_handler.cc) and then call a FoldHandler method on it. pyoomph installs MyFoldHandler /
+	// MyHopfHandler, which derive from oomph::AssemblyHandler and not from those classes, so that cast
+	// reinterprets an unrelated object and the first member access is undefined behaviour -- measured
+	// as a plain SEGV on a serial Bratu fold track, with any linear solver. Throwing here rather than
+	// installing the solver turns a crash into a message for any caller that bypasses Python.
+	static void refuse_block_solve(const char *what)
+	{
+		throw_runtime_error(std::string(what) + " with block_solve=true is not supported: oomph-lib's "
+							"block linear solvers static_cast the assembly handler to their own "
+							"FoldHandler/HopfHandler, which pyoomph's handlers are not. Use the full "
+							"augmented solve (block_solve=false).");
+	}
+
     // given starting null-eigenvector guess; if block_solve, additionally switches to the augmented block
     // linear solver that exploits the bordered system's block structure instead of a full dense solve.
     void Problem::activate_my_fold_tracking(double *const &parameter_pt, const oomph::DoubleVector &eigenvector, const bool &block_solve)
 	{
 		reset_assembly_handler_to_default();
 		this->assembly_handler_pt() = new MyFoldHandler(this, parameter_pt, eigenvector);
-		if (block_solve)
-		{
-			this->linear_solver_pt() = new oomph::AugmentedBlockFoldLinearSolver(this->linear_solver_pt());
-		}
+		if (block_solve) refuse_block_solve("Fold tracking");
 	}
 
 	// Same as above, but lets MyFoldHandler determine the initial null-eigenvector itself
@@ -1941,10 +2509,7 @@ namespace pyoomph
 	{
 		reset_assembly_handler_to_default();
 		this->assembly_handler_pt() = new MyFoldHandler(this, parameter_pt);
-		if (block_solve)
-		{
-			this->linear_solver_pt() = new oomph::AugmentedBlockFoldLinearSolver(this->linear_solver_pt());
-		}
+		if (block_solve) refuse_block_solve("Fold tracking");
 	}
 
 	// Installs the Hopf-bifurcation tracking assembly handler (bordered system with complex null vector
@@ -1953,10 +2518,7 @@ namespace pyoomph
 	{
 		reset_assembly_handler_to_default();
 		this->assembly_handler_pt() = new MyHopfHandler(this, parameter_pt, omega, null_real, null_imag);
-		if (block_solve)
-		{
-			this->linear_solver_pt() = new oomph::BlockHopfLinearSolver(this->linear_solver_pt());
-		}
+		if (block_solve) refuse_block_solve("Hopf tracking");
 	}
 
 	// oomph-lib hook (raw parameter_pt) resolved to the parameter's name and forwarded to the
@@ -2272,8 +2834,8 @@ namespace pyoomph
 	{
 		BulkElementBase *be = dynamic_cast<BulkElementBase *>(elem_pt);
 		if (!be) return false;
-		const JITFuncSpec_Table_FiniteElement_t *ft = be->get_code_instance()->get_func_table();
-		const int resind = (residual_override >= 0 ? residual_override : ft->current_res_jac);
+		const JITFuncSpec_Table_FiniteElement_t *ft = be->get_jit_code()->get_func_table();
+		const int resind = (residual_override >= 0 ? residual_override : get_current_res_jac(ft));
 		if (resind >= 0 && (unsigned)resind >= ft->num_res_jacs) return false; // Not a residual this code has
 		if (resind < 0)
 		{
@@ -2351,7 +2913,7 @@ namespace pyoomph
 
 		BulkElementBase *be = dynamic_cast<BulkElementBase *>(elem_pt);
 		if (!be) return decline("not a BulkElementBase");
-		const bool have_hessian_code = be->get_code_instance()->get_func_table()->hessian_generated;
+		const bool have_hessian_code = be->get_jit_code()->get_func_table()->hessian_generated;
 
 		// Collect the distinct (matrix, residual) pairs the spec refers to BEFORE filling any of them, so
 		// that the buffer indices stay valid while several are held at once. A tracker can mix residuals
@@ -2571,6 +3133,9 @@ namespace pyoomph
 		double t_start = oomph::TimingHelpers::timer();
 		for (unsigned r = 0; r < n_repeat; r++)
 		{
+			// One pass PER REPEAT, so each repeat costs what one real assembly sweep costs; one pass
+			// around the whole loop would have the first repeat pay for all of them.
+			HangInterpPassScope __hang_pass;
 			for (unsigned long e = 0; e < n_elements; e++)
 			{
 				oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
@@ -2826,8 +3391,8 @@ namespace pyoomph
 				{
 					for (unsigned int iv = 0; iv < n->ndim(); iv++)
 					{
-						if (dynamic_cast<pyoomph::Node *>(n)->variable_position_pt()->is_pinned(iv))
-							dynamic_cast<pyoomph::Node *>(n)->variable_position_pt()->set_value(t,iv, inp[pos++]);
+						if (static_cast<pyoomph::Node *>(n)->variable_position_pt()->is_pinned(iv))
+							static_cast<pyoomph::Node *>(n)->variable_position_pt()->set_value(t,iv, inp[pos++]);
 					}
 				}
 			}
@@ -2910,28 +3475,58 @@ namespace pyoomph
 	// get_hessian_vector_products() (kept for reference).
 	std::vector<double> Problem::get_second_order_directional_derivative(std::vector<double> dir)
 	{
-		if (dof_distribution_pt()->nrow_local()!=dir.size()) throw_runtime_error("Mismatch in size of dir vector and the number of DoFs");
+		// Both 'dir' and the result are indexed by GLOBAL equation number, the same contract as
+		// Problem::get_residuals(), which is what the callers pair this with.
+		//
+		// It used to demand dir.size() == nrow_local() while indexing dir[jG] by a global equation
+		// number, size the result by ndof() but never reduce it across ranks, and count halo elements
+		// twice. That is correct exactly where nrow_local() == ndof() -- serially, and under a plain
+		// replicated mpirun -- and a heap overrun plus a wrong answer under --distribute. Same shape
+		// as the Problem::set_history_dofs overrun (see dev_docs/floquet_multipliers.md section 8).
+		if (dir.size() != this->ndof())
+			throw_runtime_error("Mismatch in size of dir vector and the number of DoFs");
 
-		/*
-		oomph::DoubleVectorWithHaloEntries d1;
-		oomph::Vector<oomph::DoubleVectorWithHaloEntries> d2(1);
-		oomph::Vector<oomph::DoubleVectorWithHaloEntries> res(1);
-    	d1.build(dof_distribution_pt(), 0.0);
-    	d2[0].build(dof_distribution_pt(), 0.0);
-		res[0].build(dof_distribution_pt(), 0.0);
-		for (unsigned int i=0;i<dir.size();i++) 
-		{
-			d1[i]=dir[i];
-			d2[0][i]=dir[i];
-		}
-		this->get_hessian_vector_products(d1,d2,res);
-		std::vector<double> result(this->ndof(), 0.0);
-		for (unsigned int i=0;i<this->ndof();i++) result[i]=0.5*res[0][i];
-		return result;
-		*/
-
-		std::vector<double> result(this->ndof(), 0.0);
+		HangInterpPassScope __hang_pass; // see Problem::get_residuals
 		const unsigned long n_elements = mesh_pt()->nelement();
+
+#ifdef OOMPH_HAS_MPI
+		if (this->distributed())
+		{
+			// Owned rows plus halos, so an equation shared with another rank can be accumulated here
+			// and summed there; halo ELEMENTS are skipped so nothing is counted twice.
+			oomph::DoubleVectorWithHaloEntries res;
+			res.build(this->dof_distribution_pt(), 0.0);
+			res.build_halo_scheme(this->GetHaloSchemePt());
+			for (unsigned int ne = 0; ne < n_elements; ne++)
+			{
+				BulkElementBase *elem_pt = dynamic_cast<BulkElementBase *>(mesh_pt()->element_pt(ne));
+				if (!elem_pt || elem_pt->is_halo()) continue;
+				const unsigned nvar = assembly_handler_pt()->ndof(elem_pt);
+				oomph::DenseMatrix<double> hessian_buffer(nvar, nvar * nvar, 0.0);
+				elem_pt->assemble_hessian_tensor(hessian_buffer);
+				for (unsigned int i = 0; i < nvar; i++)
+				{
+					unsigned iG = assembly_handler_pt()->eqn_number(elem_pt, i);
+					for (unsigned int j = 0; j < nvar; j++)
+					{
+						unsigned jG = assembly_handler_pt()->eqn_number(elem_pt, j);
+						for (unsigned int k = 0; k < nvar; k++)
+						{
+							double hval = hessian_buffer(i, k * nvar + j);
+							unsigned kG = assembly_handler_pt()->eqn_number(elem_pt, k);
+							res.global_value(iG) += hval * dir[jG] * dir[kG];
+						}
+					}
+				}
+			}
+			res.sum_all_halo_and_haloed_values();
+			std::vector<double> result;
+			gather_double_vector_to_global(res, result);
+			return result;
+		}
+#endif
+
+		std::vector<double> result(this->ndof(), 0.0);
 		for (unsigned int ne = 0; ne < n_elements; ne++)
 		{
 			BulkElementBase *elem_pt = dynamic_cast<BulkElementBase *>(mesh_pt()->element_pt(ne));
@@ -2946,9 +3541,9 @@ namespace pyoomph
 					unsigned jG = assembly_handler_pt()->eqn_number(elem_pt, j);
 					for (unsigned int k = 0; k < nvar; k++)
 					{
-						double hval = hessian_buffer(i, k * nvar + j);						
+						double hval = hessian_buffer(i, k * nvar + j);
 						unsigned kG = assembly_handler_pt()->eqn_number(elem_pt, k);
-						result[iG]+=hval*dir[jG]*dir[kG];
+						result[iG] += hval * dir[jG] * dir[kG];
 					}
 				}
 			}
@@ -2965,6 +3560,7 @@ namespace pyoomph
 	SparseRank3Tensor Problem::assemble_hessian_tensor(bool symmetric)
 	{
 		SparseRank3Tensor result(this->ndof(), symmetric);
+		HangInterpPassScope __hang_pass; // see Problem::get_residuals
 		const unsigned long n_elements = mesh_pt()->nelement();
 		for (unsigned int ne = 0; ne < n_elements; ne++)
 		{
@@ -3509,13 +4105,17 @@ namespace pyoomph
 		{
 			// Assembled straight into the preallocated pattern; nothing else to do.
 		}
-		else if (dynamic_cast<PeriodicOrbitHandler*>(this->assembly_handler_pt()))
-		{
-			sparse_assemble_row_or_column_compressed_for_periodic_orbit(column_or_row_index,row_or_column_start,value,nnz,residual,compressed_row_flag);
-		}
 		else
 		{
-			oomph::Problem::sparse_assemble_row_or_column_compressed(column_or_row_index,row_or_column_start,value,nnz,residual,compressed_row_flag);
+			// Only the frozen route is threaded, so say so once rather than leaving --omp looking as if
+			// it had simply bought nothing.
+			if (num_threads > 1)
+				report_parallel_refusal("this assembly has no frozen sparsity pattern (the periodic-orbit "
+										"and map-based routes are not threaded)");
+			if (dynamic_cast<PeriodicOrbitHandler*>(this->assembly_handler_pt()))
+				sparse_assemble_row_or_column_compressed_for_periodic_orbit(column_or_row_index,row_or_column_start,value,nnz,residual,compressed_row_flag);
+			else
+				oomph::Problem::sparse_assemble_row_or_column_compressed(column_or_row_index,row_or_column_start,value,nnz,residual,compressed_row_flag);
 		}
 
 	}
@@ -3805,8 +4405,8 @@ namespace pyoomph
 			for (unsigned ie = 0; ie < ne; ie++)
 			{
 				auto *el = dynamic_cast<BulkElementBase *>(m->element_pt(ie));
-				if (!el || !el->get_code_instance()) continue;
-				const JITFuncSpec_Table_FiniteElement_t *ft = el->get_code_instance()->get_func_table();
+				if (!el || !el->get_jit_code()) continue;
+				const JITFuncSpec_Table_FiniteElement_t *ft = el->get_jit_code()->get_func_table();
 				auto found = located.find(ft);
 				if (found == located.end())
 				{
@@ -3892,7 +4492,7 @@ namespace pyoomph
 			}
 			if (hits.empty()) continue;
 			const std::vector<std::string> names = be->get_dof_names();
-			const JITFuncSpec_Table_FiniteElement_t *ft = be->get_code_instance()->get_func_table();
+			const JITFuncSpec_Table_FiniteElement_t *ft = be->get_jit_code()->get_func_table();
 			const std::string domain = (ft && ft->domain_name ? std::string(ft->domain_name) : std::string("?"));
 			for (const auto &h : hits)
 			{
@@ -4497,6 +5097,39 @@ namespace pyoomph
 
 	// Row cut points that no element-local condensation block straddles; empty for "no preference".
 	//
+	// Moves the cut points of a uniform nproc-way row split off the blocks they would otherwise fall
+	// inside. blocks must be disjoint and ascending. Returns an empty vector when some block is longer
+	// than one rank's share, which cannot be stepped over by moving a cut at all -- only by handing a
+	// whole rank's worth of rows to somebody else.
+	//
+	// Shared by the two callers that want a block-aligned split for different reasons: static
+	// condensation, whose blocks are the components it inverts, and the dof ordering, whose blocks are
+	// the nodal or elemental blocks the layout built. They were the same fifteen lines.
+	static std::vector<unsigned> snap_cuts_to_blocks(const std::vector<std::pair<int, int>> &blocks,
+													 unsigned nproc, unsigned nd)
+	{
+		std::vector<unsigned> cuts;
+		const unsigned share = nd / nproc;
+		for (size_t i = 0; i < blocks.size(); i++)
+			if ((unsigned)(blocks[i].second - blocks[i].first + 1) > share) return cuts;
+
+		cuts.assign(nproc + 1, 0);
+		cuts[nproc] = nd;
+		size_t bi = 0;
+		for (unsigned p = 1; p < nproc; p++)
+		{
+			unsigned c = (unsigned)((unsigned long)nd * p / nproc);
+			if (c < cuts[p - 1]) c = cuts[p - 1];
+			while (bi < blocks.size() && (unsigned)blocks[bi].second < c) bi++;
+			// One step is enough: the blocks are disjoint, so blocks[bi].second+1 is at most
+			// blocks[bi+1].first, which is not strictly inside blocks[bi+1].
+			if (bi < blocks.size() && (unsigned)blocks[bi].first < c && c <= (unsigned)blocks[bi].second)
+				c = (unsigned)blocks[bi].second + 1;
+			cuts[p] = (c > nd ? nd : c);
+		}
+		return cuts;
+	}
+
 	// Only a REPLICATED run needs this. Distributed, oomph renumbers so that each rank's own dofs are
 	// one contiguous global range (synchronise_eqn_numbers), so a block of dofs belonging to one
 	// element is inside one rank's range by construction. Replicated, the numbering is the serial one
@@ -4591,47 +5224,54 @@ namespace pyoomph
 			else blocks.push_back(spans[i]);
 		}
 
-		// A block longer than one rank's share cannot be stepped over by moving a cut, only by handing a
-		// whole rank's worth of rows to somebody else. That is not a corner case: it is what a selection
-		// mixing NODAL and element-internal dofs looks like, because oomph numbers all nodal values
-		// before any internal ones, so a CR bubble velocity and the DL pressure of the same element sit
-		// hundreds of equations apart. Leave the uniform split alone then; the plan builder refuses with
-		// a message that names the dofs, which is far more use than a silently unbalanced partition.
-		const unsigned share = nd / nproc;
-		for (size_t i = 0; i < blocks.size(); i++)
-			if ((unsigned)(blocks[i].second - blocks[i].first + 1) > share) return std::vector<unsigned>();
-
-		cuts.assign(nproc + 1, 0);
-		cuts[nproc] = nd;
-		size_t bi = 0;
-		for (unsigned p = 1; p < nproc; p++)
-		{
-			unsigned c = (unsigned)((unsigned long)nd * p / nproc);
-			if (c < cuts[p - 1]) c = cuts[p - 1];
-			while (bi < blocks.size() && (unsigned)blocks[bi].second < c) bi++;
-			// One step is enough: the blocks are disjoint after the merge, so blocks[bi].second+1 is at
-			// most blocks[bi+1].first, which is not strictly inside blocks[bi+1].
-			if (bi < blocks.size() && (unsigned)blocks[bi].first < c && c <= (unsigned)blocks[bi].second)
-				c = (unsigned)blocks[bi].second + 1;
-			cuts[p] = (c > nd ? nd : c);
-		}
-		return cuts;
+		// An over-long block means the selection mixes NODAL and element-internal dofs, because oomph
+		// numbers all nodal values before any internal ones -- a CR bubble velocity and the DL pressure
+		// of the same element then sit hundreds of equations apart and no cut can be moved off them.
+		// snap_cuts_to_blocks returns empty there, the uniform split stands, and the plan builder
+		// refuses with a message naming the dofs, which is far more use than a silently unbalanced
+		// partition. An ElementBlockOrdering on those same fields is what makes the blocks short enough
+		// for this to succeed; see dev_docs/dof_ordering.md.
+		return snap_cuts_to_blocks(blocks, nproc, nd);
 	}
 
 	void Problem::preferred_linear_solver_distribution(oomph::LinearAlgebraDistribution *&dist_pt)
 	{
 		dist_pt = 0;
-		if (!use_static_condensation || !Communicator_pt || Communicator_pt->nproc() < 2) return;
+		if (!Communicator_pt || Communicator_pt->nproc() < 2) return;
+		// Two reasons to want a non-uniform row split, and condensation's is the stronger: it is a
+		// CORRECTNESS requirement (a component must be invertible on the rank owning its rows), whereas
+		// a dof layout only wants its blocks kept whole so a block preconditioner sees them. So
+		// condensation decides whenever it is on, and the layout is consulted only otherwise. Both
+		// cannot be served at once in general -- their blocks are different partitions of the same rows.
+		const bool for_condensation = use_static_condensation;
+		// Deflation dots a DOF-layout vector (grad log M) against the Newton increment the solver
+		// returns, so under --distribute the solver's rows have to be the dof rows. oomph's default
+		// there is a uniform split, which is a different partition of the same global rows, and the two
+		// vectors are then not comparable entry by entry -- with 225 dofs on two ranks the dof blocks
+		// are 105/120 and the uniform ones 112/113. Replicated needs nothing: the gradient is the whole
+		// vector and the solver's block is a slice of it. Deflation and static condensation are
+		// mutually exclusive (Problem.set_deflation_operator refuses the combination), so they cannot
+		// both claim this.
+		const bool for_deflation = residual_scale_hook_active;
+		if (!for_condensation && !for_deflation && dof_ordering_blocks.empty()) return;
+
 		if (Problem_has_been_distributed)
 		{
+			// Each rank's dofs are already one contiguous global range (synchronise_eqn_numbers) and any
+			// dof-ordering permutation was rank-local, so no block straddles a rank: the dof distribution
+			// is block-aligned for free, and is what condensation needs besides.
 			// Unconditionally, NOT gated on Dist_problem_matrix_distribution: oomph's own default for that
 			// enum is Uniform_matrix_distribution (problem.cc, the constructor), not the "Default"
 			// heuristic, so consulting it would simply mean never asking for the dof distribution at all.
+			if (!for_condensation && !for_deflation) return; // a layout has nothing to add here; leave oomph's choice alone
 			dist_pt = new oomph::LinearAlgebraDistribution(this->dof_distribution_pt());
 			return;
 		}
+		// Replicated: deflation alone has no preference (see above), so it must not drag the row split
+		// away from oomph's uniform one just by being switched on.
+		if (!for_condensation && dof_ordering_blocks.empty()) return;
 		const unsigned nproc = Communicator_pt->nproc(), my_rank = Communicator_pt->my_rank();
-		std::vector<unsigned> cuts = condensation_row_cuts();
+		std::vector<unsigned> cuts = for_condensation ? condensation_row_cuts() : dof_ordering_row_cuts();
 		if (cuts.size() != nproc + 1) return;
 		dist_pt = new oomph::LinearAlgebraDistribution(Communicator_pt, cuts[my_rank],
 													   cuts[my_rank + 1] - cuts[my_rank], cuts[nproc]);
@@ -6187,66 +6827,77 @@ namespace pyoomph
 
 		oomph::AssemblyHandler *const assembly_handler_pt = this->assembly_handler_pt();
 		const unsigned long n_element = mesh_pt()->nelement();
-		oomph::Vector<oomph::Vector<double>> el_residuals(n_vector);
-		oomph::Vector<oomph::DenseMatrix<double>> el_jacobian(n_matrix);
-		for (unsigned long e = 0; e < n_element; e++)
+		// Threaded element loop, if one was asked for and nothing rules it out. It fills exactly the
+		// same arrays with exactly the same bits (dev_docs/openmp_assembly.md); the serial loop below is
+		// left untouched and is what runs whenever --omp was not given, which is the default.
+		if (this->try_parallel_frozen_assembly(slots, value, residuals, 0, n_element))
 		{
-			oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
-			const unsigned nvar = assembly_handler_pt->ndof(elem_pt);
-			if (!nvar) continue;
-			for (unsigned v = 0; v < n_vector; v++) el_residuals[v].resize(nvar);
-			for (unsigned m = 0; m < n_matrix; m++) el_jacobian[m].resize(nvar);
-			assembly_handler_pt->get_all_vectors_and_matrices(elem_pt, el_residuals, el_jacobian);
+			// The frozen-fill statistics below still want the finished value arrays, so fall through to
+			// them rather than returning here.
+		}
+		else
+		{
+			oomph::Vector<oomph::Vector<double>> el_residuals(n_vector);
+			oomph::Vector<oomph::DenseMatrix<double>> el_jacobian(n_matrix);
+			for (unsigned long e = 0; e < n_element; e++)
+			{
+				oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
+				const unsigned nvar = assembly_handler_pt->ndof(elem_pt);
+				if (!nvar) continue;
+				for (unsigned v = 0; v < n_vector; v++) el_residuals[v].resize(nvar);
+				for (unsigned m = 0; m < n_matrix; m++) el_jacobian[m].resize(nvar);
+				assembly_handler_pt->get_all_vectors_and_matrices(elem_pt, el_residuals, el_jacobian);
 
-			for (unsigned i = 0; i < nvar; i++)
-			{
-				const unsigned eqn_number = assembly_handler_pt->eqn_number(elem_pt, i);
-				for (unsigned v = 0; v < n_vector; v++) residuals[v][eqn_number] += el_residuals[v][i];
-			}
-			for (unsigned m = 0; m < n_matrix; m++)
-			{
-				const FrozenSparsity &sp = frozen_sparsity_cache[slots[m]];
-				const int lo = sp.element_offset[e], hi = sp.element_offset[e + 1];
-				const int *slot = &sp.scatter_slot[0];
-				const int *src = &sp.scatter_source[0];
-				double *val = value[m];
-				const double *flat = &el_jacobian[m](0, 0); // Row-major nvar*nvar block
-				for (int k = lo; k < hi; k++) val[slot[k]] += flat[src[k]];
-				if (verify_frozen_sparsity)
+				for (unsigned i = 0; i < nvar; i++)
 				{
-					// The compact scatter never looks at the positions the pattern omits, so nothing would
-					// notice if the symbolic mask under-reported and a real entry landed there -- a
-					// silently truncated Jacobian. Count the nonzeros of the whole block and of the part
-					// actually scattered: equal iff everything omitted was exactly zero. Counting rather
-					// than summing on purpose -- a sum over the block and a sum over the slot-sorted
-					// subset differ in rounding, so a magnitude comparison reports spurious mismatches.
-					// O(nvar^2) reads of a block already in L1, against O(nvar^2) cache-missing writes for
-					// the scatter itself.
-					unsigned all = 0, taken = 0;
-					const size_t nblock = (size_t)nvar * nvar;
-					for (size_t q = 0; q < nblock; q++) all += (flat[q] != 0.0);
-					for (int k = lo; k < hi; k++) taken += (flat[src[k]] != 0.0);
-					if (all > taken)
+					const unsigned eqn_number = assembly_handler_pt->eqn_number(elem_pt, i);
+					for (unsigned v = 0; v < n_vector; v++) residuals[v][eqn_number] += el_residuals[v][i];
+				}
+				for (unsigned m = 0; m < n_matrix; m++)
+				{
+					const FrozenSparsity &sp = frozen_sparsity_cache[slots[m]];
+					const int lo = sp.element_offset[e], hi = sp.element_offset[e + 1];
+					const int *slot = &sp.scatter_slot[0];
+					const int *src = &sp.scatter_source[0];
+					double *val = value[m];
+					const double *flat = &el_jacobian[m](0, 0); // Row-major nvar*nvar block
+					for (int k = lo; k < hi; k++) val[slot[k]] += flat[src[k]];
+					if (verify_frozen_sparsity)
 					{
-						// Name the offending positions: which part of the block escaped decides what is
-						// wrong. On an AUGMENTED (bifurcation-tracking) block the row and column say which
-						// sub-block of the handler's spec is at fault, which "element 898" alone does not.
-						std::string where;
-						unsigned shown = 0;
-						std::vector<bool> covered(nblock, false);
-						for (int k = lo; k < hi; k++) covered[src[k]] = true;
-						for (size_t q = 0; q < nblock && shown < 6; q++)
+						// The compact scatter never looks at the positions the pattern omits, so nothing would
+						// notice if the symbolic mask under-reported and a real entry landed there -- a
+						// silently truncated Jacobian. Count the nonzeros of the whole block and of the part
+						// actually scattered: equal iff everything omitted was exactly zero. Counting rather
+						// than summing on purpose -- a sum over the block and a sum over the slot-sorted
+						// subset differ in rounding, so a magnitude comparison reports spurious mismatches.
+						// O(nvar^2) reads of a block already in L1, against O(nvar^2) cache-missing writes for
+						// the scatter itself.
+						unsigned all = 0, taken = 0;
+						const size_t nblock = (size_t)nvar * nvar;
+						for (size_t q = 0; q < nblock; q++) all += (flat[q] != 0.0);
+						for (int k = lo; k < hi; k++) taken += (flat[src[k]] != 0.0);
+						if (all > taken)
 						{
-							if (flat[q] == 0.0 || covered[q]) continue;
-							where += (shown ? ", " : "") + std::string("(") + std::to_string(q / nvar) + "," +
-									 std::to_string(q % nvar) + ")=" + std::to_string(flat[q]);
-							shown++;
+							// Name the offending positions: which part of the block escaped decides what is
+							// wrong. On an AUGMENTED (bifurcation-tracking) block the row and column say which
+							// sub-block of the handler's spec is at fault, which "element 898" alone does not.
+							std::string where;
+							unsigned shown = 0;
+							std::vector<bool> covered(nblock, false);
+							for (int k = lo; k < hi; k++) covered[src[k]] = true;
+							for (size_t q = 0; q < nblock && shown < 6; q++)
+							{
+								if (flat[q] == 0.0 || covered[q]) continue;
+								where += (shown ? ", " : "") + std::string("(") + std::to_string(q / nvar) + "," +
+										 std::to_string(q % nvar) + ")=" + std::to_string(flat[q]);
+								shown++;
+							}
+							throw_runtime_error("A Jacobian entry appeared outside the symbolic sparsity pattern (matrix " +
+												std::to_string(m) + ", element " + std::to_string(e) + ", nvar " +
+												std::to_string(nvar) + "). Positions missing from the pattern: " + where +
+												". Silently dropping them would truncate the Jacobian, so assembly is "
+												"refused. Workaround: set problem.use_frozen_sparsity=False.");
 						}
-						throw_runtime_error("A Jacobian entry appeared outside the symbolic sparsity pattern (matrix " +
-											std::to_string(m) + ", element " + std::to_string(e) + ", nvar " +
-											std::to_string(nvar) + "). Positions missing from the pattern: " + where +
-											". Silently dropping them would truncate the Jacobian, so assembly is "
-											"refused. Workaround: set problem.use_frozen_sparsity=False.");
 					}
 				}
 			}
@@ -6267,7 +6918,7 @@ namespace pyoomph
 				if (!be) continue;
 				const unsigned nvar = assembly_handler_pt->ndof(elem_pt);
 				if (!nvar) continue;
-				const JITFuncSpec_Table_FiniteElement_t *ft = be->get_code_instance()->get_func_table();
+				const JITFuncSpec_Table_FiniteElement_t *ft = be->get_jit_code()->get_func_table();
 				const std::vector<int> &cidx = be->get_local_dof_contribution_indices();
 				if (cidx.size() != nvar) continue;
 				for (unsigned m = 0; m < n_matrix; m++)
@@ -6320,20 +6971,9 @@ namespace pyoomph
 		return true;
 	}
 
-#ifdef OOMPH_HAS_MPI
-
-	// Phase 2b. See the comment on DistributedFrozenSparsity for what this replaces and why.
-	//
-	// Builds the entire distributed plan. Everything up to "exchange the pattern" is local and mirrors
-	// build_frozen_sparsity(), only with my_eqns as the row set instead of 0..ndof-1; after that one
-	// round of communication tells each rank which (row, column) pairs will arrive from where, which is
-	// all it needs to lay out the final CSR and precompute the merge.
-	// The row/equation half of a distributed assembly plan, shared by the matrix and residual-only
-	// paths. COLLECTIVE, and it returns the same verdict on every rank.
-	//
-	// Nothing here depends on a matrix, on the symbolic mask or on keep_structural_zeros -- only on the
-	// equation numbering and the mesh partition. That is what lets get_residuals() use it even when the
-	// pattern machinery does not apply at all.
+	// Defined OUTSIDE the OOMPH_HAS_MPI block below: problem.hpp declares it unconditionally and the
+	// nanobind binding exposes it either way, so leaving it in there left _pyoomph_core.so with an
+	// undefined symbol in every MPI-less build. The body's own guard is what makes it MPI-aware.
 	// The elements this rank assembles, exactly as oomph::Problem::parallel_sparse_assemble() computes
 	// them. Distributed: all of them, with the halo flag doing the selection. Replicated: the slice
 	// oomph-lib handed this rank, which it may re-tune from measured elemental timings -- which is why
@@ -6355,6 +6995,20 @@ namespace pyoomph
 #endif
 	}
 
+#ifdef OOMPH_HAS_MPI
+
+	// Phase 2b. See the comment on DistributedFrozenSparsity for what this replaces and why.
+	//
+	// Builds the entire distributed plan. Everything up to "exchange the pattern" is local and mirrors
+	// build_frozen_sparsity(), only with my_eqns as the row set instead of 0..ndof-1; after that one
+	// round of communication tells each rank which (row, column) pairs will arrive from where, which is
+	// all it needs to lay out the final CSR and precompute the merge.
+	// The row/equation half of a distributed assembly plan, shared by the matrix and residual-only
+	// paths. COLLECTIVE, and it returns the same verdict on every rank.
+	//
+	// Nothing here depends on a matrix, on the symbolic mask or on keep_structural_zeros -- only on the
+	// equation numbering and the mesh partition. That is what lets get_residuals() use it even when the
+	// pattern machinery does not apply at all.
 	bool Problem::build_distributed_residual_plan(const oomph::LinearAlgebraDistribution* const& dist_pt, unsigned n_vector, DistributedResidualPlan &rp)
 	{
 		rp.clear();
@@ -6874,7 +7528,6 @@ namespace pyoomph
 		for (unsigned v = 0; v < n_vector; v++) local_res[v].assign(my_n_eqn, 0.0);
 
 		oomph::AssemblyHandler *const assembly_handler_pt = this->assembly_handler_pt();
-		const unsigned long n_element = mesh_pt()->nelement();
 		// From the plan, not recomputed: the two agree by the freshness vote above, and taking them from
 		// the plan is what guarantees the scatter map and the element loop describe the same slice.
 		const unsigned long el_lo = sp.el_lo, el_hi_plus_one = sp.el_hi_plus_one;
@@ -6882,53 +7535,59 @@ namespace pyoomph
 		// the matrix entries do not, they go through the scatter map.
 		const unsigned *eq0 = sp.my_eqns.data();
 
-		oomph::Vector<oomph::Vector<double>> el_residuals(n_vector);
-		oomph::Vector<oomph::DenseMatrix<double>> el_jacobian(n_matrix);
 		std::string violation; // empty = this rank has no objection, see the vote after the loop
-		for (unsigned long e = el_lo; e < el_hi_plus_one; e++)
+		// Threaded local stage (dev_docs/openmp_assembly.md): hybrid MPI+OpenMP, i.e. threads INSIDE
+		// each rank. Only this loop is threaded; the exchange below stays on the calling thread, so
+		// MPI_THREAD_FUNNELED is all that is required of the MPI build.
+		if (!this->try_parallel_distributed_assembly(sp, n_matrix, n_vector, local_values, local_res, violation))
 		{
-			oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
-			if (elem_pt->is_halo()) continue;
-			const unsigned nvar = assembly_handler_pt->ndof(elem_pt);
-			if (!nvar) continue;
-			for (unsigned v = 0; v < n_vector; v++) el_residuals[v].resize(nvar);
-			for (unsigned m = 0; m < n_matrix; m++) el_jacobian[m].resize(nvar);
-			assembly_handler_pt->get_all_vectors_and_matrices(elem_pt, el_residuals, el_jacobian);
+			oomph::Vector<oomph::Vector<double>> el_residuals(n_vector);
+			oomph::Vector<oomph::DenseMatrix<double>> el_jacobian(n_matrix);
+			for (unsigned long e = el_lo; e < el_hi_plus_one; e++)
+			{
+				oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
+				if (elem_pt->is_halo()) continue;
+				const unsigned nvar = assembly_handler_pt->ndof(elem_pt);
+				if (!nvar) continue;
+				for (unsigned v = 0; v < n_vector; v++) el_residuals[v].resize(nvar);
+				for (unsigned m = 0; m < n_matrix; m++) el_jacobian[m].resize(nvar);
+				assembly_handler_pt->get_all_vectors_and_matrices(elem_pt, el_residuals, el_jacobian);
 
-			for (unsigned i = 0; i < nvar; i++)
-			{
-				const unsigned g = assembly_handler_pt->eqn_number(elem_pt, i);
-				const unsigned *found = std::lower_bound(eq0, eq0 + my_n_eqn, g);
-				if (found == eq0 + my_n_eqn || *found != g) continue;
-				const size_t row = found - eq0;
-				for (unsigned v = 0; v < n_vector; v++) local_res[v][row] += el_residuals[v][i];
-			}
-			for (unsigned m = 0; m < n_matrix; m++)
-			{
-				const DistributedFrozenSparsity::Mat &mt = sp.mats[m];
-				const int lo = mt.element_offset[e], hi = mt.element_offset[e + 1];
-				const int *slot = mt.scatter_slot.data();
-				const int *src = mt.scatter_source.data();
-				double *val = local_values[m].data();
-				const double *flat = &el_jacobian[m](0, 0);
-				for (int k = lo; k < hi; k++) val[slot[k]] += flat[src[k]];
-				if (verify_frozen_sparsity && violation.empty())
+				for (unsigned i = 0; i < nvar; i++)
 				{
-					// Same guard as the serial path: the compact scatter cannot notice an entry that fell
-					// outside the pattern, so count instead of trusting.
-					unsigned all = 0, taken = 0;
-					const size_t nblock = (size_t)nvar * nvar;
-					for (size_t q = 0; q < nblock; q++) all += (flat[q] != 0.0);
-					for (int k = lo; k < hi; k++) taken += (flat[src[k]] != 0.0);
-					if (all > taken)
+					const unsigned g = assembly_handler_pt->eqn_number(elem_pt, i);
+					const unsigned *found = std::lower_bound(eq0, eq0 + my_n_eqn, g);
+					if (found == eq0 + my_n_eqn || *found != g) continue;
+					const size_t row = found - eq0;
+					for (unsigned v = 0; v < n_vector; v++) local_res[v][row] += el_residuals[v][i];
+				}
+				for (unsigned m = 0; m < n_matrix; m++)
+				{
+					const DistributedFrozenSparsity::Mat &mt = sp.mats[m];
+					const int lo = mt.element_offset[e], hi = mt.element_offset[e + 1];
+					const int *slot = mt.scatter_slot.data();
+					const int *src = mt.scatter_source.data();
+					double *val = local_values[m].data();
+					const double *flat = &el_jacobian[m](0, 0);
+					for (int k = lo; k < hi; k++) val[slot[k]] += flat[src[k]];
+					if (verify_frozen_sparsity && violation.empty())
 					{
-						// RECORDED, not thrown: the value exchange below is collective, so a rank throwing
-						// here on its own would leave every other rank waiting for a message it will never
-						// send - a hung job instead of a failed one. The offending element is this rank's
-						// own, so only it can see the violation.
-						violation = "A Jacobian entry appeared outside the symbolic sparsity pattern during "
-									"distributed assembly (matrix " + std::to_string(m) + ", element " +
-									std::to_string(e) + "). Workaround: set problem.use_frozen_sparsity=False.";
+						// Same guard as the serial path: the compact scatter cannot notice an entry that fell
+						// outside the pattern, so count instead of trusting.
+						unsigned all = 0, taken = 0;
+						const size_t nblock = (size_t)nvar * nvar;
+						for (size_t q = 0; q < nblock; q++) all += (flat[q] != 0.0);
+						for (int k = lo; k < hi; k++) taken += (flat[src[k]] != 0.0);
+						if (all > taken)
+						{
+							// RECORDED, not thrown: the value exchange below is collective, so a rank throwing
+							// here on its own would leave every other rank waiting for a message it will never
+							// send - a hung job instead of a failed one. The offending element is this rank's
+							// own, so only it can see the violation.
+							violation = "A Jacobian entry appeared outside the symbolic sparsity pattern during "
+										"distributed assembly (matrix " + std::to_string(m) + ", element " +
+										std::to_string(e) + "). Workaround: set problem.use_frozen_sparsity=False.";
+						}
 					}
 				}
 			}
@@ -7089,26 +7748,46 @@ namespace pyoomph
 		MPI_Comm comm = Communicator_pt->mpi_comm();
 		const unsigned my_n_eqn = rp.my_eqns.size();
 		oomph::AssemblyHandler *const assembly_handler_pt = this->assembly_handler_pt();
-		const unsigned long n_element = mesh_pt()->nelement();
 
 		// ---- local stage ----
 		std::vector<std::vector<double>> local_res(n_vector);
 		for (unsigned v = 0; v < n_vector; v++) local_res[v].assign(my_n_eqn, 0.0);
-		oomph::Vector<oomph::Vector<double>> el_residuals(n_vector);
-		oomph::Vector<oomph::DenseMatrix<double>> no_matrices;
-		for (unsigned long e = rp.el_lo; e < rp.el_hi_plus_one; e++)
+		// Threaded local stage: hybrid MPI+OpenMP (dev_docs/openmp_assembly.md). The engine derives the
+		// same rows from rp.my_eqns that rp.res_slot holds, so the two agree by construction; the plan
+		// is built once and only when a pattern id exists to invalidate it against, which is why this
+		// declines - and falls through to the loop below - with keep_structural_zeros off.
+		bool threaded = false;
+		if (this->parallel_assembly_possible())
 		{
-			oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
-			if (elem_pt->is_halo()) continue;
-			const unsigned nvar = assembly_handler_pt->ndof(elem_pt);
-			if (!nvar) continue;
-			for (unsigned v = 0; v < n_vector; v++) el_residuals[v].resize(nvar);
-			assembly_handler_pt->get_all_vectors_and_matrices(elem_pt, el_residuals, no_matrices);
-			const int *slot = rp.res_slot.data() + rp.res_element_offset[e];
-			for (unsigned i = 0; i < nvar; i++)
+			FrozenAssemblyRequest req;
+			req.el_lo = rp.el_lo;
+			req.el_hi_plus_one = rp.el_hi_plus_one;
+			req.n_matrix = 0;
+			req.n_vector = n_vector;
+			req.n_map = 0;
+			for (unsigned v = 0; v < n_vector; v++) req.residual.push_back(local_res[v].data());
+			req.res_row_map = rp.my_eqns.data();
+			req.res_row_map_n = (unsigned)rp.my_eqns.size();
+			threaded = this->parallel_assemble_frozen(req);
+		}
+		if (!threaded)
+		{
+			oomph::Vector<oomph::Vector<double>> el_residuals(n_vector);
+			oomph::Vector<oomph::DenseMatrix<double>> no_matrices;
+			for (unsigned long e = rp.el_lo; e < rp.el_hi_plus_one; e++)
 			{
-				if (slot[i] < 0) continue;
-				for (unsigned v = 0; v < n_vector; v++) local_res[v][slot[i]] += el_residuals[v][i];
+				oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
+				if (elem_pt->is_halo()) continue;
+				const unsigned nvar = assembly_handler_pt->ndof(elem_pt);
+				if (!nvar) continue;
+				for (unsigned v = 0; v < n_vector; v++) el_residuals[v].resize(nvar);
+				assembly_handler_pt->get_all_vectors_and_matrices(elem_pt, el_residuals, no_matrices);
+				const int *slot = rp.res_slot.data() + rp.res_element_offset[e];
+				for (unsigned i = 0; i < nvar; i++)
+				{
+					if (slot[i] < 0) continue;
+					for (unsigned v = 0; v < n_vector; v++) local_res[v][slot[i]] += el_residuals[v][i];
+				}
 			}
 		}
 
@@ -7293,6 +7972,12 @@ namespace pyoomph
 					residuals[v] = new double[ndof ? ndof : 1];
 					std::fill(residuals[v], residuals[v] + ndof, 0.0);
 				}
+				// Threaded element loop (dev_docs/openmp_assembly.md). This is the assembly that a
+				// bifurcation-tracking or multi-assembly step goes through, i.e. the one that gains the
+				// most from it. One slot serves every matrix here, so the gather index is built once.
+				if (this->try_parallel_frozen_assembly(std::vector<int>(n_matrix, slot), value, residuals,
+													   el_lo, el_hi + 1))
+					return;
 				oomph::Vector<oomph::Vector<double>> el_res(n_vector);
 				oomph::Vector<oomph::DenseMatrix<double>> el_jac(n_matrix);
 				for (unsigned long e = el_lo; e <= el_hi; e++)
@@ -7736,7 +8421,7 @@ namespace pyoomph
 		std::set<std::string> res_jac_combis;
 		std::map<std::string,unsigned> field_name_to_index;
 		
-		for (auto * dc : bulk_element_codes)
+		for (auto * dc : jit_codes)
 		{
 			auto *ft=dc->get_func_table();
 			//std::cout << "Processing element code " << dc->get_file_name() << " has fields " << ft->num_defined_fields_on_this_domain << std::endl;
@@ -7773,14 +8458,14 @@ namespace pyoomph
 		{
 			residual_contributing_fields[i].resize(defined_fields.size(),false);
 			jacobian_contributing_fields[i].resize(defined_fields.size(),std::vector<bool>(defined_fields.size(),false));
-			jacobian_contributing_codes[i].resize(defined_fields.size(),std::vector<std::set<DynamicBulkElementCode*>>(defined_fields.size(),std::set<DynamicBulkElementCode*>()));
-			residual_contributing_codes[i].resize(defined_fields.size(),std::set<DynamicBulkElementCode*>());
+			jacobian_contributing_codes[i].resize(defined_fields.size(),std::vector<std::set<DynamicJITCode*>>(defined_fields.size(),std::set<DynamicJITCode*>()));
+			residual_contributing_codes[i].resize(defined_fields.size(),std::set<DynamicJITCode*>());
 			mass_matrix_contributing_fields[i].assign(defined_fields.size(),std::vector<bool>(defined_fields.size(),false));
 			// Start from all-bits-set and AND per contributor; blocks without any contributor are zeroed below
 			jacobian_block_flags_union[i].assign(defined_fields.size(),std::vector<unsigned char>(defined_fields.size(),0xFF));
 			mass_matrix_block_flags_union[i].assign(defined_fields.size(),std::vector<unsigned char>(defined_fields.size(),0xFF));
 			// Go over all bulk codes and check the contributions
-			for (auto * dc : bulk_element_codes)
+			for (auto * dc : jit_codes)
 			{
 				auto *ft=dc->get_func_table();
 				int my_i=-1;
@@ -7917,7 +8602,7 @@ namespace pyoomph
 
 		
 		// Loop once more to fill all dirichlet_field_index_to_global_field_index
-		for (auto * dc : bulk_element_codes)
+		for (auto * dc : jit_codes)
 		{
 			auto *ft=dc->get_func_table();
 			//std::cout << "Processing element code " << dc->get_file_name() << " has dirichlet fields " << ft->Dirichlet_set_size << std::endl;
@@ -7927,7 +8612,7 @@ namespace pyoomph
 				if (dn=="" || dn.find("__EXT_ODE_")==0) continue;
 				if (!ft->moving_nodes && (dn=="coordinate_x" || dn=="coordinate_y" || dn=="coordinate_z")) continue;				
 				//std::cout << "Looking for a field index for dirichlet field " << dn << std::endl;
-				FiniteElementCode *current=dc->get_code();
+				FiniteElementCode *current=dc->get_code_gen();
 				bool found=false;
 				while (current)
 				{
@@ -8076,7 +8761,7 @@ namespace pyoomph
 			};
 			print_column_header();
 			
-			std::vector<std::set<DynamicBulkElementCode*>> listed_domain_contributions;
+			std::vector<std::set<DynamicJITCode*>> listed_domain_contributions;
 			for (unsigned int i=0;i<defined_fields.size();i++)
 			{				
 				if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
@@ -8144,7 +8829,7 @@ namespace pyoomph
 							listed_domain_contributions.push_back(residual_contributing_codes[ri][i]);
 						}
 						std::string symbol=" ";
-						for  (auto * dc : listed_domain_contributions[found]) if (!dc->get_code()->is_residual_assembly_ignored(residual_names[ri])) ignored_residuals=false;
+						for  (auto * dc : listed_domain_contributions[found]) if (!dc->get_code_gen()->is_residual_assembly_ignored(residual_names[ri])) ignored_residuals=false;
 						symbol[0]=(char)('A' + found + (found>25 ? 6 : 0));						
 						ss << symbol << " ";
 					}
@@ -8161,7 +8846,7 @@ namespace pyoomph
 				// grouping is unaffected, but the dump could not be diffed across runs.
 				std::vector<std::string> contrib_names;
 				for (auto * dc : listed_domain_contributions[k])
-					contrib_names.push_back(dc->get_code()->get_full_domain_name());
+					contrib_names.push_back(dc->get_code_gen()->get_full_domain_name());
 				std::sort(contrib_names.begin(), contrib_names.end());
 				unsigned int count=contrib_names.size();
 				for (auto const &nm : contrib_names)
@@ -8234,7 +8919,7 @@ namespace pyoomph
 			if (!has_any_contributions[i])
 			{
 				// Check if it is pinned, then it is fine
-				DynamicBulkElementCode * dc=defined_fields_to_domain[i];
+				DynamicJITCode * dc=defined_fields_to_domain[i];
 				auto *ft=dc->get_func_table();
 				bool pinned=false;
 				for (unsigned int j=0;j<ft->Dirichlet_set_size;j++)
@@ -8269,7 +8954,45 @@ namespace pyoomph
 		}
 
 		return std::make_tuple(ss.str(), all_good);
-		
+
+	}
+
+	// Reduces the per-block proofs of assemble_defined_field_list() to a whole-matrix verdict for the
+	// named residual set: the assembled Jacobian (mass matrix) is symmetric iff every contributing
+	// block carries JACOBIAN_BLOCK_SYMMETRIC. False means "not proven", never "disproven". Solvers use
+	// this to switch to symmetric factorizations, so anything that makes the actually-solved matrix
+	// differ from the plain elemental Jacobian must force (false,false) here: bifurcation-tracking /
+	// DofAugmentations borders (n_unaugmented_dofs!=0 while augmented), a Python-side custom assembler,
+	// and dR/dp replacement. Arclength continuation is fine - it borders algebraically, not in the matrix.
+	// All inputs are rank-replicated, so the verdict is deterministic under MPI without a collective.
+	std::tuple<bool,bool> Problem::get_proven_matrix_symmetry(const std::string &residual_name)
+	{
+		if (n_unaugmented_dofs != 0) return std::make_tuple(false, false);
+		// The C++ bifurcation trackers do not touch n_unaugmented_dofs - they enlarge the system via an
+		// oomph AssemblyHandler instead, so test for a non-default handler as well (same pair of gates
+		// as the static-condensation eligibility check).
+		oomph::AssemblyHandler *ah = this->assembly_handler_pt();
+		if (!ah || typeid(*ah) != typeid(oomph::AssemblyHandler)) return std::make_tuple(false, false);
+		if (use_custom_residual_jacobian) return std::make_tuple(false, false);
+		if (replace_RJM_by_param_deriv) return std::make_tuple(false, false);
+		int ri = -1;
+		for (unsigned i = 0; i < residual_names.size(); i++)
+			if (residual_names[i] == residual_name) { ri = i; break; }
+		if (ri < 0 || jacobian_block_flags_union.size() != residual_names.size()) return std::make_tuple(false, false);
+		// Unlike the report above, do NOT skip pin_due_to_empty_jacobian_row_or_col fields: whether
+		// their rows are actually removed depends on the remove_dofs_without_jacobian_row argument of
+		// _set_solved_residual (the eigenproblem path keeps them), so requiring the proof on every
+		// contributing block is the conservative choice - at worst a false negative.
+		bool jac_sym = true, mass_sym = true;
+		for (unsigned j = 0; j < defined_fields.size(); j++)
+		{
+			for (unsigned k = 0; k < defined_fields.size(); k++)
+			{
+				if (jacobian_contributing_fields[ri][j][k] && !(jacobian_block_flags_union[ri][j][k] & JACOBIAN_BLOCK_SYMMETRIC)) jac_sym = false;
+				if (mass_matrix_contributing_fields[ri][j][k] && !(mass_matrix_block_flags_union[ri][j][k] & JACOBIAN_BLOCK_SYMMETRIC)) mass_sym = false;
+			}
+		}
+		return std::make_tuple(jac_sym, mass_sym);
 	}
 
 

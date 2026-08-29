@@ -1,5 +1,7 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #
 #  @section LICENSE
 #
@@ -66,6 +68,10 @@ import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _WORKER = os.path.join(_HERE, "mpi_bifurcation_worker.py")
+# Kept in step with PitchforkProblem.ASPECT in the worker by hand: the worker is run as a
+# subprocess, never imported, so importing it here just to read the constant would pull pyoomph
+# (and MPI_Init) into the pytest process for one float.
+_PITCHFORK_ASPECT = 1.05
 
 
 def _skip_reason():
@@ -85,11 +91,21 @@ def _skip_reason():
 _SKIP = _skip_reason()
 pytestmark = pytest.mark.skipif(_SKIP is not None, reason=str(_SKIP))
 
-# The two spectra come from the same matrices, so they agree far better than this; the tolerance is
-# only here to absorb the shift-invert Krylov-Schur stopping criterion, which is not deterministic
-# down to the last bit across two EPS.solve() calls. A base-vs-augmented layout mix-up does not move
-# eigenvalues by 1e-8, it produces a different problem.
-_EIG_ATOL = 1e-8
+# The two spectra are NOT taken at the same state, which the tolerance has to allow for.
+#
+# _reaction_case re-converges the augmented system between them ("Re-converging has to land back on
+# the same critical parameter"), and that second solve moves the critical parameter a little: 1.73e-8
+# on the pitchfork at N=8. An eigenvalue that is zero at the bifurcation is linear in the distance to
+# it, so the tracked zero mode comes out at exactly that shift - measured, -1.7299e-08 against a
+# parameter step of +1.7298e-08, a ratio of 1.0000. The other three eigenvalues, being O(30), are
+# unmoved at seven digits and are governed by the relative tolerance instead.
+#
+# So the floor here is the tracker's own convergence, not the eigensolver's. It used to sit just under
+# 1e-8 (1.4e-9) and passed by a factor of seven, until the Gauss<2,3> knot fix (4ed8580) changed where
+# the first solve lands and pushed it to 1.7e-8. What the test is actually for is unaffected: a
+# base-vs-augmented layout mix-up does not move eigenvalues by 1e-8, it produces a different problem,
+# and _assert_base_layout() checks the layout directly anyway.
+_EIG_ATOL = 1e-6
 _EIG_RTOL = 1e-8
 
 
@@ -161,13 +177,19 @@ def test_hopf(tmp_path):
 
 
 def test_pitchfork(tmp_path):
-    """Reaction-diffusion pitchfork at lam = 2*pi^2: also a zero eigenvalue."""
+    """Reaction-diffusion pitchfork at the first Dirichlet mode: also a zero eigenvalue.
+
+    The domain is a 1 x ASPECT rectangle, not the unit square, so the critical parameter is
+    pi^2*(1 + 1/ASPECT^2) rather than 2*pi^2. See PitchforkProblem for why the square had to go: its
+    (1,2)/(2,1) degeneracy sits exactly on the nev cut of the tracked/untracked spectrum comparison.
+    """
     res = _run(tmp_path, "pitchfork")
     _assert_base_layout(res)
     _assert_matches_untracked(res)
     tracked, _ = _spectra(res)
     assert numpy.amin(numpy.absolute(tracked)) < 1e-5, tracked
-    assert numpy.isclose(res["param"], 2 * numpy.pi ** 2, rtol=1e-3), res["param"]
+    lam_crit = numpy.pi ** 2 * (1.0 + 1.0 / _PITCHFORK_ASPECT ** 2)
+    assert numpy.isclose(res["param"], lam_crit, rtol=1e-3), (res["param"], lam_crit)
 
 
 def test_azimuthal_m0_spectrum_while_tracking_m1(tmp_path):

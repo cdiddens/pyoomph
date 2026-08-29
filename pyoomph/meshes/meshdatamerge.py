@@ -139,6 +139,7 @@ def _local_payload(msh: AnySpatialMesh, key: MeshDataCacheKey) -> dict[str, Any]
             "elem_types": local.elem_types, "D0_data": local.D0_data, "DL_data": local.DL_data,
             "nodal_field_inds": local.nodal_field_inds, "elemental_field_inds": local.elemental_field_inds,
             "local_expr_indices": local.local_expr_indices, "vector_fields": local.vector_fields,
+            "tensor_fields": local.tensor_fields,
             "merged_eigendata": local.merged_eigendata, "nodal_local_exprs": local_exprs,
             "shared": shared}
 
@@ -259,7 +260,8 @@ def _merge_on_root(payloads: list[dict[str, Any] | None], msh: AnySpatialMesh, k
                                           elemental_field_inds=ref["elemental_field_inds"],
                                           merged_eigendata=merged_eigendata, nodal_local_exprs=nodal_local_exprs,
                                           local_expr_indices=ref["local_expr_indices"],
-                                          vector_fields=ref["vector_fields"])
+                                          vector_fields=ref["vector_fields"],
+                                          tensor_fields=ref["tensor_fields"])
 
 
 def merge_global_mesh_data(msh: AnySpatialMesh, key: MeshDataCacheKey) -> MeshDataCacheEntry | None:

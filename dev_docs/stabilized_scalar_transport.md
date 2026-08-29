@@ -95,15 +95,24 @@ unstabilized solve, C2, 8x4 mesh:
 
 | | `advection_by_parts=False` | `True` | `"skew"` |
 |---|---|---|---|
-| SUPG | 2.0e-10 | 3.9e-09 | 1.8e-09 |
-| GLS | 2.1e-10 | 4.0e-09 | 1.9e-09 |
-| ASGS | 6.0e-08 | 5.2e-07 | 2.3e-07 |
+| SUPG | 7.5e-16 | 8.6e-16 | 6.5e-16 |
+| GLS | 1.4e-15 | 1.5e-15 | 1.7e-15 |
+| ASGS | 2.0e-13 | 3.5e-13 | 2.7e-13 |
 
-On C1 the same numbers are 3.5e-15, i.e. roundoff. On C2 the floor is set by the *evaluation* of the
-strong residual, which contains second derivatives and cancels down to ~1e-7 relative. **ASGS
-amplifies that floor by ~100x** — it differs from GLS only in the sign of the diffusive
-perturbation, which makes it anti-dissipative there. `stabilized_navier_stokes.md` §7 records the
-same asymmetry for the momentum version ("ASGS diverges on the free-surface case"). Prefer GLS.
+On C1 the same numbers are ~4e-16, and on C2 they are now roundoff too. **They used to be 2e-10 to
+5e-7**, and this document explained that floor as the *evaluation* of the strong residual, whose
+second derivatives were said to cancel down to ~1e-7 relative. That explanation was wrong. The floor
+was the 3x3 quadrilateral Gauss rule, which had a transposed digit that cost it its symmetry and left
+a fixed ~1e-9 defect in the assembly of every C2 quadrilateral, refinement-independent; C1 and the
+triangles use other rules and were always at roundoff, which is exactly the split the table showed
+and which should have been the clue. Making the rule symmetric moved the C2 numbers by six orders
+(see the CHANGELOG entry and `tests/test_quadrature.py`). The second derivatives were never the
+limit.
+
+**ASGS still amplifies whatever the floor is, by ~200x** — it differs from GLS only in the sign of
+the diffusive perturbation, which makes it anti-dissipative there. `stabilized_navier_stokes.md` §7
+records the same asymmetry for the momentum version ("ASGS diverges on the free-surface case"), and
+its own 1e-08 floor is worth re-measuring for the same reason. Prefer GLS.
 
 **The default is off, bitwise.** `stab_factor=0` (with `dc_factor=0`) reproduces the unstabilized
 dofs *exactly*, for every term including `DC`. Bitwise rather than "close", because that is what

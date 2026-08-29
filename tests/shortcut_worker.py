@@ -1,5 +1,7 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #
 #  @section LICENSE
 #
@@ -49,12 +51,16 @@ class StubProblem:
     write_states = False
     continuation_data_in_states = False
     plotter = None
+    _arclength_inner_product = None
 
     def get_global_parameter_names(self):
         return ["mu"]
 
     def is_initialised(self):
         return True
+
+    def set_arclength_inner_product(self, kind):
+        self._arclength_inner_product = kind
 
 
 def main() -> int:
@@ -69,6 +75,11 @@ def main() -> int:
             assert action_id in app._actions, action_id + " is not a command"
             assert action_id in app._menu_entries, action_id + " is in no menu"
             assert app.keymap.get(action_id), action_id + " has no default shortcut"
+        # Reachable from a menu, but deliberately unbound: it is a repair, not something to hit by
+        # accident while moving points around.
+        assert "disentangle_branch" in app._actions
+        assert "disentangle_branch" in app._menu_entries
+        assert not app.keymap.get("disentangle_branch")
         print("SHORTCUTS OK: {:d} bound, all reach a command".format(len(DEFAULT_KEYMAP)))
     finally:
         app.root.destroy()

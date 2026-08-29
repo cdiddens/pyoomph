@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -50,7 +50,7 @@ namespace pyoomph
 		for (unsigned int l = 0; l < nnode(); l++)
 		{
 			oomph::Node *const on = node_pt(l);
-			Node *const pn = dynamic_cast<Node *>(on);
+			Node *const pn = static_cast<Node *>(on);
 			for (unsigned int i = 0; i < ndim_nodal; i++)
 			{
 				pn->unpin_position(i);
@@ -83,7 +83,7 @@ namespace pyoomph
 	// constrained (tied to its masters) rather than pinned.
 	void BulkElementBase::pin_dummy_values()
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 
 
 		if (!functable->moving_nodes)
@@ -91,7 +91,7 @@ namespace pyoomph
 			const unsigned ndim_nodal = this->nodal_dimension();
 			for (unsigned int l = 0; l < nnode(); l++)
 			{
-				Node *const pn = dynamic_cast<Node *>(node_pt(l)); // hoisted out of the direction loop
+				Node *const pn = static_cast<Node *>(node_pt(l)); // hoisted out of the direction loop
 				for (unsigned int i = 0; i < ndim_nodal; i++)
 				{
 					pn->pin_position(i);
@@ -150,12 +150,12 @@ namespace pyoomph
 			bool any = false;
 			for (unsigned int l = 0; l < nnode(); l++)
 			{
-				Node *n = dynamic_cast<Node *>(node_pt(l));
+				Node *n = static_cast<Node *>(node_pt(l));
 				if (n && n->get_additional_dof_constraints()) { any = true; break; }
 			}
 			if (!any) return;
 		}
-		auto * functable = codeinst->get_func_table();
+		auto * functable = jitcode->get_func_table();
 		const std::vector<int> & elem_to_C1_map = this->get_element_index_to_nodal_space_index_map()[SPACE_INDEX_C1];
 		bool has_C1_fields=functable->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk>0 || functable->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk>0;
 		// Lookup from a non-vertex node's local index to its element C1-corner local indices (the same
@@ -171,8 +171,7 @@ namespace pyoomph
 		}
 		for (unsigned int l = 0; l < nnode(); l++)
 		{
-			Node *n = dynamic_cast<Node *>(node_pt(l));
-			bool is_hanging_on_C1 = elem_to_C1_map[l]>=0 && has_C1_fields && n->is_hanging(functable->continuous_spaces[SPACE_INDEX_C1].hangindex) && this->refinement_level()>0;
+			Node *n = static_cast<Node *>(node_pt(l));
 			for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info != NULL; )
 			{
 				// Capture "next" before the body runs: a removal below can delete "info" itself,
@@ -271,7 +270,7 @@ namespace pyoomph
 		for (const std::vector<unsigned> & entry : c1_dummy_map)
 		{
 			if (entry.size() < 2) continue;
-			Node *tgt = dynamic_cast<Node *>(node_pt(entry[0]));
+			Node *tgt = static_cast<Node *>(node_pt(entry[0]));
 			if (!tgt || tgt->get_additional_dof_constraints() == NULL) continue;
 			const unsigned nc = entry.size() - 1;
 			tgt->c1_constraint_corners.clear();
@@ -289,7 +288,7 @@ namespace pyoomph
 	// the recorded info.
 	void BulkElementBase::unpin_Dirichlet_dofs_for_matrix_manipulation(DirichletMatrixManipulationInfo & info)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 
 
 		// TODO: Check if the entire field is pinned
@@ -300,7 +299,7 @@ namespace pyoomph
 		{
 			for (unsigned int l = 0; l < nnode(); l++)
 			{
-				oomph::Data * x=dynamic_cast<Node *>(this->node_pt(l))->variable_position_pt();
+				oomph::Data * x=static_cast<Node *>(this->node_pt(l))->variable_position_pt();
 				for (unsigned int i = 0; i < this->nodal_dimension(); i++)
 				{
 				  if (x->is_pinned(i)) info.add_dirichlet_dof(x,i);
@@ -368,7 +367,7 @@ namespace pyoomph
 	// is attributed to the field of the constrained node, which is what its master dofs contribute to.
 	void BulkElementBase::fill_local_dof_contribution_indices(std::vector<int> &dest)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 
 		// Positions (nodal coordinates), non-hanging then hanging
 		const unsigned npos = std::min(functable->nodal_dim, functable->info_Pos.numfields);
@@ -456,7 +455,7 @@ namespace pyoomph
 						set_contrib(dest, this->nodal_local_eqn(elem_node_index, val_index),
 									space_info->field_contribution_index, slot);
 					}
-					else if (auto *ielem = dynamic_cast<InterfaceElementBase *>(this))
+					else if (auto *ielem = this->as_interface_element())
 					{
 						// Resolving a hanging interface dof to its masters is an interface-element
 						// operation. On a bulk element these are somebody else's dofs anyway, and the
@@ -533,7 +532,7 @@ namespace pyoomph
 	// names line up with the residual/Jacobian ordering.
 	std::vector<std::string> BulkElementBase::get_dof_names(bool)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		std::vector<std::string> res(this->ndof(), "<unknown>");
 
 		// First nonhanging pos
@@ -651,7 +650,7 @@ namespace pyoomph
 				res[eleminfo.nodal_local_eqn[0][node_index]] = std::string(functable->info_ED0.fieldnames[j]) + "__ExternalODE";
 		}		
 
-		if (!dynamic_cast<InterfaceElementBase *>(this))
+		if (!this->as_interface_element())
 		{
 			// Check if we have unknown fields. It should not happen at the end
 			for (unsigned int i = 0; i < res.size(); i++)

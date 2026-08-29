@@ -22,6 +22,6 @@ As every numerical framework, pyoomph has some strong points but of course also 
 * when you need highly parallelized computational power
 * for computationally expensive three-dimensional problems
 * for high Reynolds numbers (go for e.g. advanced finite differences as in `AFiD <https://stevensrjam.github.io/Website/afid.html>`_)
-* for topological changes (the sharp-interface method is not well suited for this, go for VoF instead, e.g. `Basilisk <http://basilisk.fr/>`_)
+* for topological changes in general geometries (axisymmetric pinch-off and coalescence are supported, cf. :numref:`secalepinchoff`, but for the general three-dimensional case the sharp-interface method is not well suited, go for VoF instead, e.g. `Basilisk <http://basilisk.fr/>`_)
 * if you need more fancy finite-element spaces (go for `FEniCS <https://fenicsproject.org/>`_ or `NGSolve <https://ngsolve.org/>`_)
 * if you need spline basis functions (go for `nutils <https://nutils.org/>`_)

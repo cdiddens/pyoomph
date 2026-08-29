@@ -1,5 +1,7 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #
 #  @section LICENSE
 #
@@ -65,6 +67,23 @@ def _is_manifold(summary):
 
 def _max_abs_residual(problem):
     return float(np.max(np.abs(np.asarray(problem.get_residuals()))))
+
+
+def _use_pivoting_solver(problem):
+    """Solve the Crouzeix-Raviart cases with a dynamically pivoting direct solver.
+
+    Not papering over a discretisation bug: the Jacobian is correct, and umfpack solves these systems
+    to machine precision (5.6e-14 residual on the adaptive case below, no empty rows or columns).
+    The default MKL Pardiso pivots STATICALLY - it perturbs a too-small pivot instead of exchanging
+    it - and the CR saddle-point system on 2:1-refined triangles is ill-conditioned enough that this
+    leaves backward errors of order 1e0, so Newton diverges on the resulting increments. Pardiso's
+    own repair_bad_solves escalation rescues the single-level case but not the adaptive ones, hence
+    the solver switch rather than the flag. What is under test here is the hanging-node Jacobian, not
+    MKL's pivoting strategy.
+
+    Call before the problem is initialised.
+    """
+    problem.set_linear_solver("umfpack")
 
 
 def test_uniform_triangle_refinement_conforming_and_converges():
@@ -347,6 +366,7 @@ def test_crouzeix_raviart_triangle_cavity_single_level(split):
         problem.max_refinement_level = 3
         problem += RefineToLevel(1) @ "domain"
         problem += RefineToLevel(2) @ "domain/top"
+        _use_pivoting_solver(problem)
         problem.solve()
         assert _max_abs_residual(problem) < 1e-7
         assert problem.get_mesh("domain").nelement() > 150
@@ -358,6 +378,7 @@ def test_crouzeix_raviart_triangle_error_adaptivity(split):
     # non-uniform). CR bubble refinement must keep the linear Stokes residual near machine zero.
     with _CavityStokesCR(split=split) as problem:
         problem.max_refinement_level = 3
+        _use_pivoting_solver(problem)
         problem.solve(spatial_adapt=2)
         assert _max_abs_residual(problem) < 1e-7
         assert problem.get_mesh("domain").nelement() > 150
@@ -443,6 +464,7 @@ def test_stokes_triangle_unrefinement_residual_oracle(mode, tol):
     with _Cav() as problem:
         problem.max_refinement_level = 3
         problem.min_refinement_level = 0  # allow coarsening below the initial level
+        _use_pivoting_solver(problem)     # CR needs it, see the helper; harmless for TH
         problem.solve(spatial_adapt=3)    # several cycles -> refines near the lid, unrefines interior
         nel = problem.get_mesh("domain").nelement()
         _reset_dofs_to_zero(problem)

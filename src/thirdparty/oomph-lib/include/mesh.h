@@ -1607,6 +1607,19 @@ namespace oomph
     }
 
 
+    //FOR PYOOMPH: a mesh that keeps its own exact record of which face lies on which boundary has to
+    // reconcile nodal boundary membership after an adapt, because a new node inherits the boundaries
+    // shared by its generating nodes, which is a superset of the truth. Both are no-ops here; pyoomph's
+    // TemplatedMeshBase overrides them. There are two because the second one communicates, and so must
+    // be called from outside adapt_mesh()'s "if (nelement()>0)" block (a rank can hold no elements of a
+    // given submesh) and cannot use the halo NODE lists, which classify_halo_and_haloed_nodes() only
+    // rebuilds afterwards.
+    // Declared OUTSIDE the OOMPH_HAS_MPI block below, even though only the second one has anything
+    // to communicate: refineable_mesh.cc calls both unconditionally, so having them MPI-only stopped
+    // every non-MPI build - which is every wheel - from compiling.
+    virtual void reconcile_boundary_node_membership_locally() {}
+    virtual void reconcile_boundary_node_membership_across_processes() {}
+
 #ifdef OOMPH_HAS_MPI
 
     /// Function to set communicator (mesh is assumed to be distributed if the
@@ -1699,16 +1712,6 @@ namespace oomph
     /// Check halo and shared schemes on the mesh
     void check_halo_schemes(DocInfo& doc_info,
                             double& max_permitted_error_for_halo_check);
-
-    //FOR PYOOMPH: a mesh that keeps its own exact record of which face lies on which boundary has to
-    // reconcile nodal boundary membership after an adapt, because a new node inherits the boundaries
-    // shared by its generating nodes, which is a superset of the truth. Both are no-ops here; pyoomph's
-    // TemplatedMeshBase overrides them. There are two because the second one communicates, and so must
-    // be called from outside adapt_mesh()'s "if (nelement()>0)" block (a rank can hold no elements of a
-    // given submesh) and cannot use the halo NODE lists, which classify_halo_and_haloed_nodes() only
-    // rebuilds afterwards.
-    virtual void reconcile_boundary_node_membership_locally() {}
-    virtual void reconcile_boundary_node_membership_across_processes() {}
 
     /// Classify the halo and haloed nodes in the mesh. Virtual
     /// so it can be overloaded to perform additional functionality
