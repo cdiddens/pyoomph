@@ -13,7 +13,7 @@ To use it, point your assistant at ``AGENTS.md`` before asking for a script:
 
 .. code:: none
 
-   Read https://github.com/pyoomph/pyoomph/blob/develop/AGENTS.md, then write me a pyoomph script that ...
+   Read https://github.com/pyoomph/pyoomph/blob/main/AGENTS.md, then write me a pyoomph script that ...
 
 That single file is meant to be enough for a typical problem, since it carries a routing table to the more specialized companion files
 
