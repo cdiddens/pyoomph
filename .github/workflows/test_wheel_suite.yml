@@ -324,13 +324,17 @@ jobs:
         shell: msys2 {0}
         run: |
           set -x
-          export PATH="$(cygpath -u "$pythonLocation"):$PATH"
           cd "$(cygpath -u "$GITHUB_WORKSPACE")"
           ls -la wheelhouse || true
           WHEEL=$(ls wheelhouse/*.whl 2>/dev/null | head -n 1 || true)
           if [ -z "$WHEEL" ]; then echo "no wheel was built, nothing to diagnose"; exit 0; fi
-          python -m pip install --disable-pip-version-check "$WHEEL" tccbox || exit 0
-          python citools/windows_tcc_diag.py "$RUNNER_TEMP/tccdiag_out" || true
+          # The DONOR interpreter, not $pythonLocation: that one drives cibuildwheel and is 3.14,
+          # while the wheel is cp312 - "not a supported wheel on this platform" is as far as the
+          # probe got last time. The donor is set up as inputs.python_version for the Tk copy and is
+          # therefore the one interpreter here that can install what this job built.
+          PY="$(cygpath -u '${{ steps.tkdonor.outputs.python-path }}')"
+          "$PY" -m pip install --disable-pip-version-check "$WHEEL" tccbox || exit 0
+          "$PY" citools/windows_tcc_diag.py "$RUNNER_TEMP/tccdiag_out" || true
 
       # Kept so a failing suite can be reproduced locally against the exact same binary.
       - name: Upload the wheel
