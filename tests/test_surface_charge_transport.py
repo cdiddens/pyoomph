@@ -622,9 +622,28 @@ def test_the_refactor_generates_the_same_code_when_gcl_is_off():
         # comparison explicit about what is being ignored: line endings, and nothing else.
         text = raw.replace(b"\r\n", b"\n")
         got = hashlib.md5(text).hexdigest()
-        assert got == md5, (
-            "advection_by_parts=%r changed the generated code (%d lines, %d bytes, CRLF=%s)"
-            % (byparts, text.count(b"\n"), len(text), raw != text))
+        # Two extra fingerprints, reported only when the main one disagrees, to say WHAT kind of
+        # difference it is. The Windows wheel job of 29th August 2026 produces a file of exactly the
+        # same length and line count as this one - 337 lines, 24499 bytes - with a different hash, so
+        # the difference is a same-length substitution rather than extra or missing code, and the two
+        # candidates are worth separating: digits (float literals differing in their last places) and
+        # ordering (the same lines emitted in another sequence). Stripping the digits answers the
+        # first; sorting the lines answers the second. Both reference values were taken here on Linux
+        # for advection_by_parts=False, so they are only meaningful for that case.
+        if got != md5:
+            import re
+            nodigits = hashlib.md5(re.sub(rb"[0-9]", b"", text)).hexdigest()
+            sortedlines = hashlib.md5(b"\n".join(sorted(text.split(b"\n")))).hexdigest()
+            hint = ""
+            if byparts is False:
+                hint = ("; digits-stripped %s (%s), sorted-lines %s (%s)"
+                        % (nodigits, "MATCHES - only numbers differ"
+                           if nodigits == "3e3d3f2a93ed3c28e9a18a974fe7877e" else "differs too",
+                           sortedlines, "MATCHES - same lines, different order"
+                           if sortedlines == "87c9c4d339eaa8d2878199ab33365512" else "differs too"))
+            raise AssertionError(
+                "advection_by_parts=%r changed the generated code (%d lines, %d bytes, CRLF=%s)%s"
+                % (byparts, text.count(b"\n"), len(text), raw != text, hint))
     # sanity: the three settings really do differ from each other, so the check above is not vacuous
     assert len(set(expected.values())) == 3
     assert glob.glob(os.path.join(d, "_ccode", "*.c"))

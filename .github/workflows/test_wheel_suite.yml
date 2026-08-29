@@ -264,48 +264,23 @@ jobs:
       # Unlike the other platforms, Windows compiles the JIT code with tcc's own headers and runtime
       # (no -nostdinc/-nostdlib, see pyoomph/generic/ccompiler.py), so the CRT it names is the suspect.
       - name: Diagnose the tcc JIT DLL's imports (Windows)
+        # A probe, not a gate: tests/test_math_functions.py's tccbox arm fails here with LoadLibrary
+        # error 126 (ERROR_MOD_NOT_FOUND), and which module is missing is written in the DLL's import
+        # table and nowhere else. citools/windows_tcc_diag.py holds the whole thing - the first
+        # version of this step inlined it as a heredoc and the msys2 shell exited 2 without running a
+        # single line of it, which is exactly the kind of silence a diagnostic must not produce.
         if: always() && matrix.platform == 'windows'
         continue-on-error: true
         shell: msys2 {0}
         run: |
+          set -x
           export PATH="$(cygpath -u "$pythonLocation"):$PATH"
+          cd "$(cygpath -u "$GITHUB_WORKSPACE")"
+          ls -la wheelhouse || true
           WHEEL=$(ls wheelhouse/*.whl 2>/dev/null | head -n 1)
           if [ -z "$WHEEL" ]; then echo "no wheel was built, nothing to diagnose"; exit 0; fi
           python -m pip install --disable-pip-version-check "$WHEEL" tccbox || exit 0
-          mkdir -p /tmp/tccdiag
-          cd /tmp/tccdiag
-          cat > diag.py <<'PYEOF'
-          from pyoomph import Problem, ODEEquations
-          from pyoomph.expressions import var_and_test, erf
-
-          class E(ODEEquations):
-              def define_fields(self):
-                  self.define_ode_variable("u")
-
-              def define_residuals(self):
-                  u, v = var_and_test("u")
-                  self.add_residual((u - erf(0.7)) * v)
-
-          class P(Problem):
-              def define_problem(self):
-                  self.add_equations(E() @ "ode")
-
-          with P() as p:
-              p.set_c_compiler("tccbox")
-              p.set_output_directory("out")
-              try:
-                  p.solve()
-                  print("the tcc JIT DLL loaded and solved fine here")
-              except Exception as e:
-                  print("REPRODUCED:", e)
-          PYEOF
-          python diag.py || true
-          echo "---- produced files ----"
-          find out \( -name "*.dll" -o -name "*.c" \) | sort
-          for dll in $(find out -name "*.dll"); do
-            echo "---- import table of $dll ----"
-            objdump -p "$dll" | grep -B1 -A3 "DLL Name" || echo "(objdump found no import table)"
-          done
+          python citools/windows_tcc_diag.py "$RUNNER_TEMP/tccdiag_out" || true
 
       # Kept so a failing suite can be reproduced locally against the exact same binary.
       - name: Upload the wheel
