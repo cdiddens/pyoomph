@@ -23,7 +23,7 @@ inside a clone of the repository.
 
 .. note::
 
-	Using assistants which work directly in your code base, e.g. *Claude Code*, *Cortex* or *Kimi Code*, work of course considerably better than a plain web agent, since it can directly access pyoomph's source code and test and improve your script automatically. 
+	Using assistants which work directly in your code base, e.g. *Claude Code*, *Cortex* or *Kimi Code*, work of course considerably better than a plain web agent, since it can directly access pyoomph's source code and test and improve your script automatically. It works best if you clone pyoomph's git directly to give your agent direct access to pyoomph's full source code.
 
 However, while AI helps you to get started, you are still fully responsible to check your code and the generated results.
 
