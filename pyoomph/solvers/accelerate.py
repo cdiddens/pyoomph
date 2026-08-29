@@ -136,7 +136,15 @@ class MacAccelerateLinearSolver(GenericLinearSystemSolver):
             if nrhs != 1:
                 raise NotImplementedError("Only single right-hand side is supported")
             x=self.solver.solve(b)
-            b[:] = x[:]
+            # _postprocess_newton_step, not the raw solution: a deflation operator turns the solved
+            # increment into the deflated one by a scalar rescale, and every other backend routes its
+            # solution through this (pardiso.py, scipy.py, petsc.py). This one did not, so on a Mac
+            # falling back to Accelerate - Apple silicon without PETSc/MUMPS - Newton took the
+            # UNDEFLATED step and deflation quietly did nothing. Measured on macOS arm64 in the wheel
+            # runs of 29th August 2026: with W, U, R, J, M and G all identical to Linux's, the first
+            # deflated step went to -41.6 instead of +0.55, and all three deflation tests failed on
+            # arm64 while Intel - which reaches MKL Pardiso - passed them.
+            b[:] = self._postprocess_newton_step(x)
         else:
             raise NotImplementedError("Only transpose operation is supported")
 
