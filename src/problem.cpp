@@ -1060,6 +1060,41 @@ namespace pyoomph
 		/////		
 	}
 
+	// Row cut points that no element-local condensation block straddles; empty for "no preference".
+	//
+	// Moves the cut points of a uniform nproc-way row split off the blocks they would otherwise fall
+	// inside. blocks must be disjoint and ascending. Returns an empty vector when some block is longer
+	// than one rank's share, which cannot be stepped over by moving a cut at all -- only by handing a
+	// whole rank's worth of rows to somebody else.
+	//
+	// Shared by the two callers that want a block-aligned split for different reasons: static
+	// condensation, whose blocks are the components it inverts, and the dof ordering, whose blocks are
+	// the nodal or elemental blocks the layout built. They were the same fifteen lines.
+	static std::vector<unsigned> snap_cuts_to_blocks(const std::vector<std::pair<int, int>> &blocks,
+													 unsigned nproc, unsigned nd)
+	{
+		std::vector<unsigned> cuts;
+		const unsigned share = nd / nproc;
+		for (size_t i = 0; i < blocks.size(); i++)
+			if ((unsigned)(blocks[i].second - blocks[i].first + 1) > share) return cuts;
+
+		cuts.assign(nproc + 1, 0);
+		cuts[nproc] = nd;
+		size_t bi = 0;
+		for (unsigned p = 1; p < nproc; p++)
+		{
+			unsigned c = (unsigned)((unsigned long)nd * p / nproc);
+			if (c < cuts[p - 1]) c = cuts[p - 1];
+			while (bi < blocks.size() && (unsigned)blocks[bi].second < c) bi++;
+			// One step is enough: the blocks are disjoint, so blocks[bi].second+1 is at most
+			// blocks[bi+1].first, which is not strictly inside blocks[bi+1].
+			if (bi < blocks.size() && (unsigned)blocks[bi].first < c && c <= (unsigned)blocks[bi].second)
+				c = (unsigned)blocks[bi].second + 1;
+			cuts[p] = (c > nd ? nd : c);
+		}
+		return cuts;
+	}
+
 	// Builds the permutation for the active layout. Empty mode, or anything this build does not
 	// recognise, means "no opinion" and the numbering oomph assigned stands.
 	//
@@ -1068,10 +1103,6 @@ namespace pyoomph
 	// renumbering machinery is transparent to the answer. The layouts that are worth having
 	// (nodal-block for AMG, element-block for condensation) are built on Mesh::visit_global_dofs and
 	// come next; this one stays as the null hypothesis they are tested against.
-	// Defined further down, next to condensation_row_cuts, the other caller that wants a block-aligned
-	// row split.
-	static std::vector<unsigned> snap_cuts_to_blocks(const std::vector<std::pair<int, int>> &blocks,
-													 unsigned nproc, unsigned nd);
 
 	// Glob match, '*' and '?' only, as used on the field names of a dof ordering spec. Written out
 	// rather than taken from <fnmatch.h> because that header is POSIX and pyoomph builds on Windows.
@@ -5093,41 +5124,6 @@ namespace pyoomph
 		// fit rather than the owner's. A neighbour's non-halo bulk element reads exactly those values,
 		// and so does any output() taken between here and the first Newton step.
 		this->synchronise_all_dofs();
-	}
-
-	// Row cut points that no element-local condensation block straddles; empty for "no preference".
-	//
-	// Moves the cut points of a uniform nproc-way row split off the blocks they would otherwise fall
-	// inside. blocks must be disjoint and ascending. Returns an empty vector when some block is longer
-	// than one rank's share, which cannot be stepped over by moving a cut at all -- only by handing a
-	// whole rank's worth of rows to somebody else.
-	//
-	// Shared by the two callers that want a block-aligned split for different reasons: static
-	// condensation, whose blocks are the components it inverts, and the dof ordering, whose blocks are
-	// the nodal or elemental blocks the layout built. They were the same fifteen lines.
-	static std::vector<unsigned> snap_cuts_to_blocks(const std::vector<std::pair<int, int>> &blocks,
-													 unsigned nproc, unsigned nd)
-	{
-		std::vector<unsigned> cuts;
-		const unsigned share = nd / nproc;
-		for (size_t i = 0; i < blocks.size(); i++)
-			if ((unsigned)(blocks[i].second - blocks[i].first + 1) > share) return cuts;
-
-		cuts.assign(nproc + 1, 0);
-		cuts[nproc] = nd;
-		size_t bi = 0;
-		for (unsigned p = 1; p < nproc; p++)
-		{
-			unsigned c = (unsigned)((unsigned long)nd * p / nproc);
-			if (c < cuts[p - 1]) c = cuts[p - 1];
-			while (bi < blocks.size() && (unsigned)blocks[bi].second < c) bi++;
-			// One step is enough: the blocks are disjoint, so blocks[bi].second+1 is at most
-			// blocks[bi+1].first, which is not strictly inside blocks[bi+1].
-			if (bi < blocks.size() && (unsigned)blocks[bi].first < c && c <= (unsigned)blocks[bi].second)
-				c = (unsigned)blocks[bi].second + 1;
-			cuts[p] = (c > nd ? nd : c);
-		}
-		return cuts;
 	}
 
 	// Only a REPLICATED run needs this. Distributed, oomph renumbers so that each rank's own dofs are
