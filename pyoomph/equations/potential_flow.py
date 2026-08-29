@@ -221,18 +221,8 @@ class PotentialFlowFarField(_PotentialFlowInterfaceEquations):
         outgoing-wave term at :math:`R_\text{out}` carries a lag :math:`R_\text{out}/c`. That lag
         suppresses the damping by :math:`1/\left(1+(\omega R_\text{out}/c)^{2}\right)`. Measured on a
         free bubble against the exact linear radiation damping
-        :math:`\beta=\omega_0^{2}R_0/(2c)`:
-
-        =====================  ==========================
-        :math:`\omega R_\text{out}/c`  measured / exact
-        =====================  ==========================
-        0.04                   1.002
-        0.06                   1.002
-        0.10                   0.995 - 0.998
-        0.20                   0.973
-        0.41                   0.876
-        0.82                   0.614
-        =====================  ==========================
+        :math:`\beta=\omega_0^{2}R_0/(2c)`, the ratio of measured to exact damping is 1.002 at :math:`\omega R_\text{out}/c=0.04` and
+        0.06, 0.995 - 0.998 at 0.10, 0.973 at 0.20, 0.876 at 0.41 and 0.614 at 0.82.
 
         This costs nothing in practice: the monopole condition itself is already exact at
         :math:`R_\text{out}=3R_0`, so the boundary can simply be brought in. For a 50 um bubble in
