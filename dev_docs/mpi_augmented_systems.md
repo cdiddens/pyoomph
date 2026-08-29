@@ -278,6 +278,51 @@ not bit-reproducible. Compare the physics, never the dof count.
 The four handler cases above use fixed meshes, and moving-mesh problems with remeshing remain
 unvalidated *for tracking* here.
 
+**2026-08-29, from the `--distribute` tutorial sweep (`mpirun -n 2 --distribute`, 143 scripts): three
+scripts crash, all of them in the same place.** Each dies with SIGSEGV in the first tracking solve, one
+line after the activation message, having solved the eigenproblem beforehand so that the handler gets a
+real guess:
+
+| script | what it activates | last line before the crash |
+|---|---|---|
+| `advstab/movmesh/hanging_droplet.py` | `fold`, moving mesh + interface Lagrange multipliers | `Bifurcation tracking activated for Bo` |
+| `advstab/azimuthal/rayleigh_benard_azimuthal_stability.py` | `pitchfork` (the `m=0` leg) | `Bifurcation tracking activated for Ra` |
+| `advstab/eigenbranch_continuation.py` | eigenbranch `real`, which installs the **fold** tracker | `Activating eigenbranch tracking for a real branch ...` |
+
+That is worth recording because it removes the moving mesh from the description of the failure: the
+Rayleigh-Bénard case is a fixed mesh with no remeshing, and it fails the same way. What the three share
+is only that a handler is installed on a distributed problem and then assembled. The `hanging_droplet`
+report of this section is therefore no longer a single unexplained data point.
+
+**Diagnosed and fixed the same day.** The deliberate isolated attempt (detached, own MPI session
+directory, PETSc's signal handler off so gdb could catch the SIGSEGV) put the crash nowhere near the
+handler maths:
+
+    #0 oomph::Tree::stick_leaves_into_vector (this=0x0)        tree.cc:258
+    #1 oomph::Mesh::get_all_halo_data                          mesh.cc:4877
+    #2 oomph::Problem::get_all_halo_data                       problem.cc:16736
+    #3 oomph::Problem::setup_dof_halo_scheme                   problem.cc:537
+    #4 pyoomph::MyFoldHandler::MyFoldHandler                   src/bifurcation.cpp:1724
+    #5 pyoomph::Problem::activate_my_fold_tracking             src/problem.cpp:2534
+
+`get_all_halo_data` walks the tree of every root halo element that casts to `RefineableElement`. In
+pyoomph that cast carries no information -- every element derives from `RefineableSolidElement` -- and a
+halo element can still have no tree, so it dereferences null. The element that takes the guarded branch
+is a **bulk** `BulkElementQuad2dC2` in the halo layer of the bulk mesh (breakpoint on the liquid
+bridge), not a face element. The two sibling call sites in `mesh.h` (`halo_element_pt`,
+`haloed_element_pt`) already carry exactly this guard, marked `FOR PYOOMPH`; `mesh.cc` was missed. See
+`INFO_oomph-lib`, 29th August 2026.
+
+So the three failures were never about fold, pitchfork or eigenbranch tracking as such: any handler
+would have done, because they all build the dof halo scheme in their constructor. With the guard, all
+three complete under `mpirun -n 2 --distribute` (the Rayleigh-Bénard one on the complex PETSc build,
+which its `m=1` leg needs serially too).
+
+**The handler suite could not have caught it**, and still cannot: all four cases of section 6a are
+fixed-mesh problems whose halo elements do have trees. A regression test needs a configuration whose
+halo layer contains a tree-less element, which is not yet understood well enough to construct
+deliberately -- an open point.
+
 ## 6c. Eigensolving the base state while a handler is installed
 
 Added later, and it needed almost nothing from the handlers themselves. oomph-lib's

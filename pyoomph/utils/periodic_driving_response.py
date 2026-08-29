@@ -136,6 +136,12 @@ class PeriodicDrivingResponse():
         Yields:
             For each frequency, you get the current response as complex vector, with entries belonging to the degrees of freedom of the system.
         """
+        # Same guard as the two other entry points below. It was missing exactly here, which is the
+        # one place that actually assembles: the run died in scipy with "index pointer size (3) should
+        # be (5)" instead, three frames away from the feature the user asked for -- the eigenproblem
+        # matrices are this rank's ROW BLOCK once the dofs are partitioned, while n is still the global
+        # count.
+        self.problem._require_non_distributed("The periodic driving response")
         if omegas is not None and freqs is not None:
             raise RuntimeError("Cannot set both omega and frequency")
         elif omegas is not None:
