@@ -298,7 +298,7 @@ jobs:
           # compiled extension next to it - and dies on "No module named pyoomph._pyoomph_core"
           # while the installed wheel next door is perfectly fine. The tutorial scripts themselves
           # are unaffected: the harness runs each one from inside its own bundle folder.
-          (cd "${RUNNER_TEMP}" && "$VENV" -c "import pyoomph,pyoomph._pyoomph_core as c; print('pyoomph',pyoomph.__version__,'from',pyoomph.__file__); print('extension from',c.__file__)")
+          (cd "${RUNNER_TEMP}" && "$VENV" -c "import importlib.metadata as m,pyoomph,pyoomph._pyoomph_core as c; print('pyoomph',m.version('pyoomph'),'from',pyoomph.__file__); print('extension from',c.__file__)")
           echo "TUTORIAL_PYTHON=$VENV" >> "${GITHUB_ENV}"
 
       - name: Install the wheel into a fresh venv (Windows)
@@ -316,7 +316,7 @@ jobs:
           "$VENV" -m pip install "${WHEEL}[topology]"
           # See the Linux/macOS step: from RUNNER_TEMP, so that the checkout's own ./pyoomph
           # directory is not what gets imported.
-          (cd "$(cygpath -u "$RUNNER_TEMP")" && "$VENV" -c "import pyoomph,pyoomph._pyoomph_core as c; print('pyoomph',pyoomph.__version__,'from',pyoomph.__file__); print('extension from',c.__file__)")
+          (cd "$(cygpath -u "$RUNNER_TEMP")" && "$VENV" -c "import importlib.metadata as m,pyoomph,pyoomph._pyoomph_core as c; print('pyoomph',m.version('pyoomph'),'from',pyoomph.__file__); print('extension from',c.__file__)")
           echo "TUTORIAL_PYTHON=$(cygpath -m "$VENV")" >> "${GITHUB_ENV}"
 
       - name: Run the tutorial scripts (Linux/macOS)
@@ -335,7 +335,7 @@ jobs:
           # exits 0 regardless - the verdict comes from the report below.
           "${TUTORIAL_PYTHON}" -u citools/test_all_tutorial_scripts.py \
             --no-petsc ${QUICK} \
-            --report-json "${RUNNER_TEMP}/tutorial_report.json" \
+            --report-json tutorial_report.json \
             ${SKIPS} 2>&1 | tail -n 4000
 
       - name: Run the tutorial scripts (Windows)
@@ -354,7 +354,7 @@ jobs:
           export PATH="/ucrt64/bin:$PATH"
           "$(cygpath -u "${TUTORIAL_PYTHON}")" -u citools/test_all_tutorial_scripts.py \
             --no-petsc ${QUICK} \
-            --report-json "$(cygpath -m "$RUNNER_TEMP")/tutorial_report.json" \
+            --report-json tutorial_report.json \
             ${SKIPS} 2>&1 | tail -n 4000
 
       # The point of the whole workflow: the per-script verdict and timing, on the run's summary
@@ -363,7 +363,10 @@ jobs:
         if: always() && steps.want.outputs.run == '1'
         shell: bash
         run: |
-          REPORT="${RUNNER_TEMP}/tutorial_report.json"
+          # In the workspace rather than under RUNNER_TEMP: on the Windows runner this step's bash
+          # is git-bash, which is handed RUNNER_TEMP as a backslashed Windows path it cannot then
+          # use as a path at all.
+          REPORT="tutorial_report.json"
           if [[ ! -f "${REPORT}" ]]; then
             echo "## ${{ matrix.label }} - no report" >> "${GITHUB_STEP_SUMMARY}"
             echo "" >> "${GITHUB_STEP_SUMMARY}"
@@ -372,13 +375,15 @@ jobs:
           fi
           # Once, into a file: it is both appended to the summary page and echoed into the log,
           # and its exit code (non-zero if any script failed) is the job's verdict.
+          # Not a hardcoded "python3": the Windows runner's bash has python.exe and no python3.
+          PY="$(command -v python3 || command -v python)"
           set +e
-          python3 citools/tutorial_report_to_summary.py "${REPORT}" \
-            --title "${{ matrix.label }}" --out "${RUNNER_TEMP}/tutorial_summary.md"
+          "${PY}" citools/tutorial_report_to_summary.py "${REPORT}" \
+            --title "${{ matrix.label }}" --out tutorial_summary.md
           STATUS=$?
           set -e
-          cat "${RUNNER_TEMP}/tutorial_summary.md" >> "${GITHUB_STEP_SUMMARY}"
-          cat "${RUNNER_TEMP}/tutorial_summary.md"
+          cat tutorial_summary.md >> "${GITHUB_STEP_SUMMARY}"
+          cat tutorial_summary.md
           exit ${STATUS}
 
       # The report plus the log of every script that failed - the harness writes <script>.log next
@@ -389,7 +394,7 @@ jobs:
         with:
           name: tutorial-report-${{ matrix.label }}
           path: |
-            ${{ runner.temp }}/tutorial_report.json
+            tutorial_report.json
             citools/pyoomph_tutorial_scripts/**/*.log
           if-no-files-found: warn
 
