@@ -671,6 +671,10 @@ def test_embedded_plot_hook_leaves_the_figure_open(tmp_path):
 def test_eigenfunction_plotter_is_derived_from_the_source():
     """An eigenfunction pane reuses the plot definition rather than asking for it twice."""
     from pyoomph.output.plotting import MatplotlibPlotter
+    # panes.py imports tkinter at module level, and an interpreter is not obliged to have Tk - the
+    # Windows wheel runner does not (ModuleNotFoundError in the run of 29th August 2026). This is the
+    # only test in the file that imports the GUI in-process; the rest drive it in a subprocess.
+    pytest.importorskip("tkinter", reason="the bifurcation GUI panes import tkinter at module level")
     from pyoomph.utils.bifurcation_gui.panes import derive_eigenfunction_plotter
 
     class Custom(MatplotlibPlotter):
@@ -3109,7 +3113,10 @@ def test_branch_switching_at_a_recomputed_real_bifurcation(kind, unstable, tmp_p
     if unstable != "stable":
         assert any(re > 0.1 for re, _im in res["spectrum"]), "the branch is not unstable here"
 
-    assert res["switched"], res.get("error")
+    assert res["switched"], (res.get("error") or
+                             ("branch_switch() declined without raising: returned "
+                              + str(res.get("switch_return")) + ", classification "
+                              + str(res.get("bifurcation_info_at_switch"))))
     assert res["type_after"] == kind, res["type_after"]
     assert res["new_branches"] == 1
     mu = res["landed_mu"]

@@ -130,7 +130,11 @@ def test_no_public_signature_uses_an_old_spelling_any_more():
             if not filename.endswith(".py"):
                 continue
             path = os.path.join(dirpath, filename)
-            tree = ast.parse(open(path).read())
+            # encoding= is not optional here: without it Python picks the locale codec, which on
+            # Windows is cp1252 and dies on the first non-ASCII byte in the sources ("charmap codec
+            # can't decode byte 0x81"). The wheel test run of 29th August 2026 failed exactly there,
+            # having read 583 kB of pyoomph before hitting one.
+            tree = ast.parse(open(path, encoding="utf-8").read())
             for node in ast.walk(tree):
                 if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     continue

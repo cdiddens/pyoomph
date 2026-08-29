@@ -181,6 +181,20 @@ def test_rejects_nonsensical_parameters():
 # ---------------------------------------------------------------- end to end
 
 
+def _solver_name(problem):
+    """Which linear solver actually got installed, for an assertion message.
+
+    These problems are ONE dof, so no assertion here can plausibly be about a solver's numerical
+    quality - but the macOS wheel jobs of 29th August 2026 failed all three deflation tests while
+    printing "falling back to the 'accelerate' solver", and nothing in the failure said which backend
+    had been used. Naming it is what makes the next run's message decidable either way.
+    """
+    try:
+        return type(problem.get_la_solver()).__name__
+    except Exception as e:
+        return "unknown (%s)" % (e,)
+
+
 def test_pitchfork_ode_finds_all_three_solutions(tmp_path):
     """The tutorial's own claim: x = 0, +1, -1 at r = 1.
 
@@ -198,7 +212,8 @@ def test_pitchfork_ode_finds_all_three_solutions(tmp_path):
     # margin, not machine epsilon: the solve stops when the residual does, so the position of a root
     # is only good to about 5e-9, and which backend factorised it - and how strongly the deflation
     # pushed on the way in - moves the last couple of digits.
-    assert sorted(sols) == pytest.approx([-1.0, 0.0, 1.0], abs=1e-7)
+    assert sorted(sols) == pytest.approx([-1.0, 0.0, 1.0], abs=1e-7), \
+        "got %r with the %s solver" % (sorted(sols), _solver_name(p))
     for s in sols:
         assert abs(abs(s) - round(abs(s))) < 1e-7
 
@@ -265,8 +280,8 @@ def test_deflated_continuation_traces_the_pitchfork(tmp_path):
                 r=numpy.linspace(-1.0, 1.0, 21), perturbation_amplitude=0.5,
                 num_random_tries=2, random_seed=0):
             branches.setdefault(branch_index, []).append((float(rvalue), float(sol[0])))
-    assert len(branches) == 3, "expected the trivial branch and the symmetric pair, got %r" % (
-        {k: len(v) for k, v in branches.items()},)
+    assert len(branches) == 3, "expected the trivial branch and the symmetric pair, got %r (%s solver)" % (
+        {k: len(v) for k, v in branches.items()}, _solver_name(p))
     finals = sorted(round(v[-1][1], 6) for v in branches.values())
     assert finals == pytest.approx([-1.0, 0.0, 1.0], abs=1e-6)
     # The trivial branch exists for every r; the other two only above the bifurcation.
@@ -291,7 +306,15 @@ def test_assembly_handler_shell_still_works(tmp_path):
         h.add_known_solution(p.get_current_dofs()[0])
         assert (h.alpha, h.p, h.shift_mode, len(h.Ws)) == (0.1, 2, "each", 1)
         p.perturb_dofs(numpy.array([0.3]))
-        p.solve()
+        try:
+            p.solve()
+        except RuntimeError as e:
+            # The deflated Newton solve diverged rather than landing on the other root. Bare, that
+            # arrives as "RuntimeError: OomphException" with no indication of where it stood or what
+            # factorised it - which is all the macOS arm64 wheel job of 29th August 2026 reported.
+            raise AssertionError(
+                "the deflated solve failed from x=%r with the %s solver: %s"
+                % (float(p.get_current_dofs()[0][0]), _solver_name(p), e)) from e
         found = float(p.get_current_dofs()[0][0])
         p.set_custom_assembler(None)
     assert abs(abs(found) - 1.0) < 1e-7, "deflating x=0 must lead to x=+-1, got %r" % found

@@ -104,6 +104,27 @@ def _no_eigensolver_reason():
 _NO_EIGENSOLVER = _no_eigensolver_reason()
 
 
+def _describe_exit(out):
+    """How the worker ended, in words, for an assertion message.
+
+    Without this a worker that DIED produces exactly the same message as one that ran and printed
+    nothing - "no result line" - which is what the macOS wheel jobs of 29th August 2026 reported for
+    four cases each. A negative returncode is a signal on POSIX, and that single number is the
+    difference between "the solver gave up" and "the process was killed".
+    """
+    import signal
+    rc = out.returncode
+    if rc is None:
+        return "worker still running?"
+    if rc < 0:
+        try:
+            name = signal.Signals(-rc).name
+        except ValueError:
+            name = "signal %d" % (-rc,)
+        return "worker was KILLED BY %s (returncode %d)" % (name, rc)
+    return "worker exited with returncode %d" % rc
+
+
 def _run(tmp_path, timeout=900, **kw):
     """Run one worker case in its own process and return its result dict."""
     os.makedirs(str(tmp_path), exist_ok=True)
@@ -116,10 +137,11 @@ def _run(tmp_path, timeout=900, **kw):
             cmd += [flag, str(v)]
     out = subprocess.run(cmd, cwd=str(tmp_path), capture_output=True, text=True, timeout=timeout)
     lines = [l for l in out.stdout.splitlines() if l.startswith("PYOOMPH_FLOQUET_RESULT ")]
-    assert len(lines) == 1, out.stdout[-4000:] + out.stderr[-4000:]
+    assert len(lines) == 1, (_describe_exit(out) + " and produced " + str(len(lines))
+                             + " result lines\n" + out.stdout[-4000:] + out.stderr[-4000:])
     res = json.loads(lines[0][len("PYOOMPH_FLOQUET_RESULT "):])
     assert "error" not in res, res.get("traceback", res.get("error"))
-    assert out.returncode == 0, out.stdout[-4000:] + out.stderr[-4000:]
+    assert out.returncode == 0, _describe_exit(out) + "\n" + out.stdout[-4000:] + out.stderr[-4000:]
     return res
 
 
@@ -140,7 +162,8 @@ def _run_capturing_output(tmp_path, timeout=900, **kw):
             cmd += [flag, str(v)]
     out = subprocess.run(cmd, cwd=str(tmp_path), capture_output=True, text=True, timeout=timeout)
     lines = [l for l in out.stdout.splitlines() if l.startswith("PYOOMPH_FLOQUET_RESULT ")]
-    assert len(lines) == 1, out.stdout[-4000:] + out.stderr[-4000:]
+    assert len(lines) == 1, (_describe_exit(out) + " and produced " + str(len(lines))
+                             + " result lines\n" + out.stdout[-4000:] + out.stderr[-4000:])
     res = json.loads(lines[0][len("PYOOMPH_FLOQUET_RESULT "):])
     assert "error" not in res, res.get("traceback", res.get("error"))
     return res, out.stdout

@@ -613,8 +613,18 @@ def test_the_refactor_generates_the_same_code_when_gcl_is_off():
         p.quiet()
         p.set_c_compiler("system")
         p.initialise()
-        got = hashlib.md5(open(os.path.join(d, "_ccode", "domain.c"), "rb").read()).hexdigest()
-        assert got == md5, ("advection_by_parts=%r changed the generated code" % (byparts,))
+        raw = open(os.path.join(d, "_ccode", "domain.c"), "rb").read()
+        # Hash the text, not the bytes. The generated file is written through a std::ofstream in TEXT
+        # mode (src/nanobind/problem.cpp), so on Windows every newline reaches the disk as \r\n and
+        # the byte hash differs from these reference values - which were taken on Linux - even when
+        # the code is identical, character for character. That is what the Windows wheel job of 29th
+        # August 2026 reported. Normalising here rather than opening the file in text mode keeps the
+        # comparison explicit about what is being ignored: line endings, and nothing else.
+        text = raw.replace(b"\r\n", b"\n")
+        got = hashlib.md5(text).hexdigest()
+        assert got == md5, (
+            "advection_by_parts=%r changed the generated code (%d lines, %d bytes, CRLF=%s)"
+            % (byparts, text.count(b"\n"), len(text), raw != text))
     # sanity: the three settings really do differ from each other, so the check above is not vacuous
     assert len(set(expected.values())) == 3
     assert glob.glob(os.path.join(d, "_ccode", "*.c"))
