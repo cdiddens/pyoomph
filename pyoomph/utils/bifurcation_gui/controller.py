@@ -4925,7 +4925,8 @@ class BifurcationController:
         """Refine towards an eigenfunction after a remesh, if that was asked for.
 
         Refused up front rather than several frames into refine_eigenfunction: it renumbers, which pulls
-        the augmented dof vector out from under a bifurcation tracker, and it cannot run distributed.
+        the augmented dof vector out from under a bifurcation tracker. (It used to be refused on a
+        distributed problem as well; refine_eigenfunction works there now.)
         """
         if not self.adapt_to_eigenfunction:
             return
@@ -4933,9 +4934,6 @@ class BifurcationController:
             self.log("Not refining towards an eigenfunction: an augmented system is active (a "
                      "bifurcation tracker or a periodic orbit), and adapting would renumber it out "
                      "from under the handler")
-            return
-        if self.problem.is_distributed():
-            self.log("Not refining towards an eigenfunction: not supported on a distributed problem")
             return
         try:
             self._status("ADAPTING TO THE EIGENFUNCTION")

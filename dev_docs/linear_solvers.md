@@ -719,11 +719,34 @@ Two preconditions come with the flag, and they are what makes it safe:
 * **`solve_serial` must issue no MPI collective.** It runs on rank 0 alone. `custom_solve_routine` is
   the one thing on that path that could, so it is refused up front, on a replicated condition, before
   the first collective.
-* **The factorisation slot must not be shared with anything else.** `PeriodicDrivingResponse`, the
-  Lyapunov utilities and Halley's method build a *replicated* system in Python and call `solve_serial`
-  on **every** rank, into the same slot rank 0's gathered factors live in. They now call
-  `_note_external_serial_solve()` first, so a back-substitution landing on the wrong factors fails
-  loudly rather than being silently wrong on every rank at once.
+* **The factorisation slot must not be shared with anything else.** The Lyapunov utilities and
+  Halley's method build a *replicated* system in Python and call `solve_serial` on **every** rank,
+  into the same slot rank 0's gathered factors live in. They now call `_note_external_serial_solve()`
+  first, so a back-substitution landing on the wrong factors fails loudly rather than being silently
+  wrong on every rank at once.
+
+  `PeriodicDrivingResponse` used to be on that list and is the counter-example worth keeping in view:
+  it now goes through `solve_python_built_distributed()` instead (§9.2a), whose PETSc implementation
+  keeps its Mat and KSP in slots of their own, so there is no shared slot left to warn about. The
+  base-class implementation of that method still replicates and still calls `_note_external_serial_solve()`.
+
+### 9.2a A system pyoomph assembled itself: `solve_python_built_distributed`
+
+Everything above is about a system oomph-lib assembled and handed down through `solve_distributed`.
+A few features assemble their own — a bordered or otherwise augmented system built in Python out of
+the eigenproblem matrices — and until recently every one of them did it *globally* and solved it on
+every rank at once, which stops being possible the moment the rows are partitioned.
+
+`GenericLinearSystemSolver.solve_python_built_distributed(ntot, nrow_local, first_row, mat_local,
+b_local)` is the entry point for those. `mat_local` is this rank's `(nrow_local, ntot)` CSR block with
+**global** column indices — the same layout oomph's own distributed assembly produces and the one
+MPIAIJ wants. The base class replicates (allgather the square system, `solve_serial`, slice the
+answer), which keeps every serial backend usable; `PETSCSolver` overrides it with an MPIAIJ on
+`COMM_WORLD` and a `preonly`+`lu` KSP in slots of its own, reused across calls while the pattern
+holds. `solves_python_built_systems_distributed()` says which of the two a backend has.
+
+Distinct from `solves_natively_distributed`, which is about the Newton path. `PeriodicDrivingResponse`
+is the first caller; see [mpi_eigenproblems.md](mpi_eigenproblems.md) §8.
 
 ### 9.3 The refusal it replaces was describing a bug that had been fixed
 

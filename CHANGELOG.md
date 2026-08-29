@@ -296,9 +296,17 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
   `Data::add_values_to_vector` transmits every time level, not just the current one). That unblocked
   three things, each now tested against serial: **arclength continuation of a bifurcation locus**,
   which was refused outright; the **transient hand-back** when leaving a `with orbit:` block, so a
-  plain `run()` continues the orbit; and `set_history_dofs` itself. `refine_eigenfunction()` stays
-  refused -- it was on the list for this reason but also adapts the mesh to an eigenfunction, which
-  needs its own validation.
+  plain `run()` continues the orbit; and `set_history_dofs` itself.
+
+- **`refine_eigenfunction()` under MPI**, replicated and `--distribute`. Adapting the mesh to an
+  eigenfunction was the last refusal left over from the history-dof blocker above, kept because the
+  adaptation itself had never been run in parallel. It now is, in `tests/test_mpi_eigen_adapt.py` --
+  which is also the first coverage this feature has had at all. The eigenfunction survives the trip
+  through the history levels the adaptation carries it in to round-off on any partition, and a
+  replicated `mpirun` reproduces the serial mesh element for element. Under `--distribute` the refined
+  mesh may differ from the serial one by a per cent or so, because oomph-lib's distributed Z2 recovery
+  neglects the patches it cannot assemble from locally owned vertex nodes -- an ordinary
+  base-state-driven adaptation differs in the same way, and the suite asserts that it does.
 
 - **`switch_to_hopf_orbit()` under MPI**, replicated and `--distribute`, which completes the route from
   a Hopf point to a periodic orbit in parallel. Three things were in the way. The first Lyapunov

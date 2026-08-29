@@ -117,13 +117,14 @@ any more**: it was the one entry here that failed that test, and it failed it be
 never checked. It is kept, as a correction rather than a theme, because the way it went wrong is more
 useful than the claim ever was.
 
-**(a) History dofs under `--distribute` — mostly closed, and the residue is one call.**
+**(a) History dofs under `--distribute` — closed.**
 `Problem::get_dofs(t,…)`/`set_dofs(t,…)` were the single blocker behind four separate refusals
 (`floquet_multipliers.md` §10.2, `mpi_eigenproblems.md` §5, `mpi_augmented_systems.md` §4,
-`bifurcation_loci.md`). They now work (commit `2531e00`). What is still gated on the same mechanism:
-`refine_eigenfunction()` (`problem.py:5839`), which is refused for a *second* reason as well — it adapts
-the mesh to an eigenfunction and that has never been validated — and `adapt()` / arclength continuation
-while a C++ tracker is installed.
+`bifurcation_loci.md`). They now work (commit `2531e00`). The residue named here was
+`refine_eigenfunction()`, kept refused for a *second* reason — it adapts the mesh to an eigenfunction
+and that had never been validated. It has been now, and the guard is off; the validation is
+`tests/test_mpi_eigen_adapt.py` and `mpi_eigenproblems.md` §9. What is still gated on the mechanism:
+`adapt()` / arclength continuation while a C++ tracker is installed.
 
 **(b) The Python custom assembler is the last MPI-hostile pipeline.** Deflation left it (`deflation.md`),
 the Lyapunov coefficient left it (`hopf_normal_form.md` §4), the normal form left it
@@ -322,7 +323,9 @@ absence, or the missing file was checked in this tree today.
   so it is a small API change. — `floquet_multipliers.md` §10.5.
 * **The native distributed Floquet path** — measured and deliberately not built; see §2(d). It becomes
   right only *together with* removing every `nbase × nbase` object. — §10.3.
-* **`refine_eigenfunction()` under MPI** — refused for two independent reasons. — §2(a).
+* ~~**`refine_eigenfunction()` under MPI**~~ — **done**, replicated and `--distribute`; the mesh a
+  distributed run refines to may differ from the serial one, but so does an ordinary base-state-driven
+  adaptation, for a reason upstream of pyoomph. — `mpi_eigenproblems.md` §9.
 * **`CriticalWavenumberTracker` is serial only**, refuses `k = 0` and `|m| <= 1`, refuses frozen
   sparsity when there is an imaginary contribution, and `_retune_arclength_theta` silently no-ops while
   it is installed. — `critical_wavenumber_tracking.md` §"Traps".

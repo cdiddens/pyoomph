@@ -2215,9 +2215,8 @@ class Problem(_pyoomph.Problem):
         These callers assemble the eigenproblem matrices themselves and read the result as a square
         global matrix, which it stops being once the rows are partitioned across ranks -- scipy then
         raises about an indptr length, several frames away from the feature the user asked for. The
-        remaining ones (the Lyapunov exponents, the periodic driving response, the multi-assembly
-        tensor cache, and the Python custom assembler behind get_hopf_lyapunov_coefficient's
-        HopfTracker route) additionally sit on top of
+        remaining ones (the Lyapunov exponents, the multi-assembly tensor cache, and the Python custom
+        assembler behind get_hopf_lyapunov_coefficient's HopfTracker route) additionally sit on top of
         sparse_assemble_row_or_column_compressed_base_problem, which throws "This likely does not work
         in distributed parallel" from C++. Failing here names the feature instead.
 
@@ -2225,9 +2224,11 @@ class Problem(_pyoomph.Problem):
         multipliers, and -- since the normal form left the custom multi-assembly the way deflation
         did -- left eigenvectors and branch switching, used to be on that list and are not any more.
         See dev_docs/mpi_augmented_systems.md, dev_docs/floquet_multipliers.md section 10 and
-        dev_docs/branch_switching.md.
-        refine_eigenfunction() is here for the history-dof reason instead of an assembly one:
-        Problem::set_history_dofs refuses when distributed.
+        dev_docs/branch_switching.md. refine_eigenfunction() has left this list too: it was here for
+        the history-dof reason rather than an assembly one, and the history dof accessors work
+        distributed since commit 2531e00. So has the periodic driving response, which now assembles on
+        its own row block and solves the bordered system on COMM_WORLD -- dev_docs/mpi_eigenproblems.md
+        section 8.
         """
         if self.is_distributed():
             raise RuntimeError(what+" is not supported on a distributed (--distribute) problem yet. Run it without --distribute (plain eigenvalue solving via SLEPc does work distributed).")
@@ -6353,12 +6354,11 @@ class Problem(_pyoomph.Problem):
             Tuple[float, NPFloatArray]: The eigenvalue and eigenvector of the adapted eigenproblem.
             
         """
-        # Unlike plain eigenvalue solving, this one is NOT available distributed: adapt() carries the
-        # eigenfunction across the adaption in history levels 3 and 4, and the history dof accessors
-        # refuse on a distributed problem (an equation number there is global while the vector holds
-        # only this rank's rows -- see Problem::get_dofs(t,...) in src/problem.cpp). Raising here names
-        # the feature instead of failing several frames into adapt().
-        self._require_non_distributed("Mesh adaptation to an eigenfunction (refine_eigenfunction)")
+        # This used to be refused on a distributed problem, because adapt() carries the eigenfunction
+        # across the adaption in history levels 3 and 4 and the history dof accessors were unsupported
+        # there. They are not any more (Problem::get_dofs(t,...)/set_dofs(t,...) walk this rank's owned
+        # rows and let synchronise_all_dofs() carry the values, src/problem.cpp), and the whole path is
+        # now held against a serial reference in tests/test_mpi_eigen_adapt.py.
         # adapt() renumbers, which pulls the augmented dof vector out from under the tracker.
         self._require_no_bifurcation_tracking("Mesh adaptation to an eigenfunction (refine_eigenfunction)")
         if eigenindex<0:

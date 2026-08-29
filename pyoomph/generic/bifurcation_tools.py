@@ -109,21 +109,13 @@ def _as_real_eigenvector(v,what:str,tol:float=1e-8)->"numpy.ndarray":
 def _allgather_square(problem:Problem,mat:DefaultMatrixType,n:int)->DefaultMatrixType:
     """Turn a distributed row block into the whole square matrix, on every rank.
 
-    ``mpi_gather_csr_rows`` collects onto one rank; the callers here need the matrix everywhere, since
-    they all execute the same collective-laden routine together. Broadcasting the gathered triple is
-    the cheapest way to that and keeps the gather itself in one place.
+    Just ``mpi_allgather_square_csr`` on the BASE dof distribution, which is the layout the
+    eigenproblem matrices these callers pass in are assembled on.
     """
-    from .mpi import get_mpi_world_comm,get_mpi_rank,mpi_row_layout,mpi_gather_csr_rows
-    comm=get_mpi_world_comm()
-    assert comm is not None, "a distributed matrix without an MPI communicator"
+    from .mpi import mpi_allgather_square_csr
     _,nrow_local,first_row,_=problem._get_base_dof_distribution_info()
-    layout=mpi_row_layout(n,first_row,nrow_local,mat.nnz)
-    assert layout is not None
-    got=mpi_gather_csr_rows(layout,mat.data,mat.indices,mat.indptr,
-                            context="gathering the Hopf pencil for the Lyapunov coefficient")
-    got=comm.bcast(got if get_mpi_rank()==0 else None,root=0) #type:ignore
-    vals,cols,rs=got
-    return csr_matrix((vals,cols,rs),shape=(n,n))
+    return mpi_allgather_square_csr(n,first_row,nrow_local,mat,
+                                    context="gathering the Hopf pencil for the Lyapunov coefficient")
 
 
 def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD_delta:float=1e-5,FD_param_delta:float=1e-5,omega:float | None=None,q:NPComplexArray | None=None,omega_epsilon:float=1e-5,use_hopf_tracker_for_adjoint:bool=False,verbose:bool=True,residual_tolerance:float=1e-6,check_derivatives_by_fd:bool=False):
