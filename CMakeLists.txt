@@ -345,9 +345,15 @@ target_compile_definitions(_pyoomph_core PRIVATE
 )
 
 if(PYOOMPH_HAS_TQMESH)
-  # Kept PRIVATE and off pyoomph_core: nothing outside src/nanobind/tqmesh sees TQMesh. The sources
-  # are only there once tqmesh_external has run, hence the dependency.
-  target_include_directories(_pyoomph_core PRIVATE ${PYOOMPH_TQMESH_INCLUDE_DIRS})
+  # Kept off pyoomph_core AND off the rest of _pyoomph_core's TUs: nothing outside
+  # src/nanobind/tqmesh sees TQMesh. Scoping the include dir to just the TQMesh sources (rather than
+  # the whole target) matters because TQMesh's src/algorithm/ carries a Mesh.h that collides
+  # case-insensitively with oomph-lib's mesh.h - on macOS a target-wide include dir made every other
+  # TU's #include "mesh.h" (via oomph_lib.hpp) resolve to TQMesh's Mesh.h instead
+  # (-Wnonportable-include-path, and the wrong header). The sources are only there once
+  # tqmesh_external has run, hence the dependency.
+  set_source_files_properties(${PYOOMPH_TQMESH_SOURCES}
+    PROPERTIES INCLUDE_DIRECTORIES "${PYOOMPH_TQMESH_INCLUDE_DIRS}")
   add_dependencies(_pyoomph_core tqmesh_external)
 endif()
 
