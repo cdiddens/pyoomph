@@ -79,14 +79,20 @@ def main():
     outdir = sys.argv[1] if len(sys.argv) > 1 else "tccdiag_out"
 
     code = (
+        # All FIVE functions the failing test uses, not just erf: the first version of this probe
+        # used erf alone, and the DLL loaded and solved fine, importing nothing but msvcrt.dll. The
+        # C99 inverse hyperbolics are the ones legacy msvcrt lacks, so they are the likeliest reason
+        # the test's DLL and this one differ - and a probe that does not reproduce the failure proves
+        # nothing at all.
         "from pyoomph import Problem, ODEEquations\n"
-        "from pyoomph.expressions import var_and_test, erf\n"
+        "from pyoomph.expressions import var_and_test, erf, erfc, asinh, acosh, atanh\n"
         "class E(ODEEquations):\n"
         "    def define_fields(self):\n"
         "        self.define_ode_variable('u')\n"
         "    def define_residuals(self):\n"
         "        u, v = var_and_test('u')\n"
-        "        self.add_residual((u - erf(0.7)) * v)\n"
+        "        f = erf(0.7) + erfc(0.7) + asinh(0.7) + acosh(2.0) + atanh(0.7)\n"
+        "        self.add_residual((u - f) * v)\n"
         "class P(Problem):\n"
         "    def define_problem(self):\n"
         "        self.add_equations(E() @ 'ode')\n"
