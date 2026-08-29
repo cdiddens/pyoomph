@@ -156,9 +156,12 @@ jobs:
             CMD="python -m pytest ${{ inputs.pytest_args }}"
           fi
           if [ "${{ inputs.use_lldb }}" = "true" ]; then
-            # -o run then bt: batch mode returns nonzero if the target crashed, which is what the
-            # loop below reads. "bt all" covers a crash on a thread other than the main one.
-            CMD="lldb --batch -o run -k 'thread backtrace all' -k 'quit 1' -- $CMD"
+            # stop-on-exec false FIRST, and do not drop it: a Python launched through a shim
+            # re-execs, lldb stops there by default, and --batch then quits having run nothing at all
+            # - "stop reason = exec", exit 0, no output, which is exactly how the first attempt at
+            # this looked like a pass. -k runs only if the target dies, so the backtrace is printed
+            # for a crash and not for a clean exit.
+            CMD="lldb --batch -o 'settings set target.process.stop-on-exec false' -o run -k 'thread backtrace all' -k 'quit 1' -- $CMD"
           fi
           echo "command: $CMD"
           rc=0
