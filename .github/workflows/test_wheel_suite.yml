@@ -263,12 +263,33 @@ jobs:
       # own import table and nowhere else; guessing from Linux is hopeless, and one objdump settles it.
       # Unlike the other platforms, Windows compiles the JIT code with tcc's own headers and runtime
       # (no -nostdinc/-nostdlib, see pyoomph/generic/ccompiler.py), so the CRT it names is the suspect.
+      # cibuildwheel copies the wheel into --output-dir only AFTER its test command passes, so a job
+      # that fails its tests uploads nothing - precisely the run whose binary someone wants to poke at.
+      # The repaired wheel is sitting in cibuildwheel's own temp directory either way; this fetches it.
+      - name: Collect the built wheel even if the tests failed
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p wheelhouse
+          found=$(find "${RUNNER_TEMP}" -name "pyoomph-*.whl" -path "*repaired_wheel*" 2>/dev/null | head -n 1 || true)
+          if [ -z "$found" ]; then
+            found=$(find "${RUNNER_TEMP}" -name "pyoomph-*.whl" 2>/dev/null | head -n 1 || true)
+          fi
+          if [ -n "$found" ] && ! ls wheelhouse/*.whl >/dev/null 2>&1; then
+            echo "rescuing $found"
+            cp "$found" wheelhouse/
+          fi
+          ls -la wheelhouse || true
+
       - name: Diagnose the tcc JIT DLL's imports (Windows)
         # A probe, not a gate: tests/test_math_functions.py's tccbox arm fails here with LoadLibrary
         # error 126 (ERROR_MOD_NOT_FOUND), and which module is missing is written in the DLL's import
-        # table and nowhere else. citools/windows_tcc_diag.py holds the whole thing - the first
-        # version of this step inlined it as a heredoc and the msys2 shell exited 2 without running a
-        # single line of it, which is exactly the kind of silence a diagnostic must not produce.
+        # table and nowhere else. citools/windows_tcc_diag.py holds the whole thing.
+        #
+        # Note the `|| true` on the ls below, and do not remove it: the msys2 action runs bash with
+        # -eo pipefail, so `ls wheelhouse/*.whl` finding no match returns 2 and kills the step before
+        # its own "nothing to diagnose" guard can say anything. That, not the heredoc it first
+        # blamed, is why this step twice produced no output at all.
         if: always() && matrix.platform == 'windows'
         continue-on-error: true
         shell: msys2 {0}
@@ -277,7 +298,7 @@ jobs:
           export PATH="$(cygpath -u "$pythonLocation"):$PATH"
           cd "$(cygpath -u "$GITHUB_WORKSPACE")"
           ls -la wheelhouse || true
-          WHEEL=$(ls wheelhouse/*.whl 2>/dev/null | head -n 1)
+          WHEEL=$(ls wheelhouse/*.whl 2>/dev/null | head -n 1 || true)
           if [ -z "$WHEEL" ]; then echo "no wheel was built, nothing to diagnose"; exit 0; fi
           python -m pip install --disable-pip-version-check "$WHEEL" tccbox || exit 0
           python citools/windows_tcc_diag.py "$RUNNER_TEMP/tccdiag_out" || true

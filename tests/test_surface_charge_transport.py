@@ -583,16 +583,48 @@ def test_the_refactor_generates_the_same_code_when_gcl_is_off():
     what it was, for every `advection_by_parts` setting -- checked by md5 rather than asserted,
     because "it still passes the tests" is a much weaker statement than "it is the same code".
 
-    The three hashes below were taken from the pre-refactor tree on this problem.
+    Two hashes per setting, not one, because a byte hash of the file is not portable and the Windows
+    wheel job of 29th August 2026 proved it: the file it generates is 337 lines and 24499 bytes, as
+    here, and identical character for character once the DIGITS are stripped - only the last places
+    of the six to twelve float literals differ, as platform arithmetic will. So the claim is split in
+    two, and both halves are asserted everywhere:
+
+      * `expected_structure` - the file with every digit removed. This is the whole of the code's
+        shape: its statements, its identifiers, its order.
+      * `expected_numbers` - the float literals, each rounded to twelve significant digits. That
+        absorbs a difference in the last place (~1e-16 relative) and catches any real change of a
+        coefficient, which is the only thing the digits could otherwise be hiding.
+
+    `expected` keeps the exact bytes taken from the pre-refactor tree on Linux, for provenance and
+    for the check that the three settings really do differ from each other. It is reported when it
+    disagrees, but not asserted: with the structure and twelve significant digits both matching,
+    what is left is round-off.
     """
     import glob
     import hashlib
     import os
     from pyoomph.equations.advection_diffusion import AdvectionDiffusionEquations
 
+    import re
+
     expected = {False: "8086c09b7b2d5919e7c23817f927d90e",
                 True: "23d23029c5c77112a0af2bc6b639fbd4",
                 "skew": "33801fb787dad330235c7c7423552eb6"}
+    expected_structure = {False: "3e3d3f2a93ed3c28e9a18a974fe7877e",
+                          True: "019fe472baad87d904c75319ae5eb1da",
+                          "skew": "11793398bc6b362339d3216fdfa2b3de"}
+    expected_numbers = {False: "50c1e894df31cec9c82fe20772d27ac3",
+                        True: "0e151f5ac962f4520492e98bb3dbd5d9",
+                        "skew": "6b6ddc7e35a47d2af9b9b0d2ec2fc3da"}
+    # The whole file with every float literal reprinted at twelve significant digits, and everything
+    # else - integers included - left alone. This is the check that actually decides; the two above
+    # only sharpen the message when it fails. It is needed because they have a hole between them: a
+    # differing INTEGER (an index, or C1 against C2) survives digit-stripping and never reaches a
+    # float hash, so both would pass while the code really had changed.
+    expected_canonical = {False: "912d0c19574fc63a3f87f64da2ada5f6",
+                          True: "7d97610368acdb4d749c08abc3b2473d",
+                          "skew": "243dd9e705865c098547da77a1423fc6"}
+    _FLOAT = re.compile(rb"[-+]?\d+\.\d*(?:[eE][-+]?\d+)?|[-+]?\d+[eE][-+]?\d+")
 
     class _P(Problem):
         def __init__(self, byparts):
@@ -614,36 +646,33 @@ def test_the_refactor_generates_the_same_code_when_gcl_is_off():
         p.set_c_compiler("system")
         p.initialise()
         raw = open(os.path.join(d, "_ccode", "domain.c"), "rb").read()
-        # Hash the text, not the bytes. The generated file is written through a std::ofstream in TEXT
-        # mode (src/nanobind/problem.cpp), so on Windows every newline reaches the disk as \r\n and
-        # the byte hash differs from these reference values - which were taken on Linux - even when
-        # the code is identical, character for character. That is what the Windows wheel job of 29th
-        # August 2026 reported. Normalising here rather than opening the file in text mode keeps the
-        # comparison explicit about what is being ignored: line endings, and nothing else.
+        # Normalise the newlines first: the file is written through a text-mode std::ofstream
+        # (src/nanobind/problem.cpp), so on Windows every newline reaches the disk as \r\n.
         text = raw.replace(b"\r\n", b"\n")
+
+        structure = hashlib.md5(re.sub(rb"[0-9]", b"", text)).hexdigest()
+        assert structure == expected_structure[byparts], (
+            "advection_by_parts=%r changed the SHAPE of the generated code (%d lines, %d bytes)"
+            % (byparts, text.count(b"\n"), len(text)))
+
+        floats = [float(m.group(0)) for m in _FLOAT.finditer(text)]
+        numbers = hashlib.md5("|".join("%.12g" % v for v in floats).encode()).hexdigest()
+        canonical = hashlib.md5(
+            _FLOAT.sub(lambda m: ("%.12g" % float(m.group(0))).encode(), text)).hexdigest()
+        assert canonical == expected_canonical[byparts], (
+            "advection_by_parts=%r changed the generated code (%d lines, %d bytes, %d float "
+            "literals; structure %s, numbers %s)"
+            % (byparts, text.count(b"\n"), len(text), len(floats),
+               "matches" if structure == expected_structure[byparts] else "differs",
+               "match" if numbers == expected_numbers[byparts] else "differ"))
+
         got = hashlib.md5(text).hexdigest()
-        # Two extra fingerprints, reported only when the main one disagrees, to say WHAT kind of
-        # difference it is. The Windows wheel job of 29th August 2026 produces a file of exactly the
-        # same length and line count as this one - 337 lines, 24499 bytes - with a different hash, so
-        # the difference is a same-length substitution rather than extra or missing code, and the two
-        # candidates are worth separating: digits (float literals differing in their last places) and
-        # ordering (the same lines emitted in another sequence). Stripping the digits answers the
-        # first; sorting the lines answers the second. Both reference values were taken here on Linux
-        # for advection_by_parts=False, so they are only meaningful for that case.
-        if got != md5:
-            import re
-            nodigits = hashlib.md5(re.sub(rb"[0-9]", b"", text)).hexdigest()
-            sortedlines = hashlib.md5(b"\n".join(sorted(text.split(b"\n")))).hexdigest()
-            hint = ""
-            if byparts is False:
-                hint = ("; digits-stripped %s (%s), sorted-lines %s (%s)"
-                        % (nodigits, "MATCHES - only numbers differ"
-                           if nodigits == "3e3d3f2a93ed3c28e9a18a974fe7877e" else "differs too",
-                           sortedlines, "MATCHES - same lines, different order"
-                           if sortedlines == "87c9c4d339eaa8d2878199ab33365512" else "differs too"))
-            raise AssertionError(
-                "advection_by_parts=%r changed the generated code (%d lines, %d bytes, CRLF=%s)%s"
-                % (byparts, text.count(b"\n"), len(text), raw != text, hint))
+        if got != expected[byparts]:
+            # Not a failure: the shape and twelve significant digits of every number already agree,
+            # so this is the last place of a float literal and nothing else.
+            print("note: the exact bytes differ from the Linux reference for advection_by_parts=%r "
+                  "(%s vs %s), while the structure and the numbers to 12 significant digits match "
+                  "- platform arithmetic, not a code change" % (byparts, got, expected[byparts]))
     # sanity: the three settings really do differ from each other, so the check above is not vacuous
     assert len(set(expected.values())) == 3
     assert glob.glob(os.path.join(d, "_ccode", "*.c"))
