@@ -53,11 +53,16 @@ fi
 [ -w "${PETSC_PREFIX}" ] || { echo "${PETSC_PREFIX} is not writable" >&2; exit 1; }
 mkdir -p "${WORKDIR}"
 
-# PETSc's configure refuses --with-petsc4py without these in the target interpreter, and the
-# hosted-tool Pythons on the runners are bare. Deliberately NOT cython: petsc4py ships generated C
-# and only re-cythonises when a Cython is importable, and 3.1 cannot compile petsc4py 3.22's .pyx
-# ("ExpressionWriter object has no attribute emit_string").
-"${PYTHON}" -m pip install --upgrade --quiet numpy setuptools
+# PETSc's configure refuses --with-petsc4py without numpy and setuptools in the target interpreter,
+# and the hosted-tool Pythons on the runners are bare.
+#
+# Cython is pinned below 3.1 rather than left out: petsc4py always regenerates PETSc.c from the
+# .pyx, and its setup_requires fetches a Cython of its own if none is installed, which is how it
+# got 3.3.0. petsc4py 3.22's conf/cyautodoc.py calls ExpressionWriter.emit_string, removed in
+# Cython 3.1, so that build ends in "Compiler crash in ExpressionWriter". Installing 3.0.x
+# satisfies its "Cython >= 3.0.0" and stops it fetching anything. Droppable once PETSc is bumped
+# past 3.23, where cyautodoc.py no longer uses that API.
+"${PYTHON}" -m pip install --upgrade --quiet numpy setuptools "cython<3.1"
 
 fetch() { # url sha-unchecked-tarball -> extracted dir name on stdout
   local url="$1" tarball="${WORKDIR}/$(basename "$1")"
