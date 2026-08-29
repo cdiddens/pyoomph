@@ -25,8 +25,8 @@
 
 set -euo pipefail
 
-PETSC_VERSION="${PETSC_VERSION:-3.22.2}"
-SLEPC_VERSION="${SLEPC_VERSION:-3.22.2}"
+PETSC_VERSION="${PETSC_VERSION:-3.25.4}"
+SLEPC_VERSION="${SLEPC_VERSION:-3.25.1}"
 MPICH_VERSION="${MPICH_VERSION:-4.2.3}"
 
 PETSC_PREFIX="${PETSC_PREFIX:-/opt/pyoomph-petsc}"
@@ -68,7 +68,14 @@ mkdir -p "${WORKDIR}"
 # dry_run=. Measured here: 80.9.0 still takes that argument, 81.0.0 does not, so from 81 on the
 # build dies with "execute() got an unexpected keyword argument 'dry_run'" after having compiled
 # and linked the extension. Droppable together with the Cython pin on a PETSc bump.
-"${PYTHON}" -m pip install --upgrade --quiet numpy "setuptools<81" "cython<3.1"
+#
+# Both pins are for petsc4py 3.22 and older only, so they are applied by version rather than
+# always: on a newer PETSc they would hold the toolchain back for no reason.
+case "${PETSC_VERSION}" in
+  3.1?.*|3.2[0-2].*) BUILD_PINS=( "setuptools<81" "cython<3.1" ) ;;
+  *)                 BUILD_PINS=( "setuptools" "cython" ) ;;
+esac
+"${PYTHON}" -m pip install --upgrade --quiet numpy "${BUILD_PINS[@]}"
 
 fetch() { # url sha-unchecked-tarball -> extracted dir name on stdout
   local url="$1" tarball="${WORKDIR}/$(basename "$1")"
@@ -191,14 +198,17 @@ build_one() { # arch-name scalar-type
   # SLEPc is configured against the *installed* PETSc, hence an empty PETSC_ARCH. SLEPC_DIR has to
   # be passed to `make` as well: SLEPc's makefiles do not derive it from the working directory, and
   # an unset one expands to //lib/slepc/conf/slepcvariables, which does not exist.
+  # ${prefix}/lib on PYTHONPATH because --with-slepc4py imports petsc4py during configure, and
+  # petsc4py has just been installed there ("ERROR: Cannot import petsc4py" otherwise).
   if ! PETSC_DIR="${prefix}" PETSC_ARCH="" SLEPC_DIR="${PWD}" \
+       PYTHONPATH="${prefix}/lib:${MPI_PY}" \
        "${PYTHON}" ./configure --prefix="${prefix}" --with-slepc4py=1; then
     echo "=== SLEPc configure.log (last 300 lines) ========================================" >&2
     tail -300 configure.log >&2
     exit 1
   fi
-  PETSC_DIR="${prefix}" PETSC_ARCH="" SLEPC_DIR="${PWD}" make -j"${NPROC}"
-  PETSC_DIR="${prefix}" PETSC_ARCH="" SLEPC_DIR="${PWD}" make install
+  PETSC_DIR="${prefix}" PETSC_ARCH="" SLEPC_DIR="${PWD}" PYTHONPATH="${prefix}/lib:${MPI_PY}" make -j"${NPROC}"
+  PETSC_DIR="${prefix}" PETSC_ARCH="" SLEPC_DIR="${PWD}" PYTHONPATH="${prefix}/lib:${MPI_PY}" make install
   popd >/dev/null
 
   # A copy of the one mpi4py next to petsc4py, so that the single PYTHONPATH entry the harness adds
