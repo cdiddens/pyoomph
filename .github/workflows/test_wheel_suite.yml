@@ -194,6 +194,16 @@ jobs:
             PYOOMPH_CLN_INCLUDE_DIR=$PWD/prebuilt/GiNaC_static/install/include
             PYOOMPH_CLN_LIB_DIR=$PWD/prebuilt/GiNaC_static/install/lib
             MACOSX_DEPLOYMENT_TARGET=10.13
+          # cibuildwheel's own macOS repair command, plus a copy: it moves the wheel into --output-dir
+          # only after its TESTS pass, and deletes the temp it was sitting in before the job's later
+          # steps run, so a red macOS job uploaded no wheel at all - exactly the run whose binary is
+          # worth having. {delocate_archs} and the rest are the documented default, unchanged; only
+          # the mkdir and the cp are added. (Windows does the same in its own repair command below;
+          # Linux needs nothing, its wheel arrives the ordinary way.)
+          CIBW_REPAIR_WHEEL_COMMAND_MACOS: >
+            delocate-wheel --require-archs {delocate_archs} -w {dest_dir} -v {wheel} &&
+            mkdir -p "$GITHUB_WORKSPACE/wheelhouse" &&
+            cp {dest_dir}/*.whl "$GITHUB_WORKSPACE/wheelhouse/"
           # The threaded-assembly backend differs by platform: Linux links libgomp (OpenMP), macOS
           # threads through GCD/libdispatch and links no OpenMP runtime at all (so nothing collides
           # with MKL's libiomp5). Both are pinned ON so a runner that silently loses its backend fails
