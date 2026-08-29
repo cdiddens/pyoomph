@@ -13,7 +13,7 @@ To use it, point your assistant at ``AGENTS.md`` before asking for a script:
 
 .. code:: none
 
-   Read AGENTS.md, then write me a pyoomph script that ...
+   Read https://github.com/pyoomph/pyoomph/blob/develop/AGENTS.md, then write me a pyoomph script that ...
 
 That single file is meant to be enough for a typical problem, since it carries a routing table to the more specialized companion files
 
@@ -21,7 +21,9 @@ If you use a coding assistant that reads a project file automatically - the name
 is a convention several of them follow - it will pick the file up on its own as soon as you work
 inside a clone of the repository.
 
-Using assistants which work directly in your code base, e.g. *Claude Code*, *Cortex* or *Kimi Code*, work of course considerably better than a plain web agent, since it can directly access pyoomph's source code and test your script automatically.
+.. note::
+
+	Using assistants which work directly in your code base, e.g. *Claude Code*, *Cortex* or *Kimi Code*, work of course considerably better than a plain web agent, since it can directly access pyoomph's source code and test and improve your script automatically. 
 
 However, while AI helps you to get started, you are still fully responsible to check your code and the generated results.
 
