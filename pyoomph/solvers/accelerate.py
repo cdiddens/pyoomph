@@ -143,8 +143,17 @@ class MacAccelerateLinearSolver(GenericLinearSystemSolver):
         scale=float(numpy.linalg.norm(rhs)) or 1.0
         backward_error=float(numpy.linalg.norm(A@x-rhs))/scale
         if self._check_solves():
-            print("PYOOMPH_ACCELERATE_CHECK n=%d method=%s backward_error=%.3e"
-                  %(A.shape[0],self._last_factorize_method,backward_error),flush=True)
+            # The inputs as well as the error: a backward error of 1e38 on a 357-dof system is not
+            # something a factorisation can produce out of finite data, so "is what we were handed
+            # finite, and how big is it" has to be part of the same line, or the next question is
+            # another round trip.
+            finite_A=bool(numpy.isfinite(A.data).all()) if A.nnz else True
+            finite_b=bool(numpy.isfinite(rhs).all())
+            print("PYOOMPH_ACCELERATE_CHECK n=%d method=%s backward_error=%.3e "
+                  "|A|max=%.3e finite_A=%s |b|max=%.3e finite_b=%s"
+                  %(A.shape[0],self._last_factorize_method,backward_error,
+                    float(numpy.abs(A.data).max()) if A.nnz else 0.0,finite_A,
+                    float(numpy.abs(rhs).max()),finite_b),flush=True)
         if backward_error>self.symmetric_fallback_tolerance:
             if not getattr(self,"_warned_about_fallback",False):
                 self._warned_about_fallback=True
@@ -159,6 +168,12 @@ class MacAccelerateLinearSolver(GenericLinearSystemSolver):
             self._last_factorize_method="qr"
             self._structure_id=0   # the next factorisation must not refresh a QR as if symmetric
             x=self.solver.solve(rhs)
+            # Checked too, and reported: if QR is no better, the fault is not the factorisation but
+            # what it was given, and that is a different investigation.
+            after=float(numpy.linalg.norm(A@x-rhs))/scale
+            if after>self.symmetric_fallback_tolerance:
+                print("NOTE: QR did not do better (backward error %.3e); the system itself is the "
+                      "problem, not the factorisation."%after,flush=True)
         self._checked_matrix=None
         return x
 
