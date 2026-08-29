@@ -45,6 +45,13 @@ if __name__ == "__main__":
         problem.go_to_param(gamma=0.28,startstep=0.01)
         problem.solve() # solve at gamma=0.28
 
+        # Solve for the critical eigenvector first. It is the guess the fold tracker starts from:
+        # serially it can construct one itself, but that construction is a serial linear solve on a
+        # replicated dof vector, so with --distribute an explicit guess is required. shift=0 selects
+        # the mode that is crossing zero at the fold, not the fastest-decaying one.
+        problem.set_eigensolver("slepc")
+        problem.solve_eigenproblem(1,shift=0)
+
         # Activate bifurcation tracking
         problem.activate_bifurcation_tracking(problem.param_gamma,"fold")
         problem.solve()
