@@ -2400,6 +2400,12 @@ class Problem(_pyoomph.Problem):
             numouts: Number of output steps. Defaults to 25.
             phi0: Initial phase. Defaults to 0.
         
+        
+        Works on a mesh distributed with ``--distribute`` as well: the perturbation that makes a frame
+        is applied by every process, not by the drawing one alone (see
+        ``pyoomph.meshes.meshdatamerge.merge_perturbed_global_mesh_data``). Tracers are the exception -
+        they are not merged, so only the drawing process' partition of them appears.
+
         """
         if len(self.get_last_eigenvalues())<eigenvector+1:
             raise RuntimeError("Eigenvalue/vector at index "+str(eigenvector)+" not calculated")
@@ -2447,6 +2453,9 @@ class Problem(_pyoomph.Problem):
             plotter._eigenanimation_m=eigenmodes_m[eigenvector]
             
         plotter._eigenvector_for_animation=eigenfunction
+        # The index as well: on a distributed mesh the perturbation is applied by every rank from its
+        # own replicated copy of the eigenvector, so the request only carries the index and the factor.
+        plotter._eigenvector_index_for_animation=eigenvector
         from pathlib import Path
         Path(os.path.join(self.get_output_directory(),outdir)).mkdir(parents=True, exist_ok=True)
         for i in range(numouts):
@@ -2464,6 +2473,7 @@ class Problem(_pyoomph.Problem):
         plotter._eigenfactor_right=None
         plotter._eigenfactor_left=None
         plotter._eigenvector_for_animation=None
+        plotter._eigenvector_index_for_animation=None
         plotter._eigenanimation_m=None
         plotter._eigenanimation_lambda=None
 

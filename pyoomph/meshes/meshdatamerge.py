@@ -281,6 +281,69 @@ def merge_global_mesh_data(msh: AnySpatialMesh, key: MeshDataCacheKey) -> MeshDa
     return _merge_on_root(payloads, msh, key)
 
 
+def merge_perturbed_global_mesh_data(msh: AnySpatialMesh, key: MeshDataCacheKey,
+                                     eigenvector_index: int, factor: complex) -> MeshDataCacheEntry | None:
+    """The merged data of the state ``dofs + Re(factor * eigenvector)``, without keeping that state.
+
+    This is what an eigendynamics animation needs (see ``Problem.create_eigendynamics_animation``): a
+    frame is the base state plus a complex multiple of an eigenvector, and a mirrored half of the same
+    frame is the same thing with a different factor. Perturbing the dofs around the extraction is easy
+    serially, but under ``run_with_global_mesh_data`` the plot code runs on rank 0 alone, so a
+    perturbation applied there would be merged with everybody else's BASE state and the animation would
+    silently show a mixture of the two.
+
+    So the perturbation is part of the request instead: rank 0 announces which eigenvector and which
+    factor, and every rank does the same perturb-extract-restore. Only two scalars travel, because an
+    eigenvector is replicated full length on every rank anyway (see
+    :py:meth:`pyoomph.solvers.petsc.SlepcEigenSolver._vector_to_global_array`) and
+    ``get_current_dofs``/``set_current_dofs`` are global and collective.
+
+    The request is ATOMIC on purpose: the restore is in a ``finally`` and ``_merge_on_root`` -- the only
+    part that can fail on rank 0 alone -- runs after it, so no rank can be left holding a perturbed
+    state, whatever goes wrong. That is also why this cannot simply wrap
+    :py:func:`merge_global_mesh_data`.
+
+    Collective, like :py:func:`merge_global_mesh_data`, and the result is NOT cached anywhere: the
+    cache key has no room for the factor, and the two mirror halves of one frame would otherwise
+    collide with each other and with the next frame.
+    """
+    # Everything that can fail for a reason rank 0 can see has to fail BEFORE the first collective.
+    # Afterwards rank 0 would unwind while the others wait in a bcast or gather that never comes.
+    if not needs_merging(msh):
+        raise RuntimeError("merge_perturbed_global_mesh_data called for a mesh that is not distributed")
+    if key.with_halos:
+        raise RuntimeError("A perturbed global merge cannot be combined with with_halos=True")
+    if key.operator is not None:
+        # This path bypasses MeshDataCacheStorage.get_data, so its guards do not apply here.
+        raise NotImplementedError("Mesh data operators are not supported together with a perturbed global merge")
+    problem = msh.get_problem()
+    eigenvectors = problem.get_last_eigenvectors()
+    if eigenvectors is None or len(eigenvectors) <= eigenvector_index:
+        raise RuntimeError("No eigenvector at index " + str(eigenvector_index) + " to perturb the state with")
+    msh._setup_output_scales()  # MeshDataCache.get_data does this before merging; this call bypasses it
+    comm = get_mpi_world_comm()
+    assert comm is not None  # needs_merging implies more than one process, i.e. mpi4py is there
+    if _request_scope_depth > 0 and get_mpi_rank() == 0:
+        _broadcast_request(msh, key, perturbation=(int(eigenvector_index), complex(factor)))
+    # Nothing rank-dependent may be added between the broadcast above and the gather below.
+    olddofs, _ = problem.get_current_dofs()
+    # Before: _local_payload reads the ORDINARY (global_mesh=False) cache slot, which the plotter's
+    # field probes have already filled with base-state data. A hit there would feed the merge the
+    # unperturbed state on every rank.
+    problem.invalidate_cached_mesh_data()
+    try:
+        problem.set_current_dofs(numpy.asarray(olddofs) + numpy.real(factor * eigenvectors[eigenvector_index]))
+        payloads = comm.gather(_local_payload(msh, key), root=0)
+    finally:
+        problem.set_current_dofs(olddofs)
+        # After: the perturbed values are sitting in slots keyed as if they were the base state.
+        problem.invalidate_cached_mesh_data()
+    if get_mpi_rank() != 0:
+        return None
+    assert payloads is not None
+    return _merge_on_root(payloads, msh, key)
+
+
 # --- letting rank 0 ask on its own --------------------------------------------------------------
 #
 # Plot code is written without any notion of rank and only rank 0 should draw, so the other ranks
@@ -292,7 +355,8 @@ _request_scope_depth = 0
 _scope_problems: dict[str, "Problem"] = {}
 
 
-def _broadcast_request(msh: AnySpatialMesh, key: MeshDataCacheKey) -> None:
+def _broadcast_request(msh: AnySpatialMesh, key: MeshDataCacheKey, *,
+                       perturbation: "tuple[int, complex] | None" = None) -> None:
     comm = get_mpi_world_comm()
     assert comm is not None
     problem = msh.get_problem()
@@ -305,7 +369,11 @@ def _broadcast_request(msh: AnySpatialMesh, key: MeshDataCacheKey) -> None:
                            "resolve the request")
     kwargs = key.as_kwargs()
     kwargs.pop("operator")  # refused for global data anyway, and would not survive the trip
-    comm.bcast((name, msh.get_full_name(), kwargs), root=0)
+    request: tuple[Any, ...] = (name, msh.get_full_name(), kwargs)
+    if perturbation is not None:
+        # Appended rather than always present, so a plain request stays exactly what it always was.
+        request = request + (perturbation,)
+    comm.bcast(request, root=0)
 
 
 def _serve_global_mesh_data_requests() -> None:
@@ -319,9 +387,16 @@ def _serve_global_mesh_data_requests() -> None:
             request = comm.bcast(None, root=0)
             if request is None:
                 return
-            problem_name, mesh_name, kwargs = request
+            # Unpacked by length, not by arity: a perturbed request carries one element more.
+            problem_name, mesh_name, kwargs = request[0], request[1], request[2]
+            perturbation = request[3] if len(request) > 3 else None
             problem = _scope_problems[problem_name]
-            merge_global_mesh_data(problem.get_mesh(mesh_name), MeshDataCacheKey.create(**kwargs))
+            mesh = problem.get_mesh(mesh_name)
+            cache_key = MeshDataCacheKey.create(**kwargs)
+            if perturbation is None:
+                merge_global_mesh_data(mesh, cache_key)
+            else:
+                merge_perturbed_global_mesh_data(mesh, cache_key, perturbation[0], perturbation[1])
     finally:
         _request_scope_depth -= 1
 

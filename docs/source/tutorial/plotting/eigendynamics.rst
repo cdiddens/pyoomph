@@ -34,6 +34,8 @@ Once done, you can assemble all generated images to a movie. It is noteworthy th
 
 If you do not want to create a movie, but e.g. a sequence of images for a static document, consider adding ``fileext="pdf"`` to the constructor of the plotter class.
 
+The animation also works when the mesh is distributed over several processes with ``--distribute``: each frame perturbs the state by the eigenfunction on all processes at once, and the frames are identical to the ones of a serial run. Only tracers are an exception, since these are not gathered from the processes, i.e. a plotted tracer field will show the tracers of a single process only.
+
 .. only:: html
 
 	.. container:: downloadbutton
