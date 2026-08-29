@@ -3078,6 +3078,20 @@ def test_branch_switching_at_a_recomputed_real_bifurcation(kind, unstable, tmp_p
     """
     import subprocess
 
+    if unstable == "hopf":
+        # The branch carries a complex-conjugate unstable pair here, and the classification is
+        # recomputed from a fresh eigensolve. Without petsc4py/slepc4py pyoomph falls back to the
+        # scipy solver, which does not resolve that pair: the worker then reports
+        # type_while_tracking None instead of the pitchfork/transcritical it is standing on. Seen on
+        # every pyoomph wheel, which deliberately ships without PETSc (PYOOMPH_USE_MPI=OFF), in the
+        # test-wheel run of 29th August 2026. The "real" and "stable" cases need no such solver and
+        # keep running everywhere.
+        try:
+            import slepc4py  # type:ignore  # noqa: F401
+        except Exception:
+            pytest.skip("no slepc4py: the scipy fallback does not resolve the complex pair this case "
+                        "has to be classified from")
+
     here = os.path.dirname(os.path.abspath(__file__))
     worker = os.path.join(here, "secondary_real_bifurcation_worker.py")
     proc = subprocess.run([sys.executable, worker, os.path.join(str(tmp_path), "out"), kind, unstable],

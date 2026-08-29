@@ -83,6 +83,27 @@ _WORKER = os.path.join(_HERE, "floquet_worker.py")
 _EXACT_RADIAL = float(numpy.exp(-4 * numpy.pi))
 
 
+def _no_eigensolver_reason():
+    """Why the legacy method="eigenproblem" path cannot run here, or None.
+
+    That path is the only one in this module that solves a generalised eigenproblem
+    (Problem.get_floquet_multipliers -> get_eigen_solver().solve); the default condensation method
+    needs no eigensolver at all, which is why the rest of the module is unaffected. Without
+    petsc4py/slepc4py pyoomph falls back to the scipy solver, and scipy's ARPACK cannot build an
+    Arnoldi factorization for this pencil - "ARPACK error -9999", raised out of the solve rather than
+    returning a poor answer. Seen on every pyoomph wheel, which deliberately ships without PETSc
+    (PYOOMPH_USE_MPI=OFF), in the test-wheel run of 29th August 2026.
+    """
+    try:
+        import slepc4py  # type:ignore  # noqa: F401
+    except Exception:
+        return "no slepc4py: the eigenproblem method falls back to scipy, whose ARPACK cannot factor this pencil"
+    return None
+
+
+_NO_EIGENSOLVER = _no_eigensolver_reason()
+
+
 def _run(tmp_path, timeout=900, **kw):
     """Run one worker case in its own process and return its result dict."""
     os.makedirs(str(tmp_path), exist_ok=True)
@@ -182,6 +203,7 @@ def test_count_is_nbase_in_every_mode(tmp_path, mode, order):
     assert _trivial_error(F) < 1e-7, F
 
 
+@pytest.mark.skipif(_NO_EIGENSOLVER is not None, reason=str(_NO_EIGENSOLVER))
 def test_agrees_with_eigenproblem_method(tmp_path):
     cond = _multipliers(_run(tmp_path / "cond", case="dae", NT=48))
     old = _multipliers(_run(tmp_path / "old", case="dae", NT=48, method="eigenproblem", n=3))
@@ -191,6 +213,7 @@ def test_agrees_with_eigenproblem_method(tmp_path):
         assert numpy.min(numpy.abs(cond - z)) < 1e-6, (z, cond)
 
 
+@pytest.mark.skipif(_NO_EIGENSOLVER is not None, reason=str(_NO_EIGENSOLVER))
 def test_eigenproblem_method_loses_the_small_multiplier(tmp_path):
     """Why the default changed: the old filtering cannot tell exp(-4*pi) from an infinite eigenvalue."""
     cond = _multipliers(_run(tmp_path / "cond", NT=48))
