@@ -75,6 +75,32 @@ def _dump_imports(dll):
     return False
 
 
+def _rerun_the_compile(source):
+    """Run the same tccbox command pyoomph runs, with its output shown and the result inspected."""
+    try:
+        import pyoomph
+    except Exception as e:
+        _say("cannot import pyoomph to locate the jit headers: %r" % (e,))
+        return
+    include = os.path.join(os.path.dirname(os.path.abspath(pyoomph.__file__)), "jitbridge")
+    target = os.path.splitext(source)[0] + ".dll"
+    cmd = [sys.executable, "-m", "tccbox", "-I", include, "-shared", "-rdynamic",
+           "-DPYOOMPH_TCC_TO_MEMORY", "-Dsize_t=unsigned long long", source, "-o", target]
+    _say("re-running: " + " ".join(cmd))
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except (OSError, subprocess.SubprocessError) as e:
+        _say("could not run tccbox: %r" % (e,))
+        return
+    _say("tccbox exited %d" % out.returncode)
+    for stream, name in ((out.stdout, "stdout"), (out.stderr, "stderr")):
+        text = (stream or "").strip()
+        _say("tccbox %s: %s" % (name, text if text else "(empty)"))
+    _say("target exists afterwards: %s" % os.path.exists(target))
+    if os.path.exists(target):
+        _dump_imports(target)
+
+
 def main():
     outdir = sys.argv[1] if len(sys.argv) > 1 else "tccdiag_out"
 
@@ -136,8 +162,14 @@ def main():
     _say("produced %d shared librar(y/ies) and %d C file(s) under %s" % (len(produced), len(sources), outdir))
     if not produced:
         # Worth knowing on its own: if tcc never wrote a DLL, the failure is at COMPILE time and the
-        # import-table theory is wrong from the start.
-        _say("nothing was produced at all, so this is not a load-time dependency problem")
+        # import-table theory is wrong from the start. That is what happens here - and pyoomph does
+        # not notice, because call_cmd only raises on a NONZERO exit and tcc exits 0 having written
+        # nothing, so the failure surfaces much later as "DLL could not be loaded. Error code: 126",
+        # which is Windows saying the file does not exist. So run the same compile again, by hand,
+        # and show what tcc says when its output is not thrown away.
+        _say("nothing was produced at all, so this is a COMPILE failure, not a load-time dependency")
+        if sources:
+            _rerun_the_compile(sources[0])
         return 0
     for dll in produced:
         _dump_imports(dll)
