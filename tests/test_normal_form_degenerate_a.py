@@ -95,7 +95,12 @@ def _classify_at(x_value, tmp_path):
         p.setup_for_stability_analysis(analytic_hessian=True)
         p.initialise()
         p.mu.value = 0.0
-        p.solve()
+        # No solve: mu = 0 with x = z = 0 IS the solution (the residual is mu*x - x^2 and -z, both
+        # exactly zero there), and asking Newton for it means factorising an exactly singular
+        # Jacobian. On macOS with the Accelerate backend that now raises rather than returning a
+        # step - correctly, since src/mac_accelerate.cpp learned to report SparseMatrixIsSingular
+        # instead of letting libSparse trap - so a solve here fails the test for a reason that has
+        # nothing to do with what it is testing.
         # The whole point: mu = 0 and x = x_value is the bifurcation, and dR/dmu = x is then exactly
         # x_value. Set through the dof vector rather than solved for, because a solve would land back
         # on 0.0 and destroy the case being tested.
@@ -167,7 +172,7 @@ def test_a_genuine_fold_is_still_a_fold(tmp_path):
         p.setup_for_stability_analysis(analytic_hessian=True)
         p.initialise()
         p.mu.value = 0.0
-        p.solve()
+        # No solve, for the same reason as above: at mu = 0 the fold's own Jacobian is singular.
         dofs, _ = p.get_current_dofs()
         dofs = numpy.array(dofs, dtype=float)
         dofs[0] = from_x

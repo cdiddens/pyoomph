@@ -603,6 +603,19 @@ def _worker_radius_error(tmp_path, *args):
     raise AssertionError(f"worker {args} did not report a result (exit {proc.returncode}):\n{tail}")
 
 
+def _exit_description(proc):
+    """How the worker ended, in words. A negative returncode is a signal on POSIX."""
+    import signal as _signal
+    rc = proc.returncode
+    if rc < 0:
+        try:
+            name = _signal.Signals(-rc).name
+        except ValueError:
+            name = f"signal {-rc}"
+        return f"was KILLED BY {name} (returncode {rc})"
+    return f"exited with returncode {rc}"
+
+
 def _worker_lines(tmp_path, *args):
     # Like _worker_radius_error, but for cases reporting several named quantities. Returns them as a
     # dict of the child's "KEY value" lines.
@@ -616,7 +629,14 @@ def _worker_lines(tmp_path, *args):
             out[parts[0]] = parts[1]
     if not out:
         tail = "\n".join((proc.stdout + proc.stderr).splitlines()[-12:])
-        raise AssertionError(f"worker {args} reported nothing (exit {proc.returncode}):\n{tail}")
+        raise AssertionError(f"worker {args} reported nothing ({_exit_description(proc)}):\n{tail}")
+    if proc.returncode != 0:
+        # A worker that died PARTWAY used to reach the caller as a bare KeyError on whichever line it
+        # never got to print - "KeyError: 'NIFACE'" on macOS arm64 in the wheel run of 29th August
+        # 2026, which says nothing about the death. Anything it did print before that is not a result.
+        tail = "\n".join((proc.stdout + proc.stderr).splitlines()[-12:])
+        raise AssertionError(f"worker {args} {_exit_description(proc)} after reporting only "
+                             f"{sorted(out)}:\n{tail}")
     return out
 
 
