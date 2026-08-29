@@ -61,8 +61,12 @@ NTHREADS = 4
 # still accepts _set_num_assembly_threads and still gives the right answer - it just never runs the
 # threaded loop, so every bit-identity test below would fail on an assertion about a path that does
 # not exist. The tests that check the loop DECLINES are left running: they pass either way.
-requires_openmp = pytest.mark.skipif(not _pyoomph_core.has_openmp,
-                                     reason="this build has no OpenMP; there is no threaded element loop to compare against")
+# Either backend gives a threaded element loop to compare against the serial one: OpenMP, or the
+# GCD/libdispatch backend on macOS (has_threaded_assembly is true for both). Older builds predate
+# the attribute, so fall back to has_openmp.
+_has_threaded = getattr(_pyoomph_core, "has_threaded_assembly", _pyoomph_core.has_openmp)
+requires_openmp = pytest.mark.skipif(not _has_threaded,
+                                     reason="this build has no threaded element loop (neither OpenMP nor GCD) to compare against")
 
 
 def _snapshot(problem):

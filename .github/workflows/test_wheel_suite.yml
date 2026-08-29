@@ -19,11 +19,12 @@ name: Build one wheel per OS and run the test suite
 # entry that tags the released wheel cp312-abi3. The compiled code is the same either way -
 # the Stable ABI story is what test_wheels_multiversion.yml exists to check.
 #
-# The wheel is built with OpenMP ON and the suite run with PYOOMPH_EXPECT_OPENMP=1, so
-# tests/test_openmp_present.py asserts instead of skipping: a wheel that silently lost
-# OpenMP would make --omp N a no-op, which nothing else in this workflow would notice.
-# That requires an OpenMP-capable tree (citools/build_static_libomp.sh,
-# cmake's PYOOMPH_USE_OPENMP, tests/test_openmp_present.py) in whatever `ref` is built.
+# The wheel is built with its threaded-assembly backend pinned ON - OpenMP on Linux, GCD
+# on macOS - and the suite run with PYOOMPH_EXPECT_OPENMP / PYOOMPH_EXPECT_THREADED, so
+# tests/test_openmp_present.py asserts instead of skipping: a wheel that silently lost its
+# backend would make --omp N a no-op, which nothing else in this workflow would notice.
+# That requires a threaded-assembly-capable tree (cmake's PYOOMPH_USE_OPENMP /
+# PYOOMPH_USE_GCD, tests/test_openmp_present.py) in whatever `ref` is built.
 #
 # NOTE: GitHub only offers the "Run workflow" button for workflows that exist on the
 # DEFAULT branch, which is why this file lives on main even though development happens on
@@ -150,19 +151,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libglu1-mesa-dev libxcursor-dev libopengl0
 
-      - name: Build a static libomp (macOS)
-        # AppleClang ships no OpenMP, so without this macOS would be the one platform whose
-        # wheel silently has no --omp - and PYOOMPH_USE_OPENMP=ON below then turns that into
-        # a CMake configure error rather than a surprise. Homebrew's libomp is unusable here
-        # (its bottle requires the runner's macOS release, which delocate refuses to bundle
-        # into a 10.13 wheel); see citools/build_static_libomp.sh. ~3 minutes.
-        if: matrix.platform == 'macos'
-        shell: bash
-        env:
-          MACOSX_DEPLOYMENT_TARGET: "10.13"
-        run: |
-          chmod +x ./citools/build_static_libomp.sh
-          ./citools/build_static_libomp.sh "$PWD/libomp_static/install"
+      # macOS needs no libomp: it threads through GCD/libdispatch (PYOOMPH_USE_GCD below), which links
+      # no OpenMP runtime and so cannot collide with MKL's libiomp5. The static-libomp build that used
+      # to be here is only for the opt-in OpenMP-on-mac path (citools/build_static_libomp.sh,
+      # PYOOMPH_USE_OPENMP=ON).
 
       - name: Build and test the wheel (Linux/macOS)
         if: matrix.platform != 'windows'
@@ -189,17 +181,21 @@ jobs:
             PYOOMPH_CLN_INCLUDE_DIR=$PWD/prebuilt/GiNaC_static/install/include
             PYOOMPH_CLN_LIB_DIR=$PWD/prebuilt/GiNaC_static/install/lib
             MACOSX_DEPLOYMENT_TARGET=10.13
-            OpenMP_ROOT=$PWD/libomp_static/install
+          # The threaded-assembly backend differs by platform: Linux links libgomp (OpenMP), macOS
+          # threads through GCD/libdispatch and links no OpenMP runtime at all (so nothing collides
+          # with MKL's libiomp5). Both are pinned ON so a runner that silently loses its backend fails
+          # the build instead of shipping a serial wheel.
           CIBW_CONFIG_SETTINGS: >
             cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF
             cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF
             cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON
             cmake.define.PYOOMPH_USE_MPI=OFF
             cmake.define.PYOOMPH_PARANOID=OFF
-            cmake.define.PYOOMPH_USE_OPENMP=ON
-          # Turns tests/test_openmp_present.py from a skip into a hard failure. CMake can only
-          # see that it found OpenMP, not that the built extension reports it back to Python.
-          CIBW_TEST_ENVIRONMENT: PYOOMPH_EXPECT_OPENMP=1
+            ${{ matrix.platform == 'macos' && 'cmake.define.PYOOMPH_USE_GCD=ON' || 'cmake.define.PYOOMPH_USE_OPENMP=ON' }}
+          # Turns tests/test_openmp_present.py from a skip into a hard failure: the built extension
+          # must report a threaded loop back to Python, not merely have CMake find one. EXPECT_OPENMP
+          # asserts OpenMP specifically (Linux); EXPECT_THREADED asserts either backend (macOS/GCD).
+          CIBW_TEST_ENVIRONMENT: ${{ matrix.platform == 'macos' && 'PYOOMPH_EXPECT_THREADED=1' || 'PYOOMPH_EXPECT_OPENMP=1' }}
         uses: pypa/cibuildwheel@v4.1.0
         with:
           output-dir: wheelhouse

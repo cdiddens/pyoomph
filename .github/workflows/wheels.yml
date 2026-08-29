@@ -135,23 +135,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libglu1-mesa-dev libxcursor-dev libopengl0
 
-      - name: Build a static libomp (macOS)
-        # OpenMP is not part of AppleClang, so without this the macOS wheels would silently be the
-        # only ones without --omp (PYOOMPH_USE_OPENMP=ON below then makes that a build failure
-        # rather than a surprise). Homebrew's libomp cannot be used: its bottle requires the
-        # runner's macOS release, which delocate refuses to bundle into a 10.13 wheel. See
-        # citools/build_static_libomp.sh for the rest of the reasoning. ~3 minutes.
-        #
-        # Deliberately built here rather than in the prebuild workflow next to CLN/GiNaC: it has to
-        # match MACOSX_DEPLOYMENT_TARGET, which is set in THIS file, and an old prebuild artifact
-        # reused via prebuild_run_id would then be missing it.
-        if: matrix.platform == 'macos'
-        shell: bash
-        env:
-          MACOSX_DEPLOYMENT_TARGET: "10.13"
-        run: |
-          chmod +x ./citools/build_static_libomp.sh
-          ./citools/build_static_libomp.sh "$PWD/libomp_static/install"
+      # macOS wheels thread through GCD/libdispatch (PYOOMPH_USE_GCD below), which links no OpenMP
+      # runtime and so cannot collide with the Intel libiomp5 that MKL's Pardiso loads. No static
+      # libomp is built here any more; citools/build_static_libomp.sh remains for the opt-in
+      # OpenMP-on-mac path (PYOOMPH_USE_OPENMP=ON).
 
       # Split into two cibuildwheel invocations (both appending into the same
       # wheelhouse/ dir) rather than one combined CIBW_BUILD selector: cibuildwheel
@@ -187,20 +174,20 @@ jobs:
             PYOOMPH_CLN_INCLUDE_DIR=$PWD/prebuilt/GiNaC_static/install/include
             PYOOMPH_CLN_LIB_DIR=$PWD/prebuilt/GiNaC_static/install/lib
             MACOSX_DEPLOYMENT_TARGET=10.13
-            OpenMP_ROOT=$PWD/libomp_static/install
           CIBW_CONFIG_SETTINGS: >
             cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF
             cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF
             cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON
             cmake.define.PYOOMPH_USE_MPI=OFF
             cmake.define.PYOOMPH_PARANOID=OFF
-            cmake.define.PYOOMPH_USE_OPENMP=ON
-          # PYOOMPH_USE_OPENMP=ON above already turns a missing OpenMP into a CONFIGURE error, so
-          # this only has to cover what CMake cannot see: an extension that reports has_openmp but
-          # whose runtime OpenMP library never actually threads the element loop. Without the
-          # variable, tests/test_openmp_present.py skips - a from-source build defaults to AUTO and
-          # is entitled to have no OpenMP.
-          CIBW_TEST_ENVIRONMENT: PYOOMPH_EXPECT_OPENMP=1
+            ${{ matrix.platform == 'macos' && 'cmake.define.PYOOMPH_USE_GCD=ON' || 'cmake.define.PYOOMPH_USE_OPENMP=ON' }}
+          # The backend define above (OpenMP on Linux, GCD on macOS) already turns a missing backend
+          # into a CONFIGURE error; this only covers what CMake cannot see: an extension that reports
+          # the capability but whose runtime never actually threads the element loop. EXPECT_OPENMP
+          # asserts OpenMP specifically (Linux), EXPECT_THREADED asserts either backend (macOS/GCD,
+          # where has_openmp is false). Without it tests/test_openmp_present.py skips - a from-source
+          # build defaults to AUTO and is entitled to whatever backend the platform provides.
+          CIBW_TEST_ENVIRONMENT: ${{ matrix.platform == 'macos' && 'PYOOMPH_EXPECT_THREADED=1' || 'PYOOMPH_EXPECT_OPENMP=1' }}
         uses: pypa/cibuildwheel@v4.1.0
         with:
           output-dir: wheelhouse
@@ -230,7 +217,6 @@ jobs:
             PYOOMPH_CLN_INCLUDE_DIR=$PWD/prebuilt/GiNaC_static/install/include
             PYOOMPH_CLN_LIB_DIR=$PWD/prebuilt/GiNaC_static/install/lib
             MACOSX_DEPLOYMENT_TARGET=10.13
-            OpenMP_ROOT=$PWD/libomp_static/install
           # wheel.py-api=cp312 tags the wheel cp312-abi3 instead of cp312-cp312,
           # matching CMakeLists.txt's nanobind_add_module(... STABLE_ABI ...)
           # (which compiles this build against Py_LIMITED_API=0x030C0000). Must
@@ -244,10 +230,10 @@ jobs:
             cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON
             cmake.define.PYOOMPH_USE_MPI=OFF
             cmake.define.PYOOMPH_PARANOID=OFF
-            cmake.define.PYOOMPH_USE_OPENMP=ON
+            ${{ matrix.platform == 'macos' && 'cmake.define.PYOOMPH_USE_GCD=ON' || 'cmake.define.PYOOMPH_USE_OPENMP=ON' }}
             wheel.py-api=cp312
-          # See the same variable in the legacy step above.
-          CIBW_TEST_ENVIRONMENT: PYOOMPH_EXPECT_OPENMP=1
+          # See the same variables in the legacy step above.
+          CIBW_TEST_ENVIRONMENT: ${{ matrix.platform == 'macos' && 'PYOOMPH_EXPECT_THREADED=1' || 'PYOOMPH_EXPECT_OPENMP=1' }}
         uses: pypa/cibuildwheel@v4.1.0
         with:
           output-dir: wheelhouse

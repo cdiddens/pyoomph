@@ -214,12 +214,16 @@ pyoomph's own through an appended `--omp 1`.
 
 ## Packaging: which wheels actually have it
 
-The build option is `PYOOMPH_USE_OPENMP` (`AUTO`/`ON`/`OFF`, default `AUTO`, see
-`docs/source/tutorial/installation/cmakeoptions.rst`). `AUTO` links OpenMP if the toolchain has it -
-which is why the capability of a wheel would otherwise be decided, silently, by whatever the build
-machine happened to have. `pyoomph._pyoomph_core.has_openmp` says which it was; the wheel jobs pass
-`ON` so that a runner which loses OpenMP fails the build instead of shipping a serial wheel, and
-`tests/test_openmp_assembly.py` skips on it rather than failing everywhere it is absent.
+Two backends provide the identical, bit-identical loop and exactly one is compiled in: **OpenMP** on
+Linux and Windows, and **GCD/libdispatch** on macOS (see "The macOS GCD backend" below for why). The
+build options are `PYOOMPH_USE_OPENMP` and, macOS-only, `PYOOMPH_USE_GCD` (both `AUTO`/`ON`/`OFF`,
+default `AUTO`, see `docs/source/tutorial/installation/cmakeoptions.rst`). The AUTO defaults resolve
+to GCD on macOS and OpenMP everywhere else, and never both - the collision below is exactly what a
+second runtime causes. `pyoomph._pyoomph_core.has_threaded_assembly` says a threaded loop is present
+at all (either backend), `has_openmp` / `has_gcd` say which; the wheel jobs pin the backend so a
+runner that loses it fails the build instead of shipping a serial wheel, and
+`tests/test_openmp_assembly.py` gates on `has_threaded_assembly` rather than failing where it is
+absent.
 
 * **Linux.** GCC always brings `libgomp`, and auditwheel vendors it into the wheel. A second
   `libgomp` next to numpy's or torch's is merely wasteful, not fatal.
@@ -228,28 +232,76 @@ machine happened to have. `pyoomph._pyoomph_core.has_openmp` says which it was; 
   libgomp. delvewheel bundles all three, so the wheel stays self-contained. Exceptions must keep
   being caught before they leave the parallel region (they are): the extension's static libgcc and
   libgomp's dynamic one are two unwinders in one process.
-* **macOS.** AppleClang has no OpenMP at all and Homebrew's `libomp` cannot be used: its bottle
-  requires the runner's macOS release, and delocate refuses to bundle that into a 10.13 wheel.
-  `citools/build_static_libomp.sh` builds LLVM's runtime from source at the wheel's own deployment
-  target and links it statically, so nothing lands in `.dylibs`.
-  `.github/workflows/test_mac_openmp_wheel.yml` builds one wheel and checks all of it: nothing
-  bundled, `kmpc_fork_call` present in the extension, `minos` still 11.0, `has_openmp` true, and the
-  bit-identity suite green.
+* **macOS.** AppleClang has no OpenMP runtime, so a macOS OpenMP wheel would have to CARRY one -
+  and that is the whole problem. pyoomph hard-depends on `mkl` on Intel macs (Pardiso), and MKL
+  loads Intel's `libiomp5`; a second OpenMP runtime linked beside it (LLVM's `libomp`) is two
+  runtimes in one process, i.e. `OMP: Error #15`, which on an Intel runner does not abort cleanly but
+  corrupts MKL and segfaults inside Pardiso. That is a real failure, not a hypothetical: it took down
+  the Intel-mac job of the OpenMP-enabled test-wheel suite. So **macOS threads through GCD instead**
+  (next section), which links no OpenMP runtime at all - the collision cannot occur. Nothing lands in
+  `.dylibs`; `libdispatch` is part of `libSystem`.
 
-  Static linking does not, in principle, avoid libomp's per-process registration - a second copy in
-  the process is what produces `OMP: Error #15` - so a `KMP_DUPLICATE_LIB_OK` default was tried and
-  then removed. Measured on a macos-14 runner against scikit-learn (which does bring its own
-  runtime): the threaded assembly survives in both import orders, and the variable is already set to
-  `True` before pyoomph is imported - `threadpoolctl`, which scikit-learn depends on, sets it at
-  import time for exactly this reason. The package that brings the second runtime brings the setting
-  with it. One earlier run with PyTorch 2.13 DID
-  abort in the first threaded assembly, with no `OMP:` diagnostic of any kind - unexplained, not
-  reproduced with scikit-learn, and no reason on its own to set a process-global variable that every
-  other OpenMP library in the process would see.
+  The former arrangement - `citools/build_static_libomp.sh` builds LLVM's runtime from source at the
+  wheel's deployment target and links it statically - is still reachable with
+  `-DPYOOMPH_USE_OPENMP=ON` on macOS (it wins over GCD), and is what `PYOOMPH_USE_OPENMP=ON` selects.
+  It was tried as the default and abandoned: static linking does not avoid libomp's per-process
+  registration, `KMP_DUPLICATE_LIB_OK=TRUE` (which `threadpoolctl` sets, so a scikit-learn env
+  masked the problem) is only an unsafe workaround, and the test wheels install no `threadpoolctl` -
+  so nothing set it and MKL's own `libiomp5` was the second runtime. GCD removes the second runtime
+  rather than papering over it.
 
-Rejected: replacing OpenMP with a `std::thread` pool, which would remove the packaging problem on
-all three platforms. The OpenMP surface here is small enough to port (one parallel region, one
-dynamic `for`, two barriers), but the barrier is not incidental - the chunk sweep above shows a 28 %
-loss once the two barriers per chunk stop being amortised, measured against libgomp's tuned
-spin-then-sleep. Hand-rolling that, plus a pool whose lifetime survives fork/MPI/several `Problem`s,
-buys one platform that `build_static_libomp.sh` already buys without touching the hot path.
+Rejected: replacing OpenMP with a `std::thread` pool on ALL platforms. The OpenMP surface is small
+enough to port (one parallel region, one dynamic `for`, two barriers), but the barrier is not
+incidental - the chunk sweep above shows a 28 % loss once the two barriers per chunk stop being
+amortised against libgomp's tuned spin-then-sleep - and Linux/Windows have no packaging problem to
+solve (libgomp ships with the toolchain). So OpenMP stays on those two, and only macOS - which DID
+have a packaging problem, and a fatal one - gets a second backend, GCD, which buys the barrier and
+the dynamic schedule from the OS rather than hand-rolling them.
+
+## The macOS GCD backend
+
+`src/parallel_assembly.cpp` carries both backends behind one umbrella (`PYOOMPH_HAS_PARALLEL_ASSEMBLY`
+= OpenMP or GCD); everything up to the parallel region - the plan, the gather index, the hang
+pre-pass, the scratch buffers, the error/violation handling - is shared, and only the region itself
+is `#if defined(PYOOMPH_HAS_OPENMP) ... #else /* GCD */ ... #endif`. `compiled` is decided in CMake
+(previous section); at runtime `has_gcd` / `has_openmp` report which.
+
+**The mapping.** The OpenMP region is one persistent team wrapping the serial chunk loop, with an
+`omp for schedule(dynamic, gran)` and two `omp barrier`s per chunk. GCD has no team and no barrier,
+but `dispatch_apply` gives both for free: its synchronous completion IS a barrier, and it
+load-balances. So the chunk loop runs on the calling thread and issues, per chunk, two
+`dispatch_apply_f` calls - phase 1 (element blocks) then phase 2 (the slot-partitioned gather) - each
+over `nt` blocks. Phase 1's `nt` blocks pull elements from a shared `std::atomic<long>` counter
+`gran` at a time, which reproduces `schedule(dynamic, gran)` by hand; phase 2's block index is the
+`tid` the slot partition needs. The phase-1 and phase-2 bodies are the OpenMP ones verbatim, reached
+through a `[&]`-capturing lambda and a trampoline (`pa_apply_trampoline`) because `dispatch_apply_f`
+takes a C function-plus-context and the plan/atomics are not copyable into a `^{}` block.
+
+**Bit-identity is free.** It is a property of the gather (phase 2 owns disjoint target slots and sums
+each in stored element order), which is independent of what runs the parallel-for. `array_equal`
+holds against the serial loop on both backends; `tests/test_openmp_assembly.py` runs on either.
+
+**Performance.** Measured on a 4-core/8-thread Intel mac (the doc's own machine class), the assembly
+pattern with matched worker counts, min-of-reps to beat load noise: at the chunk size pyoomph
+actually uses (the 1 MB-doubles budget, a few dozen chunks) GCD is within ~5 % of LLVM libomp
+(0.94-0.98). GCD degrades harder than OpenMP only when the chunk count explodes - ~1.9x at hundreds
+of chunks - because each `dispatch_apply` completion is a heavier sync than an `omp barrier` in a
+live team, paid twice per chunk. pyoomph does not run there (the chunk budget keeps the count low),
+which is what makes GCD viable; it also makes "keep the chunk count modest" load-bearing rather than
+just a tuning choice.
+
+**Caveats.**
+* **Thread count is a target, not a pin.** `dispatch_apply_f(nt, ...)` issues `nt` work items, but
+  GCD schedules them on its global pool; `--omp N` is "at most N-wide via N items", and the
+  `PYOOMPH_REPORT_OMP_ASSEMBLY` per-thread busy figures are per-item, not per-core.
+* **Worker lifetime.** `AssemblyWorkerScope` (which hands its shape-buffer chain back on the way out)
+  is constructed per block per chunk rather than once per team, because GCD has no team-exit hook.
+  Correct - each block sets up its own thread-local state on whatever GCD thread runs it - just a
+  little more pool churn than OpenMP's once-per-thread.
+* **Fork.** GCD is not fork-safe: `dispatch_apply` in a child of a bare `fork()` (no `exec`)
+  segfaults, where libomp merely reinitialises and keeps working. This does NOT bite MPI - `mpirun`
+  starts each rank with fork+`exec`, so GCD initialises fresh per rank, and the hybrid model
+  (threaded assembly per rank, no MPI calls inside the region, exchange outside) is verified by
+  `tests/test_mpi_openmp_assembly.py`. It would bite `multiprocessing` with the `fork` start method
+  after an assembly - but macOS Python defaults that to `spawn`, and `ParallelParameterScan` children
+  are single-threaded anyway.

@@ -21,14 +21,16 @@ counts (``MKL_NUM_THREADS``, ``OPENBLAS_NUM_THREADS``) default to four instead, 
 solvers were already using. All of these are overridable through the corresponding ``PYOOMPH_*``
 environment variables (cf. :numref:`installenvvars`).
 
-The threaded assembly requires a build with OpenMP, which is the ``PYOOMPH_USE_OPENMP`` CMake option
-(cf. :numref:`installcmakeoptions`). Its default ``AUTO`` links OpenMP if the toolchain provides it,
-so whether a given installation has it is answered by
+The threaded assembly requires a build with a threading backend. This is **OpenMP** on Linux and
+Windows and **GCD/libdispatch** on macOS (which links no OpenMP runtime, so it cannot clash with the
+one MKL already loads); the ``PYOOMPH_USE_OPENMP`` / ``PYOOMPH_USE_GCD`` CMake options select it
+(cf. :numref:`installcmakeoptions`), and their ``AUTO`` defaults resolve to GCD on macOS and OpenMP
+elsewhere. Whether a given installation has a threaded loop at all is answered by
 
 .. code:: python
 
    from pyoomph import _pyoomph_core
-   print(_pyoomph_core.has_openmp)
+   print(_pyoomph_core.has_threaded_assembly)   # has_openmp / has_gcd say which backend
 
 .. note::
 
@@ -60,7 +62,7 @@ under MPI.
    There are situations in which pyoomph *declines* to thread the assembly. It then says so once and
    runs the serial loop, so the run stays correct and merely does not get faster. The most common ones
    are a domain using a finite-difference Jacobian (whose perturbations touch data shared with the
-   neighbouring elements) or a build without OpenMP.
+   neighbouring elements) or a build without a threading backend.
 
    Because a silent fallback and a working fast path give exactly the same answer, check
    ``problem._get_parallel_assemblies_done()``, which counts the loops that actually ran threaded,

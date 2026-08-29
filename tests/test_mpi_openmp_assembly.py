@@ -57,8 +57,8 @@ def _skip_reason():
     except Exception as e:
         return "MPI unavailable: " + str(e)
     from pyoomph import _pyoomph_core
-    if not _pyoomph_core.has_openmp:
-        return "this build has no OpenMP"
+    if not getattr(_pyoomph_core, "has_threaded_assembly", _pyoomph_core.has_openmp):
+        return "this build has no threaded element loop (neither OpenMP nor GCD)"
     return None
 
 

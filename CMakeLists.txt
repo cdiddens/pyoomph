@@ -248,21 +248,47 @@ endif()
 # generated code is called from INSIDE the parallel region and only has to be
 # reentrant, which it is since commit 25b24ea retired its file-scope globals.
 # ----------------------------------------------------------------------------
-if(PYOOMPH_USE_OPENMP)
-  if(PYOOMPH_USE_OPENMP STREQUAL "AUTO")
-    find_package(OpenMP COMPONENTS CXX)
-  else()
-    find_package(OpenMP REQUIRED COMPONENTS CXX)
+# Two backends provide the identical, bit-identical threaded loop; exactly one is compiled in.
+#
+#   * macOS defaults to GCD/libdispatch. It ships NO OpenMP runtime, so nothing collides with the
+#     Intel libiomp5 that MKL's Pardiso pulls in - that collision is "OMP: Error #15" and crashed an
+#     Intel-mac test run (see dev_docs/openmp_assembly.md). libdispatch is in libSystem, so nothing
+#     extra is linked. OpenMP is still selectable on macOS with -DPYOOMPH_USE_OPENMP=ON, in which
+#     case it wins and GCD steps aside (the old static-libomp wheel path).
+#   * Linux and Windows always use OpenMP (libgomp comes with GCC/MinGW); GCD is macOS-only.
+#
+# So the AUTO default is: GCD on macOS, OpenMP everywhere else - and never both, because the code in
+# parallel_assembly.cpp would pick OpenMP when both are defined and the second runtime is exactly
+# what we are avoiding here.
+set(_pyoomph_use_gcd FALSE)
+if(APPLE)
+  set(PYOOMPH_USE_GCD "AUTO" CACHE STRING "GCD/libdispatch backend for --omp N on macOS: AUTO=the macOS default unless PYOOMPH_USE_OPENMP=ON, ON=require, OFF=never (fall back to OpenMP)")
+  set_property(CACHE PYOOMPH_USE_GCD PROPERTY STRINGS AUTO ON OFF)
+  if(PYOOMPH_USE_GCD STREQUAL "ON" OR (PYOOMPH_USE_GCD STREQUAL "AUTO" AND NOT PYOOMPH_USE_OPENMP STREQUAL "ON"))
+    set(_pyoomph_use_gcd TRUE)
   endif()
 endif()
-if(OpenMP_CXX_FOUND AND PYOOMPH_USE_OPENMP)
-  target_link_libraries(pyoomph_core PUBLIC OpenMP::OpenMP_CXX)
-  target_compile_definitions(pyoomph_core PUBLIC PYOOMPH_HAS_OPENMP)
-  message(STATUS "OpenMP found - parallel element assembly (--omp N) is available")
-elseif(PYOOMPH_USE_OPENMP)
-  message(STATUS "OpenMP NOT found - building without parallel element assembly (pass -DPYOOMPH_USE_OPENMP=ON to make this an error instead)")
+
+if(_pyoomph_use_gcd)
+  target_compile_definitions(pyoomph_core PUBLIC PYOOMPH_HAS_GCD)
+  message(STATUS "Threaded element assembly (--omp N): GCD/libdispatch backend (no OpenMP runtime linked)")
 else()
-  message(STATUS "OpenMP disabled by PYOOMPH_USE_OPENMP=OFF - building without parallel element assembly")
+  if(PYOOMPH_USE_OPENMP)
+    if(PYOOMPH_USE_OPENMP STREQUAL "AUTO")
+      find_package(OpenMP COMPONENTS CXX)
+    else()
+      find_package(OpenMP REQUIRED COMPONENTS CXX)
+    endif()
+  endif()
+  if(OpenMP_CXX_FOUND AND PYOOMPH_USE_OPENMP)
+    target_link_libraries(pyoomph_core PUBLIC OpenMP::OpenMP_CXX)
+    target_compile_definitions(pyoomph_core PUBLIC PYOOMPH_HAS_OPENMP)
+    message(STATUS "Threaded element assembly (--omp N): OpenMP")
+  elseif(PYOOMPH_USE_OPENMP)
+    message(STATUS "OpenMP NOT found - building without parallel element assembly (pass -DPYOOMPH_USE_OPENMP=ON to make this an error instead)")
+  else()
+    message(STATUS "OpenMP disabled by PYOOMPH_USE_OPENMP=OFF - building without parallel element assembly")
+  endif()
 endif()
 
 # ----------------------------------------------------------------------------

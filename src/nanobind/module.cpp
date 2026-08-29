@@ -89,6 +89,21 @@ NB_MODULE(PYOOMPH_MODULE_NAME, m)
     m.attr("has_openmp") = false;
 #endif
 
+    // The GCD/libdispatch backend for the same threaded element loop (macOS only). It is an
+    // ALTERNATIVE to OpenMP that ships no OpenMP runtime, so a mac wheel can offer --omp N without a
+    // libomp that collides with MKL's libiomp5 (OMP: Error #15). has_threaded_assembly is the one the
+    // bit-identity tests should gate on - either backend gives a threaded loop to compare.
+#ifdef PYOOMPH_HAS_GCD
+    m.attr("has_gcd") = true;
+#else
+    m.attr("has_gcd") = false;
+#endif
+#if defined(PYOOMPH_HAS_OPENMP) || defined(PYOOMPH_HAS_GCD)
+    m.attr("has_threaded_assembly") = true;
+#else
+    m.attr("has_threaded_assembly") = false;
+#endif
+
     // Lets python find out whether this build can mesh with TQMesh, without having to probe for
     // the classes registered by PyReg_TQMesh().
 #ifdef PYOOMPH_HAS_TQMESH
