@@ -101,7 +101,13 @@ def main():
     )
     # A separate process on purpose: the failure under investigation is a DLL load, and a load that
     # goes wrong can take the interpreter with it.
-    run = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=1800)
+    # cwd=outdir's parent, never the checkout: a repository copy of pyoomph/ on sys.path has no
+    # compiled extension, so the child would fail with "No module named pyoomph._pyoomph_core"
+    # before reaching the JIT at all - which is exactly how this probe first came back empty.
+    workdir = os.path.dirname(os.path.abspath(outdir)) or "."
+    os.makedirs(workdir, exist_ok=True)
+    run = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=1800,
+                         cwd=workdir)
     for stream in (run.stdout, run.stderr):
         for line in (stream or "").splitlines():
             if line.startswith("DIAG:") or "could not be loaded" in line or "Error code" in line:
