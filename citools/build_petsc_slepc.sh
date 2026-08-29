@@ -69,11 +69,22 @@ mkdir -p "${WORKDIR}"
 # build dies with "execute() got an unexpected keyword argument 'dry_run'" after having compiled
 # and linked the extension. Droppable together with the Cython pin on a PETSc bump.
 #
-# Both pins are for petsc4py 3.22 and older only, so they are applied by version rather than
-# always: on a newer PETSc they would hold the toolchain back for no reason.
+# Both bounds were measured against the actual releases, and they differ per PETSc version:
+#
+#   <= 3.22  setuptools<81, cython<3.1   conf/cyautodoc.py calls ExpressionWriter.emit_string
+#                                        (gone in Cython 3.1) and conf/confpetsc.py calls
+#                                        distutils.util.execute(dry_run=) (gone in setuptools 81).
+#   >= 3.23  cython<3.3                  cyautodoc.py now guards emit_string with hasattr and the
+#                                        dry_run call is gone, so setuptools is free; but Cython
+#                                        3.3 rejects petsc4py's PC.pyx:1256 with "Invalid index
+#                                        type 'int'". 3.0.11, 3.1.6 and 3.2.2 were all verified to
+#                                        cythonise 3.25.4 cleanly.
+#
+# petsc4py regenerates PETSc.c on every build and fetches a Cython of its own when none is
+# installed, so leaving Cython out is not an option - it just picks the newest.
 case "${PETSC_VERSION}" in
   3.1?.*|3.2[0-2].*) BUILD_PINS=( "setuptools<81" "cython<3.1" ) ;;
-  *)                 BUILD_PINS=( "setuptools" "cython" ) ;;
+  *)                 BUILD_PINS=( "setuptools" "cython<3.3" ) ;;
 esac
 "${PYTHON}" -m pip install --upgrade --quiet numpy "${BUILD_PINS[@]}"
 
