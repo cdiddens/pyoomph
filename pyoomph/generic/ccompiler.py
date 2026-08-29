@@ -217,7 +217,21 @@ class TCCBoxCompiler(BaseCCompiler):
             else:
                 fullcmd+=["-rdynamic"]
             fullcmd+=["-DPYOOMPH_TCC_TO_MEMORY","-Dsize_t=unsigned long long"]+list(extra_flags)+[self.get_code_filename(), "-o",soname]
-            self.call_cmd( fullcmd,quiet=quiet)
+            output=self.call_cmd( fullcmd,quiet=quiet)
+            # A zero exit is not proof that anything was written. tcc on Windows warns about an
+            # implicit declaration, exits 0 and produces NO library, and without this the failure
+            # surfaces much later as "DLL ... could not be loaded. Error code: 126" - Windows saying
+            # the file does not exist - pointing at a path that was never created, with tcc's own
+            # warning long since discarded (call_cmd only shows its output on a nonzero exit). The
+            # missing declaration was strcpy, in jitbridge.h; the misleading error cost far more to
+            # chase than the declaration did to add.
+            if not os.path.exists(soname):
+                raise RuntimeError(
+                    "The JIT compiler exited successfully but wrote no library at " + soname +
+                    ". Its output was:\n" + (output.strip() or "(nothing)") +
+                    "\nAn implicit declaration warning here means a function used by the generated "
+                    "code is missing from pyoomph/jitbridge/jitbridge.h, which is the only "
+                    "declaration tcc gets (it is called with -nostdinc).")
         return True
 
 
