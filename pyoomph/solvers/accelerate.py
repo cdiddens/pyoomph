@@ -102,6 +102,31 @@ class MacAccelerateLinearSolver(GenericLinearSystemSolver):
         """Re-solve against a new right-hand side, reusing the cached factorization."""
         return self.solver.resolve(b)
 
+    def _check_solves(self)->bool:
+        """Whether to verify each solve against the matrix it was given.
+
+        Off by default - it costs a sparse matrix-vector product and a copy of the matrix per
+        factorisation - and switched on with PYOOMPH_ACCELERATE_CHECK_SOLVE=1. It exists because this
+        backend has twice now returned an answer that does not solve the system while reporting
+        success: Newton went from a residual of 0.118 to inf on a linear Poisson problem, and from
+        1.016 to 9.0e15 on a constrained-adaptivity one. A backward error is the one measurement that
+        distinguishes "the solver is wrong" from "the matrix it was handed is wrong", and neither
+        Apple's status nor the Newton residual says it.
+        """
+        import os
+        return os.environ.get("PYOOMPH_ACCELERATE_CHECK_SOLVE","") not in ("","0","false","False")
+
+    def _solve_and_maybe_check(self,rhs:NPFloatArray)->NPFloatArray:
+        x=self.solver.solve(rhs)
+        A=getattr(self,"_checked_matrix",None)
+        if A is not None:
+            import numpy
+            resid=float(numpy.linalg.norm(A@x-rhs))
+            scale=float(numpy.linalg.norm(rhs)) or 1.0
+            print("PYOOMPH_ACCELERATE_CHECK n=%d method=%s backward_error=%.3e"
+                  %(A.shape[0],self._last_factorize_method,resid/scale),flush=True)
+        return x
+
     def solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPIntArray,colptr:NPIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
         if op_flag==1:
             A=csr_matrix((values,rowind,colptr),shape=(n,n))
@@ -142,6 +167,9 @@ class MacAccelerateLinearSolver(GenericLinearSystemSolver):
             self._structure_id=structure_id
             self.solver.factorize(n,n,indptr,indices,data,method)
             self._last_factorize_method=method
+            # Kept only for the check below, and only when it is switched on: holding the matrix
+            # otherwise would double the memory a factorisation costs.
+            self._checked_matrix=A if self._check_solves() else None
         elif op_flag==2:
             if nrhs != 1:
                 raise NotImplementedError("Only single right-hand side is supported")
@@ -158,7 +186,7 @@ class MacAccelerateLinearSolver(GenericLinearSystemSolver):
             #     algebra with it. That is the half this backend was still missing, which is why the
             #     two handler-based tests went on failing with a trajectory identical to before the
             #     first fix: -41.6 at the first step, the undeflated increment exactly.
-            b[:] = self._solve_newton_step(lambda rhs: self.solver.solve(rhs), b)
+            b[:] = self._solve_newton_step(lambda rhs: self._solve_and_maybe_check(rhs), b)
         else:
             raise NotImplementedError("Only transpose operation is supported")
 
