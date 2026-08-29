@@ -320,6 +320,59 @@ def test_assembly_handler_shell_still_works(tmp_path):
     assert abs(abs(found) - 1.0) < 1e-7, "deflating x=0 must lead to x=+-1, got %r" % found
 
 
+class _TracingPitchFork(PitchForkProblem):
+    """PitchForkProblem that records where every Newton step lands.
+
+    The macOS deflation failures say the deflated Newton left a 0.3 perturbation and ended at
+    x = -27 on a ONE-dof problem, and nothing said whether it got there in one wild step - which
+    points at the linear solve, and is what tests/test_linear_solver_selfcheck.py interrogates - or
+    wandered there over many, which points at the deflation factor instead. The trajectory separates
+    those two without needing either to be reproducible off a Mac.
+    """
+
+    def __init__(self, r=1.0):
+        super().__init__(r=r)
+        self.trajectory = []
+
+    def actions_after_newton_step(self):
+        super().actions_after_newton_step()
+        self.trajectory.append(float(self.get_current_dofs()[0][0]))
+
+
+def test_the_deflated_newton_trajectory_is_reported(tmp_path):
+    """Not a numeric assertion beyond the landing: what it adds on a failure is the path taken."""
+    from pyoomph.generic.bifurcation_tools import DeflationAssemblyHandler
+    with _TracingPitchFork(r=1.0) as p:
+        p.set_output_directory(str(tmp_path / "trace"))
+        p.quiet()
+        p.initialise()
+        p.solve()
+        h = DeflationAssemblyHandler(alpha=0.1, p=2)
+        p.set_custom_assembler(h)
+        h.add_known_solution(p.get_current_dofs()[0])
+        p.perturb_dofs(numpy.array([0.3]))
+        p.trajectory.clear()
+        try:
+            p.solve()
+        except RuntimeError as e:
+            raise AssertionError(
+                "the deflated solve failed with the %s solver; Newton went %r"
+                % (_solver_name(p), [round(v, 6) for v in p.trajectory])) from e
+        found = float(p.get_current_dofs()[0][0])
+        p.set_custom_assembler(None)
+        steps = list(p.trajectory)
+    assert abs(abs(found) - 1.0) < 1e-7, (
+        "deflating x=0 must lead to x=+-1, got %r with the %s solver; Newton went %r"
+        % (found, _solver_name(p), [round(v, 6) for v in steps]))
+    # The first step is the one the linear solve alone decides, so it is worth stating separately:
+    # a solve that returns nonsense puts x somewhere absurd immediately, while a wrong deflation
+    # factor lets Newton wander. Generous on purpose - this is a diagnostic, not a tuning knob.
+    assert steps and abs(steps[0]) < 10.0, (
+        "the FIRST deflated Newton step already went to %r (whole path %r, %s solver), which is the "
+        "linear solve rather than the deflation" % (steps[0], [round(v, 6) for v in steps],
+                                                    _solver_name(p)))
+
+
 def test_refuses_adaptation_while_solutions_are_known(tmp_path):
     """Known solutions are dof vectors of the current numbering, which adaptation invalidates."""
     from pyoomph.generic.bifurcation_tools import DeflationOperator
