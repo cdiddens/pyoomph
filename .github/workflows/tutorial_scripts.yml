@@ -1,0 +1,396 @@
+name: Run the tutorial scripts on a fresh wheel
+
+# The companion of test_wheel_suite.yml: that one builds one wheel per OS and runs the pytest
+# suite against it, this one builds the same wheel and runs every script of the tutorial against
+# it - the same set citools/test_all_tutorial_scripts.py runs nightly, assembled from
+# docs/source/tutorial by tutorial_bundle.export_tree(), so it tests the scripts as the
+# documentation currently shows them.
+#
+# Why it is worth a separate workflow: the tests in tests/ are written to be fast and to pin down
+# one mechanism each, while the tutorial scripts are what a reader actually types in, and they use
+# far more of the API - the plotting interface, the mesh generators, bifurcation tracking,
+# multi-component flow. A wheel can pass the suite and still fail on the first thing a new user
+# tries.
+#
+# The per-script verdict and timing are put on the run's SUMMARY page, not just in the log: the log
+# is over a hundred scripts long and nobody scrolls it. The harness writes --report-json and
+# citools/tutorial_report_to_summary.py turns that into a table (failures first, the green ones
+# folded away), and that script's exit code is what makes the job red - the harness itself always
+# exits 0, because the nightly parses its printed output instead.
+#
+# What is deliberately NOT covered here:
+#   * PETSc/SLEPc. The wheels are built with PYOOMPH_USE_MPI=OFF and nothing installs petsc4py, so
+#     the harness runs with --no-petsc and every eigen-problem falls back to the scipy solver. That
+#     is exactly what a `pip install pyoomph` user gets, so it is the right thing to test HERE; the
+#     complex-PETSc pass stays with the nightly on a real machine (see CLAUDE.md).
+#   * preCICE, shapely and the interactive bifurcation GUI. The harness reports these as skips, by
+#     name, and they are listed in the summary table.
+#
+# NOTE: GitHub only offers the "Run workflow" button for workflows that exist on the DEFAULT
+# branch, which is why this file lives on main even though development happens on develop. Pick the
+# branch to test via the `ref` input.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or SHA to build and test (defaults to the branch this is dispatched on)
+        required: false
+        type: string
+        default: ""
+      python_version:
+        description: Python version to build the wheel for and run the scripts with
+        required: false
+        type: string
+        default: "3.12"
+      quick_test:
+        description: Pass --quick-test, i.e. stop each script after its first Newton solve (a full run takes hours)
+        required: false
+        type: boolean
+        default: true
+      platforms:
+        description: Which platforms to run on
+        required: false
+        type: choice
+        default: all
+        options: [all, linux, macos, windows, linux-and-macos]
+      skip_folders:
+        description: Bundle folders to skip, space separated (e.g. "PreCICE_Coupling Plotting_Interface")
+        required: false
+        type: string
+        default: ""
+      prebuild_run_id:
+        description: Optional "Prebuild static CLN/GiNaC" run id to take the CLN/GiNaC artifacts from (defaults to the latest successful run)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  # gh run list/download below reads another workflow's run artifacts.
+  actions: read
+
+jobs:
+  tutorials:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    # The wheel build is ~40 minutes on a cold macOS runner and the --quick-test tutorial pass about
+    # the same; a full (non-quick) pass is what the upper end is for.
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64
+            runner: ubuntu-latest
+            platform: linux
+            prebuild_artifact: static-ginac-cln-linux-x86_64
+          - label: macos-intel-x86_64
+            runner: macos-15-intel
+            platform: macos
+            prebuild_artifact: static-ginac-cln-macos-intel-x86_64
+          - label: macos-arm64
+            runner: macos-14
+            platform: macos
+            prebuild_artifact: static-ginac-cln-macos-arm64
+          - label: windows-msys2-ucrt64
+            runner: windows-latest
+            platform: windows
+            prebuild_artifact: static-ginac-cln-windows-msys2-ucrt64
+
+    steps:
+      - name: Decide whether this platform was asked for
+        id: want
+        shell: bash
+        env:
+          WANTED: ${{ inputs.platforms }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          case "${WANTED}" in
+            all) yes=1 ;;
+            linux-and-macos) [[ "${PLATFORM}" == "linux" || "${PLATFORM}" == "macos" ]] && yes=1 || yes=0 ;;
+            *) [[ "${WANTED}" == "${PLATFORM}" ]] && yes=1 || yes=0 ;;
+          esac
+          echo "run=${yes}" >> "${GITHUB_OUTPUT}"
+          [[ "${yes}" == "1" ]] || echo "Skipping ${PLATFORM}: only '${WANTED}' was requested"
+
+      - uses: actions/checkout@v4
+        if: steps.want.outputs.run == '1'
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Set up the cibuildwheel driver interpreter
+        if: steps.want.outputs.run == '1'
+        id: driver
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      # The interpreter the wheel is installed into and the tutorial scripts are run with. Last, so
+      # that $pythonLocation (which the MSYS2 step below inherits) points at it.
+      - name: Set up the interpreter the scripts run on
+        if: steps.want.outputs.run == '1'
+        id: runpy
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      # CLN and GiNaC are not rebuilt here, for the same reason as in test_wheel_suite.yml:
+      # compiling both from source costs more than everything else together, and these are the very
+      # static libraries the released wheels are built against. Windows cannot do without them at
+      # all (there is no MSVC port of CLN).
+      - name: Resolve prebuild run id
+        if: steps.want.outputs.run == '1'
+        id: prebuild
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANUAL_RUN_ID: ${{ inputs.prebuild_run_id }}
+        shell: bash
+        run: |
+          if [[ -n "${MANUAL_RUN_ID}" ]]; then
+            RUN_ID="${MANUAL_RUN_ID}"
+          else
+            RUN_ID="$(gh run list \
+              --workflow prebuild_static_ginac_cln.yml \
+              --repo "${GITHUB_REPOSITORY}" \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+          fi
+
+          if [[ -z "${RUN_ID}" || "${RUN_ID}" == "null" ]]; then
+            echo "Could not resolve a successful prebuild run id - run the 'Prebuild static CLN/GiNaC' workflow first" >&2
+            exit 1
+          fi
+
+          echo "Using prebuild run id ${RUN_ID}"
+          echo "run_id=${RUN_ID}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download the static CLN/GiNaC artifact
+        if: steps.want.outputs.run == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          rm -rf prebuilt
+          mkdir -p prebuilt
+          gh run download "${{ steps.prebuild.outputs.run_id }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --name "${{ matrix.prebuild_artifact }}" \
+            --dir prebuilt
+          find prebuilt -maxdepth 4 -type d | sort
+
+      - name: Compute the cibuildwheel build selector
+        if: steps.want.outputs.run == '1'
+        id: cibw
+        shell: bash
+        env:
+          PYVER: ${{ inputs.python_version }}
+        run: echo "selector=cp${PYVER//./}-*" >> "${GITHUB_OUTPUT}"
+
+      # The tutorials draw with matplotlib and mesh with gmsh (through pygmsh), both of which want
+      # X libraries present even when they never open a window.
+      - name: Install runtime libraries (Linux)
+        if: steps.want.outputs.run == '1' && matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglu1-mesa libglu1-mesa-dev libxcursor1 libxinerama1 libxft2 libxrender1 libopengl0 libgl1
+
+      - name: Build the wheel (Linux/macOS)
+        if: steps.want.outputs.run == '1' && matrix.platform != 'windows'
+        env:
+          CIBW_BUILD: ${{ steps.cibw.outputs.selector }}
+          CIBW_SKIP: "*-musllinux_*"
+          CIBW_ARCHS: native
+          CIBW_BUILD_FRONTEND: build
+          # No pytest here - the tutorial scripts below are this workflow's test. Left empty rather
+          # than left at pyproject.toml's test-command, which would silently add ~25 minutes of a
+          # suite that test_wheel_suite.yml already runs.
+          CIBW_TEST_COMMAND: ""
+          CIBW_TEST_SOURCES: ""
+          CIBW_BEFORE_ALL_LINUX: >
+            bash -lc 'if command -v dnf >/dev/null 2>&1; then dnf -y install wget bzip2 patch;
+            elif command -v yum >/dev/null 2>&1; then yum -y install wget bzip2 patch;
+            elif command -v apk >/dev/null 2>&1; then apk add --no-cache wget bzip2 patch;
+            elif command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y wget bzip2 patch;
+            else echo "No supported package manager for before-all" >&2; exit 1; fi'
+          CIBW_ENVIRONMENT: >
+            PYOOMPH_GINAC_INCLUDE_DIR=$PWD/prebuilt/GiNaC_static/install/include
+            PYOOMPH_GINAC_LIB_DIR=$PWD/prebuilt/GiNaC_static/install/lib
+            PYOOMPH_CLN_INCLUDE_DIR=$PWD/prebuilt/GiNaC_static/install/include
+            PYOOMPH_CLN_LIB_DIR=$PWD/prebuilt/GiNaC_static/install/lib
+            MACOSX_DEPLOYMENT_TARGET=10.13
+          # Deliberately no PYOOMPH_USE_OPENMP / PYOOMPH_USE_GCD here, unlike test_wheel_suite.yml:
+          # the tutorial scripts run on the serial element loop anyway (nothing passes --omp), and
+          # pinning a threading backend on would tie this workflow, which lives on main, to whether
+          # the branch under `ref` already has that backend.
+          CIBW_CONFIG_SETTINGS: >
+            cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF
+            cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF
+            cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON
+            cmake.define.PYOOMPH_USE_MPI=OFF
+            cmake.define.PYOOMPH_PARANOID=OFF
+        uses: pypa/cibuildwheel@v4.1.0
+        with:
+          output-dir: wheelhouse
+
+      - name: Set up MSYS2
+        if: steps.want.outputs.run == '1' && matrix.platform == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            make
+            patch
+            git
+            pkgconf
+            base-devel
+            mingw-w64-ucrt-x86_64-toolchain
+
+      - name: Build the wheel (Windows/MSYS2)
+        # Windows builds through MSYS2/MinGW rather than MSVC - CLN has no MSVC port, and its
+        # MinGW-built libstdc++ could not be mixed into an MSVC extension anyway.
+        if: steps.want.outputs.run == '1' && matrix.platform == 'windows'
+        shell: msys2 {0}
+        env:
+          CC: gcc
+          CXX: g++
+        run: |
+          # cibuildwheel needs >= 3.11, so it is driven by the 3.14 donor rather than by whatever
+          # inputs.python_version happens to be.
+          DRIVER="$(cygpath -u '${{ steps.driver.outputs.python-path }}')"
+          "$DRIVER" -m pip install --upgrade pip
+          "$DRIVER" -m pip install --upgrade "cibuildwheel==4.1.0" delvewheel
+
+          PREBUILT_WIN="$(cygpath -m "$PWD/prebuilt/GiNaC_static/install")"
+
+          export CIBW_BUILD="${{ steps.cibw.outputs.selector }}"
+          export CIBW_ARCHS="AMD64"
+          export CIBW_BUILD_FRONTEND="build"
+          export CIBW_TEST_COMMAND=""
+          export CIBW_TEST_SOURCES=""
+          export CIBW_ENVIRONMENT_WINDOWS="CC=gcc CXX=g++ CXXFLAGS='-static-libgcc -static-libstdc++' LDFLAGS='-static-libgcc -static-libstdc++' PYOOMPH_GINAC_INCLUDE_DIR=${PREBUILT_WIN}/include PYOOMPH_GINAC_LIB_DIR=${PREBUILT_WIN}/lib PYOOMPH_CLN_INCLUDE_DIR=${PREBUILT_WIN}/include PYOOMPH_CLN_LIB_DIR=${PREBUILT_WIN}/lib"
+          export CIBW_REPAIR_WHEEL_COMMAND_WINDOWS="delvewheel repair --add-path C:/msys64/ucrt64/bin -w {dest_dir} {wheel}"
+          export CIBW_CONFIG_SETTINGS="cmake.args=-GUnix\ Makefiles cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON cmake.define.PYOOMPH_USE_MPI=OFF cmake.define.PYOOMPH_PARANOID=OFF"
+
+          "$DRIVER" -m cibuildwheel --output-dir wheelhouse
+
+      - name: Install the wheel into a fresh venv (Linux/macOS)
+        if: steps.want.outputs.run == '1' && matrix.platform != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -l wheelhouse
+          # A venv, not the runner's interpreter: it must be impossible for the checkout's own
+          # ./pyoomph directory to shadow the installed package. The harness runs each script with
+          # sys.executable, so this venv's python is what every script sees.
+          "${{ steps.runpy.outputs.python-path }}" -m venv "${RUNNER_TEMP}/tutorialvenv"
+          VENV="${RUNNER_TEMP}/tutorialvenv/bin/python"
+          "$VENV" -m pip install --upgrade pip
+          # [topology] pulls shapely, which the axisymmetric pinch-off scripts need; without it the
+          # harness would report them as skipped-for-missing-dependency, which is not what a
+          # tutorial run should be proving.
+          WHEEL=$(ls wheelhouse/*.whl | head -n 1)
+          "$VENV" -m pip install "${WHEEL}[topology]"
+          "$VENV" -c "import pyoomph; print('pyoomph', pyoomph.__version__, 'from', pyoomph.__file__)"
+          echo "TUTORIAL_PYTHON=$VENV" >> "${GITHUB_ENV}"
+
+      - name: Install the wheel into a fresh venv (Windows)
+        if: steps.want.outputs.run == '1' && matrix.platform == 'windows'
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          cd "$(cygpath -u "$GITHUB_WORKSPACE")"
+          ls -l wheelhouse
+          RUNPY="$(cygpath -u '${{ steps.runpy.outputs.python-path }}')"
+          "$RUNPY" -m venv "$(cygpath -u "$RUNNER_TEMP")/tutorialvenv"
+          VENV="$(cygpath -u "$RUNNER_TEMP")/tutorialvenv/Scripts/python.exe"
+          "$VENV" -m pip install --upgrade pip
+          WHEEL=$(ls wheelhouse/*.whl | head -n 1)
+          "$VENV" -m pip install "${WHEEL}[topology]"
+          "$VENV" -c "import pyoomph; print('pyoomph', pyoomph.__version__, 'from', pyoomph.__file__)"
+          echo "TUTORIAL_PYTHON=$(cygpath -m "$VENV")" >> "${GITHUB_ENV}"
+
+      - name: Run the tutorial scripts (Linux/macOS)
+        if: steps.want.outputs.run == '1' && matrix.platform != 'windows'
+        shell: bash
+        env:
+          # No display on a runner, and several scripts call plt.show()-adjacent code paths.
+          MPLBACKEND: Agg
+          # The harness itself only imports docs/source/tutorial/tutorial_bundle.py; it never needs
+          # pyoomph, and running it with the venv's python keeps the two consistent anyway.
+          QUICK: ${{ inputs.quick_test && '--quick-test' || '' }}
+          SKIPS: ${{ inputs.skip_folders }}
+        run: |
+          set -o pipefail
+          # Not `set -e`: a non-zero exit here must not skip the summary step, and the harness
+          # exits 0 regardless - the verdict comes from the report below.
+          "${TUTORIAL_PYTHON}" -u citools/test_all_tutorial_scripts.py \
+            --no-petsc ${QUICK} \
+            --report-json "${RUNNER_TEMP}/tutorial_report.json" \
+            ${SKIPS} 2>&1 | tail -n 4000
+
+      - name: Run the tutorial scripts (Windows)
+        if: steps.want.outputs.run == '1' && matrix.platform == 'windows'
+        shell: msys2 {0}
+        env:
+          MPLBACKEND: Agg
+          QUICK: ${{ inputs.quick_test && '--quick-test' || '' }}
+          SKIPS: ${{ inputs.skip_folders }}
+        run: |
+          set -o pipefail
+          cd "$(cygpath -u "$GITHUB_WORKSPACE")"
+          # Run from the MSYS2 shell so that the UCRT64 gcc is on PATH: it is the JIT compiler
+          # pyoomph picks for the generated element code, and without it every single script would
+          # fall back to tccbox (or fail outright).
+          export PATH="/ucrt64/bin:$PATH"
+          "$(cygpath -u "${TUTORIAL_PYTHON}")" -u citools/test_all_tutorial_scripts.py \
+            --no-petsc ${QUICK} \
+            --report-json "$(cygpath -m "$RUNNER_TEMP")/tutorial_report.json" \
+            ${SKIPS} 2>&1 | tail -n 4000
+
+      # The point of the whole workflow: the per-script verdict and timing, on the run's summary
+      # page rather than at line 40000 of the log. Its exit code is what fails the job.
+      - name: Summarise
+        if: always() && steps.want.outputs.run == '1'
+        shell: bash
+        run: |
+          REPORT="${RUNNER_TEMP}/tutorial_report.json"
+          if [[ ! -f "${REPORT}" ]]; then
+            echo "## ${{ matrix.label }} - no report" >> "${GITHUB_STEP_SUMMARY}"
+            echo "" >> "${GITHUB_STEP_SUMMARY}"
+            echo "The harness did not get as far as writing its report; see the job log." >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+          # Once, into a file: it is both appended to the summary page and echoed into the log,
+          # and its exit code (non-zero if any script failed) is the job's verdict.
+          set +e
+          python3 citools/tutorial_report_to_summary.py "${REPORT}" \
+            --title "${{ matrix.label }}" --out "${RUNNER_TEMP}/tutorial_summary.md"
+          STATUS=$?
+          set -e
+          cat "${RUNNER_TEMP}/tutorial_summary.md" >> "${GITHUB_STEP_SUMMARY}"
+          cat "${RUNNER_TEMP}/tutorial_summary.md"
+          exit ${STATUS}
+
+      # The report plus the log of every script that failed - the harness writes <script>.log next
+      # to the script it belongs to, and only for failures unless --keep-logs is given.
+      - name: Upload the report and the failure logs
+        if: always() && steps.want.outputs.run == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tutorial-report-${{ matrix.label }}
+          path: |
+            ${{ runner.temp }}/tutorial_report.json
+            citools/pyoomph_tutorial_scripts/**/*.log
+          if-no-files-found: warn
+
+      # Kept so a failing script can be reproduced locally against the exact same binary.
+      - name: Upload the wheel
+        if: always() && steps.want.outputs.run == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tutorial-wheel-${{ matrix.label }}
+          path: wheelhouse/*.whl
+          if-no-files-found: warn

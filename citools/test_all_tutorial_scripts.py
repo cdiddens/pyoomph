@@ -35,6 +35,7 @@ parser.add_argument("--tcc", help="Used TCC", action="store_true")
 parser.add_argument("--no-petsc", help="Do not select a PETSc build at all: skip the $PETSC_DIR/$PETSC_ARCH_REAL/$PETSC_ARCH_COMPLEX check and run every script with the inherited PYTHONPATH", action="store_true")
 parser.add_argument("--keep-logs", help="Keep log files also of successful tests", action="store_true")
 parser.add_argument("--keep-outdirs", help="Do not delete each script's output directory after it runs. Useful for comparing generated code across repeated runs (e.g. for determinism testing)", action="store_true")
+parser.add_argument("--report-json", metavar="PATH", default=None, help="Also write one JSON record per script (status, wall time, simulation time) to PATH. Meant for CI, which turns it into a table; the printed output is unchanged")
 parser.add_argument("--mpirun", type=int, default=0, metavar="N", help="Run each script under 'mpirun -n N' instead of directly. Default 0, i.e. no mpirun")
 parser.add_argument("--omp", type=int, default=0, metavar="N", help="Pass '--omp N' to each script, i.e. assemble the elements on N threads. Default 0, i.e. leave each script on the serial element loop. Composes with --mpirun, which is threads per rank then")
 parser.add_argument("--distribute", help="Pass --distribute to each script, i.e. distribute the mesh over the ranks. Only meaningful together with --mpirun", action="store_true")
@@ -42,6 +43,10 @@ parser.add_argument("--distribute", help="Pass --distribute to each script, i.e.
 # added - argparse rejects any positional argument it does not know about.
 parser.add_argument("skips", nargs="*", help="Bundle folders to skip, e.g. Temporal_ODEs")
 args = parser.parse_args()
+
+# Resolved before the chdir below, so that a relative --report-json still lands where the caller
+# meant it and not somewhere inside the exported bundle.
+report_json=Path(args.report_json).resolve() if args.report_json else None
 
 os.chdir(Path(__file__).parent)
 
@@ -303,6 +308,7 @@ skipped_for_missing=[]
 manual_gui=[]      # (folder, script) of the GUI scripts nobody can test unattended
 timings=[]  # (folder, script, seconds, number of log files, whether the script failed)
 untimed=[]  # ran, but left no "Elapsed time" footer anywhere
+records=[]  # one dict per script, for --report-json
 
 
 for d in glob.glob("./*/"):
@@ -320,10 +326,12 @@ for d in glob.glob("./*/"):
     if f in _MANUAL_GUI_SCRIPTS:
       print("   SKIPPING",f,"--",_MANUAL_GUI_SCRIPTS[f],"and must be checked manually")
       manual_gui.append((d.strip("/").strip("./"),f))
+      records.append({"folder":d.strip("/").strip("./"),"script":f,"status":"skipped","note":_MANUAL_GUI_SCRIPTS[f]+", must be checked manually"})
       continue
     if args.mpirun>0 and f=="parallel_running.py":
       # This one spawns its own mpirun, so launching it under one already gives nested MPI.
       print("   SKIPPING",f,"-- it is just as spawner of other scripts")
+      records.append({"folder":d.strip("/").strip("./"),"script":f,"status":"skipped","note":"only a spawner of other scripts, and this pass is already under mpirun"})
       continue
     env=None if args.no_petsc else (env_complex if needs_complex_petsc(f) else env_real)
     print("   Testing",f,"-- with the complex PETSc" if env is not None and env is env_complex else "")
@@ -342,6 +350,9 @@ for d in glob.glob("./*/"):
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
     #proc = subprocess.Popen([sys.executable, '-u', f], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     (stdout,_) = proc.communicate()
+    # The whole subprocess, i.e. interpreter start-up and imports included. Not comparable to the
+    # "simulation time" below, but it is the only number a script that never built a Problem has.
+    wall=time.time()-started_at
     secs,numlogs=simulation_seconds(started_at)
     optional=None
     if proc.returncode!=0:
@@ -350,16 +361,24 @@ for d in glob.glob("./*/"):
       mod,why=optional
       print("   SKIPPED",f,"--",_OPTIONAL_MODULES[mod],why)
       skipped_for_missing.append((d.strip("/").strip("./"),f,mod,why))
+      status,note="skipped","needs "+_OPTIONAL_MODULES[mod]+", which "+why
     elif proc.returncode!=0:
       logf=Path(f).stem+".log"
       print(" ================= FAILED",f,"see log at ",logf)
       with open(logf,"wb") as lf:
         lf.write(stdout)
       folder_okay=False
+      status,note="failed","exited with %d, see %s"%(proc.returncode,logf)
     elif args.keep_logs:
       logf=Path(f).stem+".log"
       with open(logf,"wb") as lf:
         lf.write(stdout)
+      status,note="passed",""
+    else:
+      status,note="passed",""
+
+    records.append({"folder":d.strip("/").strip("./"),"script":f,"status":status,"note":note,
+                    "wall_seconds":wall,"sim_seconds":secs,"num_logs":numlogs})
 
     if secs is not None:
       print("      simulation time: %.2f s"%secs+(" (%d runs)"%numlogs if numlogs>1 else ""))
@@ -413,5 +432,23 @@ if all_okay:
   print("ALL TESTS PASSED -- But please check e.g. preCICE and the interactive GUI scripts manually")
 else:
   print("SOME TESTS FAILED")
+
+# Written last, and only on request: the printed report above stays the interface for a human and
+# for the nightly's greps, this one is for a machine (citools/tutorial_report_to_summary.py turns it
+# into the GitHub job summary). The exit code stays 0 either way - callers that want a gate look at
+# "all_okay" here, or at the report.
+if report_json is not None:
+  import json,platform
+  report_json.parent.mkdir(parents=True,exist_ok=True)
+  with open(report_json,"w") as jf:
+    json.dump({"all_okay":all_okay,
+               "bundle_problems":problems,
+               "platform":platform.platform(),
+               "python":sys.version.split()[0],
+               "options":{"quick_test":args.quick_test,"tcc":args.tcc,"no_petsc":args.no_petsc,
+                          "mpirun":args.mpirun,"omp":args.omp,"distribute":args.distribute,
+                          "skips":skips},
+               "scripts":records},jf,indent=1)
+  print("Wrote the machine-readable report to",report_json)
   
   
