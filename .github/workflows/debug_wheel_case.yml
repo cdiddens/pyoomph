@@ -62,6 +62,16 @@ on:
         required: false
         type: boolean
         default: false
+      command:
+        description: Run this shell command instead of pytest (e.g. a worker script directly)
+        required: false
+        type: string
+        default: ""
+      use_lldb:
+        description: Run the command under lldb and print a native backtrace when it dies (macOS)
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -137,10 +147,24 @@ jobs:
           PYTHONFAULTHANDLER: "1"
         run: |
           set -o pipefail
+          # A worker script run DIRECTLY is worth more than the same crash seen through pytest: the
+          # deaths are in worker subprocesses, so lldb attached to pytest would watch the wrong
+          # process, while lldb on the worker itself gives the C++ frames - which is the difference
+          # between "it aborts in _unload_all_dlls" and knowing what inside it aborts.
+          CMD='${{ inputs.command }}'
+          if [ -z "$CMD" ]; then
+            CMD="python -m pytest ${{ inputs.pytest_args }}"
+          fi
+          if [ "${{ inputs.use_lldb }}" = "true" ]; then
+            # -o run then bt: batch mode returns nonzero if the target crashed, which is what the
+            # loop below reads. "bt all" covers a crash on a thread other than the main one.
+            CMD="lldb --batch -o run -k 'thread backtrace all' -k 'quit 1' -- $CMD"
+          fi
+          echo "command: $CMD"
           rc=0
           for i in $(seq 1 ${{ inputs.repeat }}); do
             echo "=============== attempt $i of ${{ inputs.repeat }} ==============="
-            python -m pytest ${{ inputs.pytest_args }} 2>&1 | tee -a run.log || { rc=$?; break; }
+            eval "$CMD" 2>&1 | tee -a run.log || { rc=$?; break; }
           done
           echo "exit_code=$rc" >> "${GITHUB_OUTPUT}"
           exit 0
