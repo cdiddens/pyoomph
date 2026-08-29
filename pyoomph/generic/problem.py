@@ -267,8 +267,18 @@ class PeriodicOrbit:
         
         self.problem.initialise_dt(dt)
         
+        # The dt loop stops at ndt(): the history has THREE entries (u(0), u(-dt), u(-2dt)) while a
+        # BDF2 Time stores two step sizes, so set_dt(2) wrote eight bytes past the end of that
+        # vector - oomph::Time::dt(i) hands out Dt[i] unchecked, and the binding used to pass the
+        # index straight through. Nothing showed on Linux; on macOS the corrupted heap surfaced later
+        # as a crash in an unrelated destructor at interpreter shutdown, on a different test each run.
+        # Found with valgrind on tests/floquet_worker.py: "Invalid write of size 8, 0 bytes after a
+        # block of size 16". Nothing is lost by stopping: initialise_dt(dt) above has already set
+        # every stored step size to dt, so these assignments were redundant to begin with.
+        ndt=self.problem.time_pt().ndt()
         for i,h in enumerate(history):
-            self.problem.time_pt().set_dt(i,dt)            
+            if i<ndt:
+                self.problem.time_pt().set_dt(i,dt)
             self.problem.set_history_dofs(i,h)
         self.problem.time_stepper_pt().set_weights()
         # No shift_time_values() here. The history above is already in shift-before-solve form
