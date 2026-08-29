@@ -67,6 +67,11 @@ on:
         required: false
         type: string
         default: ""
+      overlay_python:
+        description: Copy the checkout's pyoomph/**.py over the installed wheel (verify a Python-only fix without rebuilding)
+        required: false
+        type: boolean
+        default: false
       use_lldb:
         description: Run the command under lldb and print a native backtrace when it dies (macOS)
         required: false
@@ -136,6 +141,29 @@ jobs:
           python -m pip install wheelhouse/*.whl
           # From outside the checkout, since the repo's own pyoomph/ would shadow the installed one.
           cd "${RUNNER_TEMP}" && python -c "import pyoomph; print('pyoomph', pyoomph.__file__)"
+
+      - name: Overlay the checkout's Python over the installed wheel
+        if: inputs.overlay_python
+        shell: bash
+        run: |
+          # For a fix that lives in .py only - a solver backend, a hook, a guard - this makes the
+          # five-minute lane able to test it, instead of waiting fifty minutes for a wheel that
+          # differs from the last one by a few lines of Python. The compiled extension stays exactly
+          # as built. It is NOT a substitute for a real wheel run: nothing here rebuilds C++, and a
+          # .py that disagrees with the extension it is copied next to would be a fiction.
+          python - <<'PYEOF'
+          import os, pathlib, shutil, sys
+          import pyoomph
+          installed = pathlib.Path(pyoomph.__file__).parent
+          source = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "pyoomph"
+          n = 0
+          for src in source.rglob("*.py"):
+              dst = installed / src.relative_to(source)
+              if dst.parent.exists():
+                  shutil.copy2(src, dst)
+                  n += 1
+          print(f"overlaid {n} python files onto {installed}")
+          PYEOF
 
       - name: Run the case
         id: run
