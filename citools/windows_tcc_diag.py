@@ -78,21 +78,28 @@ def _dump_imports(dll):
 def main():
     outdir = sys.argv[1] if len(sys.argv) > 1 else "tccdiag_out"
 
+    # The functions are applied to an UNKNOWN, not to a number. erf(0.7) is folded to a literal at
+    # code-generation time, so the first two versions of this probe produced a DLL with no libm call
+    # in it at all - it loaded fine and imported nothing but msvcrt, which proved nothing about a
+    # test whose DLL does call erf, erfc, asinh, acosh and atanh. This mirrors _Values in
+    # tests/test_math_functions.py: one unknown per function, each written through a solved variable
+    # so the calls and their derivatives both reach the generated code.
     code = (
-        # All FIVE functions the failing test uses, not just erf: the first version of this probe
-        # used erf alone, and the DLL loaded and solved fine, importing nothing but msvcrt.dll. The
-        # C99 inverse hyperbolics are the ones legacy msvcrt lacks, so they are the likeliest reason
-        # the test's DLL and this one differ - and a probe that does not reproduce the failure proves
-        # nothing at all.
         "from pyoomph import Problem, ODEEquations\n"
         "from pyoomph.expressions import var_and_test, erf, erfc, asinh, acosh, atanh\n"
+        "FUNCS = {'erf': (erf, 0.0), 'erfc': (erfc, 0.0), 'asinh': (asinh, 0.0),\n"
+        "         'acosh': (acosh, 2.0), 'atanh': (atanh, 0.0)}\n"
         "class E(ODEEquations):\n"
         "    def define_fields(self):\n"
-        "        self.define_ode_variable('u')\n"
+        "        self.define_ode_variable('s')\n"
+        "        for n in FUNCS:\n"
+        "            self.define_ode_variable('u_' + n)\n"
         "    def define_residuals(self):\n"
-        "        u, v = var_and_test('u')\n"
-        "        f = erf(0.7) + erfc(0.7) + asinh(0.7) + acosh(2.0) + atanh(0.7)\n"
-        "        self.add_residual((u - f) * v)\n"
+        "        s, vs = var_and_test('s')\n"
+        "        self.add_residual((s - 0.7) * vs)\n"
+        "        for n, (f, shift) in FUNCS.items():\n"
+        "            u, v = var_and_test('u_' + n)\n"
+        "            self.add_residual((u - f(s + shift)) * v)\n"
         "class P(Problem):\n"
         "    def define_problem(self):\n"
         "        self.add_equations(E() @ 'ode')\n"
@@ -105,8 +112,7 @@ def main():
         "    except Exception as e:\n"
         "        print('DIAG: reproduced the failure:', e)\n" % (outdir,)
     )
-    # A separate process on purpose: the failure under investigation is a DLL load, and a load that
-    # goes wrong can take the interpreter with it.
+
     # cwd=outdir's parent, never the checkout: a repository copy of pyoomph/ on sys.path has no
     # compiled extension, so the child would fail with "No module named pyoomph._pyoomph_core"
     # before reaching the JIT at all - which is exactly how this probe first came back empty.
