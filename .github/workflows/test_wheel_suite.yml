@@ -1,0 +1,231 @@
+name: Build one wheel per OS and run the test suite
+
+# One button that, per OS, builds a single wheel (Python 3.12 by default) and runs the
+# pytest suite against it - the whole point being that the tests run on the *installed*
+# wheel in cibuildwheel's own throwaway venv, not on the source tree, so nothing in the
+# checkout can shadow the package.
+#
+# The pytest invocation is not repeated here: it comes from pyproject.toml's
+# [tool.cibuildwheel] test-command (`pytest {package}/tests -m "not campaign"`) and
+# test-sources, which is exactly what the release Wheels workflow runs on its Stable ABI
+# wheel. Change it there and both follow.
+#
+# Difference to wheels.yml: this builds only ONE Python version per platform and never
+# uploads anything anywhere. Use it to check a branch; use wheels.yml to ship.
+#
+# One consequence of that shortcut: the wheel built here is a classic, version-specific one
+# even for 3.12. Setting CIBW_CONFIG_SETTINGS as an env var below completely replaces
+# pyproject.toml's [[tool.cibuildwheel.overrides]], including the cp312 wheel.py-api=cp312
+# entry that tags the released wheel cp312-abi3. The compiled code is the same either way -
+# the Stable ABI story is what test_wheels_multiversion.yml exists to check.
+#
+# Deliberately branch-agnostic: it configures nothing that only exists on one branch (no
+# OpenMP knobs, for instance - wheels.yml owns that), so the same file can sit on main and
+# on develop and be dispatched from either. What it builds is decided by the `ref` input.
+#
+# NOTE: GitHub only offers the "Run workflow" button for workflows that exist on the
+# DEFAULT branch, which is why this file lives on main even though development happens on
+# develop. Pick the branch to test via the `ref` input.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or SHA to build and test (defaults to the branch this is dispatched on)
+        required: false
+        type: string
+        default: ""
+      python_version:
+        description: Python version to build the wheel for
+        required: false
+        type: string
+        default: "3.12"
+      prebuild_run_id:
+        description: Optional "Prebuild static CLN/GiNaC" run id to take the CLN/GiNaC artifacts from (defaults to the latest successful run)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  # gh run list/download below reads another workflow's run artifacts.
+  actions: read
+
+jobs:
+  wheel_and_tests:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    # The suite itself is ~25 minutes; the rest is the wheel build. Generous, because a
+    # cold macOS runner is much slower than a Linux one.
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64
+            runner: ubuntu-latest
+            platform: linux
+            prebuild_artifact: static-ginac-cln-linux-x86_64
+          - label: macos-intel-x86_64
+            runner: macos-15-intel
+            platform: macos
+            prebuild_artifact: static-ginac-cln-macos-intel-x86_64
+          - label: macos-arm64
+            runner: macos-14
+            platform: macos
+            prebuild_artifact: static-ginac-cln-macos-arm64
+          - label: windows-msys2-ucrt64
+            runner: windows-latest
+            platform: windows
+            prebuild_artifact: static-ginac-cln-windows-msys2-ucrt64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Set up Python
+        # Only the interpreter that *drives* cibuildwheel; the wheel itself is built for
+        # inputs.python_version by cibuildwheel's own managed interpreters.
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Compute the cibuildwheel build selector
+        id: cibw
+        shell: bash
+        env:
+          PYVER: ${{ inputs.python_version }}
+        run: echo "selector=cp${PYVER//./}-*" >> "${GITHUB_OUTPUT}"
+
+      # CLN and GiNaC are not rebuilt here: compiling both from source costs more than the
+      # rest of this workflow put together, and they are exactly the same static libraries
+      # the release wheels are built against. Windows *needs* them (pyproject.toml's
+      # [tool.cibuildwheel.windows] turns PYOOMPH_DOWNLOAD_CLN/GINAC off - there is no MSVC
+      # port of CLN), and using them everywhere keeps this wheel comparable to a shipped one.
+      - name: Resolve prebuild run id
+        id: prebuild
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANUAL_RUN_ID: ${{ inputs.prebuild_run_id }}
+        shell: bash
+        run: |
+          if [[ -n "${MANUAL_RUN_ID}" ]]; then
+            RUN_ID="${MANUAL_RUN_ID}"
+          else
+            RUN_ID="$(gh run list \
+              --workflow prebuild_static_ginac_cln.yml \
+              --repo "${GITHUB_REPOSITORY}" \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+          fi
+
+          if [[ -z "${RUN_ID}" || "${RUN_ID}" == "null" ]]; then
+            echo "Could not resolve a successful prebuild run id - run the 'Prebuild static CLN/GiNaC' workflow first" >&2
+            exit 1
+          fi
+
+          echo "Using prebuild run id ${RUN_ID}"
+          echo "run_id=${RUN_ID}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download the static CLN/GiNaC artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          rm -rf prebuilt
+          mkdir -p prebuilt
+          gh run download "${{ steps.prebuild.outputs.run_id }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --name "${{ matrix.prebuild_artifact }}" \
+            --dir prebuilt
+          find prebuilt -maxdepth 4 -type d | sort
+
+      - name: Install build dependencies (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglu1-mesa-dev libxcursor-dev libopengl0
+
+      - name: Build and test the wheel (Linux/macOS)
+        if: matrix.platform != 'windows'
+        env:
+          CIBW_BUILD: ${{ steps.cibw.outputs.selector }}
+          CIBW_SKIP: "*-musllinux_*"
+          CIBW_ARCHS: native
+          CIBW_BUILD_FRONTEND: build
+          CIBW_BEFORE_ALL_LINUX: >
+            bash -lc 'if command -v dnf >/dev/null 2>&1; then dnf -y install wget bzip2 patch;
+            elif command -v yum >/dev/null 2>&1; then yum -y install wget bzip2 patch;
+            elif command -v apk >/dev/null 2>&1; then apk add --no-cache wget bzip2 patch;
+            elif command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y wget bzip2 patch;
+            else echo "No supported package manager for before-all" >&2; exit 1; fi'
+          CIBW_BEFORE_TEST_LINUX: >
+            bash -lc 'if command -v dnf >/dev/null 2>&1; then dnf -y install mesa-libGLU libXcursor libglvnd-opengl libXinerama;
+            elif command -v yum >/dev/null 2>&1; then yum -y install mesa-libGLU libXcursor libglvnd-opengl libXinerama;
+            elif command -v apk >/dev/null 2>&1; then apk add --no-cache glu libxcursor libxinerama || apk add --no-cache mesa libxcursor libxinerama || true;
+            elif command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y libglu1-mesa libxcursor1 libopengl0 libxinerama1;
+            else echo "No supported package manager for before-test" >&2; exit 1; fi'
+          CIBW_ENVIRONMENT: >
+            PYOOMPH_GINAC_INCLUDE_DIR=$PWD/prebuilt/GiNaC_static/install/include
+            PYOOMPH_GINAC_LIB_DIR=$PWD/prebuilt/GiNaC_static/install/lib
+            PYOOMPH_CLN_INCLUDE_DIR=$PWD/prebuilt/GiNaC_static/install/include
+            PYOOMPH_CLN_LIB_DIR=$PWD/prebuilt/GiNaC_static/install/lib
+            MACOSX_DEPLOYMENT_TARGET=10.13
+          CIBW_CONFIG_SETTINGS: >
+            cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF
+            cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF
+            cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON
+            cmake.define.PYOOMPH_USE_MPI=OFF
+            cmake.define.PYOOMPH_PARANOID=OFF
+        uses: pypa/cibuildwheel@v4.1.0
+        with:
+          output-dir: wheelhouse
+
+      - name: Set up MSYS2
+        if: matrix.platform == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            make
+            patch
+            git
+            pkgconf
+            base-devel
+            mingw-w64-ucrt-x86_64-toolchain
+
+      - name: Build and test the wheel (Windows/MSYS2)
+        # Windows builds through MSYS2/MinGW rather than MSVC - CLN has no MSVC port, and its
+        # MinGW-built libstdc++ could not be mixed into an MSVC extension anyway.
+        if: matrix.platform == 'windows'
+        shell: msys2 {0}
+        env:
+          CC: gcc
+          CXX: g++
+        run: |
+          export PATH="$(cygpath -u "$pythonLocation"):$PATH"
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade "cibuildwheel==4.1.0" delvewheel
+
+          PREBUILT_WIN="$(cygpath -m "$PWD/prebuilt/GiNaC_static/install")"
+
+          export CIBW_BUILD="${{ steps.cibw.outputs.selector }}"
+          export CIBW_ARCHS="AMD64"
+          export CIBW_BUILD_FRONTEND="build"
+          export CIBW_ENVIRONMENT_WINDOWS="CC=gcc CXX=g++ CXXFLAGS='-static-libgcc -static-libstdc++' LDFLAGS='-static-libgcc -static-libstdc++' PYOOMPH_GINAC_INCLUDE_DIR=${PREBUILT_WIN}/include PYOOMPH_GINAC_LIB_DIR=${PREBUILT_WIN}/lib PYOOMPH_CLN_INCLUDE_DIR=${PREBUILT_WIN}/include PYOOMPH_CLN_LIB_DIR=${PREBUILT_WIN}/lib"
+          export CIBW_REPAIR_WHEEL_COMMAND_WINDOWS="delvewheel repair --add-path C:/msys64/ucrt64/bin -w {dest_dir} {wheel}"
+          export CIBW_CONFIG_SETTINGS="cmake.args=-GUnix\ Makefiles cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON cmake.define.PYOOMPH_USE_MPI=OFF cmake.define.PYOOMPH_PARANOID=OFF"
+
+          python -m cibuildwheel --output-dir wheelhouse
+
+      # Kept so a failing suite can be reproduced locally against the exact same binary.
+      - name: Upload the wheel
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-wheel-${{ matrix.label }}
+          path: wheelhouse/*.whl
+          if-no-files-found: warn
