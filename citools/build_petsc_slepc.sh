@@ -47,6 +47,10 @@ fi
 [ -w "${PETSC_PREFIX}" ] || { echo "${PETSC_PREFIX} is not writable" >&2; exit 1; }
 mkdir -p "${WORKDIR}"
 
+# PETSc's configure refuses --with-petsc4py without these in the target interpreter, and the
+# hosted-tool Pythons on the runners are bare.
+"${PYTHON}" -m pip install --upgrade --quiet numpy setuptools cython
+
 fetch() { # url sha-unchecked-tarball -> extracted dir name on stdout
   local url="$1" tarball="${WORKDIR}/$(basename "$1")"
   [ -f "${tarball}" ] || curl -fsSL --retry 3 -o "${tarball}" "${url}"
@@ -78,32 +82,24 @@ if [ ! -x "${MPI_PREFIX}/bin/mpicc" ]; then
 fi
 export PATH="${MPI_PREFIX}/bin:${PATH}"
 
-# mpi4py has to exist, built against THIS MPICH, before PETSc ever configures petsc4py: petsc4py's
-# setup takes its MPI compiler from mpi4py.get_config() whenever an mpi4py is importable, so a
-# system one (Ubuntu ships an OpenMPI build) makes petsc4py link libmpi.so.40 by soname while
-# libpetsc links MPICH's libmpi.so.12 through its RPATH. Nothing complains until PetscInitialize
-# resolves PMPI_Comm_set_errhandler out of the wrong library and segfaults on import. Putting our
-# own first on PYTHONPATH removes the choice.
-MPI_PY="${MPI_PREFIX}/python"
-if [ ! -d "${MPI_PY}/mpi4py" ]; then
-  echo "==> Building mpi4py against ${MPI_PREFIX}"
-  MPICC="${MPI_PREFIX}/bin/mpicc" "${PYTHON}" -m pip install \
-      --no-binary=mpi4py --no-cache-dir --target "${MPI_PY}" mpi4py
-fi
-export PYTHONPATH="${MPI_PY}${PYTHONPATH:+:${PYTHONPATH}}"
-
-# Which MPI a module ended up against is invisible until it crashes, so assert it here. MPICH is
+# Which MPI a module ended up against is invisible until it crashes, so assert it. MPICH is
 # libmpi.so.12/libmpi.12.dylib; anything resolving a bare libmpi.so.40 has picked up OpenMPI.
+#
+# This is not hypothetical: mpi4py 4.x installed by hand ignores both MPICC and
+# MPI4PY_BUILD_MPICC and takes its MPI from pkg-config, so on a machine with OpenMPI headers it
+# links libmpi.so.40 while libpetsc links MPICH's libmpi.so.12 through its RPATH. Nothing
+# complains until PetscInitialize resolves PMPI_Comm_set_errhandler out of the wrong library and
+# segfaults on import. Hence --download-mpi4py below, which makes PETSc build it against the same
+# MPI it is itself configured with, and hence this check.
 check_links_mpich() { # path-to-extension-module
   local mod="$1" deps
   if [ "$(uname)" = "Darwin" ]; then deps="$(otool -L "${mod}")"; else deps="$(ldd "${mod}")"; fi
-  if echo "${deps}" | grep -q "libmpi\.so\.40\|libmpi\.40\.dylib\|openmpi"; then
+  if echo "${deps}" | grep -q "libmpi\\.so\\.40\\|libmpi\\.40\\.dylib\\|openmpi"; then
     echo "${mod} links a foreign MPI, not the MPICH in ${MPI_PREFIX}:" >&2
     echo "${deps}" | grep -i mpi >&2
     exit 1
   fi
 }
-check_links_mpich "$(echo "${MPI_PY}"/mpi4py/MPI*.so)"
 
 # ---------------------------------------------------------------------------------------------
 # PETSc + SLEPc, once per scalar type
@@ -137,6 +133,7 @@ build_one() { # arch-name scalar-type
       --download-scalapack \
       --download-mumps \
       --with-petsc4py=1 \
+      --download-mpi4py \
       --with-64-bit-indices=0
   make -j"${NPROC}" all
   make install
@@ -155,11 +152,9 @@ build_one() { # arch-name scalar-type
   PETSC_DIR="${prefix}" PETSC_ARCH="" SLEPC_DIR="${PWD}" make install
   popd >/dev/null
 
-  # A copy of the one mpi4py next to petsc4py, so that the single PYTHONPATH entry the harness adds
-  # ($PETSC_DIR/$ARCH/lib) brings all four modules with it. It is scalar-type independent, hence a
-  # copy of the shared build rather than a second one.
-  cp -a "${MPI_PY}"/mpi4py* "${prefix}/lib/"
-
+  # petsc4py, slepc4py and mpi4py all land in ${prefix}/lib, so the single PYTHONPATH entry the
+  # harness adds ($PETSC_DIR/$ARCH/lib) brings all three with it.
+  check_links_mpich "$(echo "${prefix}"/lib/mpi4py/MPI*.so)"
   check_links_mpich "$(echo "${prefix}"/lib/petsc4py/lib/PETSc*.so)"
   check_links_mpich "$(echo "${prefix}"/lib/slepc4py/lib/SLEPc*.so)"
 }
