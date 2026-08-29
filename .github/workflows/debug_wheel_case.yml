@@ -151,7 +151,12 @@ jobs:
           # differs from the last one by a few lines of Python. The compiled extension stays exactly
           # as built. It is NOT a substitute for a real wheel run: nothing here rebuilds C++, and a
           # .py that disagrees with the extension it is copied next to would be a fiction.
-          python - <<'PYEOF'
+          # -P, like everywhere else in this file: without it "import pyoomph" here resolves to the
+          # SOURCE tree this step is standing in, which has no compiled extension, and the overlay
+          # dies with "No module named pyoomph._pyoomph_core" before copying anything. Third time
+          # this trap has been sprung in this workflow; every python invocation that imports pyoomph
+          # from the checkout needs it.
+          python -P - <<'PYEOF'
           import os, pathlib, shutil, sys
           import pyoomph
           installed = pathlib.Path(pyoomph.__file__).parent
