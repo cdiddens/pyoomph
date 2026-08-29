@@ -45,7 +45,7 @@
 # measured, not assumed. So this reads the source files instead, which every platform can do for every
 # backend. Crude, but it is the shape of the defect: a missing call, not a wrong number.
 
-"""Every linear-solver backend routes its solution through the deflation hook."""
+"""Backend invariants that only source inspection can check across platforms."""
 
 import ast
 import os
@@ -104,3 +104,38 @@ def test_the_backend_applies_the_deflation_rescale(filename, classname):
         "%s in %s implements %s but never calls %s, so a deflated solve through this backend would "
         "silently take the undeflated Newton step - which is what Accelerate did on macOS arm64"
         % (classname, filename, "/".join(defines), " or ".join(_HOOKS)))
+
+
+# --------------------------------------------------------------------------------------------
+# A symmetric factorization must be a PIVOTED one.
+#
+# Apple's SparseFactorizationLDLT is the unpivoted LDL^T, valid only for a definite matrix, while
+# _use_symmetric_factorisation_now() proves symmetry and nothing more. Every saddle point pyoomph
+# assembles - an interface Lagrange multiplier, a constraint, an augmented tracker - is symmetric
+# INDEFINITE, and there an unpivoted factorization meets a zero pivot and returns nonsense while
+# reporting success: measured at 1600 dofs with 128 negative eigenvalues, Newton went from a residual
+# of 0.118 to inf in one step on a linear problem. Checked by reading the source for the same reason
+# as the hook above: accelerate.py does not import off a Mac.
+# --------------------------------------------------------------------------------------------
+
+_UNPIVOTED = ('"ldlt"', "'ldlt'", '"ldlt_unpivoted"', "'ldlt_unpivoted'", '"cholesky"', "'cholesky'")
+_PIVOTED = ("ldlt_sbk", "ldlt_tpp")
+
+
+def test_the_symmetric_path_picks_a_pivoted_factorization():
+    import os
+    path = os.path.join(_SOLVER_DIR, "accelerate.py")
+    if not os.path.exists(path):
+        pytest.skip("no accelerate backend in this tree")
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    # The one line that chooses: `method = <something> if self._use_symmetric_factorisation_now()`
+    chooser = [l for l in text.splitlines() if "_use_symmetric_factorisation_now()" in l and "method" in l]
+    assert chooser, "accelerate.py no longer chooses its method from _use_symmetric_factorisation_now()"
+    line = chooser[0]
+    assert any(p in line for p in _PIVOTED), (
+        "the symmetric path picks a factorization that is not pivoted: %s\n"
+        "Only %s are safe for the symmetric INDEFINITE systems pyoomph assembles."
+        % (line.strip(), " or ".join(_PIVOTED)))
+    assert not any(u in line for u in _UNPIVOTED), (
+        "the symmetric path still mentions an unpivoted factorization: %s" % (line.strip(),))

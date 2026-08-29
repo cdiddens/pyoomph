@@ -78,6 +78,13 @@ _MATRICES = {
     "3x3_tridiagonal": numpy.array([[2.0, -1.0, 0.0], [-1.0, 2.0, -1.0], [0.0, -1.0, 2.0]]),
     # A rank-one update on top of a diagonal, which is the SHAPE deflation produces: J/eta + f d^T.
     "3x3_rank_one_update": numpy.eye(3)*3.0 + numpy.outer([1.0, 2.0, -1.0], [0.5, -1.0, 2.0]),
+    # Symmetric INDEFINITE, i.e. a saddle point - the shape every interface Lagrange multiplier,
+    # constraint and augmented tracker assembles. It is here because this file's first version had
+    # nothing of the kind and so did not catch the Accelerate backend factorising exactly such a
+    # system with an unpivoted LDL^T: 1600 dofs, symmetric to 2.2e-16, 128 negative eigenvalues, a
+    # factorisation reported as successful, and a Newton residual of inf one step later.
+    "2x2_saddle": numpy.array([[0.0, 1.0], [1.0, 0.0]]),
+    "3x3_saddle": numpy.array([[2.0, 0.0, 1.0], [0.0, 2.0, 1.0], [1.0, 1.0, 0.0]]),
 }
 
 

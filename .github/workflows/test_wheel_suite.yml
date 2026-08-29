@@ -334,7 +334,13 @@ jobs:
           # therefore the one interpreter here that can install what this job built.
           PY="$(cygpath -u '${{ steps.tkdonor.outputs.python-path }}')"
           "$PY" -m pip install --disable-pip-version-check "$WHEEL" tccbox || exit 0
-          "$PY" citools/windows_tcc_diag.py "$RUNNER_TEMP/tccdiag_out" || true
+          # From outside the checkout: the source pyoomph/ has no compiled extension, so a child
+          # started with the workspace as its CWD dies with "No module named pyoomph._pyoomph_core"
+          # before reaching the JIT. windows_tcc_diag.py runs its own child with cwd=the output
+          # directory for the same reason; this is the outer half of it.
+          DIAG="$PWD/citools/windows_tcc_diag.py"
+          cd "$RUNNER_TEMP"
+          "$PY" "$DIAG" "$RUNNER_TEMP/tccdiag_out" || true
 
       # Kept so a failing suite can be reproduced locally against the exact same binary.
       - name: Upload the wheel

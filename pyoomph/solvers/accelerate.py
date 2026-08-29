@@ -116,11 +116,21 @@ class MacAccelerateLinearSolver(GenericLinearSystemSolver):
             # recomputes only the numbers. problem.jacobian_structure_id promises the pattern is the
             # same; refactorize_values_only() verifies it against the stored indices before acting, so a
             # stale id costs a full factorization rather than a wrong answer.
-            # "ldlt" (not "cholesky": that needs SPD, which the symbolic proof cannot give) when the
-            # matrix is proven symmetric; the C++ side then reads only the upper triangle of the full
-            # CSR, so no triangle extraction is needed here. Users keeping their own method choice do
-            # so via exploit_proven_symmetry=False or by picking a symmetric method themselves.
-            method:MacAccelerateMethod="ldlt" if self._use_symmetric_factorisation_now() else self.method
+            # "ldlt_sbk", not "ldlt": Apple's SparseFactorizationLDLT is the UNPIVOTED factorization,
+            # which is only valid for a definite matrix, while the symbolic proof behind
+            # _use_symmetric_factorisation_now() establishes symmetry and nothing more. Every saddle
+            # point pyoomph assembles - an interface Lagrange multiplier, a constraint, an augmented
+            # tracker - is symmetric INDEFINITE, and unpivoted LDL^T meets a zero pivot there and
+            # returns nonsense without reporting failure. Measured on the coupled curved-interface
+            # Poisson problem of tests/test_curved_boundaries.py: 1600 dofs, symmetric to 2.2e-16,
+            # 1472 positive and 128 negative eigenvalues (one per interface multiplier); Accelerate
+            # reported a successful factorisation and Newton went from a residual of 0.118 to inf in
+            # one step, on a LINEAR problem. SBK is Bunch-Kaufman with supernodes, i.e. the pivoted
+            # variant the symmetry proof actually justifies; "ldlt_tpp" (threshold partial pivoting)
+            # is the more conservative alternative, and plain "ldlt" remains available for anyone who
+            # knows their system is definite. Cholesky is still not an option - that needs SPD, which
+            # the proof cannot give either.
+            method:MacAccelerateMethod="ldlt_sbk" if self._use_symmetric_factorisation_now() else self.method
             structure_id=self.problem.jacobian_structure_id
             if (self.reuse_symbolic_factorization and structure_id!=0 and structure_id==self._structure_id
                     and method==self._last_factorize_method
