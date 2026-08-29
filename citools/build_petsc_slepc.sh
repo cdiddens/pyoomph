@@ -187,8 +187,20 @@ build_one() { # arch-name scalar-type
     tail -300 configure.log >&2
     exit 1
   fi
-  make -j"${NPROC}" all
-  make install
+  # PETSc 3.23+ builds petsc4py during `make install` and writes its output to a log of its own,
+  # reporting only "Check .../petsc4py.build.log" on the terminal. Dump it, or the failure is a
+  # dead end.
+  dump_binding_logs() {
+    local log
+    for log in "${PETSC_ARCH_DIR}"/lib/petsc/conf/*4py*.log; do
+      [ -f "${log}" ] || continue
+      echo "=== ${log} (last 200 lines) =====================================================" >&2
+      tail -200 "${log}" >&2
+    done
+  }
+  PETSC_ARCH_DIR="$(echo "${PWD}"/arch-*-c-opt)"
+  if ! make -j"${NPROC}" all; then dump_binding_logs; exit 1; fi
+  if ! make install; then dump_binding_logs; exit 1; fi
   popd >/dev/null
 
   echo "==> Building SLEPc (${scalar} scalars) into ${prefix}"
