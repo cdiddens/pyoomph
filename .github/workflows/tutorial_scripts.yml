@@ -282,8 +282,8 @@ jobs:
         run: |
           set -euo pipefail
           ls -l wheelhouse
-          # A venv, not the runner's interpreter: it must be impossible for the checkout's own
-          # ./pyoomph directory to shadow the installed package. The harness runs each script with
+          # A venv, not the runner's interpreter: nothing the tutorial scripts pip-installed can
+          # then leak into the runner's own Python. The harness runs each script with
           # sys.executable, so this venv's python is what every script sees.
           "${{ steps.runpy.outputs.python-path }}" -m venv "${RUNNER_TEMP}/tutorialvenv"
           VENV="${RUNNER_TEMP}/tutorialvenv/bin/python"
@@ -293,7 +293,12 @@ jobs:
           # tutorial run should be proving.
           WHEEL=$(ls wheelhouse/*.whl | head -n 1)
           "$VENV" -m pip install "${WHEEL}[topology]"
-          "$VENV" -c "import pyoomph; print('pyoomph', pyoomph.__version__, 'from', pyoomph.__file__)"
+          # From RUNNER_TEMP, NOT from the workspace: `python -c` puts the current directory on
+          # sys.path, so run in the checkout this imports the SOURCE ./pyoomph - which has no
+          # compiled extension next to it - and dies on "No module named pyoomph._pyoomph_core"
+          # while the installed wheel next door is perfectly fine. The tutorial scripts themselves
+          # are unaffected: the harness runs each one from inside its own bundle folder.
+          (cd "${RUNNER_TEMP}" && "$VENV" -c "import pyoomph,pyoomph._pyoomph_core as c; print('pyoomph',pyoomph.__version__,'from',pyoomph.__file__); print('extension from',c.__file__)")
           echo "TUTORIAL_PYTHON=$VENV" >> "${GITHUB_ENV}"
 
       - name: Install the wheel into a fresh venv (Windows)
@@ -309,7 +314,9 @@ jobs:
           "$VENV" -m pip install --upgrade pip
           WHEEL=$(ls wheelhouse/*.whl | head -n 1)
           "$VENV" -m pip install "${WHEEL}[topology]"
-          "$VENV" -c "import pyoomph; print('pyoomph', pyoomph.__version__, 'from', pyoomph.__file__)"
+          # See the Linux/macOS step: from RUNNER_TEMP, so that the checkout's own ./pyoomph
+          # directory is not what gets imported.
+          (cd "$(cygpath -u "$RUNNER_TEMP")" && "$VENV" -c "import pyoomph,pyoomph._pyoomph_core as c; print('pyoomph',pyoomph.__version__,'from',pyoomph.__file__); print('extension from',c.__file__)")
           echo "TUTORIAL_PYTHON=$(cygpath -m "$VENV")" >> "${GITHUB_ENV}"
 
       - name: Run the tutorial scripts (Linux/macOS)

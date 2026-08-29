@@ -72,9 +72,9 @@ minimum-version = "build-system.requires"
 build-dir = "build/{state}"
 cmake.build-type = "Release"
 # The pure-Python package; the compiled extension is now installed as
-# `pyoomph/_core*.so` (importable as `pyoomph._core`) directly by
-# CMakeLists.txt's `install(TARGETS _core LIBRARY DESTINATION pyoomph)`, so
-# it lives inside the "pyoomph" package below and needs no separate entry
+# `pyoomph/_pyoomph_core*.so` (importable as `pyoomph._pyoomph_core`) directly
+# by CMakeLists.txt's `install(TARGETS _pyoomph_core LIBRARY DESTINATION
+# pyoomph)`, so it lives inside the "pyoomph" package below and needs no entry
 # here.
 wheel.packages = ["pyoomph"]
 
