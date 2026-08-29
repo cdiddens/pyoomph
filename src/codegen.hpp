@@ -1189,6 +1189,18 @@ namespace pyoomph
       // it unconditionally.
       std::string alias_buffer_access(const std::string &access, const std::string &name, const std::string &decl);
       std::string alias_nodal_data(const FiniteElementSpace *sp); // alias for eleminfo->nodal_data / ->nodal_coords of sp's owner
+      // Collector for the PYOOMPH_AQUIRE_* shape-sensitivity arrays (the COORDDIFF family) that
+      // write_spatial_interpolation emits. When non-null, the declarations are pushed here (without
+      // indent) instead of being written into the integration-point body, and the caller emits them
+      // ABOVE the loop.
+      //
+      // Not cosmetic: PYOOMPH_AQUIRE_ARRAY is a VLA on ELF but _alloca on Windows (jitbridge.h), and
+      // _alloca is released when the FUNCTION returns, not at the end of the enclosing block. Declared
+      // per integration point, a 3d moving-mesh Hessian therefore accumulated ~2.9 MB of stack in one
+      // frame (27 points x 27 arrays over 27 nodes) and overflowed the stack on Windows, while the
+      // same code was free on Linux/macOS. The arrays are re-zeroed and re-filled every point anyway,
+      // so hoisting the declaration changes nothing about what is computed.
+      std::vector<std::string> *hoisted_array_decls = nullptr;
       std::string write_buffer_alias_declarations(const std::string &indent, const std::string &body) const; // only the aliases `body` mentions
       void register_global_parameters_in(const GiNaC::ex &e, std::set<unsigned> &used_local_indices); // Print-free registration pre-pass over an expression (descends into subexpressions and multi-ret invocations); fills used_local_indices with the local slots occurring in e
       std::vector<FiniteElementCodeSubExpression> subexpressions; // All CSE'd subexpressions registered for this code, in creation order (indices referenced by GiNaCSubExpression)

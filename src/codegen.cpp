@@ -359,6 +359,20 @@ namespace pyoomph
 		~BufferAliasSuspend() { code->buffer_aliases_active = was_active; }
 	};
 
+	// Collects the PYOOMPH_AQUIRE_* shape-sensitivity array declarations printed while it is open, so
+	// the caller can emit them above the integration-point loop rather than inside it. See
+	// FiniteElementCode::hoisted_array_decls: on Windows that macro is _alloca, which a loop never
+	// releases.
+	class HoistedArrayDeclScope
+	{
+		FiniteElementCode *code;
+		std::vector<std::string> *was;
+
+	public:
+		HoistedArrayDeclScope(FiniteElementCode *code_, std::vector<std::string> *sink) : code(code_), was(code_->hoisted_array_decls) { code->hoisted_array_decls = sink; }
+		~HoistedArrayDeclScope() { code->hoisted_array_decls = was; }
+	};
+
 	std::string FiniteElementCode::alias_buffer_access(const std::string &access, const std::string &name, const std::string &decl)
 	{
 		if (!buffer_aliases_active || __buffer_aliases_disabled)
@@ -2379,7 +2393,7 @@ namespace pyoomph
 					std::string code_type = for_code->get_owner_prefix(s.basis->get_space());
 					std::string coorddiffname = code_type + "intrp_" + dtstring + "_" + s.basis->get_dx_str() + "_COORDDIFF_" + std::to_string(i) + "_" + s.field->get_name();
 					//os << indent << "PYOOMPH_AQUIRE_ARRAY(double," << coorddiffname << "," << posrange << ");" << std::endl;
-					decl_lines.push_back(indent + "PYOOMPH_AQUIRE_ARRAY(double," + coorddiffname + "," + posrange + ");");
+					decl_lines.push_back("PYOOMPH_AQUIRE_ARRAY(double," + coorddiffname + "," + posrange + ");");
 				}
 				if (for_hessian)
 				{
@@ -2390,16 +2404,25 @@ namespace pyoomph
 							std::string code_type = for_code->get_owner_prefix(s.basis->get_space());
 							std::string coorddiffname = code_type + "intrp_" + dtstring + "_" + s.basis->get_dx_str() + "_2ndCOORDDIFF_" + std::to_string(i) + "_" + std::to_string(j) + "_" + s.field->get_name();
 							//os << indent << "PYOOMPH_AQUIRE_TWO_D_ARRAY(double," << coorddiffname << "," << posrange << "," << posrange << ");" << std::endl;
-							decl_lines.push_back(indent + "PYOOMPH_AQUIRE_TWO_D_ARRAY(double," + coorddiffname + "," + posrange + "," + posrange + ");");
+							decl_lines.push_back("PYOOMPH_AQUIRE_TWO_D_ARRAY(double," + coorddiffname + "," + posrange + "," + posrange + ");");
 						}
 					}
 				}
 				
 			}
 			std::sort(decl_lines.begin(), decl_lines.end());
-			for (auto &l : decl_lines)
+			// Above the integration loop when the caller offers a place for it - see
+			// FiniteElementCode::hoisted_array_decls for why declaring these per integration point
+			// overflows the stack on Windows. The fill loop below stays where it is.
+			if (for_code->hoisted_array_decls)
 			{
-				os << l << std::endl;
+				for (auto &l : decl_lines)
+					for_code->hoisted_array_decls->push_back(l);
+			}
+			else
+			{
+				for (auto &l : decl_lines)
+					os << indent << l << std::endl;
 			}
 			if (!for_hessian)
 				os << indent << "if (flag)" << std::endl;
@@ -6142,8 +6165,13 @@ namespace pyoomph
 		{
 			osh << "  //START: Spatial integration loop" << std::endl;
 			std::string required_name = "&(my_func_table->shapes_required_Hessian[" + std::to_string(residual_index) + "]), 3";
-			write_generic_spatial_integration_header(osh, "  ", spatial_integral_portion_Eulerian, spatial_integral_portion_Lagrangian, required_name);
+			// As in the ResJac writer: the loop header is buffered and emitted below, after the in-loop
+			// part has been printed, so the shape-sensitivity arrays it declares land above the loop.
+			std::ostringstream loop_header;
+			write_generic_spatial_integration_header(loop_header, "  ", spatial_integral_portion_Eulerian, spatial_integral_portion_Lagrangian, required_name);
 			std::ostringstream osh_ipt; // in-loop part, so the alias declarations can be emitted ahead of it
+			std::vector<std::string> hoisted_decls;
+			HoistedArrayDeclScope hoist(this, &hoisted_decls);
 			std::set<ShapeExpansion> spatial_shape_exps = get_all_shape_expansions_in(spatial_integral_portion); // TODO: This is wrong!
 			std::set<ShapeExpansion> shape_intersect;
 
@@ -6174,6 +6202,9 @@ namespace pyoomph
 			spatial_integral_portion = this->write_code_subexpressions(osh_ipt, "     ", spatial_integral_portion, spatial_shape_exps, true);
 			// osm as well as osh_ipt: the Hessian assembly body was printed first and lives in osm, which
 			// is concatenated after this header.
+			for (auto &l : hoisted_decls)
+				osh << "  " << l << std::endl;
+			osh << loop_header.str();
 			osh << alias_scope.declarations("    ", osh_ipt.str() + osm.str());
 			osh << osh_ipt.str();
 		}
@@ -6415,7 +6446,12 @@ namespace pyoomph
 		{
 			body << "  //START: Spatial integration loop" << std::endl;
 			std::string required_name = "&(my_func_table->shapes_required_ResJac[" + std::to_string(residual_index) + "]), flag";
-			write_generic_spatial_integration_header(body, "  ", spatial_integral_portion_Eulerian, spatial_integral_portion_Lagrangian, required_name);
+			// The header (and with it the "for(ipt..)" line) is written only once the body below has
+			// been printed: printing is what fills hoisted_decls, and those have to land above the loop.
+			std::ostringstream loop_header;
+			write_generic_spatial_integration_header(loop_header, "  ", spatial_integral_portion_Eulerian, spatial_integral_portion_Lagrangian, required_name);
+			std::vector<std::string> hoisted_decls;
+			HoistedArrayDeclScope hoist(this, &hoisted_decls);
 
 			// The buffer aliases are declared HERE, at the top of the integration-point body, and not at
 			// function scope - even though function scope would be equally correct, since
@@ -6457,6 +6493,9 @@ namespace pyoomph
 			ipt_body << "    //END: Contribution of the spaces" << std::endl;
 
 			const std::string ipt_text = ipt_body.str();
+			for (auto &l : hoisted_decls)
+				body << "  " << l << std::endl;
+			body << loop_header.str();
 			body << alias_scope.declarations("    ", ipt_text);
 			body << ipt_text;
 
