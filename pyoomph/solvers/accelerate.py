@@ -102,6 +102,11 @@ class MacAccelerateLinearSolver(GenericLinearSystemSolver):
         """Re-solve against a new right-hand side, reusing the cached factorization."""
         return self.solver.resolve(b)
 
+    #: Backward error above which a symmetric factorisation is discarded and redone with QR. Far
+    #: above any honest round-off (a good solve gives 1e-16 to 1e-12 here) and far below what a
+    #: failed one produces (7.9e14 measured), so it does not need tuning.
+    symmetric_fallback_tolerance:float=1e-6
+
     def _check_solves(self)->bool:
         """Whether to verify each solve against the matrix it was given.
 
@@ -117,14 +122,44 @@ class MacAccelerateLinearSolver(GenericLinearSystemSolver):
         return os.environ.get("PYOOMPH_ACCELERATE_CHECK_SOLVE","") not in ("","0","false","False")
 
     def _solve_and_maybe_check(self,rhs:NPFloatArray)->NPFloatArray:
+        """Solve, and - once per symmetric factorisation - check that the answer solves the system.
+
+        Apple's symmetric factorisations return a vector that does not satisfy Ax=b, with status
+        SparseStatusOK, on matrices pyoomph assembles routinely. Measured on macOS arm64: an
+        unpivoted LDL^T on a 1600-dof saddle point took Newton from a residual of 0.118 to inf, and
+        the PIVOTED ldlt_sbk on the 357-dof constrained-adaptivity system returned a backward error
+        of 7.9e14 - both silently. So the answer is verified rather than trusted, and a bad one is
+        recomputed with QR, which is general and has never done this.
+
+        The cost is one matrix-vector product per factorisation. Using QR throughout would cost far
+        more, on every symmetric problem that factorises perfectly well.
+        """
+        import numpy
         x=self.solver.solve(rhs)
         A=getattr(self,"_checked_matrix",None)
-        if A is not None:
-            import numpy
-            resid=float(numpy.linalg.norm(A@x-rhs))
-            scale=float(numpy.linalg.norm(rhs)) or 1.0
+        if A is None or not getattr(self,"_verify_next_solve",False):
+            return x
+        self._verify_next_solve=False
+        scale=float(numpy.linalg.norm(rhs)) or 1.0
+        backward_error=float(numpy.linalg.norm(A@x-rhs))/scale
+        if self._check_solves():
             print("PYOOMPH_ACCELERATE_CHECK n=%d method=%s backward_error=%.3e"
-                  %(A.shape[0],self._last_factorize_method,resid/scale),flush=True)
+                  %(A.shape[0],self._last_factorize_method,backward_error),flush=True)
+        if backward_error>self.symmetric_fallback_tolerance:
+            if not getattr(self,"_warned_about_fallback",False):
+                self._warned_about_fallback=True
+                print("NOTE: the Accelerate '"+str(self._last_factorize_method)+"' factorisation "
+                      "returned a solution with a backward error of "+("%.3e"%backward_error)+
+                      " and reported success; refactorising this system with QR. Symmetric "
+                      "factorisations do this on indefinite and near-singular systems, which is why "
+                      "the answer is checked. Pass exploit_proven_symmetry=False to skip them "
+                      "entirely.",flush=True)
+            indptr,indices,data=self._last_csr
+            self.solver.factorize(A.shape[0],A.shape[0],indptr,indices,data,"qr")
+            self._last_factorize_method="qr"
+            self._structure_id=0   # the next factorisation must not refresh a QR as if symmetric
+            x=self.solver.solve(rhs)
+        self._checked_matrix=None
         return x
 
     def solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPIntArray,colptr:NPIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
@@ -169,7 +204,14 @@ class MacAccelerateLinearSolver(GenericLinearSystemSolver):
             self._last_factorize_method=method
             # Kept only for the check below, and only when it is switched on: holding the matrix
             # otherwise would double the memory a factorisation costs.
-            self._checked_matrix=A if self._check_solves() else None
+            # Verified on the FIRST solve after every symmetric factorisation - one matrix-vector
+            # product per factorisation, not per solve, and the matrix is dropped again as soon as it
+            # has been used. A bad factorisation poisons every solve that follows it, so checking the
+            # first is enough to catch it.
+            symmetric_now=method in ("ldlt","ldlt_unpivoted","ldlt_sbk","ldlt_tpp","cholesky")
+            self._checked_matrix=A if (self._check_solves() or symmetric_now) else None
+            self._verify_next_solve=bool(symmetric_now or self._check_solves())
+            self._last_csr=(indptr,indices,data)
         elif op_flag==2:
             if nrhs != 1:
                 raise NotImplementedError("Only single right-hand side is supported")
