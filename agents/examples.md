@@ -69,7 +69,10 @@ Key points:
   unit before `float()`.
 - `problem.create_text_file_output(fname, header=[...])` + `.add_row(...)` is the
   idiom for writing a custom scan/summary file (separate from the per-timestep
-  `TextFileOutput()`/`MeshFileOutput()` equation classes).
+  `TextFileOutput()`/`MeshFileOutput()` equation classes). Note it is called *after*
+  `problem.solve()` here, and must be: the file is opened in the output directory at
+  once, and that directory does not exist until the problem is initialised.
+  `.add_row(...)` calls `float()` on every value, so divide out any units first.
 - With an all-Dirichlet velocity BC and no free surface, the pressure needs a
   nullspace fixation: either `eqs += AverageConstraint(pressure=0)` (pin the mean) or
   `StokesEquations.create_pressure_fixation()` (pin a single dof).
@@ -160,6 +163,10 @@ Key points:
 - A coupling `InterfaceEquations` is attached to only one side of the shared
   boundary; it reaches across to the other side via `domain=`/
   `get_opposite_side_of_interface()`.
+- The constraint here is homogeneous (`T_my - T_opp = 0`), so every prefactor cancels. As
+  soon as the coupling carries a *physical* coefficient — a contact resistance, a flux, a
+  partition coefficient — the units of the term paired with the bulk test function stop
+  being obvious: see [`units.md`](units.md) § *On interfaces and boundaries*.
 - For matching whole vector fields (e.g. velocity or mesh position) across an
   interface, prefer the ready-made `ConnectFieldsAtInterface`/
   `ConnectVelocityAtInterface`/`ConnectMeshAtInterface` over hand-rolling this pattern.
@@ -285,7 +292,7 @@ if __name__ == "__main__":
     with FoldProblem() as problem:
         while True:
             problem.solve()
-            problem.output_at_increased_time()
+            problem.output(increase_time_for_PVD=True)
             problem.r.value -= 0.02
 ```
 
@@ -389,7 +396,7 @@ class MeshTestProblem(Problem):
 if __name__ == "__main__":
     with MeshTestProblem() as problem:
         problem.solve()
-        problem.output_at_increased_time()
+        problem.output(increase_time_for_PVD=True)
 ```
 
 Key points:
@@ -451,6 +458,8 @@ class ConvectionDiffusionProblem(Problem):
 
         # jumps of grad(c) across element boundaries, both now and at the previous timestep, drive refinement
         eqs += SpatialErrorEstimator(grad(var("c")), evaluate_in_past(grad(var("c"))))
+        eqs += TemporalErrorEstimator(c=1)   # without this, temporal_error= below is ignored
+                                             # (the tolerance below is loose; 1e-3..1e-6 is typical)
         self.add_equations(eqs @ "domain")
 
 
@@ -465,9 +474,10 @@ Key points:
 - `SpatialErrorEstimator` takes any number of expressions whose *jump across element
   boundaries* is used as the refinement indicator — not just gradients of a field.
 - `temporal_error=<tol>` in `run(...)` enables adaptive time-stepping (rejecting/
-  shrinking steps whose estimated local error exceeds `tol`); pair with
-  `TemporalErrorEstimator(**fieldfactors)` to weight which fields contribute to the
-  error estimate if the default (all fields equally) isn't appropriate.
+  shrinking steps whose estimated local error exceeds `tol`), **but only together with a
+  `TemporalErrorEstimator(**fieldfactors)` naming the fields that count**. With no
+  estimator attached the tolerance is silently ignored and the step size never changes —
+  a run that looks adaptive and is not.
 
 ## 7. Save and resume a simulation
 

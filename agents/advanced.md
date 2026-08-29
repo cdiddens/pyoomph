@@ -42,8 +42,13 @@ eigvals, eigvects = problem.solve_eigenproblem(
     filter=None, report_accuracy=False, sort=True)
 ```
 Solves the generalized eigenproblem of the current Jacobian/mass matrix for the `n`
-eigenvalues nearest `shift` (`which` controls SciPy/SLEPc's target mode, default
-largest-magnitude). Requires the system to have exactly one time-derivative order
+eigenvalues, shift-inverted about `shift` — so `shift=0` is what you want near a steady
+bifurcation, and it is the default. (`which` selects the target of the *shifted* problem;
+leave it alone unless you know you need something else.) **The returned list is not
+guaranteed to be ordered by real part**, so pick the leading mode yourself with
+`max(range(len(ev)), key=lambda i: ev[i].real)` rather than trusting `eigvals[0]`.
+Constraint rows with no time derivative (pressure, Lagrange multipliers) are fine — they
+simply contribute infinite eigenvalues that the shift-invert filters out. Requires the system to have exactly one time-derivative order
 (reduce higher-order-in-time systems to first order via auxiliary variables first).
 Choose the backend with `problem.set_eigensolver("scipy")` (default) or
 `problem.set_eigensolver("slepc")` (PETSc/SLEPc — more robust for large/sparse
@@ -56,7 +61,15 @@ stability to non-axisymmetric perturbations you want to check):
 - `normal_mode_k=k` (or `normal_mode_L=L`, converted internally via `k=2*pi/L`) — perturbations `~exp(i*k*x)` along an extra homogeneous Cartesian direction not in the mesh.
 
 Both route through the same `solve_eigenproblem(...)` call; mutually exclusive with
-each other. `problem.refine_eigenfunction(numadapt=1, eigenindex=0)` spatially adapts
+each other. Declare the intent up front with
+`setup_for_stability_analysis(azimuthal_stability=True)` (or
+`additional_cartesian_mode=True`), put `AxisymmetryBC() @ "<axis boundary>"` on the
+symmetry axis, and pass one `m` at a time — `azimuthal_m` accepts a list, but the return
+shape for a list is not worth guessing. A worked check: the decay modes of the diffusion
+equation on a unit disc, meshed 1D in `r` with `set_coordinate_system("axisymmetric")`,
+reproduce `lambda = -(j_{m,1})**2` (-5.7832, -14.6820, -26.3746 for m=0,1,2) to 1e-10.
+Serial azimuthal eigensolves work with the default scipy backend; complex PETSc/SLEPc is
+about robustness and size, not correctness. `problem.refine_eigenfunction(numadapt=1, eigenindex=0)` spatially adapts
 the mesh based on a chosen eigenfunction's gradient and re-solves base state + eigenproblem.
 
 ### Scanning for a bifurcation via eigenvalues
@@ -81,7 +94,9 @@ problem.activate_bifurcation_tracking(parameter, bifurcation_type=None,  # "hopf
 Augments the system so that subsequent `solve()`/`arclength_continuation()` calls
 solve simultaneously for the base state, the critical eigenvector, and `parameter` —
 converging exactly onto the bifurcation point, with `parameter` itself becoming an
-extra unknown. `bifurcation_type=None` autodetects from the last eigensolve.
+extra unknown. `bifurcation_type=None` autodetects from the last eigensolve; a pitchfork of a trivial
+branch is commonly reported as `"fold"`, which tracks the same point correctly. After
+`solve()` the converged critical value is read back from `parameter.value`.
 `parameter=None` instead tracks the current eigenbranch without forcing `Re(λ)=0`
 ("eigenbranch continuation"). For `"azimuthal"`/`"cartesian_normal_mode"`, pass
 `azimuthal_mode`/`cartesian_wavenumber_k` explicitly, or they're picked up from the
@@ -115,7 +130,7 @@ if __name__ == "__main__":
         def output_with_eigen():
             eigvals, eigvects = problem.solve_eigenproblem(6, shift=0)
             # ... log problem.param_gamma.value, eigvals[0] ...
-            problem.output_at_increased_time()
+            problem.output(increase_time_for_PVD=True)
 
         output_with_eigen()
         ds = 0.001
@@ -264,6 +279,34 @@ class MyExpr(CustomMultiReturnExpression):
              # (uses the same arg_list/result_list/derivative_matrix/flag/nargs names).
              # End with FILL_MULTI_RET_JACOBIAN_BY_FD(1e-8) to get a finite-difference Jacobian for free.
 ```
+**Using it.** Instantiate once, then *call* the instance with the arguments; it returns a
+**tuple** of `get_num_returned_scalars(...)` symbolic expressions (a tuple even when there
+is only one), which drop straight into a weak form:
+
+```python
+class PiecewiseConductivity(CustomMultiReturnExpression):
+    def get_num_returned_scalars(self, nargs): return 1
+    def eval(self, flag, arg_list, result_list, derivative_matrix):
+        T = arg_list[0]                       # plain Python floats, so `if` works
+        if T <= 1.0:
+            result_list[0] = 1.0
+            if flag: derivative_matrix[0] = 0.0
+        else:
+            result_list[0] = 1.0 + self.a*(T - 1.0)
+            if flag: derivative_matrix[0] = self.a
+
+k_of_T = PiecewiseConductivity()             # build it ONCE, outside define_residuals
+...
+T, Ttest = var_and_test("T")
+k, = k_of_T(T)                                # unpack the 1-tuple
+self.add_residual(weak(k*grad(T), grad(Ttest)))
+```
+`CustomMultiReturnExpression` and `CustomMathExpression` are re-exported by
+`from pyoomph.expressions import *`. `flag` is a truthy int meaning "derivatives are
+wanted"; `derivative_matrix[i*nargs + j]` is `d result_i / d arg_j`. `generate_c_code()`
+returns a bare C statement block using those same names — give any local you declare an
+unlikely name, since it is spliced into the generated element code.
+
 Optional refinements: `process_args_to_scalar_list`/`process_result_list_to_results`
 (pack/unpack tensors into the flat scalar buffer), `use_symbolic_derivative(arg_list, i, j)`
 (supply an exactly-known derivative entry, e.g. 0, instead of relying on the general
@@ -345,6 +388,15 @@ choice of weak vs. strong Dirichlet BC handling.
 can be overridden to supply Nitsche-type facet terms for imposing a Dirichlet value
 weakly (falls back to strong pinning if it returns `None`); `DirichletBC(..., prefer_weak_for_DG=True)`
 (the default) uses this automatically when the field's space is a DG space.
+
+**Do not hand-write that override naively.** `grad` on a boundary domain is the *surface*
+gradient, so the consistency and symmetrisation terms of a textbook Nitsche condition
+(`weak(D*grad(c), ctest*n)` and friends) silently evaluate to zero there, leaving an
+inconsistent pure-penalty method. Measured on the 1D Pe=50 advection-diffusion boundary
+layer with `"D2"` and N=40: the hand-written Nitsche override gives a maximum error of
+2.4e-1, while simply *not* overriding it — i.e. letting `DirichletBC` fall back to strong
+pinning of the boundary dof — gives 4.2e-3. **Leave it alone unless you have a specific
+reason**; strong pinning of a nodal DG dof is consistent and is the right default.
 
 Full example — 1D DG advection-diffusion with upwinding and a symmetric-interior-penalty
 diffusion term (`docs/source/tutorial/dg/convection_diffusion.py`):

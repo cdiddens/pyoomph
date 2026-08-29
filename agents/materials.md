@@ -71,6 +71,39 @@ from the liquid's `default_surface_tension["gas"]`; standard mass-transfer model
 `"mole_fraction"`, `"volume_fraction"`, or `"relative_humidity"`/`"RH"` (for gas
 mixtures against a given liquid's vapor pressure).
 
+## Getting numbers out of a material
+
+Material properties are **symbolic expressions** that still contain `var("temperature")`,
+`var("massfrac_...")` and `var("absolute_pressure")`, so `float(water.mass_density/(kilogram/meter**3))`
+raises. Evaluate them with **`evaluate_at_condition`**, which every material object has:
+
+```python
+water, air, vapour = get_pure_liquid("water"), get_pure_gas("air"), get_pure_gas("water")
+T = 20*celsius
+
+rho = float(water.evaluate_at_condition("mass_density", temperature=T)/(kilogram/meter**3))   # 998.23
+mu  = float(water.evaluate_at_condition("dynamic_viscosity", temperature=T)/(milli*pascal*second))  # 1.0017
+```
+
+`evaluate_at_condition(expr, cond={}, **conditions)` takes either a **property name** or any
+expression as `expr`, and the state either as keywords (`temperature=`,
+`absolute_pressure=`, `massfrac_water=`, `molefrac_...`) or as a dict. Pass the string
+`"initial"` (or `"IC"`) as `cond` to evaluate at the mixture's own composition.
+
+**The saturated composition of a gas** comes out of a mixture built with `quantity="RH"` at
+RH = 1, and is read from `mixture.initial_condition`, a plain dict of numbers:
+
+```python
+gas = Mixture(1.0*vapour + air, quantity="RH", temperature=T)     # RH = 1 -> saturated
+c_sat = float(gas.initial_condition["massfrac_water"])            # 0.014425 at 20 degC
+rho_gas = float(gas.evaluate_at_condition("mass_density", "initial",
+                                          absolute_pressure=1*atm)/(kilogram/meter**3))
+sigma = float(water.evaluate_at_condition((water|gas).surface_tension,
+                                          temperature=T)/(milli*newton/meter))   # 72.44
+```
+Note `absolute_pressure` is a state variable of its own: a gas density evaluated without it
+comes back still carrying that symbol.
+
 ## Defining a new material
 
 Subclass the matching base and register it. Exactly one component may be omitted
