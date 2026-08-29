@@ -49,13 +49,28 @@
 
 import ast
 import os
+import re
 
 import pytest
 
 import pyoomph.solvers
 
 
-_HOOKS = ("_postprocess_newton_step", "_solve_newton_step")
+# Two things are installed on top of a plain solve, and a backend has to honour BOTH:
+#   * a deflation OPERATOR rescales the increment            -> _postprocess_newton_step
+#   * a custom assembler with has_custom_solve_routine() (the augmented trackers, and the
+#     DeflationAssemblyHandler shell) is handed the solve as a callable -> _custom_solve_routine_active
+# _solve_newton_step does both, which is why naming it alone is enough.
+#
+# The first version of this file accepted either name, and that hole cost a round trip: Accelerate was
+# given _postprocess_newton_step, this test went green, and the two handler-based deflation tests went
+# on failing on arm64 with a trajectory identical to before the fix, the solve never having been handed
+# to the handler at all.
+# Matched as CALLS, not as substrings: the first version of this check looked for the bare name and a
+# COMMENT naming the hook satisfied it - measured, while verifying that reverting the fix fails the
+# test, which it then did not.
+_HOOKS = (r"self\._solve_newton_step\s*\(",)
+_HOOK_ALTERNATIVES = (r"self\._postprocess_newton_step\s*\(", r"self\._custom_solve_routine_active\s*\(")
 # The entry points oomph calls to get a solved increment back.
 _ENTRY_POINTS = ("solve_serial", "solve_distributed")
 _SOLVER_DIR = os.path.dirname(os.path.abspath(pyoomph.solvers.__file__))
@@ -100,10 +115,14 @@ def test_there_are_backends_to_check():
 def test_the_backend_applies_the_deflation_rescale(filename, classname):
     entry = next(b for b in _backends() if b[0] == filename and b[1] == classname)
     _, _, defines, source = entry
-    assert any(hook in source for hook in _HOOKS), (
-        "%s in %s implements %s but never calls %s, so a deflated solve through this backend would "
-        "silently take the undeflated Newton step - which is what Accelerate did on macOS arm64"
-        % (classname, filename, "/".join(defines), " or ".join(_HOOKS)))
+    covers_both = (any(re.search(h, source) for h in _HOOKS)
+                   or all(re.search(h, source) for h in _HOOK_ALTERNATIVES))
+    assert covers_both, (
+        "%s in %s implements %s but does not honour both post-solve hooks: it must CALL "
+        "_solve_newton_step, or else both of the others. Without the first, a deflated solve silently takes the "
+        "UNDEFLATED Newton step; without the second, an augmented handler never receives the solve "
+        "it is supposed to drive - both of which Accelerate did on macOS arm64."
+        % (classname, filename, "/".join(defines)))
 
 
 # --------------------------------------------------------------------------------------------

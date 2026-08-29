@@ -145,16 +145,20 @@ class MacAccelerateLinearSolver(GenericLinearSystemSolver):
         elif op_flag==2:
             if nrhs != 1:
                 raise NotImplementedError("Only single right-hand side is supported")
-            x=self.solver.solve(b)
-            # _postprocess_newton_step, not the raw solution: a deflation operator turns the solved
-            # increment into the deflated one by a scalar rescale, and every other backend routes its
-            # solution through this (pardiso.py, scipy.py, petsc.py). This one did not, so on a Mac
-            # falling back to Accelerate - Apple silicon without PETSc/MUMPS - Newton took the
-            # UNDEFLATED step and deflation quietly did nothing. Measured on macOS arm64 in the wheel
-            # runs of 29th August 2026: with W, U, R, J, M and G all identical to Linux's, the first
-            # deflated step went to -41.6 instead of +0.55, and all three deflation tests failed on
-            # arm64 while Intel - which reaches MKL Pardiso - passed them.
-            b[:] = self._postprocess_newton_step(x)
+            # _solve_newton_step, not solve()-and-return: it is the one entry point that applies BOTH
+            # of the things installed on top of a plain solve, and every other backend goes through it
+            # (pardiso.py, scipy.py, petsc.py). This one applied neither, so on a Mac falling back to
+            # Accelerate - Apple silicon without PETSc/MUMPS - a deflated Newton took the UNDEFLATED
+            # step and an augmented handler never got the solve at all.
+            #
+            #   * a deflation OPERATOR rescales the increment (_postprocess_newton_step). Adding only
+            #     that fixed the two tests that install one, on arm64, in the run of 29th August 2026.
+            #   * a custom assembler with has_custom_solve_routine() - the augmented trackers, and the
+            #     DeflationAssemblyHandler shell - is handed the solve as a CALLABLE and does its own
+            #     algebra with it. That is the half this backend was still missing, which is why the
+            #     two handler-based tests went on failing with a trajectory identical to before the
+            #     first fix: -41.6 at the first step, the undeflated increment exactly.
+            b[:] = self._solve_newton_step(lambda rhs: self.solver.solve(rhs), b)
         else:
             raise NotImplementedError("Only transpose operation is supported")
 
