@@ -622,17 +622,18 @@ def test_the_refactor_generates_the_same_code_when_gcl_is_off():
     # they have a hole between them: a differing INTEGER (an index, or C1 against C2) survives
     # digit-stripping and never reaches a float hash, so both would pass while the code had changed.
     #
-    # The struct sizes are blanked because they are the one number in the file that is SUPPOSED to
-    # differ per platform. check_compiler_size(sizeof(struct JITShapeInfo), 1032, ...) is the
-    # generated code agreeing with the extension about the ABI, and MinGW lays those structs out
-    # differently - 1032 and 2288 here, other values on Windows, which is exactly right. That is what
-    # the Windows wheel job of 29th August 2026 was reporting as "changed the generated code" while
-    # its structure and all six float literals matched.
-    expected_canonical = {False: "c8e608bb1ca0b7eceeae87ea3ced1e77",
-                          True: "4973ca11c00f21b57b934690ddad3062",
-                          "skew": "a615d1d0afb4ccc390af7e732234d551"}
+    # Every check_compiler_size() size is blanked, because those are the numbers in the file that are
+    # SUPPOSED to differ per platform: the generated code stating what it believes the ABI to be, for
+    # the extension to verify. The one that actually moved is
+    # check_compiler_size(sizeof(unsigned long int), 8, ...), which is 4 on Windows - LLP64 against
+    # LP64, as textbook as it gets. Blanking only the sizeof(struct ...) forms, as a first attempt
+    # did, left exactly that one behind and the test went on failing; the token dump below is what
+    # found it, one character in a 24499-byte file.
+    expected_canonical = {False: "9781e8dff3f001b014867867dc787ef5",
+                          True: "ab1840bab94b88507541e616f1eed1e0",
+                          "skew": "13284cf4adaf3785f2f85244a52fa7d2"}
     _FLOAT = re.compile(rb"[-+]?\d+\.\d*(?:[eE][-+]?\d+)?|[-+]?\d+[eE][-+]?\d+")
-    _STRUCT_SIZE = re.compile(rb"(check_compiler_size\(sizeof\(struct [A-Za-z_0-9]+\),)\d+")
+    _ABI_SIZE = re.compile(rb"(check_compiler_size\(sizeof\([^)]*\),)\d+")
 
     class _P(Problem):
         def __init__(self, byparts):
@@ -665,7 +666,7 @@ def test_the_refactor_generates_the_same_code_when_gcl_is_off():
 
         floats = [float(m.group(0)) for m in _FLOAT.finditer(text)]
         numbers = hashlib.md5("|".join("%.12g" % v for v in floats).encode()).hexdigest()
-        portable = _STRUCT_SIZE.sub(rb"\1<SIZE>", text)
+        portable = _ABI_SIZE.sub(rb"\1<SIZE>", text)
         canonical = hashlib.md5(
             _FLOAT.sub(lambda m: ("%.12g" % float(m.group(0))).encode(), portable)).hexdigest()
         if canonical != expected_canonical[byparts]:

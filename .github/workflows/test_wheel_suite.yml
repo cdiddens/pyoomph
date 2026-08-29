@@ -246,7 +246,13 @@ jobs:
           export CIBW_ARCHS="AMD64"
           export CIBW_BUILD_FRONTEND="build"
           export CIBW_ENVIRONMENT_WINDOWS="CC=gcc CXX=g++ CXXFLAGS='-static-libgcc -static-libstdc++' LDFLAGS='-static-libgcc -static-libstdc++' PYOOMPH_GINAC_INCLUDE_DIR=${PREBUILT_WIN}/include PYOOMPH_GINAC_LIB_DIR=${PREBUILT_WIN}/lib PYOOMPH_CLN_INCLUDE_DIR=${PREBUILT_WIN}/include PYOOMPH_CLN_LIB_DIR=${PREBUILT_WIN}/lib"
-          export CIBW_REPAIR_WHEEL_COMMAND_WINDOWS="delvewheel repair --add-path C:/msys64/ucrt64/bin -w {dest_dir} {wheel}"
+          # The copy is appended to the repair command because that is the last moment the wheel
+          # exists in a known place: cibuildwheel puts it in --output-dir only after its tests pass,
+          # and deletes its own temp before the job's later steps run, so the rescue step downstream
+          # found nothing under RUNNER_TEMP on a failing job. %GITHUB_WORKSPACE% is expanded by cmd,
+          # which is what runs this.
+          mkdir -p wheelhouse
+          export CIBW_REPAIR_WHEEL_COMMAND_WINDOWS="delvewheel repair --add-path C:/msys64/ucrt64/bin -w {dest_dir} {wheel} && copy /Y \"{dest_dir}\\*.whl\" \"%GITHUB_WORKSPACE%\\wheelhouse\\\""
           # See the Tk donor step above. Runs in the test venv, so the script copies into
           # sys.base_prefix; it never fails, and without it the GUI test simply skips as before.
           TK_DONOR="$(dirname "$(cygpath -m '${{ steps.tkdonor.outputs.python-path }}')")"
@@ -288,6 +294,8 @@ jobs:
                   print("rescuing", found[0])
                   shutil.copy(found[0], "wheelhouse")
               else:
+                  # Windows copies its wheel out at repair time instead (see the build step): by the
+                  # time this runs, cibuildwheel has deleted the temp it was sitting in.
                   print("no wheel found under", temp)
           print(os.listdir("wheelhouse"))
           PYEOF
