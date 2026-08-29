@@ -225,6 +225,7 @@ if __name__ == "__main__":
 | `evaluate_in_past(expr)` | Value of `expr` at the previous timestep (e.g. for error estimators). |
 | `time_scheme("BDF1"/"BDF2"/"TPZ"/"MPT", expr)` | Wrap a residual term to use a specific time-stepping scheme for that term. |
 | `subexpression(expr)` | Compute a shared sub-expression once in the generated C and reuse it (also caches its derivatives). Wrap any moderately expensive repeated term. |
+| `piecewise_geq0(cond, a, b)` | The two-branch switch: `a` where `cond >= 0`, `b` elsewhere. **Python comparisons and `if` do not work on expressions** (`t < 2*second` raises `TypeError`), and there is no `conditional(...)`; write `a < b` as `piecewise_geq0(b - a, ...)`. See [`agents/examples.md`](agents/examples.md) §0 for ramps and switches. |
 | Elementary math | `sin`, `cos`, `exp`, `log`, `square_root` (**not** `sqrt`), `absolute`, `signum`, `heaviside`, `pi`, `minimum`/`maximum`, `rational_num(n,d)`. |
 | Tensor helpers | `identity_matrix`, `transpose`, `trace`, `determinant`, `inverse_matrix`, `matproduct`. |
 

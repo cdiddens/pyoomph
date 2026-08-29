@@ -258,8 +258,10 @@ resumed. See `docs/source/tutorial/advstab/bifgui.rst`.
 ## 2. Custom (non-symbolic / piecewise) C code in a weak form
 
 Most physics is expressed as pure GiNaC `Expression`s and differentiated
-automatically. When a term is not representable that way — piecewise/branching
-functions, calls into an external numerical routine, or anything needing manual
+automatically. A *simple* branch does not need this section at all: use the symbolic
+`piecewise_geq0(cond, iftrue, iffalse)` (with `heaviside`/`minimum`/`maximum`), see
+[`examples.md`](examples.md) §0. When a term is genuinely not representable that way — many
+branches, a call into an external numerical routine, a table lookup, or anything needing manual
 control over the generated C — use `CustomMultiReturnExpression`
 (`pyoomph/expressions/cb.py`), the base used internally for e.g. safe division, tensor
 inversion/exponential, spline interpolation, UNIFAC activity coefficients, and

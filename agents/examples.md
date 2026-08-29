@@ -20,6 +20,49 @@ For bifurcation/stability, custom C code, DG, and ALE-internals recipes, see
 | 6 | Combined spatial + temporal adaptivity | `SpatialErrorEstimator`, `run(..., spatial_adapt=1, temporal_error=...)` |
 | 7 | Save and resume a simulation | `save_state`/`load_state` |
 
+## 0. Conditionals, ramps and switches
+
+**Python's comparison operators and `if` do not work on symbolic expressions.** `t < 2*second`
+raises `TypeError: '<' not supported between instances of Expression and Expression`, and so
+does anything that would branch on it (`if`, `min`/`max`, `numpy.where`, a ternary). There is
+no `conditional(...)` function — a model that writes one has invented it.
+
+The symbolic two-branch switch is **`piecewise_geq0(cond, iftrue, iffalse)`**: it evaluates
+`iftrue` where `cond >= 0` and `iffalse` where `cond < 0`. Only the *sign* of `cond` matters, so
+its units are arbitrary and divided out; `iftrue` and `iffalse` must agree in units, and a bare
+`0` is accepted for either branch whatever the other one carries. A mismatch is not caught when
+you build the expression but at setup, as *"Nonmatching units in the two branches of
+piecewise_geq0(...)"*.
+
+So a velocity that ramps smoothly from rest over `T_ramp` and is then held constant is
+
+```python
+t = var("time")                                  # dimensional: carries seconds
+T_ramp = 2*second
+ramp = piecewise_geq0(T_ramp - t, (1 - cos(pi*t/T_ramp))/2, 1)   # 0 -> 1, then 1
+eqs += DirichletBC(velocity_x=U0*ramp) @ "inlet"
+```
+Note the condition is written as a **difference**, `T_ramp - t`, which is non-negative exactly
+while `t <= T_ramp`. That is the mechanical translation of any comparison: `a < b` becomes
+`piecewise_geq0(b - a, ..., ...)`.
+
+Related building blocks, all in `pyoomph.expressions`:
+
+| | |
+|---|---|
+| `piecewise_geq0(cond, iftrue, iffalse)` | the general two-branch switch |
+| `heaviside(x)` | `1` for `x>0`, `0` for `x<0`, `1/2` at `0` — a switch between `0` and `1`, so `heaviside(T_ramp - t)` is "still ramping" |
+| `minimum(a, b)` / `maximum(a, b)` | a linear ramp needs no branch at all: `minimum(t/T_ramp, 1)` |
+| `absolute(x)`, `signum(x)` | `signum` is `+1`/`-1`/`0`; combinations of these build most masks |
+
+Prefer whichever is smoothest. A branch is a kink in the residual, and the Newton solver has to
+step across it; `minimum(t/T_ramp, 1)` is C0, the cosine ramp above is C1, and a `tanh` of a
+scaled argument is C-infinity and often the better choice if convergence suffers.
+
+These are all *symbolic*, so they differentiate and compile like anything else. Reach for
+`CustomMultiReturnExpression` (see [`advanced.md`](advanced.md) §2) only when the branch cannot
+be written this way — many branches, a call into external code, or a table lookup.
+
 ## 1. 2D boundary value problem: named boundaries, observables, parameter scan
 
 A `NavierStokesEquations` problem on a square, with all boundaries pinned except a
