@@ -27,4 +27,5 @@
      tutorial/parallel.rst
      tutorial/miscsettings.rst
      tutorial/math.rst
+     tutorial/vibecoding.rst
      tutorial/references.rst
