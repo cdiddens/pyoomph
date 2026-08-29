@@ -62,7 +62,13 @@ mkdir -p "${WORKDIR}"
 # Cython 3.1, so that build ends in "Compiler crash in ExpressionWriter". Installing 3.0.x
 # satisfies its "Cython >= 3.0.0" and stops it fetching anything. Droppable once PETSc is bumped
 # past 3.23, where cyautodoc.py no longer uses that API.
-"${PYTHON}" -m pip install --upgrade --quiet numpy setuptools "cython<3.1"
+#
+# setuptools is pinned below 81 for the same kind of reason: petsc4py's conf/confpetsc.py does
+# "from distutils.util import execute" - which on 3.12 is setuptools' shim - and calls it with
+# dry_run=. Measured here: 80.9.0 still takes that argument, 81.0.0 does not, so from 81 on the
+# build dies with "execute() got an unexpected keyword argument 'dry_run'" after having compiled
+# and linked the extension. Droppable together with the Cython pin on a PETSc bump.
+"${PYTHON}" -m pip install --upgrade --quiet numpy "setuptools<81" "cython<3.1"
 
 fetch() { # url sha-unchecked-tarball -> extracted dir name on stdout
   local url="$1" tarball="${WORKDIR}/$(basename "$1")"
