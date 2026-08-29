@@ -274,6 +274,15 @@ restored, so an animated frame drew every ordinary field from the perturbed stat
 perturbed window (§4.1), so the two would have disagreed; `_get_mesh_data` now materialises them before
 restoring, and both are right.
 
+The same request scope carries the **tracers** of a plot, for the same reason: a particle belongs to
+the process holding its element, so `MatplotLibTracers` -- which reads `mesh.get_tracers()` -- drew
+whatever happened to be on the drawing rank, silently, since a scatter plot of a subset looks
+perfectly reasonable. `gather_global_tracers` returns a `GatheredTracers` with the same
+`get_positions`/`get_tags`/`get_ids`/`get_history` API a collection has, so the drawing code did not
+change; the underlying gathers are `MPI_Allgatherv` sorted by particle identity. Trails need the
+position history, and the only gather that carries it is the checkpoint one (`_save_state(True)`),
+whose packing is decoded there.
+
 `tests/test_mpi_eigendynamics.py` covers it at 2 and 3 ranks: the collective called symmetrically, the
 same thing through the request scope (including a plain request afterwards that must return exactly
 what the plain request before it did), the whole animation through
@@ -614,10 +623,11 @@ Left open:
 
 1. **Operators** (`MeshDataCombineWithEigenfunction`, the extrusions) still raise `NotImplementedError`
    together with `global_mesh=True`; see §3.5 for the `required_cache_keys` design that resolves it.
-2. ~~**Eigendynamics animations**~~ DONE (29th August 2026): the perturbation is part of the request
-   now, so every rank applies it -- §3.4c. What is still rank-local in an animated plot is the
-   TRACERS: `MatplotLibTracers` reads `mesh.get_tracers` directly, so only rank 0's partition's
-   particles are drawn, on an animated plot as on any other.
+2. ~~**Eigendynamics animations**~~ and ~~**tracer plots**~~ DONE (29th August 2026): both are
+   requests now, so every rank takes part -- §3.4c. The one thing a distributed tracer plot still
+   cannot show is the fading trail of a DEAD particle: those are deliberately not gathered
+   (`dev_docs/tracers.md`), so a particle that has left the domain loses its trail at once instead of
+   over the history window.
 3. **Remeshing** still works on per-rank data; switching `RemeshWhen` and the boundary identification
    to the merged mesh is the next consumer.
 4. **Coordinate fallback** (§5.3) is not implemented: every distributed mesh met so far has the shared

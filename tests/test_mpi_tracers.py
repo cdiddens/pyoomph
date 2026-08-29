@@ -222,3 +222,36 @@ def test_state_file_is_partition_independent(write_nproc, read_nproc, tmp_path):
     assert min(len(v) for v in wh.values()) >= 6, "no history was recorded - the check is vacuous"
     for k in wh:
         assert rh[k] == wh[k], "the history of particle " + k + " did not survive the state file"
+
+
+@pytest.mark.parametrize("nproc", [2, 3, 4])
+def test_a_tracer_plot_draws_the_particles_of_every_process(nproc, tmp_path):
+    """A plotted tracer collection must be the whole cloud, not the drawing process' share of it.
+
+    MatplotLibTracers read the LOCAL collection, and under run_with_global_mesh_data only rank 0 draws,
+    so a distributed run drew whatever particles happened to be on rank 0 - silently, since a scatter
+    plot of a subset looks perfectly reasonable. It now goes through gather_global_tracers, which is a
+    collective and is therefore served by the other ranks like a merge request.
+
+    The worker records what the plot part holds instead of drawing it, half way down the channel where
+    the particles are spread over the partitions.
+    """
+    serial = _run(1, tmp_path, "plot")[0]["plotted"]
+    per_rank = _run(nproc, tmp_path, "plot")
+    root = [r for r in per_rank if r["rank"] == 0][0]["plotted"]
+    assert root["mesh_distributed"] is True
+
+    local_counts = [r["plotted"]["nlocal_at_plot"] for r in per_rank]
+    assert sum(local_counts) == serial["n"], \
+        "the %d particles are spread as %r over the processes, which does not add up" % (serial["n"], local_counts)
+    assert min(local_counts) < serial["n"], \
+        "one process held every particle, so this run cannot tell a gathered plot from a local one"
+
+    assert root["n"] == serial["n"], "drew %d particles, serially %d" % (root["n"], serial["n"])
+    assert root["ids"] == serial["ids"]
+    assert root["x_sum"] == pytest.approx(serial["x_sum"], abs=_ATOL)
+    assert root["y_sum"] == pytest.approx(serial["y_sum"], abs=_ATOL)
+    # The trails come from the position history, which only the owner of a particle has: they are
+    # gathered through the checkpoint path, so this is the assertion that covers that decoding.
+    assert root["trail_samples"] == serial["trail_samples"], \
+        "the trails hold %d samples, serially %d" % (root["trail_samples"], serial["trail_samples"])

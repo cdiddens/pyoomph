@@ -2419,7 +2419,15 @@ class MatplotLibTracers(MatplotLibPart):
     def add_to_plot(self):
         assert self.tracer_name is not None
         assert self.mesh is not None
-        col=self.mesh.get_tracers(self.tracer_name)
+        from ..meshes.meshdatamerge import needs_merging
+        if needs_merging(self.mesh):
+            # A particle belongs to the process holding the element it sits in, so this rank's
+            # collection is a fraction of the cloud. Gather it - collective, and served by the other
+            # ranks of the plot scope exactly like a merge request.
+            from ..meshes.meshdatamerge import gather_global_tracers
+            col=gather_global_tracers(self.mesh,self.tracer_name,with_history=self.trail)
+        else:
+            col=self.mesh.get_tracers(self.tracer_name)
         assert col is not None
         if self.invisible:
             return

@@ -344,6 +344,81 @@ def merge_perturbed_global_mesh_data(msh: AnySpatialMesh, key: MeshDataCacheKey,
     return _merge_on_root(payloads, msh, key)
 
 
+class GatheredTracers:
+    """Every process's tracer particles, in the API the plot code already uses for a local collection.
+
+    ``get_positions``/``get_tags``/``get_ids``/``get_history`` behave as
+    :py:class:`TracerCollection`'s do, so a consumer does not have to know which of the two it holds.
+    The data is sorted by particle identity and therefore identical on every process and independent of
+    the partitioning.
+
+    ``get_dead_ids`` is always empty: a dead particle -- one that has left the domain but whose trail is
+    still fading -- is deliberately not gathered (dev_docs/tracers.md), so on a distributed mesh those
+    last trails are the one thing a plot cannot show.
+    """
+
+    def __init__(self, positions, tags, ids, histories):
+        self._positions, self._tags, self._ids, self._histories = positions, tags, ids, histories
+
+    def get_positions(self): return self._positions
+
+    def get_tags(self): return self._tags
+
+    def get_ids(self): return self._ids
+
+    def get_dead_ids(self): return []
+
+    def get_history(self, tid: int):
+        return self._histories.get(int(tid))
+
+
+def gather_global_tracers(msh: AnySpatialMesh, tracer_name: str, with_history: bool = False) -> GatheredTracers:
+    """All particles of one tracer collection, gathered from every process.
+
+    Collective, and answered identically everywhere -- the underlying gathers are ``MPI_Allgatherv``
+    plus a sort by identity. Like the merges above it can be reached either by every rank calling it,
+    or by rank 0 asking inside a :py:func:`run_with_global_mesh_data` scope while the others serve.
+
+    A tracer collection is rank-local: a particle belongs to the process whose element it sits in, and
+    it migrates as it advects. Drawing ``get_positions()`` on the plotting rank therefore shows that
+    rank's partition of the particles and nothing else, which is what this replaces.
+    """
+    col = msh.get_tracers(tracer_name)
+    if col is None:
+        raise RuntimeError("There is no tracer collection '" + tracer_name + "' on mesh " + msh.get_full_name())
+    if needs_merging(msh) and _request_scope_depth > 0 and get_mpi_rank() == 0:
+        _broadcast_scope_request("tracers", _scope_name_of(msh), msh.get_full_name(),
+                                 (tracer_name, bool(with_history)))
+    dim = int(col.get_coordinate_dimension())
+    if not with_history:
+        positions = numpy.asarray(col.gather_positions(), dtype=float).reshape(-1, dim)
+        return GatheredTracers(positions, numpy.asarray(col.gather_tags()),
+                               numpy.asarray(col.gather_ids()), {})
+    # The trails need the position history, and the only gather that carries it is the checkpoint one.
+    # Its layout: the id array is (id, tag, nsamples) per particle, and the position array is one row
+    # of (coordinates, payloads) per particle followed by all the history samples, each (time, coords).
+    flat, idtags = col._save_state(True)
+    flat = numpy.asarray(flat, dtype=float)
+    idtags = numpy.asarray(idtags).reshape(-1, 3)
+    n = int(idtags.shape[0])
+    if n == 0:
+        return GatheredTracers(numpy.zeros((0, dim)), numpy.zeros(0, dtype=int), numpy.zeros(0, dtype=int), {})
+    hstride = 1 + dim
+    counts = idtags[:, 2].astype(int)
+    # The row stride is coordinates plus payloads, and the number of payloads is not exposed - derive
+    # it from what is left once the history block is accounted for.
+    stride = int((len(flat) - int(counts.sum()) * hstride) // n)
+    positions = flat[:n * stride].reshape(n, stride)[:, :dim]
+    histories: dict[int, Any] = {}
+    offset = n * stride
+    for i in range(n):
+        k = int(counts[i])
+        if k:
+            histories[int(idtags[i, 0])] = flat[offset:offset + k * hstride].reshape(k, hstride)
+        offset += k * hstride
+    return GatheredTracers(positions, idtags[:, 1], idtags[:, 0], histories)
+
+
 # --- letting rank 0 ask on its own --------------------------------------------------------------
 #
 # Plot code is written without any notion of rank and only rank 0 should draw, so the other ranks
@@ -355,25 +430,32 @@ _request_scope_depth = 0
 _scope_problems: dict[str, "Problem"] = {}
 
 
-def _broadcast_request(msh: AnySpatialMesh, key: MeshDataCacheKey, *,
-                       perturbation: "tuple[int, complex] | None" = None) -> None:
-    comm = get_mpi_world_comm()
-    assert comm is not None
+def _scope_name_of(msh: AnySpatialMesh) -> str:
+    """The name this mesh's problem goes by in the surrounding request scope."""
     problem = msh.get_problem()
     for name, p in _scope_problems.items():
         if p is problem:
-            break
-    else:
-        raise RuntimeError("Global mesh data was requested for a mesh of a problem that the surrounding "
-                           "run_with_global_mesh_data call does not know about, so the other ranks cannot "
-                           "resolve the request")
+            return name
+    raise RuntimeError("Global mesh data was requested for a mesh of a problem that the surrounding "
+                       "run_with_global_mesh_data call does not know about, so the other ranks cannot "
+                       "resolve the request")
+
+
+def _broadcast_scope_request(kind: str, problem_name: str, mesh_name: str, payload: Any) -> None:
+    """Announce one request to the ranks in the serve loop. Every request is (kind, problem, mesh, payload)."""
+    comm = get_mpi_world_comm()
+    assert comm is not None
+    comm.bcast((kind, problem_name, mesh_name, payload), root=0)
+
+
+def _broadcast_request(msh: AnySpatialMesh, key: MeshDataCacheKey, *,
+                       perturbation: "tuple[int, complex] | None" = None) -> None:
+    name = _scope_name_of(msh)
     kwargs = key.as_kwargs()
     kwargs.pop("operator")  # refused for global data anyway, and would not survive the trip
-    request: tuple[Any, ...] = (name, msh.get_full_name(), kwargs)
-    if perturbation is not None:
-        # Appended rather than always present, so a plain request stays exactly what it always was.
-        request = request + (perturbation,)
-    comm.bcast(request, root=0)
+    payload: Any = kwargs if perturbation is None else (kwargs, perturbation)
+    _broadcast_scope_request("merge" if perturbation is None else "merge_perturbed",
+                             name, msh.get_full_name(), payload)
 
 
 def _serve_global_mesh_data_requests() -> None:
@@ -387,16 +469,17 @@ def _serve_global_mesh_data_requests() -> None:
             request = comm.bcast(None, root=0)
             if request is None:
                 return
-            # Unpacked by length, not by arity: a perturbed request carries one element more.
-            problem_name, mesh_name, kwargs = request[0], request[1], request[2]
-            perturbation = request[3] if len(request) > 3 else None
-            problem = _scope_problems[problem_name]
-            mesh = problem.get_mesh(mesh_name)
-            cache_key = MeshDataCacheKey.create(**kwargs)
-            if perturbation is None:
-                merge_global_mesh_data(mesh, cache_key)
+            kind, problem_name, mesh_name, payload = request
+            mesh = _scope_problems[problem_name].get_mesh(mesh_name)
+            if kind == "merge":
+                merge_global_mesh_data(mesh, MeshDataCacheKey.create(**payload))
+            elif kind == "merge_perturbed":
+                kwargs, (index, factor) = payload
+                merge_perturbed_global_mesh_data(mesh, MeshDataCacheKey.create(**kwargs), index, factor)
+            elif kind == "tracers":
+                gather_global_tracers(mesh, payload[0], with_history=payload[1])
             else:
-                merge_perturbed_global_mesh_data(mesh, cache_key, perturbation[0], perturbation[1])
+                raise RuntimeError("Unknown global mesh data request '" + str(kind) + "'")
     finally:
         _request_scope_depth -= 1
 

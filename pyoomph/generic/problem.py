@@ -2403,8 +2403,8 @@ class Problem(_pyoomph.Problem):
         
         Works on a mesh distributed with ``--distribute`` as well: the perturbation that makes a frame
         is applied by every process, not by the drawing one alone (see
-        ``pyoomph.meshes.meshdatamerge.merge_perturbed_global_mesh_data``). Tracers are the exception -
-        they are not merged, so only the drawing process' partition of them appears.
+        ``pyoomph.meshes.meshdatamerge.merge_perturbed_global_mesh_data``), and plotted tracers are gathered
+        from all processes as well.
 
         """
         if len(self.get_last_eigenvalues())<eigenvector+1:

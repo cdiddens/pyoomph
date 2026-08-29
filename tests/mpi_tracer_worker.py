@@ -134,6 +134,11 @@ def run_case(mode, outdir, statefile=None, nsteps=55, dt=0.05):
     # was not and another process took the particle over. The second is what says the collective
     # reinjection round was actually needed, which the positions alone cannot distinguish.
     nwrapped, nreinjected = 0, 0
+    if mode == "plot":
+        # Half the channel: the particles are then spread over the partitions rather than bunched up
+        # at the outlet, so the drawing rank really does hold only some of them and the gather has
+        # something to do. The test asserts that (nlocal_at_plot < nglobal on some rank).
+        nsteps = nsteps // 2
     for _ in range(nsteps):
         p.solve(timestep=dt)
         nlocal_seen.add(int(tr.nlocal()))
@@ -144,6 +149,43 @@ def run_case(mode, outdir, statefile=None, nsteps=55, dt=0.05):
     if mode == "save":
         p.save_state(statefile)
         hist_at_state = local_histories(tr)
+
+    plotted = None
+    if mode == "plot":
+        # What a tracer plot would draw. MatplotLibTracers reads the collection of the drawing rank,
+        # which is a fraction of the cloud on a distributed mesh, so it now gathers instead - and the
+        # gather has to be reached by every rank, i.e. it goes through the plot's request scope.
+        from pyoomph.output.plotting import MatplotlibPlotter
+
+        drawn = {}
+
+        class _RecordingPlotter(MatplotlibPlotter):
+            def define_plot(self):
+                part = self.add_plot("domain/tracers")
+                part.trail = True
+                part.invisible = True  # record what it holds; drawing it needs a figure we do not want
+                col = part.mesh.get_tracers(part.tracer_name)
+                from pyoomph.meshes.meshdatamerge import needs_merging, gather_global_tracers
+                if needs_merging(part.mesh):
+                    col = gather_global_tracers(part.mesh, part.tracer_name, with_history=True)
+                pos = numpy.asarray(col.get_positions(), dtype=float)
+                drawn["n"] = int(len(pos))
+                drawn["x_sum"] = float(numpy.sum(pos[:, 0])) if len(pos) else 0.0
+                drawn["y_sum"] = float(numpy.sum(pos[:, 1])) if len(pos) else 0.0
+                drawn["ids"] = sorted(int(i) for i in col.get_ids())
+                drawn["trail_samples"] = int(sum(len(numpy.asarray(col.get_history(int(i))))
+                                                 for i in col.get_ids()
+                                                 if col.get_history(int(i)) is not None))
+
+        plotter = _RecordingPlotter()
+        plotter._problem = p
+        plotter._named_problems[""] = p
+        # What this rank holds by itself, i.e. what the plot used to draw
+        local_at_plot = int(tr.nlocal())
+        plotter.plot()
+        plotted = drawn if get_mpi_rank() == 0 else {}
+        plotted["nlocal_at_plot"] = local_at_plot
+        plotted["mesh_distributed"] = bool(p.get_mesh("domain").is_mesh_distributed())
 
     end = tr.gather_positions()
     ids = list(tr.gather_ids())
@@ -175,12 +217,13 @@ def run_case(mode, outdir, statefile=None, nsteps=55, dt=0.05):
         "history_at_state": hist_at_state,
         "nwrapped": nwrapped,
         "nreinjected": nreinjected,
+        "plotted": plotted,
     }
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["run", "corner", "save", "load", "periodic"])
+    ap.add_argument("mode", choices=["run", "corner", "save", "load", "periodic", "plot"])
     ap.add_argument("--outdir", default="mpi_tracer_out")
     ap.add_argument("--statefile", default=None)
     ap.add_argument("--nsteps", type=int, default=55)
