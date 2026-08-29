@@ -23,6 +23,8 @@ name: Run the tutorial scripts on a fresh wheel
 #     the harness runs with --no-petsc and every eigen-problem falls back to the scipy solver. That
 #     is exactly what a `pip install pyoomph` user gets, so it is the right thing to test HERE; the
 #     complex-PETSc pass stays with the nightly on a real machine (see CLAUDE.md).
+#     Eleven scripts spell out set_eigensolver("slepc"); the harness reports those as skips for a
+#     missing optional package, exactly as it does for preCICE.
 #   * preCICE, shapely and the interactive bifurcation GUI. The harness reports these as skips, by
 #     name, and they are listed in the summary table.
 #
@@ -54,6 +56,11 @@ on:
         type: choice
         default: all
         options: [all, linux, macos, windows, linux-and-macos]
+      script_timeout:
+        description: Kill any single script that runs longer than this many seconds (0 waits forever)
+        required: false
+        type: string
+        default: "1800"
       skip_folders:
         description: Bundle folders to skip, space separated (e.g. "PreCICE_Coupling Plotting_Interface")
         required: false
@@ -329,12 +336,13 @@ jobs:
           # pyoomph, and running it with the venv's python keeps the two consistent anyway.
           QUICK: ${{ inputs.quick_test && '--quick-test' || '' }}
           SKIPS: ${{ inputs.skip_folders }}
+          TIMEOUT: ${{ inputs.script_timeout }}
         run: |
           set -o pipefail
-          # Not `set -e`: a non-zero exit here must not skip the summary step, and the harness
-          # exits 0 regardless - the verdict comes from the report below.
+          # The harness exits 0 whatever happens - the verdict comes from the report in the next
+          # step - so nothing here can hide a failing script.
           "${TUTORIAL_PYTHON}" -u citools/test_all_tutorial_scripts.py \
-            --no-petsc ${QUICK} \
+            --no-petsc ${QUICK} --timeout "${TIMEOUT:-0}" \
             --report-json tutorial_report.json \
             ${SKIPS} 2>&1 | tail -n 4000
 
@@ -345,6 +353,7 @@ jobs:
           MPLBACKEND: Agg
           QUICK: ${{ inputs.quick_test && '--quick-test' || '' }}
           SKIPS: ${{ inputs.skip_folders }}
+          TIMEOUT: ${{ inputs.script_timeout }}
         run: |
           set -o pipefail
           cd "$(cygpath -u "$GITHUB_WORKSPACE")"
@@ -353,7 +362,7 @@ jobs:
           # fall back to tccbox (or fail outright).
           export PATH="/ucrt64/bin:$PATH"
           "$(cygpath -u "${TUTORIAL_PYTHON}")" -u citools/test_all_tutorial_scripts.py \
-            --no-petsc ${QUICK} \
+            --no-petsc ${QUICK} --timeout "${TIMEOUT:-0}" \
             --report-json tutorial_report.json \
             ${SKIPS} 2>&1 | tail -n 4000
 
