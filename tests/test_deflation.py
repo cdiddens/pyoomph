@@ -328,3 +328,81 @@ def test_refuses_static_condensation(tmp_path):
         p.use_static_condensation = True
         with pytest.raises(RuntimeError, match="static condensation"):
             p.set_deflation_operator(DeflationOperator())
+
+
+# ------------------------------------------------- the perturbation is a field, not dof entries
+
+
+class _TwoFieldPoisson(Equations):
+    """Two coupled fields on a square, so that a dof-ordering permutation has something to permute."""
+
+    def define_fields(self):
+        self.define_scalar_field("u", "C2")
+        self.define_scalar_field("v", "C2")
+
+    def define_residuals(self):
+        u, ut = var_and_test("u")
+        v, vt = var_and_test("v")
+        self.add_residual(weak(grad(u), grad(ut)) - weak(v, ut)
+                          + weak(grad(v), grad(vt)) - weak(1, vt))
+
+
+class _TwoFieldProblem(Problem):
+    def __init__(self, ordering=None):
+        super().__init__()
+        self.ordering = ordering
+
+    def define_problem(self):
+        self += RectangularQuadMesh(N=4)
+        eqs = _TwoFieldPoisson()
+        for b in ["left", "right", "top", "bottom"]:
+            eqs += DirichletBC(u=0, v=0) @ b
+        self += eqs @ "domain"
+        if self.ordering is not None:
+            self.dof_ordering = self.ordering
+
+
+def _perturbation_by_place(p, amplitude=0.5, seed=3):
+    """The perturbation keyed by what each dof IS -- its type and its position -- not by its index."""
+    pert = p._deflation_random_perturbation(amplitude, numpy.random.default_rng(seed))
+    coords = p._dof_coordinates()
+    types, names = p.get_dof_description()
+    out = {}
+    for i in range(len(pert)):
+        key = (names[types[i]] if types[i] >= 0 else "?",
+               # None, not nan, for a direction the dof has no extent in: nan is never equal to
+               # itself, so a key holding one would never match the other numbering's.
+               tuple(None if numpy.isnan(c) else round(float(c), 9) for c in coords[i]))
+        assert key not in out, "two dofs share a place and a type: %r" % (key,)
+        out[key] = float(pert[i])
+    return out
+
+
+def test_the_random_perturbation_follows_the_nodes_not_the_dof_numbering(tmp_path):
+    """The property --distribute needs, tested serially by renumbering the dofs instead.
+
+    A deflated search is a sequence of random perturbations, so a perturbation drawn in dof-index
+    space makes the search depend on the numbering -- and distribute() renumbers. Deflated
+    continuation over the pitchfork PDE really did find three branches serially and one under
+    --distribute from the same seed because of it. NodalBlockOrdering permutes the numbering here
+    without touching the geometry, which is the same test without needing mpirun.
+    """
+    from pyoomph.generic.dof_ordering import NodalBlockOrdering
+    plain, permuted = {}, {}
+    order = [None, NodalBlockOrdering("domain/v", "domain/u")]
+    seqs = []
+    for which, o in enumerate(order):
+        with _TwoFieldProblem(ordering=o) as p:
+            p.set_output_directory(str(tmp_path / ("order%d" % which)))
+            p.quiet()
+            p.initialise()
+            p.solve()
+            types, names = p.get_dof_description()
+            seqs.append([names[t] if t >= 0 else "?" for t in types])
+            (plain if o is None else permuted).update(_perturbation_by_place(p))
+    assert seqs[0] != seqs[1], "the ordering did not renumber anything, so this proves nothing"
+    assert set(plain) == set(permuted)
+    for key, value in plain.items():
+        assert value == pytest.approx(permuted[key], abs=1e-14), \
+            "dof %r was perturbed by %r under one numbering and %r under the other" \
+            % (key, value, permuted[key])

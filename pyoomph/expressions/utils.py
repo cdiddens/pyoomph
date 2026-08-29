@@ -90,6 +90,21 @@ class DeterministicRandomField(CustomMathExpression):
 
   def eval(self ,arg_array:NPFloatArray)->float:
     return self.interp((arg_array -self.min_x ) *self.coord_denom)[0] #type:ignore
+
+  def evaluate_at(self ,points:NPFloatArray)->NPFloatArray:
+    """Evaluate the field at many points at once.
+
+    Args:
+      points: array of shape ``(N,dim)``, one point per row.
+
+    Returns:
+      The ``N`` field values. Points outside ``[min_x,max_x]`` give 0, as for :py:meth:`eval`.
+    """
+    pts=numpy.asarray(points ,dtype=float)
+    dim=int(numpy.atleast_1d(self.min_x).size) # min_x is a numpy array after __init__, but not by declaration
+    if pts.ndim!=2 or pts.shape[1]!=dim:
+      raise RuntimeError("Expected an array of shape (N,"+str(dim)+"), got "+str(pts.shape))
+    return numpy.asarray(self.interp((pts -self.min_x ) *self.coord_denom)) #type:ignore
 		
 		
 		

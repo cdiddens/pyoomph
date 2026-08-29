@@ -48,11 +48,11 @@
 # Everything compared across the two is numbering-independent -- solution counts and mesh integrals
 # -- because distribute() renumbers the dofs.
 #
-# One property is deliberately NOT asserted across --distribute: that the same seed explores the same
-# sequence of perturbations. It cannot, because the perturbation is drawn in dof-index space and
-# global index i is a different node under a different partition. The worker therefore drives the
-# search with the leading EIGENVECTOR as well, which is a field and means the same thing whatever the
-# partition, and every configuration then finds the whole solution set.
+# The same seed explores the same sequence of perturbations in every configuration, and the branch
+# counts and lengths are asserted across --distribute because of it: the perturbation is drawn as a
+# random field over the node coordinates (Problem._deflation_random_perturbation), not from dof
+# indices, so renumbering the dofs does not change it. While it was drawn from dof indices, deflated
+# continuation found three branches serially and one under --distribute from the same seed.
 
 import json
 import os

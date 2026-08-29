@@ -200,7 +200,7 @@ absence, or the missing file was checked in this tree today.
 | **Rank-local linear-solver failure under `--distribute`** is declined on purpose; the natural place for the agreement is `throw_solver_failure_as_newton_error`. | `adaptive_resolve_recovery.md` §8 | CONFIRMED |
 | **Mesh-data operators + `global_mesh=True`**, and `create_eigendynamics_animation` on a distributed mesh. | `mesh_data_cache.md` §10 | CONFIRMED — `NotImplementedError` at `meshdatacache.py:681` |
 | **`Problem.load_balance()` called by hand** dies in `generate_interface_elements` ("bulkmesh was not set") and then segfaults. Pre-existing, reproduces with no macro elements at all. | `macro_elements.md` §8.3, §11 | open, not diagnosed |
-| **The deflation perturbation is not partition-independent** (drawn from dof indices, `numpy.random.default_rng`). `DeterministicRandomField` over node coordinates is the fix. | `deflation.md` §8 | CONFIRMED — not needed for correctness |
+| ~~**The deflation perturbation is not partition-independent**~~ DONE (2026-08-29): drawn as a `DeterministicRandomField` per dof type over the node coordinates, so serial, replicated and `--distribute` explore the same search. | `deflation.md` §5 | FIXED |
 | **Why the broadcast merge in the Z2 estimator disagreed in the third significant digit.** Unexplained; the fix was to delete the split. Three suspects listed, none excluded. | `replicated_mpi_correctness.md` §6 | CONFIRMED open — the interesting one, because reordered summation cannot produce that difference |
 
 ### 3.2 Adaptivity, meshes and geometry

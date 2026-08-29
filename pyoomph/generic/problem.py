@@ -9239,6 +9239,162 @@ class Problem(_pyoomph.Problem):
         return currentdt
     
 
+    def _dof_coordinates(self)->NPFloatArray:
+        """Where every degree of freedom sits in space, as an ``(ndof,3)`` array.
+
+        A dof that has no place -- ODE and global-parameter data, and anything the mesh walk below
+        cannot reach -- is left as ``nan`` in all three columns; a dof of a mesh of lower dimension
+        keeps ``nan`` in the unused columns, so a caller has to look at the finite entries only.
+
+        Element-internal data (a discontinuous pressure, say) is given the centroid of its element:
+        it belongs to the element, and the centroid is the same point however the mesh was cut up.
+
+        On a distributed problem this is collective. A rank only walks its own part of the mesh, so
+        it comes out with holes where somebody else's nodes are, exactly as
+        :py:meth:`get_dof_description` does, and the per-rank answers are merged the same way.
+        """
+        ndof=self.ndof()
+        coords:NPFloatArray=numpy.full((ndof,3),numpy.nan) #type:ignore
+
+        def assign(data,x:list[float]):
+            for vi in range(data.nvalue()):
+                eq=data.eqn_number(vi)
+                if 0<=eq<ndof:
+                    coords[eq,:len(x)]=x
+
+        def process(m:AnyMesh):
+            if isinstance(m,ODEStorageMesh):
+                return
+            for node in m.nodes():
+                x=[node.x(xi) for xi in range(node.ndim())]
+                assign(node,x)
+                assign(node.variable_position_pt(),x)
+            for e in m.elements():
+                if e.ninternal_data()==0:
+                    continue
+                nn=e.nnode()
+                if nn==0:
+                    continue
+                cx=[0.0,0.0,0.0]
+                ndim=0
+                for ni in range(nn):
+                    n=e.node_pt(ni)
+                    ndim=n.ndim()
+                    for xi in range(ndim):
+                        cx[xi]+=n.x(xi)
+                centroid=[cx[xi]/nn for xi in range(ndim)]
+                for di in range(e.ninternal_data()):
+                    assign(e.internal_data_pt(di),centroid)
+            for im in m._interfacemeshes.values():
+                process(im)
+
+        for _,bm in self._meshdict.items():
+            process(bm)
+
+        if self.is_distributed():
+            from .mpi import get_mpi_nproc,get_mpi_elementwise_max
+            if get_mpi_nproc()>1:
+                # Elementwise max is the merge, as in _merge_dof_description_over_ranks. Where two
+                # ranks both know a dof (a halo node) they know the same position, so the max is that
+                # position; where one does not, it contributes the sentinel. It has to be a sentinel
+                # rather than nan, because nan wins every comparison and would erase what the other
+                # rank knew.
+                sentinel=-1e300
+                filled=numpy.where(numpy.isnan(coords),sentinel,coords) #type:ignore
+                merged=numpy.asarray(get_mpi_elementwise_max(filled))
+                coords=numpy.where(merged<=sentinel,numpy.nan,merged) #type:ignore
+        return coords
+
+    def _deflation_random_perturbation(self,amplitude:float,rng:"numpy.random.Generator",resolution:int=12,cache:"dict[str,Any] | None"=None)->NPFloatArray:
+        """A random dof perturbation that does not depend on how the problem is partitioned.
+
+        The drivers used to draw ``(rng.random(ndof)-0.5)*amplitude``, which is reproducible only for
+        a FIXED partition: ``distribute()`` renumbers the dofs, so global index i is a different node
+        at np=2 than at np=3 and the same seed then explores a different search. That is not a
+        cosmetic difference -- deflated continuation over the pitchfork found three branches serially
+        and one under ``--distribute`` with the test's seed, and the other way round with seed 0.
+
+        So the perturbation is drawn as a FIELD instead: one
+        :py:class:`~pyoomph.expressions.utils.DeterministicRandomField` per dof type, over the
+        bounding box of the mesh, evaluated at the coordinates of each dof. Both inputs are
+        partition-independent -- the dof type description is merged over the ranks, and a node's
+        position is its position on whichever rank owns it -- so every configuration draws the same
+        perturbation of the same solution field.
+
+        A smooth interpolated field is also a better search direction than white noise: what a
+        deflated search has to do is leave the basin of the known solution, and the low modes of the
+        problem are where the other branches are.
+
+        Dofs with no place (:py:meth:`_dof_coordinates` returns ``nan`` for them) fall back to an
+        index-drawn value per dof type. Those are ODE and global-parameter dofs, which are replicated
+        rather than partitioned, so their order is partition-independent as well.
+
+        The random field itself costs nothing worth measuring; the mesh walks behind it do (at 65k
+        dofs: 3 ms for the field, 140 ms for :py:meth:`_dof_coordinates` and 19 ms for
+        :py:meth:`get_dof_description`). Pass ``cache``, a dict owned by the caller, to do them once
+        per search rather than once per perturbation - the drivers do. It is dropped whenever the
+        number of dofs changes, and a deflated search cannot renumber without that (adaptation is
+        refused while solutions are known).
+        """
+        from ..expressions.utils import DeterministicRandomField
+        ndof=self.ndof()
+        if ndof==0:
+            return numpy.zeros(0)
+        if cache is None:
+            cache={}
+        if cache.get("ndof")!=ndof:
+            # Everything that depends on the numbering and the geometry rather than on this draw. The
+            # mesh walks dominate the cost by two orders of magnitude, and the per-type index lists
+            # below are what is left once they are gone: computing them per try instead cost more than
+            # the random field itself (11 ms against 4 ms on a 36k-dof 3D problem with 21 dof types).
+            cache.clear()
+            cache["ndof"]=ndof
+            coords=self._dof_coordinates()
+            located=numpy.isfinite(coords).any(axis=1)
+            cache["located_any"]=bool(numpy.any(located))
+            if cache["located_any"]:
+                _types,names=self.get_dof_description()
+                types=numpy.asarray(_types,dtype=numpy.int64)
+                # The directions that actually vary: a 2D mesh leaves the third column nan everywhere,
+                # and a direction of zero extent (a flat interface) would be a degenerate box.
+                active=[d for d in range(3)
+                        if numpy.all(numpy.isfinite(coords[located,d]))
+                        and float(numpy.amax(coords[located,d])-numpy.amin(coords[located,d]))>0.0]
+                cache["min_x"]=[float(numpy.amin(coords[located,d])) for d in active]
+                cache["max_x"]=[float(numpy.amax(coords[located,d])) for d in active]
+                cache["ntypes"]=len(names)
+                blocks=[]
+                # -1 is "the mesh walk did not classify this dof"; here that is a type of its own, not
+                # an error -- those dofs still have to be perturbed.
+                for ti in range(-1,len(names)):
+                    of_type=types==ti
+                    if not numpy.any(of_type):
+                        continue
+                    here=numpy.flatnonzero(of_type&located) if active else numpy.zeros(0,dtype=numpy.int64)
+                    rest=numpy.flatnonzero(of_type&(~located)) if active else numpy.flatnonzero(of_type)
+                    blocks.append((ti,here,coords[here][:,active] if len(here) else None,rest))
+                cache["blocks"]=blocks
+        if not cache["located_any"]:
+            # Nothing is anywhere: a pure ODE problem. There is no field to draw, and the dof order of
+            # ODE data is the same on every rank anyway, so this is the plain draw the drivers used
+            # before -- kept bit-for-bit, so that a seed tuned on an ODE problem still finds what it
+            # found (tests/test_deflation.py pins one).
+            return (rng.random(ndof)-0.5)*amplitude
+        # One seed for this draw, so that successive tries differ and the whole sequence still follows
+        # the driver's seeded generator.
+        seed=int(rng.integers(0,2**31-1))
+        pert:NPFloatArray=numpy.zeros(ndof) #type:ignore
+        for ti,here,pts,rest in cache["blocks"]:
+            if pts is not None and len(here):
+                field=DeterministicRandomField(min_x=cache["min_x"],max_x=cache["max_x"],
+                                               amplitude=amplitude,Nresolution=resolution,
+                                               seed=(seed+ti+1)%(2**31-1))
+                pert[here]=field.evaluate_at(pts)
+            if len(rest):
+                sub=numpy.random.default_rng([seed,ti+1]).random(len(rest))
+                pert[rest]=(sub-0.5)*amplitude
+        return pert
+
     @staticmethod
     def _deflation_solution_is_new(U:NPFloatArray,known:Iterable[NPFloatArray],tolerance:float)->bool:
         """Is ``U`` distinct from every solution in ``known``?
@@ -9338,6 +9494,8 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         # MPI every rank would draw a DIFFERENT perturbation, converge differently, and take different
         # branches of the code below, which is how ranks end up in mismatched collectives.
         rng=numpy.random.default_rng(random_seed)
+        # The mesh walks behind the perturbation, done once per search instead of once per try.
+        perturbation_cache:dict[str,Any]={}
         deflation=DeflationOperator(alpha=deflation_alpha,p=deflation_p)
         if not self.is_initialised():
             self.initialise()
@@ -9387,7 +9545,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                     except Exception:
                         print("Eigenperturbation of solution "+str(i)+" failed to converge. Trying random perturbation")
                 for j in range(num_random_tries):
-                    self.set_current_dofs(Ustart+(rng.random(self.ndof())-0.5)*(perturbation_amplitude))
+                    self.set_current_dofs(Ustart+self._deflation_random_perturbation(perturbation_amplitude,rng,cache=perturbation_cache))
                     try:
                         numtries+=1
                         self.solve(max_newton_iterations=max_newton_iterations,newton_relaxation_factor=newton_relaxation_factor)
@@ -9454,6 +9612,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         """The body of :py:meth:`deflated_continuation`; see there."""
         from .bifurcation_tools import DeflationOperator
         rng=numpy.random.default_rng(random_seed)   # see iterate_over_multiple_solutions_by_deflation
+        perturbation_cache:dict[str,Any]={}
         param=None
         rang=None
         for k,v in param_range.items():
@@ -9547,7 +9706,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                     
                     print("Checking for a new solution",branch_index,branches_to_remove)
                     self.set_current_dofs(dofs)
-                    self.perturb_dofs((rng.random(self.ndof())-0.5)*(perturbation_amplitude))
+                    self.perturb_dofs(self._deflation_random_perturbation(perturbation_amplitude,rng,cache=perturbation_cache))
                     param_obj.value=pv
                     try:                    
                         self.solve(max_newton_iterations=max_newton_iterations,newton_relaxation_factor=newton_relaxation_factor)

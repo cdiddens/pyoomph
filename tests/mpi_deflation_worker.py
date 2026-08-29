@@ -128,16 +128,14 @@ def deflated_solve_case(N=8, lam0=25.0, outdir=None):
         sols = []
         for _dofs in p.iterate_over_multiple_solutions_by_deflation(
                 deflation_alpha=0.1, deflation_p=2, perturbation_amplitude=0.5,
-                # Three tries and this seed find all THREE solutions; with two, the random walk
-                # happens to reach only one of the symmetric pair. Which is not a defect -- the
-                # search is random -- but a run that found the pair is a far better certificate,
-                # since +u1 and -u1 have the same |u| and are told apart only by the signed integral.
-                # Eigenperturbation AND random tries. The eigenvector is a field, so perturbing
-                # along it means the same thing however the mesh was partitioned; a random dof-index
-                # vector does not, because --distribute renumbers and global index i is then a
-                # different node. With both, every configuration below finds all three solutions;
-                # with random tries alone, np=3 --distribute explores a different sequence and
-                # reaches only the trivial one. See dev_docs/deflation.md on reproducibility.
+                # Three tries and this seed find all THREE solutions; with two, the search happens
+                # to reach only one of the symmetric pair. Which is not a defect -- the search is
+                # random -- but a run that found the pair is a far better certificate, since +u1 and
+                # -u1 have the same |u| and are told apart only by the signed integral.
+                # Eigenperturbation AND random tries, so that both perturbation paths are covered.
+                # Both are partition-independent: the eigenvector is a field, and the random
+                # perturbation is drawn as one (Problem._deflation_random_perturbation), so every
+                # configuration explores the same search. See dev_docs/deflation.md §5.
                 use_eigenperturbation=True, num_random_tries=3, random_seed=0):
             sols.append(_observables(p))
         return {
@@ -165,7 +163,12 @@ def deflated_continuation_case(N=6, outdir=None):
         per_branch = {}
         for branch_index, lamvalue, _dofs in p.deflated_continuation(
                 lam=numpy.linspace(15.0, 30.0, 7), perturbation_amplitude=0.5,
-                num_random_tries=2, random_seed=1234):
+                # No eigenperturbation here: the random one is what this case is for, since
+                # deflated_continuation drives every parameter step past the first with it alone.
+                # This seed finds all three branches; with two tries not every seed does, and what
+                # the test asserts is that whichever branches are found are the SAME ones serially,
+                # replicated and distributed.
+                num_random_tries=2, random_seed=11):
             per_branch.setdefault(branch_index, []).append((float(lamvalue), _observables(p)))
         last = [{"lam": v[-1][0], **v[-1][1]} for v in per_branch.values()]
         return {

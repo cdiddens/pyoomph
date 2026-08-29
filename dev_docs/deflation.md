@@ -197,11 +197,37 @@ branch and the job deadlocks in the next collective. Both drivers therefore draw
 `mpi_augmented_systems.md` §8 records an unexplained hang (B6) in an earlier prototype and names the
 unseeded RNG as the prime suspect; it has not recurred since.
 
-Seeding makes a run reproducible **for a fixed partition**. It cannot make it reproducible across
-partitions: the perturbation is drawn in dof-index space and `distribute()` renumbers, so global index
-`i` is a different node at `np=2` than at `np=3`. `tests/mpi_deflation_worker.py` drives the search
-with the leading eigenvector as well, which is a field and therefore means the same thing however the
-mesh was cut up; with that, every configuration finds the whole solution set.
+### The perturbation is a field, not a vector of dof entries
+
+Seeding alone makes a run reproducible only **for a fixed partition**. The perturbation used to be
+drawn as `rng.random(ndof)`, i.e. in dof-index space, and `distribute()` renumbers, so global index
+`i` is a different node at `np=2` than at `np=3` and the same seed explored a different search. That
+is not cosmetic: deflated continuation over the pitchfork found three branches serially and one under
+`--distribute` from the test's seed -- and with seed `0`, three distributed and one serially.
+
+`Problem._deflation_random_perturbation` therefore draws it as a **random field**: one
+`DeterministicRandomField` per dof type, over the bounding box of the mesh, evaluated at the
+coordinates of every dof (`Problem._dof_coordinates`). Both inputs are partition-independent -- the
+dof-type description is merged over the ranks, and a node's position is its position wherever it is
+owned -- so serial, replicated and `--distribute` at any `np` now draw the *same* perturbation of the
+same solution field and find the same solutions, which `tests/test_mpi_deflation.py` asserts.
+
+Two details of that:
+
+* **Dofs with no place** -- ODE and global-parameter data -- keep an index-drawn value, per dof type,
+  in the global dof order. They are replicated rather than partitioned, so that order is
+  partition-independent as well. Element-internal data (a discontinuous pressure) *is* partitioned,
+  and is given the centroid of its element instead.
+* **A smooth field is also the better search direction.** What a deflated search has to do is leave
+  the basin of a known solution, and the other branches live in the low modes; white noise spends most
+  of its amplitude on modes that Newton damps out in the first iteration.
+* **The cost is the mesh walks, not the field.** Per draw at 65k dofs (2D): 4 ms to build and evaluate
+  the fields, against 130 ms for `_dof_coordinates` (a Python walk over nodes and elements) and 18 ms
+  for `get_dof_description`. Both depend only on the numbering and the geometry, so the drivers hand
+  the helper a `cache` dict and do them once per search: a draw then costs 1.8 ms at 65k dofs in 2D
+  and 9 ms at 89k dofs in 3D with 21 dof types, i.e. well under 1% of a single Newton solve of the
+  same problem. The cache is dropped whenever `ndof` changes, and a search cannot renumber without
+  that (adaptation is refused while solutions are known).
 
 ## 6. Driver defects fixed on the way
 
@@ -232,7 +258,7 @@ no test.
 
 | | |
 |---|---|
-| `tests/test_deflation.py` | 17 serial tests: the closed form against the literal Sherman-Morrison update, `grad log M` against finite differences in all three shift modes, the far-field and near-field limits, the residual-never-shrinks regression, the pitchfork ODE and its deflated continuation, and the two refusals |
+| `tests/test_deflation.py` | 20 serial tests: the closed form against the literal Sherman-Morrison update, `grad log M` against finite differences in all three shift modes, the far-field and near-field limits, the residual-never-shrinks regression, the pitchfork ODE and its deflated continuation, the two refusals, and the perturbation following the nodes rather than the numbering (a `NodalBlockOrdering` permutation, which is the `--distribute` property without needing mpirun) |
 | `tests/test_mpi_deflation.py` + `tests/mpi_deflation_worker.py` | `np=2` plain, `np=2 --distribute`, `np=3 --distribute`, both drivers, against an in-process serial run. Marked `slow` (`--full`). A 2D `u_t = laplace(u) + lam u - u^3` whose symmetric pair has the *same* integral of `u^2` and is distinguished only by the signed one |
 | the two tutorial scripts | no longer skipped under `--mpirun` in `citools/test_all_tutorial_scripts.py` |
 
@@ -284,10 +310,6 @@ deflation operator used to stay installed on the problem and quietly deflate eve
 
 ## 8. Open
 
-* **The random perturbation is not partition-independent** (§5). Drawing it from a
-  `DeterministicRandomField` over the node coordinates instead of from dof indices would make a
-  deflated search reproduce across serial, replicated and distributed runs. Worth doing; not needed
-  for correctness.
 * **`deflated_continuation` cannot connect branch points**, which is intrinsic to the method
   (Farrell 2016) -- the two halves of one arclength branch come out as two branch indices.
 * **`dparameter` is not implemented**, so deflation cannot be combined with arclength continuation.
