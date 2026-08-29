@@ -30,12 +30,12 @@ on:
         description: PETSc version
         required: false
         type: string
-        default: "3.22.2"
+        default: "3.25.4"
       slepc_version:
         description: SLEPc version (keep the major.minor equal to PETSc's)
         required: false
         type: string
-        default: "3.22.2"
+        default: "3.25.1"
       platforms:
         description: Which platforms to build
         required: false
@@ -51,11 +51,11 @@ on:
       petsc_version:
         required: false
         type: string
-        default: "3.22.2"
+        default: "3.25.4"
       slepc_version:
         required: false
         type: string
-        default: "3.22.2"
+        default: "3.25.1"
       platforms:
         required: false
         type: string
