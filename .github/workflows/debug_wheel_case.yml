@@ -153,7 +153,12 @@ jobs:
           # between "it aborts in _unload_all_dlls" and knowing what inside it aborts.
           CMD='${{ inputs.command }}'
           if [ -z "$CMD" ]; then
-            CMD="python -m pytest ${{ inputs.pytest_args }}"
+            # -P: do not put the CWD on sys.path. Without it "python -m pytest" from the checkout
+            # imports the SOURCE pyoomph/, which has no compiled extension - "No module named
+            # pyoomph._pyoomph_core" - and the wheel under test is never loaded at all. (A worker run
+            # as "python tests/foo.py" escapes this, since that puts tests/ on the path instead,
+            # which is why the macOS case worked and the pytest one did not.)
+            CMD="python -P -m pytest ${{ inputs.pytest_args }}"
           fi
           if [ "${{ inputs.use_lldb }}" = "true" ]; then
             # stop-on-exec false FIRST, and do not drop it: a Python launched through a shim
@@ -195,7 +200,9 @@ jobs:
         shell: bash
         run: |
           python -m pip install tccbox || exit 0
-          python citools/windows_tcc_diag.py "${RUNNER_TEMP}/tccdiag_out" || true
+          # From outside the checkout, for the same reason as -P above.
+          cd "${RUNNER_TEMP}"
+          python "${GITHUB_WORKSPACE}/citools/windows_tcc_diag.py" "${RUNNER_TEMP}/tccdiag_out" || true
 
       - name: Upload the logs
         if: always()
