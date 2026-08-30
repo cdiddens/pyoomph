@@ -229,11 +229,18 @@ import tutorial_bundle
 # --mpirun finds PMIX_NAMESPACE/PMIX_RANK, concludes it is already running inside an MPI job and
 # exits 1 without printing anything at all - i.e. every single script "failing" with an empty log.
 # Keeping this process free of MPI is what makes --mpirun work; nothing here needs PETSc itself.
+# The reason is printed, not just the verdict: "petsc4py is not importable" is true of a directory
+# that is not there, of one built for another Python, and of one whose libpetsc cannot be found - and
+# those are three different things to go and fix. The macOS arm64 tutorial job of 30th August 2026
+# reported the bare verdict for a petsc4py whose DIRECTORY the harness had already located, which
+# left the actual ImportError - the only part that says which of the three it is - unsaid.
 _PETSC_PROBE="""
 try:
   from petsc4py import PETSc
-except ImportError:
+except ImportError as e:
   print("NO_PETSC4PY")
+  import sys
+  print("REASON:", e, file=sys.stderr)
   raise SystemExit
 import numpy
 print("COMPLEX" if PETSc.ScalarType is numpy.complex128 else "NOT_COMPLEX")
@@ -282,7 +289,8 @@ def check_petsc(env,arch,varname,want_complex):
   verdict=probe.stdout.split()
   where="$%s=%s (%s)"%(varname,arch,env["PYTHONPATH"].split(os.pathsep)[0])
   if "NO_PETSC4PY" in verdict:
-    raise ImportError("petsc4py is not importable from "+where)
+    raise ImportError("petsc4py is not importable from %s by %s:\n%s"
+                      %(where,sys.executable,(probe.stderr or "").strip() or "(the probe said nothing)"))
   wanted="COMPLEX" if want_complex else "NOT_COMPLEX"
   if wanted in verdict:
     return
