@@ -8,6 +8,10 @@
 #   * It only makes sense on arm64. MKL Pardiso is unavailable there, which is precisely why the
 #     Accelerate backend matters on Apple silicon in the first place.
 #
+# Deliberately WITHOUT the prebuilt PETSc/SLEPc that the arm64 wheel and tutorial jobs now install:
+# pyoomph's autodetection prefers PETSc/MUMPS to Accelerate on arm64 (pyoomph/__init__.py), so a
+# PETSc on the path here would quietly select the solver this workflow exists to exercise away.
+#
 # Manual dispatch only. It builds GiNaC and CLN from source (see below), which takes a while, and
 # there is no reason to pay that on every push -- the code it covers changes rarely.
 #

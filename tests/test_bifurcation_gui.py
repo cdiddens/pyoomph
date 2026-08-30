@@ -1439,6 +1439,26 @@ def _complex_petsc_pythonpath():
     return None
 
 
+def _complex_capable_worker_env():
+    """The environment for a worker that has to TARGET a complex eigenvalue, or None to skip.
+
+    Two ways to get one. A complex PETSc, if this machine has one, is put on the worker's PYTHONPATH
+    (see _complex_petsc_pythonpath). Failing that the built-in spectra backend can target a complex
+    eigenvalue on its own, which is what makes these cases run on a plain wheel - but only if nothing
+    else outranks it in pyoomph's autodetection, so a REAL petsc4py on the inherited PYTHONPATH still
+    means a skip: the worker would pick SLEPc and then truncate the target to its real part.
+    """
+    libdir = _complex_petsc_pythonpath()
+    if libdir is not None:
+        return {**os.environ, "PYTHONPATH": libdir}
+    try:
+        import petsc4py  # type:ignore  # noqa: F401
+    except Exception:
+        if has_complex_target_eigensolver():
+            return dict(os.environ)
+    return None
+
+
 def test_the_stripe_scan_finds_a_pair_shift_invert_misses(tmp_path):
     """A region scan must find what a shift-invert solve cannot see, and merge without duplicating.
 
@@ -2861,15 +2881,15 @@ def _run_orbit_worker(tmp_path, phase, extra=(), outdir=None):
     """One phase of tests/orbit_gui_worker.py, returning its JSON result."""
     import subprocess
 
-    libdir = _complex_petsc_pythonpath()
-    if libdir is None:
-        pytest.skip("no complex PETSc build found; the Hopf-to-orbit switch needs one (see CLAUDE.md)")
+    env = _complex_capable_worker_env()
+    if env is None:
+        pytest.skip("no eigensolver that can target the complex Hopf pair: neither a complex PETSc "
+                    "build (see CLAUDE.md) nor spectra")
     here = os.path.dirname(os.path.abspath(__file__))
     worker = os.path.join(here, "orbit_gui_worker.py")
     out_dir = outdir if outdir is not None else os.path.join(str(tmp_path), "orbit")
     proc = subprocess.run([sys.executable, worker, "--outdir", out_dir, "--phase", phase, *extra],
-                          cwd=here, capture_output=True, text=True, timeout=1800,
-                          env={**os.environ, "PYTHONPATH": libdir})
+                          cwd=here, capture_output=True, text=True, timeout=1800, env=env)
     out = (proc.stdout or "") + (proc.stderr or "")
     assert proc.returncode == 0, "worker failed:\n" + out[-4000:]
     assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-4000:]
@@ -2978,10 +2998,16 @@ def test_a_tagged_orbit_can_be_started_from_a_plain_script(tmp_path, portable):
     # ... and it is the cycle of the normal form. The 200 samples are interpolated off the orbit's
     # own 31-point collocation, so what is left is that discretization's amplitude error (a few 1e-3
     # relative here), not the sampling.
+    #
+    # 1e-2 rather than the 5e-3 this used to carry: WHERE the 31 collocation points sit within the
+    # cycle follows the phase of the Hopf eigenvector the orbit was started from, and that phase is
+    # the eigensolver's arbitrary choice - measured, SLEPc lands the extremum at 0.2481 and spectra
+    # at 0.2472 for the same r = 0.2485, same mu, same period and the same Floquet multiplier to 15
+    # digits. The tolerance had been fitted to the SLEPc arm, so the spectra one failed by 0.5%.
     r = back["mu"]**0.5
     assert back["T"] == pytest.approx(2*numpy.pi, rel=1e-5)
-    assert back["max_x"] == pytest.approx(+r, rel=5e-3)
-    assert back["min_x"] == pytest.approx(-r, rel=5e-3)
+    assert back["max_x"] == pytest.approx(+r, rel=1e-2)
+    assert back["min_x"] == pytest.approx(-r, rel=1e-2)
     assert abs(back["avg_x"]) < 1e-9
     # A Newton solve on the reloaded orbit system may not have to move it anywhere.
     assert back["T_after_solve"] == pytest.approx(back["T"], rel=1e-10)
@@ -3141,13 +3167,13 @@ def test_a_hopf_on_an_unstable_branch_is_classified_from_its_own_mode(tmp_path):
     import subprocess
 
     here = os.path.dirname(os.path.abspath(__file__))
-    libdir = _complex_petsc_pythonpath()
-    if libdir is None:
-        pytest.skip("no complex PETSc build found; the Hopf-to-orbit switch needs one (see CLAUDE.md)")
+    env = _complex_capable_worker_env()
+    if env is None:
+        pytest.skip("no eigensolver that can target the complex Hopf pair: neither a complex PETSc "
+                    "build (see CLAUDE.md) nor spectra")
     worker = os.path.join(here, "secondary_hopf_worker.py")
     proc = subprocess.run([sys.executable, worker, os.path.join(str(tmp_path), "out")],
-                          cwd=here, capture_output=True, text=True, timeout=900,
-                          env={**os.environ, "PYTHONPATH": libdir})
+                          cwd=here, capture_output=True, text=True, timeout=900, env=env)
     out = (proc.stdout or "") + (proc.stderr or "")
     assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
     line = [l for l in out.splitlines() if l.startswith("PYOOMPH_SECHOPF_RESULT ")]

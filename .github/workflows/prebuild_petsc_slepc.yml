@@ -4,11 +4,11 @@ name: Prebuild PETSc/SLEPc
 # PETSc/SLEPc once per platform, keep them as an artifact, and let the test and tutorial workflows
 # download them instead of paying ~40 minutes of MUMPS and ScaLAPACK per run.
 #
-# Why this is worth having: tutorial_scripts.yml and test_wheel_suite.yml currently run with
-# --no-petsc, so every eigenvalue problem silently falls back to the scipy solver and the SLEPc
-# path - azimuthal stability, Floquet analysis, bifurcation tracking, everything that needs complex
-# scalars - is untested outside the nightly on a real machine. With this artifact CI can run the
-# same real/complex pair the nightly does.
+# Why this is worth having: without it every CI job runs the eigenvalue problems on the built-in
+# spectra backend, and the SLEPc path - azimuthal stability, Floquet analysis, bifurcation tracking,
+# everything that needs complex scalars - is untested outside the nightly on a real machine. With
+# this artifact the macOS arm64 jobs run the same real/complex pair the nightly does; see the note
+# at the bottom of this file for who consumes it and why only that platform.
 #
 # Sizes (measured on a 3.22 opt build with MUMPS+ScaLAPACK+SLEPc): ~82 MB installed per scalar
 # type after stripping, ~36 MB gzipped, so one platform's tarball (real + complex + MPICH) lands
@@ -179,55 +179,29 @@ jobs:
           compression-level: 0   # the payload is already gzipped
 
 # ------------------------------------------------------------------------------------------------
-# Consumer side - drop these steps into tutorial_scripts.yml or test_wheel_suite.yml, right after
-# the interpreter is set up and before the harness runs. They mirror the CLN/GiNaC download that is
-# already there. Windows must keep passing --no-petsc.
+# Who consumes this, and why only macOS arm64
 #
-#   - name: Resolve the PETSc prebuild run id
-#     if: matrix.platform != 'windows'
-#     id: petsc_run
-#     env:
-#       GH_TOKEN: ${{ github.token }}
-#       MANUAL_RUN_ID: ${{ inputs.petsc_prebuild_run_id }}
-#     shell: bash
-#     run: |
-#       RUN_ID="${MANUAL_RUN_ID}"
-#       if [[ -z "${RUN_ID}" ]]; then
-#         RUN_ID="$(gh run list --workflow prebuild_petsc_slepc.yml \
-#           --repo "${GITHUB_REPOSITORY}" --status success --limit 1 \
-#           --json databaseId --jq '.[0].databaseId')"
-#       fi
-#       [[ -n "${RUN_ID}" && "${RUN_ID}" != "null" ]] || {
-#         echo "Run the 'Prebuild PETSc/SLEPc' workflow first" >&2; exit 1; }
-#       echo "run_id=${RUN_ID}" >> "${GITHUB_OUTPUT}"
+#   .github/workflows/wheels.yml           the Stable ABI wheel's cibuildwheel TEST environment
+#   .github/workflows/test_wheel_suite.yml the same, for the one-wheel-per-OS suite
+#   .github/workflows/tutorial_scripts.yml the tutorial harness, which then runs WITHOUT --no-petsc
 #
-#   - name: Install the PETSc/SLEPc prebuild
-#     if: matrix.platform != 'windows'
-#     env:
-#       GH_TOKEN: ${{ github.token }}
-#       PYVER: ${{ inputs.python_version }}
-#     shell: bash
-#     run: |
-#       # OpenBLAS is the only runtime dependency left outside the tarball (macOS uses Accelerate).
-#       if [[ "${{ matrix.platform }}" == "linux" ]]; then
-#         sudo apt-get update && sudo apt-get install -y libopenblas-dev
-#       fi
-#       gh run download "${{ steps.petsc_run.outputs.run_id }}" \
-#         --repo "${GITHUB_REPOSITORY}" \
-#         --name "petsc-slepc-${{ matrix.label }}-cp${PYVER//./}" --dir petsc-prebuilt
-#       # Unpacked at the absolute path it was configured with: PETSc bakes the prefix into
-#       # petscvariables, the RPATHs and the macOS install_names, so anywhere else fails to import.
-#       sudo mkdir -p /opt && sudo tar xzf petsc-prebuilt/pyoomph-petsc.tar.gz -C /opt
-#       cat /opt/pyoomph-petsc/env.sh
-#       # The harness reads PETSC_DIR/PETSC_ARCH_REAL/PETSC_ARCH_COMPLEX and switches per script;
-#       # see citools/test_all_tutorial_scripts.py. Feed the same values to later steps.
-#       set -a; source /opt/pyoomph-petsc/env.sh; set +a
-#       for v in PETSC_DIR PETSC_ARCH_REAL PETSC_ARCH_COMPLEX PATH PYTHONPATH \
-#                LD_LIBRARY_PATH DYLD_LIBRARY_PATH; do
-#         echo "${v}=${!v}" >> "${GITHUB_ENV}"
-#       done
+# All three take the macos-arm64 artifact and none of the others. Apple silicon has no MKL, so
+# PETSc/MUMPS is what pyoomph's autodetection picks there for the linear solver and SLEPc for the
+# eigensolver (pyoomph/__init__.py); on every other platform the pick is Pardiso plus the built-in
+# spectra eigensolver, which is what a `pip install pyoomph` user gets and therefore what CI should
+# be testing there. Nothing is skipped for a missing SLEPc on those platforms: the tutorial scripts
+# no longer name an eigensolver at all, and the tests that need one capable of TARGETING an
+# eigenvalue ask for that capability (tests/conftest.py has_complex_target_eigensolver), which
+# spectra has.
 #
-# and then drop the `--no-petsc` from the harness invocation on Linux/macOS:
+# The consumers put the COMPLEX arch on PYTHONPATH rather than env.sh's real one: pyoomph takes
+# SLEPc wherever petsc4py imports, so a real build would not fall back to spectra for the azimuthal
+# and Hopf cases - it would run them and truncate every complex target to its real part. The
+# tutorial harness is the exception; it reads PETSC_ARCH_REAL/PETSC_ARCH_COMPLEX and picks per
+# script. tests/test_slepc_present.py (PYOOMPH_EXPECT_COMPLEX_SLEPC=1) is what makes a PETSc that
+# never reached the test interpreter fail the job instead of silently reverting it to spectra.
 #
-#       python3 citools/test_all_tutorial_scripts.py ${QUICK} ...      # no --no-petsc
+# Linux and macOS x86_64 are built here all the same: the artifacts are what a nightly or a one-off
+# comparison run needs, and building only one platform would not make the workflow noticeably
+# faster (the matrix runs in parallel).
 # ------------------------------------------------------------------------------------------------

@@ -18,13 +18,21 @@ name: Run the tutorial scripts on a fresh wheel
 # folded away), and that script's exit code is what makes the job red - the harness itself always
 # exits 0, because the nightly parses its printed output instead.
 #
+# Eigensolvers, per platform. macOS arm64 downloads the real+complex PETSc/SLEPc pair built by
+# prebuild_petsc_slepc.yml and runs the harness WITHOUT --no-petsc, so the SLEPc path - azimuthal
+# stability, Floquet analysis, bifurcation tracking - is exercised in CI rather than only on the
+# nightly machine. It is the platform that needs it most: there is no MKL on Apple silicon, so
+# PETSc/MUMPS is what pyoomph's autodetection picks there for the linear solver as well.
+# Every other platform keeps --no-petsc and runs on the built-in spectra eigensolver over Pardiso,
+# which is exactly what a `pip install pyoomph` user gets.
+#
+# Either way NOTHING is skipped for a missing SLEPc: no tutorial script names an eigensolver any
+# more (they leave the choice to the autodetection), and the harness treats a ModuleNotFoundError
+# for petsc4py as a real failure rather than forgiving it - see the _OPTIONAL_MODULES comment in
+# citools/test_all_tutorial_scripts.py.
+#
 # What is deliberately NOT covered here:
-#   * PETSc/SLEPc. The wheels are built with PYOOMPH_USE_MPI=OFF and nothing installs petsc4py, so
-#     the harness runs with --no-petsc and every eigen-problem falls back to the scipy solver. That
-#     is exactly what a `pip install pyoomph` user gets, so it is the right thing to test HERE; the
-#     complex-PETSc pass stays with the nightly on a real machine (see CLAUDE.md).
-#     Eleven scripts spell out set_eigensolver("slepc"); the harness reports those as skips for a
-#     missing optional package, exactly as it does for preCICE.
+#   * PETSc/SLEPc on Linux, macOS x86_64 and Windows - see above.
 #   * preCICE, shapely and the interactive bifurcation GUI. The harness reports these as skips, by
 #     name, and they are listed in the summary table.
 #
@@ -70,6 +78,10 @@ on:
         description: Optional "Prebuild static CLN/GiNaC" run id to take the CLN/GiNaC artifacts from (defaults to the latest successful run)
         required: false
         type: string
+      petsc_prebuild_run_id:
+        description: Optional "Prebuild PETSc/SLEPc" run id to take the macOS arm64 PETSc artifact from (defaults to the latest successful run)
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -99,6 +111,9 @@ jobs:
             runner: macos-14
             platform: macos
             prebuild_artifact: static-ginac-cln-macos-arm64
+            # The one platform that gets PETSc/SLEPc; see the header. The cpXY suffix is appended
+            # at run time, since petsc4py/slepc4py are compiled extension modules.
+            petsc_artifact: petsc-slepc-macos-arm64
           - label: windows-msys2-ucrt64
             runner: windows-latest
             platform: windows
@@ -327,6 +342,58 @@ jobs:
           (cd "$(cygpath -u "$RUNNER_TEMP")" && "$VENV" -c "import importlib.metadata as m,pyoomph,pyoomph._pyoomph_core as c; print('pyoomph',m.version('pyoomph'),'from',pyoomph.__file__); print('extension from',c.__file__)")
           echo "TUTORIAL_PYTHON=$(cygpath -m "$VENV")" >> "${GITHUB_ENV}"
 
+      - name: Resolve the PETSc/SLEPc prebuild run id
+        if: steps.want.outputs.run == '1' && matrix.petsc_artifact
+        id: petsc_prebuild
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANUAL_RUN_ID: ${{ inputs.petsc_prebuild_run_id }}
+        shell: bash
+        run: |
+          if [[ -n "${MANUAL_RUN_ID}" ]]; then
+            RUN_ID="${MANUAL_RUN_ID}"
+          else
+            RUN_ID="$(gh run list \
+              --workflow prebuild_petsc_slepc.yml \
+              --repo "${GITHUB_REPOSITORY}" \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+          fi
+          [[ -n "${RUN_ID}" && "${RUN_ID}" != "null" ]] || {
+            echo "Could not resolve a successful PETSc prebuild run id - run the 'Prebuild PETSc/SLEPc' workflow first" >&2
+            exit 1; }
+          echo "Using PETSc prebuild run id ${RUN_ID}"
+          echo "run_id=${RUN_ID}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install the PETSc/SLEPc prebuild
+        if: steps.want.outputs.run == '1' && matrix.petsc_artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYVER: ${{ inputs.python_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf petsc-prebuilt && mkdir -p petsc-prebuilt
+          gh run download "${{ steps.petsc_prebuild.outputs.run_id }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --name "${{ matrix.petsc_artifact }}-cp${PYVER//./}" \
+            --dir petsc-prebuilt
+          # Unpacked at the absolute path it was CONFIGURED with: PETSc bakes the prefix into
+          # petscvariables, the RPATHs and the macOS install_names, so anywhere else fails to import.
+          sudo mkdir -p /opt
+          sudo tar xzf petsc-prebuilt/pyoomph-petsc.tar.gz -C /opt
+          cat /opt/pyoomph-petsc/env.sh
+          set -a; source /opt/pyoomph-petsc/env.sh; set +a
+          # The harness reads PETSC_DIR/PETSC_ARCH_REAL/PETSC_ARCH_COMPLEX and puts the matching
+          # arch on each script's PYTHONPATH itself, so what is exported here only has to make a
+          # plain `python -c "import petsc4py"` work.
+          for v in PETSC_DIR PETSC_ARCH_REAL PETSC_ARCH_COMPLEX PATH PYTHONPATH \
+                   LD_LIBRARY_PATH DYLD_LIBRARY_PATH; do
+            echo "${v}=${!v}" >> "${GITHUB_ENV}"
+          done
+
       - name: Run the tutorial scripts (Linux/macOS)
         if: steps.want.outputs.run == '1' && matrix.platform != 'windows'
         shell: bash
@@ -340,10 +407,18 @@ jobs:
           TIMEOUT: ${{ inputs.script_timeout }}
         run: |
           set -o pipefail
+          # --no-petsc unless the PETSc prebuild was installed above (macOS arm64), which is what
+          # sets PETSC_DIR. With it the harness runs each script against the real or the complex
+          # build, whichever that script needs; without it every eigenproblem uses spectra.
+          # An if, not `[[ ... ]] && NO_PETSC=`: this step runs under `bash -e`, where the
+          # trailing && of a false test is the step's exit status and every non-arm64 job would
+          # stop right here.
+          NO_PETSC="--no-petsc"
+          if [[ -n "${PETSC_DIR:-}" ]]; then NO_PETSC=""; fi
           # The harness exits 0 whatever happens - the verdict comes from the report in the next
           # step - so nothing here can hide a failing script.
           "${TUTORIAL_PYTHON}" -u citools/test_all_tutorial_scripts.py \
-            --no-petsc ${QUICK} --timeout "${TIMEOUT:-0}" \
+            ${NO_PETSC} ${QUICK} --timeout "${TIMEOUT:-0}" \
             --report-json tutorial_report.json \
             ${SKIPS} 2>&1 | tail -n 4000
 

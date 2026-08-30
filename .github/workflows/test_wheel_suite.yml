@@ -19,6 +19,17 @@ name: Build one wheel per OS and run the test suite
 # entry that tags the released wheel cp312-abi3. The compiled code is the same either way -
 # the Stable ABI story is what test_wheels_multiversion.yml exists to check.
 #
+# Eigensolvers, per platform. macOS arm64 downloads the complex PETSc/SLEPc built by
+# prebuild_petsc_slepc.yml and puts it on the test venv's PYTHONPATH, so the suite runs the SLEPc
+# path there instead of skipping it - it is also the platform pyoomph most needs it on, since there
+# is no MKL on Apple silicon and PETSc/MUMPS is what the autodetection then picks for the linear
+# solver as well. Everywhere else the wheel's built-in spectra eigensolver over Pardiso is what
+# runs, which is what a `pip install pyoomph` user gets. Nothing is skipped for a missing SLEPc
+# either way: the tests that need an eigensolver capable of TARGETING an eigenvalue ask for that
+# capability (conftest.has_complex_target_eigensolver), which spectra also has. That the arm64 job
+# really got its PETSc is checked by tests/test_slepc_present.py via PYOOMPH_EXPECT_COMPLEX_SLEPC,
+# because otherwise it would silently fall back to spectra and stay green.
+#
 # The wheel is built with its threaded-assembly backend pinned ON - OpenMP on Linux, GCD
 # on macOS - and the suite run with PYOOMPH_EXPECT_OPENMP / PYOOMPH_EXPECT_THREADED, so
 # tests/test_openmp_present.py asserts instead of skipping: a wheel that silently lost its
@@ -45,6 +56,10 @@ on:
         default: "3.12"
       prebuild_run_id:
         description: Optional "Prebuild static CLN/GiNaC" run id to take the CLN/GiNaC artifacts from (defaults to the latest successful run)
+        required: false
+        type: string
+      petsc_prebuild_run_id:
+        description: Optional "Prebuild PETSc/SLEPc" run id to take the macOS arm64 PETSc artifact from (defaults to the latest successful run)
         required: false
         type: string
 
@@ -76,6 +91,9 @@ jobs:
             runner: macos-14
             platform: macos
             prebuild_artifact: static-ginac-cln-macos-arm64
+            # The one platform that gets PETSc/SLEPc; see the header. The cpXY suffix is appended at
+            # run time, since petsc4py/slepc4py are compiled extension modules.
+            petsc_artifact: petsc-slepc-macos-arm64
           - label: windows-msys2-ucrt64
             runner: windows-latest
             platform: windows
@@ -169,6 +187,61 @@ jobs:
       # to be here is only for the opt-in OpenMP-on-mac path (citools/build_static_libomp.sh,
       # PYOOMPH_USE_OPENMP=ON).
 
+      - name: Resolve the PETSc/SLEPc prebuild run id
+        if: matrix.petsc_artifact
+        id: petsc_prebuild
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANUAL_RUN_ID: ${{ inputs.petsc_prebuild_run_id }}
+        shell: bash
+        run: |
+          if [[ -n "${MANUAL_RUN_ID}" ]]; then
+            RUN_ID="${MANUAL_RUN_ID}"
+          else
+            RUN_ID="$(gh run list \
+              --workflow prebuild_petsc_slepc.yml \
+              --repo "${GITHUB_REPOSITORY}" \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+          fi
+          [[ -n "${RUN_ID}" && "${RUN_ID}" != "null" ]] || {
+            echo "Could not resolve a successful PETSc prebuild run id - run the 'Prebuild PETSc/SLEPc' workflow first" >&2
+            exit 1; }
+          echo "Using PETSc prebuild run id ${RUN_ID}"
+          echo "run_id=${RUN_ID}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install the PETSc/SLEPc prebuild
+        if: matrix.petsc_artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYVER: ${{ inputs.python_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf petsc-prebuilt && mkdir -p petsc-prebuilt
+          gh run download "${{ steps.petsc_prebuild.outputs.run_id }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --name "${{ matrix.petsc_artifact }}-cp${PYVER//./}" \
+            --dir petsc-prebuilt
+          # Unpacked at the absolute path it was CONFIGURED with: PETSc bakes the prefix into
+          # petscvariables, the RPATHs and the macOS install_names, so anywhere else fails to import.
+          sudo mkdir -p /opt
+          sudo tar xzf petsc-prebuilt/pyoomph-petsc.tar.gz -C /opt
+          cat /opt/pyoomph-petsc/env.sh
+          set -a; source /opt/pyoomph-petsc/env.sh; set +a
+          # Handed to the SUITE only, through CIBW_TEST_ENVIRONMENT below, and never exported into
+          # the job: a petsc4py on PYTHONPATH during the build would leak into the isolated build
+          # environment cibuildwheel creates, and the wheel itself is built with PYOOMPH_USE_MPI=OFF
+          # and links nothing of PETSc anyway.
+          #
+          # The COMPLEX arch, not env.sh's real one. pyoomph's autodetection takes SLEPc wherever
+          # petsc4py imports, so a real build here would not fall back to spectra for the azimuthal
+          # and Hopf cases - it would run them and truncate every complex target to its real part.
+          COMPLEX_LIB="${PETSC_DIR}/${PETSC_ARCH_COMPLEX}/lib"
+          echo "PYOOMPH_PETSC_TEST_ENV=PYOOMPH_EXPECT_COMPLEX_SLEPC=1 PETSC_DIR=${PETSC_DIR} PETSC_ARCH_REAL=${PETSC_ARCH_REAL} PETSC_ARCH_COMPLEX=${PETSC_ARCH_COMPLEX} PYTHONPATH=${COMPLEX_LIB} DYLD_LIBRARY_PATH=${PETSC_DIR}/mpi/lib:${COMPLEX_LIB}" >> "${GITHUB_ENV}"
+
       - name: Build and test the wheel (Linux/macOS)
         if: matrix.platform != 'windows'
         env:
@@ -219,7 +292,9 @@ jobs:
           # Turns tests/test_openmp_present.py from a skip into a hard failure: the built extension
           # must report a threaded loop back to Python, not merely have CMake find one. EXPECT_OPENMP
           # asserts OpenMP specifically (Linux); EXPECT_THREADED asserts either backend (macOS/GCD).
-          CIBW_TEST_ENVIRONMENT: ${{ matrix.platform == 'macos' && 'PYOOMPH_EXPECT_THREADED=1 PYOOMPH_EXPECT_SPECTRA=1' || 'PYOOMPH_EXPECT_OPENMP=1 PYOOMPH_EXPECT_SPECTRA=1' }}
+          # PYOOMPH_PETSC_TEST_ENV is empty on every platform but macOS arm64, where the step
+          # above filled it in with the prebuilt complex PETSc/SLEPc.
+          CIBW_TEST_ENVIRONMENT: ${{ matrix.platform == 'macos' && 'PYOOMPH_EXPECT_THREADED=1 PYOOMPH_EXPECT_SPECTRA=1' || 'PYOOMPH_EXPECT_OPENMP=1 PYOOMPH_EXPECT_SPECTRA=1' }} ${{ env.PYOOMPH_PETSC_TEST_ENV }}
         uses: pypa/cibuildwheel@v4.1.0
         with:
           output-dir: wheelhouse

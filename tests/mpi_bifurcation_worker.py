@@ -147,6 +147,25 @@ class BrusselatorProblem(Problem):
         self += eqs @ "domain"
 
 
+def _select_solvers(p):
+    """Name PETSc/SLEPc where it exists, and say nothing where it does not.
+
+    Under mpirun this worker needs the distributed pair (petsc_mumps + slepc), which is why they
+    were spelled out here. Serially - test_eigen_during_tracking.py drives the same cases in a
+    single process - the built-in spectra backend does the job, and naming slepc unconditionally
+    made every one of those cases skip on a plain wheel. pyoomph's own autodetection picks exactly
+    the same PETSc pair when PETSc is installed, so this only forces the choice when it is there.
+    """
+    try:
+        from petsc4py import PETSc  # type:ignore
+        if not PETSc.Sys.hasExternalPackage("mumps"):
+            return
+    except Exception:
+        return
+    p.set_linear_solver("petsc_mumps")
+    p.set_eigensolver("slepc")
+
+
 def _eigenvector_norms(p, index=0):
     """Scale certificates of the TRACKED eigenvector, invariant under the dof permutation.
 
@@ -263,8 +282,7 @@ def fold_case(N=8, lam0=4.0, outdir=None, eigenvector_scaling="unit", with_guess
         if outdir is not None:
             p.set_output_directory(outdir)
         p.quiet()
-        p.set_linear_solver("petsc_mumps")
-        p.set_eigensolver("slepc")
+        _select_solvers(p)
         p.initialise()
         p.lam.value = lam0
         p.solve()
@@ -311,12 +329,16 @@ def hopf_case(N=20, B0=2.5, outdir=None, with_eigen=False):
         if outdir is not None:
             p.set_output_directory(outdir)
         p.quiet()
-        p.set_linear_solver("petsc_mumps")
-        p.set_eigensolver("slepc")
+        _select_solvers(p)
         p.initialise()
         p.B.value = B0
         p.solve()
-        p.solve_eigenproblem(4, quiet=True)
+        # 8, not 4: the two backends disagree about what a zero shift selects. SLEPc takes the
+        # eigenvalues whose REAL part is nearest (TARGET_REAL), which puts the Hopf pair first;
+        # spectra shift-inverts and takes the nearest in MAGNITUDE, and at B=2.5 the pair sits at
+        # 0.25 +- 0.97i, further out than four real modes. With 4 the guess handed to the tracker
+        # was then real and it refused with "Hopf bifurcation cannot have zero complex part".
+        p.solve_eigenproblem(8, quiet=True)
         p.activate_bifurcation_tracking("B", "hopf")
         p.solve()
 
@@ -429,8 +451,7 @@ def _reaction_case(prob, bifurcation_type, lam_start, lam_step, azimuthal_m, out
         if outdir is not None:
             p.set_output_directory(outdir)
         p.quiet()
-        p.set_linear_solver("petsc_mumps")
-        p.set_eigensolver("slepc")
+        _select_solvers(p)
         if azimuthal_m is not None:
             p.setup_for_stability_analysis(azimuthal_stability=True, analytic_hessian=True)
         p.initialise()
@@ -551,8 +572,7 @@ def eigen_refusals_case(N=6, outdir=None, with_eigen=True):
         if outdir is not None:
             p.set_output_directory(outdir)
         p.quiet()
-        p.set_linear_solver("petsc_mumps")
-        p.set_eigensolver("slepc")
+        _select_solvers(p)
         p.setup_for_stability_analysis(azimuthal_stability=True, analytic_hessian=True)
         p.initialise()
         p.lam.value = 5.0

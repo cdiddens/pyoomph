@@ -7,6 +7,10 @@ on:
         description: Optional prebuild workflow run id to download CLN/GiNaC artifacts from
         required: false
         type: string
+      petsc_prebuild_run_id:
+        description: Optional "Prebuild PETSc/SLEPc" run id to take the macOS arm64 PETSc artifact from (defaults to the latest successful run)
+        required: false
+        type: string
   workflow_run:
     workflows:
       - Prebuild static CLN/GiNaC
@@ -57,6 +61,13 @@ jobs:
             runner: macos-14
             platform: macos
             prebuild_artifact: static-ginac-cln-macos-arm64
+            # The one platform whose SUITE runs against PETSc/SLEPc: there is no MKL on Apple
+            # silicon, so PETSc/MUMPS is what pyoomph's autodetection picks there for the linear
+            # solver and SLEPc for the eigensolver, and until now no CI job exercised either.
+            # It changes nothing about the wheel itself, which is built with PYOOMPH_USE_MPI=OFF
+            # and links no PETSc; only the cibuildwheel TEST environment sees it. Everywhere else
+            # the wheel's built-in spectra eigensolver over Pardiso is what the suite runs on.
+            petsc_artifact: petsc-slepc-macos-arm64
           - label: windows-msys2-ucrt64
             runner: windows-latest
             platform: windows
@@ -139,6 +150,66 @@ jobs:
       # runtime and so cannot collide with the Intel libiomp5 that MKL's Pardiso loads. No static
       # libomp is built here any more; citools/build_static_libomp.sh remains for the opt-in
       # OpenMP-on-mac path (PYOOMPH_USE_OPENMP=ON).
+
+      # The PETSc/SLEPc prebuild for the macOS arm64 suite. Only the Stable ABI step below uses it:
+      # petsc4py/slepc4py are compiled extension modules, and the artifact carries exactly one cpXY
+      # build - the Stable ABI one, PYTHON_STABLE_ABI_BASE - so the legacy (3.10/3.11) tier stays on
+      # spectra, which is also what those wheels' users get.
+      - name: Resolve the PETSc/SLEPc prebuild run id
+        if: matrix.petsc_artifact
+        id: petsc_prebuild
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANUAL_RUN_ID: ${{ github.event.inputs.petsc_prebuild_run_id }}
+        shell: bash
+        run: |
+          if [[ -n "${MANUAL_RUN_ID}" ]]; then
+            RUN_ID="${MANUAL_RUN_ID}"
+          else
+            RUN_ID="$(gh run list \
+              --workflow prebuild_petsc_slepc.yml \
+              --repo "${GITHUB_REPOSITORY}" \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+          fi
+          [[ -n "${RUN_ID}" && "${RUN_ID}" != "null" ]] || {
+            echo "Could not resolve a successful PETSc prebuild run id - run the 'Prebuild PETSc/SLEPc' workflow first" >&2
+            exit 1; }
+          echo "Using PETSc prebuild run id ${RUN_ID}"
+          echo "run_id=${RUN_ID}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install the PETSc/SLEPc prebuild
+        if: matrix.petsc_artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf petsc-prebuilt && mkdir -p petsc-prebuilt
+          gh run download "${{ steps.petsc_prebuild.outputs.run_id }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --name "${{ matrix.petsc_artifact }}-cp${PYTHON_STABLE_ABI_BASE//./}" \
+            --dir petsc-prebuilt
+          # Unpacked at the absolute path it was CONFIGURED with: PETSc bakes the prefix into
+          # petscvariables, the RPATHs and the macOS install_names, so anywhere else fails to import.
+          sudo mkdir -p /opt
+          sudo tar xzf petsc-prebuilt/pyoomph-petsc.tar.gz -C /opt
+          cat /opt/pyoomph-petsc/env.sh
+          set -a; source /opt/pyoomph-petsc/env.sh; set +a
+          # Handed to the SUITE only, through CIBW_TEST_ENVIRONMENT below, never exported into the
+          # job: a petsc4py on PYTHONPATH during the build would leak into the isolated build
+          # environment cibuildwheel creates.
+          #
+          # The COMPLEX arch, not env.sh's real one. pyoomph takes SLEPc wherever petsc4py imports,
+          # so a real build would not fall back to spectra for the azimuthal and Hopf cases - it
+          # would run them and truncate every complex target to its real part.
+          # PYOOMPH_EXPECT_COMPLEX_SLEPC turns tests/test_slepc_present.py from a skip into an
+          # assertion, so a PETSc that did not reach the test venv fails the job instead of quietly
+          # letting the whole suite run on spectra.
+          COMPLEX_LIB="${PETSC_DIR}/${PETSC_ARCH_COMPLEX}/lib"
+          echo "PYOOMPH_PETSC_TEST_ENV=PYOOMPH_EXPECT_COMPLEX_SLEPC=1 PETSC_DIR=${PETSC_DIR} PETSC_ARCH_REAL=${PETSC_ARCH_REAL} PETSC_ARCH_COMPLEX=${PETSC_ARCH_COMPLEX} PYTHONPATH=${COMPLEX_LIB} DYLD_LIBRARY_PATH=${PETSC_DIR}/mpi/lib:${COMPLEX_LIB}" >> "${GITHUB_ENV}"
 
       # Split into two cibuildwheel invocations (both appending into the same
       # wheelhouse/ dir) rather than one combined CIBW_BUILD selector: cibuildwheel
@@ -234,8 +305,10 @@ jobs:
             ${{ matrix.platform == 'macos' && 'cmake.define.PYOOMPH_USE_GCD=ON' || 'cmake.define.PYOOMPH_USE_OPENMP=ON' }}
             cmake.define.PYOOMPH_HAS_SPECTRA=ON
             wheel.py-api=cp312
-          # See the same variables in the legacy step above.
-          CIBW_TEST_ENVIRONMENT: ${{ matrix.platform == 'macos' && 'PYOOMPH_EXPECT_THREADED=1 PYOOMPH_EXPECT_SPECTRA=1' || 'PYOOMPH_EXPECT_OPENMP=1 PYOOMPH_EXPECT_SPECTRA=1' }}
+          # See the same variables in the legacy step above. PYOOMPH_PETSC_TEST_ENV is empty
+          # everywhere but macOS arm64, where the step above filled it in with the prebuilt complex
+          # PETSc/SLEPc - this is the one tier whose interpreter matches that artifact's cpXY.
+          CIBW_TEST_ENVIRONMENT: ${{ matrix.platform == 'macos' && 'PYOOMPH_EXPECT_THREADED=1 PYOOMPH_EXPECT_SPECTRA=1' || 'PYOOMPH_EXPECT_OPENMP=1 PYOOMPH_EXPECT_SPECTRA=1' }} ${{ env.PYOOMPH_PETSC_TEST_ENV }}
         uses: pypa/cibuildwheel@v4.1.0
         with:
           output-dir: wheelhouse
