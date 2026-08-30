@@ -353,7 +353,9 @@ class JITCache:
             try:
                 shutil.copyfile(src, tmp_path)
                 shutil.copystat(src, tmp_path)
-                os.replace(tmp_path, dest_path)
+                # Not a plain os.replace: on Windows the destination may be a library this process
+                # has loaded, and replacing one is refused there. See the helper.
+                replace_possibly_loaded_library(tmp_path, dest_path)
             except BaseException:
                 try:
                     os.remove(tmp_path)
@@ -507,6 +509,77 @@ class JITCache:
 
 _global_cache: JITCache | None = None
 _global_cache_dir_used: str | None = None
+
+
+def replace_possibly_loaded_library(tmp_path: str, dest_path: str) -> None:
+    """os.replace(tmp_path, dest_path), also when dest_path is a shared library this process LOADED.
+
+    On POSIX the plain rename is enough, and is the whole reason a temp file is written first: it
+    installs a NEW inode, so a mapping another Problem still holds keeps the bytes it was opened
+    with, whereas writing the destination in place rewrites those pages underneath it.
+
+    Windows refuses it. A loaded image may not be deleted or overwritten, so os.replace raises
+    PermissionError (WinError 5, "Access is denied"). Measured on the Windows wheel job of 30th
+    August 2026: a second Problem compiling into the code directory of a first, still-live one died
+    there - before the collision it was supposed to report could be reported at all
+    (tests/test_two_live_problems.py::test_pinned_colliding_code_dir_is_refused).
+
+    Renaming a loaded file AWAY is allowed on Windows, which is what makes the fallback work: move
+    the old library aside, put the new one in its place, then try to delete the old one. That last
+    step fails precisely while somebody still has it loaded, and failing is fine - the leftover
+    carries a .old-<pid>-<n> suffix, is never loaded by anything (the loader only ever opens the
+    unsuffixed name), and the next process to pass through here deletes it.
+    """
+    try:
+        os.replace(tmp_path, dest_path)
+        return
+    except PermissionError:
+        if sys.platform != "win32":
+            raise
+    _sweep_stale_library_leftovers(dest_path)
+    aside = "%s.old-%d-%d" % (dest_path, os.getpid(), _library_aside_counter())
+    os.replace(dest_path, aside)
+    try:
+        os.replace(tmp_path, dest_path)
+    except BaseException:
+        # Put it back rather than leaving the directory without the library the caller expects.
+        try:
+            os.replace(aside, dest_path)
+        except OSError:
+            pass
+        raise
+    try:
+        os.remove(aside)
+    except OSError:
+        pass  # still loaded; see the docstring
+
+
+_library_aside_count = 0
+
+
+def _library_aside_counter() -> int:
+    """A per-process counter, so a second replace in the same process cannot reuse a name that the
+    first one left behind (still loaded, hence undeletable)."""
+    global _library_aside_count
+    _library_aside_count += 1
+    return _library_aside_count
+
+
+def _sweep_stale_library_leftovers(dest_path: str) -> None:
+    """Delete the .old-* leftovers of earlier runs that nothing holds open any more."""
+    directory = os.path.dirname(os.path.abspath(dest_path))
+    prefix = os.path.basename(dest_path) + ".old-"
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return
+    for name in names:
+        if not name.startswith(prefix):
+            continue
+        try:
+            os.remove(os.path.join(directory, name))
+        except OSError:
+            pass  # a live process still has it mapped
 
 
 def get_jit_cache() -> JITCache | None:

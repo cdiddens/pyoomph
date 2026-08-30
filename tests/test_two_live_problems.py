@@ -53,6 +53,8 @@ import textwrap
 import pytest
 
 _PREAMBLE = textwrap.dedent("""
+    from pyoomph.generic.ccompiler import BaseCCompiler
+    print("CHILD COMPILERS", BaseCCompiler.available_compilers(), flush=True)
     from pyoomph import Problem, DirichletBC
     from pyoomph.equations.poisson import PoissonEquation
     from pyoomph.meshes.simplemeshes import RectangularQuadMesh
@@ -81,6 +83,22 @@ _PREAMBLE = textwrap.dedent("""
 """)
 
 
+def _compilers_here():
+    """What this process would JIT with, for the failure message.
+
+    The child gets its own answer, and the two need not agree: on the Windows wheel job of 30th
+    August 2026 these cases died in the CHILD with "Cannot open include file: math.h", i.e. it had
+    picked the MSVC toolchain (SystemCCompiler, quality 5, which outranks tccbox's 4) while the
+    pytest process compiling the rest of the suite had not - and nothing in the log said what either
+    of them chose. Reported rather than asserted on: a machine is entitled to any of them.
+    """
+    try:
+        from pyoomph.generic.ccompiler import BaseCCompiler
+        return repr(BaseCCompiler.available_compilers())
+    except Exception as e:
+        return "unavailable (%s)" % e
+
+
 def _run(tmp_path, body, timeout=900):
     script = tmp_path / "case.py"
     script.write_text(_PREAMBLE + textwrap.dedent(body))
@@ -88,8 +106,9 @@ def _run(tmp_path, body, timeout=900):
                           capture_output=True, text=True, timeout=timeout)
     assert proc.returncode == 0, (
         "exited %d (a negative value is the killing signal -- -11 is SIGSEGV)\n"
+        "compilers available to pytest: %s\n"
         "--- stdout ---\n%s\n--- stderr tail ---\n%s"
-        % (proc.returncode, proc.stdout[-3000:], proc.stderr[-4000:]))
+        % (proc.returncode, _compilers_here(), proc.stdout[-3000:], proc.stderr[-4000:]))
     return proc.stdout
 
 
