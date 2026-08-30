@@ -77,6 +77,11 @@ on:
         required: false
         type: boolean
         default: false
+      with_petsc:
+        description: Install the prebuilt complex PETSc/SLEPc first (macOS arm64 only, where the suite runs against it)
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -162,13 +167,49 @@ jobs:
           installed = pathlib.Path(pyoomph.__file__).parent
           source = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "pyoomph"
           n = 0
-          for src in source.rglob("*.py"):
+          # .h as well as .py: the wheel ships pyoomph/jitbridge/jitbridge.h and hands it to tcc as
+          # the include dir (-nostdinc, so it is the ONLY declaration tcc gets), which makes a missing
+          # prototype there a Windows-only compile failure - and one this lane could not otherwise
+          # test without a fifty-minute rebuild.
+          for src in list(source.rglob("*.py")) + list(source.rglob("*.h")):
               dst = installed / src.relative_to(source)
               if dst.parent.exists():
                   shutil.copy2(src, dst)
                   n += 1
-          print(f"overlaid {n} python files onto {installed}")
+          print(f"overlaid {n} files (.py and .h) onto {installed}")
           PYEOF
+
+      # The arm64 suite (test_wheel_suite.yml) runs against the prebuilt complex PETSc/SLEPc, so a
+      # debug run without it reproduces a different configuration - a SLEPc failure would come back
+      # as a pass on spectra. Only arm64: no other platform's suite has PETSc either.
+      - name: Install the PETSc/SLEPc prebuild (macOS arm64)
+        if: inputs.with_petsc && inputs.platform == 'macos-arm64'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYVER: ${{ inputs.python_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_ID="$(gh run list --workflow prebuild_petsc_slepc.yml --repo "${GITHUB_REPOSITORY}" \
+                      --status success --limit 1 --json databaseId --jq '.[0].databaseId')"
+          [[ -n "${RUN_ID}" && "${RUN_ID}" != "null" ]] || {
+            echo "No successful 'Prebuild PETSc/SLEPc' run to take the artifact from" >&2; exit 1; }
+          rm -rf petsc-prebuilt && mkdir -p petsc-prebuilt
+          gh run download "${RUN_ID}" --repo "${GITHUB_REPOSITORY}" \
+            --name "petsc-slepc-macos-arm64-cp${PYVER//./}" --dir petsc-prebuilt
+          # Unpacked at the absolute path it was configured with: PETSc bakes the prefix into
+          # petscvariables, the RPATHs and the macOS install_names.
+          sudo mkdir -p /opt
+          sudo tar xzf petsc-prebuilt/pyoomph-petsc.tar.gz -C /opt
+          set -a; source /opt/pyoomph-petsc/env.sh; set +a
+          # The COMPLEX arch, as the suite does: a real petsc4py is picked by the autodetection just
+          # as happily and then truncates every complex target to its real part.
+          PYTHONPATH="${PETSC_DIR}/${PETSC_ARCH_COMPLEX}/lib"
+          DYLD_LIBRARY_PATH="${PETSC_DIR}/mpi/lib:${PYTHONPATH}"
+          for v in PETSC_DIR PETSC_ARCH_REAL PETSC_ARCH_COMPLEX PYTHONPATH DYLD_LIBRARY_PATH; do
+            echo "${v}=${!v}" >> "${GITHUB_ENV}"
+          done
+          echo "PYOOMPH_EXPECT_COMPLEX_SLEPC=1" >> "${GITHUB_ENV}"
 
       - name: Run the case
         id: run
