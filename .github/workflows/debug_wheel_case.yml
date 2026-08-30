@@ -171,12 +171,28 @@ jobs:
           # the include dir (-nostdinc, so it is the ONLY declaration tcc gets), which makes a missing
           # prototype there a Windows-only compile failure - and one this lane could not otherwise
           # test without a fifty-minute rebuild.
+          skipped = []
           for src in list(source.rglob("*.py")) + list(source.rglob("*.h")):
               dst = installed / src.relative_to(source)
-              if dst.parent.exists():
-                  shutil.copy2(src, dst)
-                  n += 1
+              if not dst.parent.exists():
+                  continue
+              # Never overwrite a file delvewheel has patched. On Windows it injects a DLL-preload
+              # prelude into pyoomph/__init__.py, and the source copy does not have it: overwriting
+              # left the extension unable to find its bundled dependencies - "DLL load failed while
+              # importing _pyoomph_core" - which looks exactly like the JIT failure this lane is here
+              # to investigate.
+              if dst.exists():
+                  try:
+                      if "_delvewheel_" in dst.read_text(encoding="utf-8", errors="ignore"):
+                          skipped.append(str(dst.relative_to(installed)))
+                          continue
+                  except OSError:
+                      pass
+              shutil.copy2(src, dst)
+              n += 1
           print(f"overlaid {n} files (.py and .h) onto {installed}")
+          if skipped:
+              print("left alone because delvewheel patched them:", ", ".join(skipped))
           PYEOF
 
       # The arm64 suite (test_wheel_suite.yml) runs against the prebuilt complex PETSc/SLEPc, so a
