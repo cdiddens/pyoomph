@@ -41,6 +41,15 @@ name: Build one wheel per OS and run the test suite
 # DEFAULT branch, which is why this file lives on main even though development happens on
 # develop. Pick the branch to test via the `ref` input.
 
+# The title of the run carries the parameters that decide whether it COUNTS as a release
+# prerequisite. wheels.yml's gate looks for a successful run of this workflow on the exact commit
+# being released whose title contains "[full_suite=true]"; the run's inputs themselves are not
+# exposed by the Actions API, so they are put here instead. Keep the markers verbatim if you touch
+# this line - the gate matches them as plain substrings.
+run-name: >-
+  Suite [full_suite=${{ inputs.full_suite || false }}] on ${{ inputs.ref || github.ref_name }}
+  (py${{ inputs.python_version }})
+
 on:
   workflow_dispatch:
     inputs:
@@ -64,6 +73,31 @@ on:
         type: string
       full_suite:
         description: Run the WHOLE suite (--full plus the campaign tests) instead of the per-wheel selection - hours, not minutes
+        required: false
+        type: boolean
+        default: false
+
+  # Called by wheels.yml when the release gate finds no qualifying run of this workflow for the
+  # commit being released; see the "prereqs" job there. Same inputs as above, minus the
+  # descriptions and with `platforms`-style choices spelled as plain strings, which is all
+  # workflow_call supports.
+  workflow_call:
+    inputs:
+      ref:
+        required: false
+        type: string
+        default: ""
+      python_version:
+        required: false
+        type: string
+        default: "3.12"
+      prebuild_run_id:
+        required: false
+        type: string
+      petsc_prebuild_run_id:
+        required: false
+        type: string
+      full_suite:
         required: false
         type: boolean
         default: false

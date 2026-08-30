@@ -11,6 +11,14 @@ on:
         description: Optional "Prebuild PETSc/SLEPc" run id to take the macOS arm64 PETSc artifact from (defaults to the latest successful run)
         required: false
         type: string
+      prerequisites:
+        description: >-
+          auto = enforce the release prerequisites only on a release (a manual dispatch builds
+          straight away), force = enforce them here too, skip = build without checking anything
+        required: false
+        type: choice
+        default: auto
+        options: [auto, force, skip]
   workflow_run:
     workflows:
       - Prebuild static CLN/GiNaC
@@ -40,9 +48,203 @@ env:
   # wheel.py-api value) together.
   PYTHON_STABLE_ABI_BASE: "3.12"
 
+# Release prerequisites
+# ---------------------
+# Publishing must not be the first time anything is checked, so a "release" event runs through a
+# gate before a single wheel is built. Four things have to be in place, and the `prereqs` job below
+# decides for each of them whether it already is; whatever is missing is RUN FIRST, as a called
+# workflow, and the wheel jobs wait for it:
+#
+#   * Prebuild static CLN/GiNaC        - satisfied by ANY successful run, on any commit. That is the
+#   * Prebuild PETSc/SLEPc               same rule the download steps below already use ("latest
+#                                        successful run"), and both build third-party sources that
+#                                        do not move with pyoomph's own commits.
+#   * Build one wheel per OS and run the test suite, with full_suite=true
+#   * Run the tutorial scripts on a fresh wheel, with omp=3
+#                                      - these two must have run on THIS commit, so a successful run
+#                                        is only accepted if its head SHA equals github.sha and its
+#                                        title carries the right parameter markers (see the
+#                                        `run-name:` line in each of those files - the Actions API
+#                                        does not expose a run's dispatch inputs, which is why the
+#                                        parameters are encoded in the title).
+#
+# Consequence worth knowing before pressing "Publish release": if neither has been run on the
+# release commit, the release run itself will spend hours on the full suite and the tutorial pass
+# before it builds anything. Running both from the Actions tab on the release branch beforehand is
+# the fast path - the gate then finds them and skips straight to the wheels.
+#
+# Another consequence: a prerequisite that this workflow ran ITSELF, via workflow_call, is part of
+# this run and does not show up as a run of its own workflow, so re-running the release run from
+# scratch will run it again.
+#
+# A workflow_run trigger (a prebuild finished) is deliberately NOT gated - it would turn every
+# prebuild into an afternoon of tutorials - and a manual dispatch is gated only with
+# prerequisites=force.
+
 jobs:
-  build_wheels:
+  prereqs:
+    name: Check release prerequisites
+    # Nothing here needs to run for the prebuild-completed trigger; the wheel jobs keep their own
+    # copy of that condition.
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # gh run list reads other workflows' runs.
+      actions: read
+    outputs:
+      need_ginac: ${{ steps.check.outputs.need_ginac }}
+      need_petsc: ${{ steps.check.outputs.need_petsc }}
+      need_suite: ${{ steps.check.outputs.need_suite }}
+      need_tutorials: ${{ steps.check.outputs.need_tutorials }}
+    steps:
+      - name: Decide what still has to run
+        id: check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          MODE: ${{ github.event.inputs.prerequisites }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          MODE="${MODE:-auto}"
+
+          need_ginac=false; need_petsc=false; need_suite=false; need_tutorials=false
+          enforce=true
+          if [[ "${MODE}" == "skip" ]]; then
+            enforce=false
+            echo "prerequisites=skip: building without checking anything."
+          elif [[ "${MODE}" == "auto" && "${EVENT_NAME}" != "release" ]]; then
+            enforce=false
+            echo "prerequisites=auto on a ${EVENT_NAME} event: the gate applies to releases only."
+          fi
+
+          # Any successful run at all, on any commit - the same rule the artifact download steps use.
+          any_success() {
+            local id
+            id="$(gh run list --workflow "$1" --repo "${GITHUB_REPOSITORY}" \
+                    --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+            # gh exits 0 on "no runs matched", so the emptiness is what decides, not the status.
+            [[ -n "${id}" ]] || return 1
+            echo "${id}"
+          }
+
+          # A successful run of $1 on exactly ${SHA} whose title contains every remaining argument.
+          # The markers come from that workflow's run-name; see the header of this file.
+          marked_success() {
+            local wf="$1"; shift
+            local rows id sha title marker ok
+            rows="$(gh run list --workflow "${wf}" --repo "${GITHUB_REPOSITORY}" \
+                      --status success --limit 100 \
+                      --json databaseId,headSha,displayTitle \
+                      --jq '.[] | [.databaseId, .headSha, .displayTitle] | @tsv')"
+            while IFS=$'\t' read -r id sha title; do
+              [[ -n "${id:-}" ]] || continue
+              [[ "${sha}" == "${SHA}" ]] || continue
+              ok=yes
+              for marker in "$@"; do
+                [[ "${title}" == *"${marker}"* ]] || ok=no
+              done
+              [[ "${ok}" == "yes" ]] || continue
+              echo "${id}"
+              return 0
+            done <<< "${rows}"
+            return 1
+          }
+
+          report() { echo "- **$1**: $2" >> "${GITHUB_STEP_SUMMARY}"; echo "$1: $2"; }
+
+          if [[ "${enforce}" == "true" ]]; then
+            echo "### Release prerequisites for ${SHA}" >> "${GITHUB_STEP_SUMMARY}"
+
+            if id="$(any_success prebuild_static_ginac_cln.yml)"; then
+              report "Prebuild static CLN/GiNaC" "satisfied by run ${id}"
+            else
+              need_ginac=true; report "Prebuild static CLN/GiNaC" "MISSING - will be run now"
+            fi
+
+            if id="$(any_success prebuild_petsc_slepc.yml)"; then
+              report "Prebuild PETSc/SLEPc" "satisfied by run ${id}"
+            else
+              need_petsc=true; report "Prebuild PETSc/SLEPc" "MISSING - will be run now"
+            fi
+
+            if id="$(marked_success test_wheel_suite.yml '[full_suite=true]')"; then
+              report "Full test suite on this commit" "satisfied by run ${id}"
+            else
+              need_suite=true
+              report "Full test suite on this commit" "MISSING - will be run now (hours)"
+            fi
+
+            if id="$(marked_success tutorial_scripts.yml '[omp=3]' '[platforms=all]')"; then
+              report "Tutorial scripts (omp=3) on this commit" "satisfied by run ${id}"
+            else
+              need_tutorials=true
+              report "Tutorial scripts (omp=3) on this commit" "MISSING - will be run now (hours)"
+            fi
+          fi
+
+          {
+            echo "need_ginac=${need_ginac}"
+            echo "need_petsc=${need_petsc}"
+            echo "need_suite=${need_suite}"
+            echo "need_tutorials=${need_tutorials}"
+          } >> "${GITHUB_OUTPUT}"
+
+  prereq_prebuild_ginac:
+    name: Prerequisite - prebuild CLN/GiNaC
+    needs: prereqs
+    if: needs.prereqs.outputs.need_ginac == 'true'
+    uses: ./.github/workflows/prebuild_static_ginac_cln.yml
+
+  prereq_prebuild_petsc:
+    name: Prerequisite - prebuild PETSc/SLEPc
+    needs: prereqs
+    if: needs.prereqs.outputs.need_petsc == 'true'
+    # Left at that workflow's own defaults on purpose - in particular python_version 3.12, which has
+    # to stay equal to PYTHON_STABLE_ABI_BASE above, since the Stable ABI job is the only one that
+    # installs petsc4py. The env context is not available in a reusable call's `with:`, so the two
+    # cannot be tied together mechanically; change them together.
+    uses: ./.github/workflows/prebuild_petsc_slepc.yml
+
+  prereq_suite:
+    name: Prerequisite - full test suite
+    # The prebuilds first: the suite downloads both of their artifacts.
+    needs: [prereqs, prereq_prebuild_ginac, prereq_prebuild_petsc]
+    if: >-
+      ${{ !cancelled()
+          && !contains(needs.*.result, 'failure')
+          && needs.prereqs.outputs.need_suite == 'true' }}
+    uses: ./.github/workflows/test_wheel_suite.yml
+    with:
+      # The exact commit being released, not a branch name: the branch may have moved on since the
+      # tag was cut, and then this would certify the wrong tree.
+      ref: ${{ github.sha }}
+      full_suite: true
+
+  prereq_tutorials:
+    name: Prerequisite - tutorial scripts
+    needs: [prereqs, prereq_prebuild_ginac, prereq_prebuild_petsc]
+    if: >-
+      ${{ !cancelled()
+          && !contains(needs.*.result, 'failure')
+          && needs.prereqs.outputs.need_tutorials == 'true' }}
+    uses: ./.github/workflows/tutorial_scripts.yml
+    with:
+      ref: ${{ github.sha }}
+      omp: "3"
+
+  build_wheels:
+    needs: [prereqs, prereq_prebuild_ginac, prereq_prebuild_petsc, prereq_suite, prereq_tutorials]
+    # !cancelled() rather than success(): the four prerequisite jobs are SKIPPED whenever the gate
+    # found them already satisfied, and a skipped dependency would otherwise skip this job too.
+    # What must not happen is building on a failed one, hence the explicit failure check.
+    if: >-
+      ${{ !cancelled()
+          && !contains(needs.*.result, 'failure')
+          && (github.event_name != 'workflow_run'
+              || github.event.workflow_run.conclusion == 'success') }}
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -432,7 +634,15 @@ jobs:
           if-no-files-found: error
 
   build_sdist:
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    needs: [prereqs, prereq_prebuild_ginac, prereq_prebuild_petsc, prereq_suite, prereq_tutorials]
+    # !cancelled() rather than success(): the four prerequisite jobs are SKIPPED whenever the gate
+    # found them already satisfied, and a skipped dependency would otherwise skip this job too.
+    # What must not happen is building on a failed one, hence the explicit failure check.
+    if: >-
+      ${{ !cancelled()
+          && !contains(needs.*.result, 'failure')
+          && (github.event_name != 'workflow_run'
+              || github.event.workflow_run.conclusion == 'success') }}
     name: sdist
     runs-on: ubuntu-latest
 

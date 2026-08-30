@@ -314,6 +314,7 @@ class SpectraEigenSolver(GenericEigenSolver):
         force_complex=(v0 is not None and numpy.iscomplexobj(v0))
 
         op=None
+        complex_op=False
         for attempt in range(self.max_retries+1):
             try:
                 op,complex_op=self._make_operator(J,M,sigma,use_sym,quiet,force_complex)
@@ -339,17 +340,17 @@ class SpectraEigenSolver(GenericEigenSolver):
 
         start=None
         if v0 is not None:
-            v0=numpy.asarray(v0)
-            if v0.ndim!=1 or v0.shape[0]!=n:
+            v0arr=numpy.asarray(v0)
+            if v0arr.ndim!=1 or v0arr.shape[0]!=n:
                 # SLEPc accepts a whole initial basis; Spectra takes a single start vector.
                 if not quiet:
                     print("Spectra: ignoring the given v0, which is not a single vector of length "+str(n))
-            elif not numpy.any(v0):
+            elif not numpy.any(v0arr):
                 # Spectra rejects a zero residual vector outright.
                 if not quiet:
                     print("Spectra: ignoring the given v0, which is entirely zero")
             else:
-                start=numpy.ascontiguousarray(v0,dtype=dt)
+                start=numpy.ascontiguousarray(v0arr,dtype=dt)
 
         rule="LargestMagn" if target is not None else self._SORT_RULES[which]
         ncv=self.ncv if self.ncv is not None else max(2*neval+1,neval+5)
@@ -358,6 +359,7 @@ class SpectraEigenSolver(GenericEigenSolver):
         fn=_pyoomph.spectra_eigensolve_complex if complex_op else _pyoomph.spectra_eigensolve_real
 
         nu=None
+        Vt=None
         for attempt in range(self.max_retries+1):
             nu,Vt,nconv,niter,info,_nmatvec=fn(matvec,n,neval,ncv,maxit,self.tol,start,rule)
             if info=="successful" or nconv>=neval:
@@ -381,7 +383,7 @@ class SpectraEigenSolver(GenericEigenSolver):
                 print("Spectra did not converge ("+str(nconv)+" of "+str(neval)+"), retrying with ncv="
                       +str(ncv)+", maxit="+str(maxit)+" (attempt "+str(attempt+1)+"/"+str(self.max_retries)+")")
 
-        assert nu is not None
+        assert nu is not None and Vt is not None
         nu=numpy.asarray(nu,dtype=numpy.complex128)
         Vt=numpy.asarray(Vt,dtype=numpy.complex128)
 
