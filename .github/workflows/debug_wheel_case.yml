@@ -167,12 +167,16 @@ jobs:
           installed = pathlib.Path(pyoomph.__file__).parent
           source = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "pyoomph"
           n = 0
-          for src in source.rglob("*.py"):
+          # .h as well as .py: the wheel ships pyoomph/jitbridge/jitbridge.h and hands it to tcc as
+          # the include dir (-nostdinc, so it is the ONLY declaration tcc gets), which makes a missing
+          # prototype there a Windows-only compile failure - and one this lane could not otherwise
+          # test without a fifty-minute rebuild.
+          for src in list(source.rglob("*.py")) + list(source.rglob("*.h")):
               dst = installed / src.relative_to(source)
               if dst.parent.exists():
                   shutil.copy2(src, dst)
                   n += 1
-          print(f"overlaid {n} python files onto {installed}")
+          print(f"overlaid {n} files (.py and .h) onto {installed}")
           PYEOF
 
       # The arm64 suite (test_wheel_suite.yml) runs against the prebuilt complex PETSc/SLEPc, so a
