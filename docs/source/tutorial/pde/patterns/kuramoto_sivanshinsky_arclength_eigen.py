@@ -66,9 +66,6 @@ class KSEBifurcationProblem(Problem):
         self.add_equations(eqs@"domain")
 
 
-# slepc eigensolver is more reliable here
-import pyoomph.solvers.petsc # Requires petsc4py, slepc4py. Might not work in Windows
-
 if __name__ == "__main__":
     with KSEBifurcationProblem() as problem:
         problem.initialise()
@@ -77,8 +74,7 @@ if __name__ == "__main__":
         problem.set_initial_condition(ic_name="hexdots") # set the hexdot initial condition
         problem.solve(timestep=10) # One transient step to converge towards the stationary solution
         problem.solve() # stationary solve
-
-        problem.set_eigensolver("slepc") # Set the slepc eigensolver
+        
         # Write eigenvalues to file
         eigenfile=open(os.path.join(problem.get_output_directory(),"hexdots.txt"),"w")
         def output_with_eigen():

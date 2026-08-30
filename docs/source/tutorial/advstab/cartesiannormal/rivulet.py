@@ -88,8 +88,6 @@ class RivuletProblem(Problem):
 problem=RivuletProblem() # Create the problem
 # Setup the problem for k-stability analysis, we do not need an analytic Hessian, since we don't do any bifurcation tracking
 problem.setup_for_stability_analysis(additional_cartesian_mode=True,analytic_hessian=False) 
-# Use the SLEPc eigensolver with MUMPS
-problem.set_eigensolver("slepc").use_mumps()
 problem.solve() # Solve the base state
 problem.save_state("start.dump") # Save the start case at 90°
 

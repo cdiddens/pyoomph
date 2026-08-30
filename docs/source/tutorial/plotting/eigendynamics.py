@@ -42,7 +42,8 @@ class RisingBubblePlotter(MatplotlibPlotter):
 with RisingBubbleProblem() as problem:        
     # Same as before in the rising bubble problem, except that we just solve at Bo=4
     problem.set_c_compiler("system").optimize_for_max_speed()
-    problem.set_eigensolver("slepc").use_mumps()        
+    # The eigensolver is left to the autodetection: SLEPc/MUMPS where PETSc is available (and under
+    # MPI), otherwise the built-in Spectra. Both can target the complex azimuthal eigenvalue.
     problem.setup_for_stability_analysis(azimuthal_stability=True,analytic_hessian=False)    
     problem.Mo=6.2e-7 
     problem.Bo.value=4 

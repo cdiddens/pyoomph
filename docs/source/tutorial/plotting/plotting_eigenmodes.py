@@ -90,7 +90,7 @@ if __name__ == "__main__":
         # Solve for the critical eigenvector first: it is the guess the fold tracker starts from, and
         # it must be passed explicitly when the problem is distributed with --distribute (see the
         # comment in kuramoto_sivanshinsky_bifurcation.py).
-        problem.set_eigensolver("slepc")
+        # Eigensolver left to the autodetection (SLEPc where available, else Spectra)
         problem.solve_eigenproblem(1,shift=0)
 
         # Activate bifurcation tracking

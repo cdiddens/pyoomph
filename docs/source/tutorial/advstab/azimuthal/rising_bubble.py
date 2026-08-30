@@ -200,10 +200,7 @@ if __name__=="__main__":
     with RisingBubbleProblem() as problem:
             
         # Make sure to get the most optimized code available
-        problem.set_c_compiler("system").optimize_for_max_speed()
-        # Use SLEPc for the eigenvalue problem, use MUMPS as linear solver, since we have constraints.
-        # These have a zero diagonal and give problems in the default LU decomposition of PETSc
-        problem.set_eigensolver("slepc").use_mumps()
+        problem.set_c_compiler("system").optimize_for_max_speed()        
         
         # Setup the problem for azimuthal stability analysis. We don't use the analytic Hessian, since we don't do any bifurcation tracking
         # This saves some code generation and compilations time

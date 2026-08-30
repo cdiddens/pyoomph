@@ -49,7 +49,7 @@ if __name__ == "__main__":
         # serially it can construct one itself, but that construction is a serial linear solve on a
         # replicated dof vector, so with --distribute an explicit guess is required. shift=0 selects
         # the mode that is crossing zero at the fold, not the fastest-decaying one.
-        problem.set_eigensolver("slepc")
+        # Eigensolver left to the autodetection (SLEPc where available, else Spectra)
         problem.solve_eigenproblem(1,shift=0)
 
         # Activate bifurcation tracking

@@ -127,16 +127,15 @@ _OPTIONAL_MODULES={"precice":"preCICE (pip install pyprecice, plus a libprecice 
                              "distribution's release)",
                    "shapely":"shapely (pip install pyoomph[topology]), which plans the axisymmetric "
                              "pinch-off and coalescence surgery",
-                   # A script that spells out set_eigensolver("slepc") cannot run without them, and
-                   # neither can be pip-installed usefully - petsc4py from PyPI builds a real-scalar
-                   # PETSc, and half of these scripts need the complex one. Under the nightly this
-                   # never fires: check_petsc() below refuses to start at all when the two builds
-                   # named by $PETSC_ARCH_REAL/$PETSC_ARCH_COMPLEX are not importable. It is for
-                   # --no-petsc runs, i.e. the GitHub workflow, where a plain wheel is under test
-                   # and "this environment has no SLEPc" is the honest verdict rather than a
-                   # regression.
-                   "petsc4py":"PETSc/SLEPc (see the installation chapter of the tutorial)",
-                   "slepc4py":"PETSc/SLEPc (see the installation chapter of the tutorial)"}
+                   }
+# petsc4py/slepc4py used to be forgiven here as well, because the eigen scripts spelled out
+# set_eigensolver("slepc") and could not run without them. None of them does any more: they leave the
+# choice to pyoomph's autodetection, which takes SLEPc where PETSc is installed (and it is still the
+# only backend that solves an eigenproblem distributed) and the built-in "spectra" otherwise. So a
+# missing PETSc is no longer a reason to skip anything - on a --no-petsc run, i.e. the GitHub workflow
+# testing a plain wheel, these scripts have to RUN and produce the same answers, which is the point of
+# having a PETSc-free eigensolver in the first place. A ModuleNotFoundError for petsc4py is therefore a
+# real failure again.
 # Scripts that open a window and wait for the user. tkinter's mainloop never returns on its own, so
 # under this harness they would either hang forever or - on a headless nightly - die on "no display
 # name and no $DISPLAY environment variable", neither of which says anything about pyoomph. They are
@@ -148,8 +147,9 @@ _MANUAL_GUI_SCRIPTS={"thin_film_bifurcation_gui.py":"opens the interactive bifur
 _MISSING_MODULE=re.compile(rb"ModuleNotFoundError: No module named '([A-Za-z0-9_.]+)'")
 # pyoomph catches the ImportError of a solver backend and re-raises it as its own RuntimeError
 # (solvers/generic.py _unavailable_solver_message), so the missing package is named in the middle of
-# the last line rather than at the start of it. Without this, every set_eigensolver("slepc") script
-# counts as a failure on a machine that simply has no SLEPc.
+# the last line rather than at the start of it. No tutorial script names a solver backend explicitly
+# any more, so this no longer fires for the eigen scripts; it stays for any script that does select a
+# backend whose package this machine happens not to have.
 _UNAVAILABLE_SOLVER=re.compile(rb"^RuntimeError: .* is not available \(ModuleNotFoundError: No module named '([A-Za-z0-9_.]+)'\)")
 _BROKEN_IMPORT=re.compile(rb"^ImportError: (.*)$")
 _TRACEBACK_FRAME=re.compile(rb'^  File "([^"]+)"')
