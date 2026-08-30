@@ -75,6 +75,8 @@ import sys
 import numpy
 import pytest
 
+from conftest import has_complex_target_eigensolver
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _WORKER = os.path.join(_HERE, "floquet_worker.py")
 
@@ -88,16 +90,14 @@ def _no_eigensolver_reason():
 
     That path is the only one in this module that solves a generalised eigenproblem
     (Problem.get_floquet_multipliers -> get_eigen_solver().solve); the default condensation method
-    needs no eigensolver at all, which is why the rest of the module is unaffected. Without
-    petsc4py/slepc4py pyoomph falls back to the scipy solver, and scipy's ARPACK cannot build an
-    Arnoldi factorization for this pencil - "ARPACK error -9999", raised out of the solve rather than
-    returning a poor answer. Seen on every pyoomph wheel, which deliberately ships without PETSc
-    (PYOOMPH_USE_MPI=OFF), in the test-wheel run of 29th August 2026.
+    needs no eigensolver at all, which is why the rest of the module is unaffected. What it cannot
+    run on is scipy's ARPACK, which cannot build an Arnoldi factorization for this pencil - "ARPACK
+    error -9999", raised out of the solve rather than returning a poor answer (seen on the wheel of
+    29th August 2026, which had neither PETSc nor spectra). SLEPc and the built-in spectra backend
+    both shift-and-invert instead, so either will do.
     """
-    try:
-        import slepc4py  # type:ignore  # noqa: F401
-    except Exception:
-        return "no slepc4py: the eigenproblem method falls back to scipy, whose ARPACK cannot factor this pencil"
+    if not has_complex_target_eigensolver():
+        return "neither spectra nor slepc4py: the eigenproblem method falls back to scipy, whose ARPACK cannot factor this pencil"
     return None
 
 

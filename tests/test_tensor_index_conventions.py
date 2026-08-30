@@ -42,6 +42,8 @@
 
 import pytest
 
+from conftest import has_complex_target_eigensolver
+
 from pyoomph import Problem, Equations, DirichletBC, InitialCondition
 from pyoomph.expressions import (var, var_and_test, weak, matrix, vector, grad, div, dyadic, dot, trace,
                                  identity_matrix, partial_t, testfunction,
@@ -929,17 +931,15 @@ def _eigen_operator_values(tmp_path, expressions, stability, n=2):
 def _slepc_or_scipy_fallback():
     """Whether the eigensolves below would fall back to scipy.
 
-    pyoomph picks its eigensolver by what imports, and says little about it, so a wheel-test
-    environment without petsc4py silently exercises the scipy backend instead. Measured on the same
-    machine and the same commit: with slepc_mumps the k=0 test below passes, with the eigensolver
-    forced to "scipy" it fails by O(1) - the modes come back in a basis this comparison cannot
-    undo. A SLEPc without MUMPS was not tried.
+    pyoomph picks its eigensolver by what imports, and says little about it, so an installation with
+    neither PETSc nor the built-in spectra backend silently exercises the scipy backend instead.
+    Measured on the same machine and the same commit: with slepc_mumps the k=0 test below passes,
+    with the eigensolver forced to "scipy" it fails by O(1) - the modes come back in a basis this
+    comparison cannot undo. Spectra shift-and-inverts like SLEPc's ST does and was measured to pass
+    it too, which is what keeps this running on a plain wheel. A SLEPc without MUMPS was not tried.
     """
-    try:
-        from petsc4py import PETSc  # type:ignore  # noqa: F401
-        import slepc4py  # type:ignore  # noqa: F401
-    except Exception:
-        return "the eigensolve would fall back to scipy (no petsc4py/slepc4py), whose eigenvectors this comparison cannot phase-fix"
+    if not has_complex_target_eigensolver():
+        return "the eigensolve would fall back to scipy (neither spectra nor petsc4py/slepc4py), whose eigenvectors this comparison cannot phase-fix"
     return None
 
 
