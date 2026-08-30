@@ -466,8 +466,11 @@ jobs:
           cat /opt/pyoomph-petsc/env.sh
           set -a; source /opt/pyoomph-petsc/env.sh; set +a
           # The harness reads PETSC_DIR/PETSC_ARCH_REAL/PETSC_ARCH_COMPLEX and puts the matching
-          # arch on each script's PYTHONPATH itself, so what is exported here only has to make a
-          # plain `python -c "import petsc4py"` work.
+          # arch on each script's PYTHONPATH *and* loader path itself, so what is exported here only
+          # has to make a plain `python -c "import petsc4py"` work. env.sh names the REAL arch, and
+          # until env_with_petsc() also moved DYLD_LIBRARY_PATH the complex scripts inherited it:
+          # petsc4py reported complex scalars (a compile-time constant) while having mapped
+          # real/lib/libpetsc, and slepc4py died on a symbol only the complex build exports.
           for v in PETSC_DIR PETSC_ARCH_REAL PETSC_ARCH_COMPLEX PATH PYTHONPATH \
                    LD_LIBRARY_PATH DYLD_LIBRARY_PATH; do
             echo "${v}=${!v}" >> "${GITHUB_ENV}"

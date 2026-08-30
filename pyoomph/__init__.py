@@ -311,12 +311,29 @@ def _have_spectra() -> bool:
 		return False
 
 
+# Why PETSc/MUMPS was not taken, for _warn_suboptimal_solver() to quote. The bare `except` below
+# used to discard it, and the three reasons it hides are three different things to go and fix: no
+# petsc4py on the path at all, a PETSc built without MUMPS, and - the one that cost two hours of CI
+# on 30th August 2026 - a petsc4py that imports but whose slepc4py cannot, because the loader had
+# been pointed at the other scalar arch ("Symbol not found: _NEPCISSGetExtraction"). All three read
+# as "no better solver was found" and only the last one is a misconfiguration the user can undo.
+_petsc_mumps_unavailable_reason:Optional[str]=None
+
 def _have_petsc_mumps() -> bool:
+	global _petsc_mumps_unavailable_reason
 	try:
 		from .solvers.petsc import PETSc,PETSCMUMPSSolver,SlepcMUMPSEigenSolver #type:ignore
-		return bool(PETSc.Sys.hasExternalPackage("mumps")) #type:ignore
-	except:
+	except BaseException as e:
+		_petsc_mumps_unavailable_reason="importing petsc4py/slepc4py failed: %s: %s"%(type(e).__name__,e)
 		return False
+	try:
+		if bool(PETSc.Sys.hasExternalPackage("mumps")): #type:ignore
+			_petsc_mumps_unavailable_reason=None
+			return True
+		_petsc_mumps_unavailable_reason="this PETSc was built without MUMPS (--download-mumps=yes)"
+	except BaseException as e:
+		_petsc_mumps_unavailable_reason="PETSc.Sys.hasExternalPackage('mumps') failed: %s: %s"%(type(e).__name__,e)
+	return False
 
 
 def _set_accelerate_linear_solver() -> bool:
@@ -353,10 +370,14 @@ _is_arm64 = _machine in ("arm64", "aarch64")
 def _warn_suboptimal_solver(name:str) -> None:
 	import warnings
 	suggestion="PETSc/SLEPc compiled with MUMPS support" if (_is_macos and _is_arm64) else "pardiso (via Intel MKL)"
+	# Appended when there is one: a PETSc that is installed and merely unreachable produces exactly the
+	# same sentence as one that was never there, and the difference decides whether the reader should
+	# go and install something or go and fix an environment variable.
+	why=("\nPETSc/MUMPS was not used because "+_petsc_mumps_unavailable_reason) if _petsc_mumps_unavailable_reason else ""
 	warnings.warn(
 		"pyoomph is falling back to the '"+name+"' solver, since no better solver was found. For better performance, consider "
 		"installing "+suggestion+" -- see https://pyoomph.readthedocs.io/en/latest/tutorial/installation/ for "
-		"instructions.",
+		"instructions."+why,
 		RuntimeWarning,
 		stacklevel=2,
 	)
