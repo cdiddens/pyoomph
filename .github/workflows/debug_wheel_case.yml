@@ -190,6 +190,17 @@ jobs:
                       pass
               shutil.copy2(src, dst)
               n += 1
+          # src/jitbridge.h is the ORIGINAL; pyoomph/jitbridge/jitbridge.h is a build-time copy of it
+          # and is gitignored, so it is not in the checkout and the loop above cannot find it. Without
+          # this the lane silently tests the wheel's old header - which is exactly how a strcpy fix
+          # appeared not to work, the probe still reporting the implicit declaration it was meant to
+          # remove.
+          bridge = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "src" / "jitbridge.h"
+          bridge_dst = installed / "jitbridge" / "jitbridge.h"
+          if bridge.exists() and bridge_dst.parent.exists():
+              shutil.copy2(bridge, bridge_dst)
+              n += 1
+              print(f"overlaid the jit header from {bridge}")
           print(f"overlaid {n} files (.py and .h) onto {installed}")
           if skipped:
               print("left alone because delvewheel patched them:", ", ".join(skipped))
