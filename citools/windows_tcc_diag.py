@@ -101,6 +101,57 @@ def _rerun_the_compile(source):
         _dump_imports(target)
 
 
+_LIBM_PROBES = ("erf", "erfc", "asinh", "acosh", "atanh", "exp", "log", "sqrt", "pow",
+                "sinh", "cosh", "tanh", "atan2", "fabs", "fmax", "fmin", "strcpy", "strlen")
+
+
+def _which_libm_symbols_link(outdir):
+    """Which of the functions the generated code may call can tcc actually LINK on this platform.
+
+    tcc stops at the first undefined symbol, so one failing compile names one function and hides the
+    rest. Each is tried on its own here, because the answer decides the fix: asinh, acosh and atanh
+    have exact closed forms that could be supplied in the header, while erf and erfc to the 1e-14 the
+    tests demand do not, and would need the symbols themselves - from the UCRT rather than the legacy
+    msvcrt tcc links by default.
+    """
+    workdir = os.path.join(os.path.abspath(outdir), "symcheck")
+    os.makedirs(workdir, exist_ok=True)
+    ok, missing, skipped = [], [], []
+    for name in _LIBM_PROBES:
+        src = os.path.join(workdir, name + ".c")
+        dst = os.path.splitext(src)[0] + (".dll" if os.name == "nt" else ".so")
+        argument = '"x"' if name in ("strcpy", "strlen") else "0.5"
+        if name == "strcpy":
+            body = "char buf[8]; double f(void){ strcpy(buf, \"ab\"); return 0.0; }\n"
+            decl = "char *strcpy(char *, const char *);\n"
+        elif name == "strlen":
+            body = "double f(void){ return (double)strlen(\"ab\"); }\n"
+            decl = "unsigned long long strlen(const char *);\n"
+        elif name in ("pow", "atan2", "fmax", "fmin"):
+            body = "double f(double x){ return %s(x, 0.5); }\n" % name
+            decl = "double %s(double, double);\n" % name
+        else:
+            body = "double f(double x){ return %s(x); }\n" % name
+            decl = "double %s(double);\n" % name
+        with open(src, "w") as f:
+            f.write(decl + body)
+        cmd = [sys.executable, "-m", "tccbox", "-shared", src, "-o", dst]
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        except (OSError, subprocess.SubprocessError) as e:
+            skipped.append("%s (%s)" % (name, e))
+            continue
+        if os.path.exists(dst):
+            ok.append(name)
+        else:
+            first = (out.stderr or out.stdout or "").strip().splitlines()
+            missing.append("%s [%s]" % (name, first[0] if first else "no diagnostic"))
+    _say("libm symbols tcc CAN link: " + (", ".join(ok) or "none"))
+    _say("libm symbols tcc CANNOT link: " + (", ".join(missing) or "none"))
+    if skipped:
+        _say("not probed: " + ", ".join(skipped))
+
+
 def main():
     outdir = sys.argv[1] if len(sys.argv) > 1 else "tccdiag_out"
 
@@ -170,6 +221,7 @@ def main():
         _say("nothing was produced at all, so this is a COMPILE failure, not a load-time dependency")
         if sources:
             _rerun_the_compile(sources[0])
+        _which_libm_symbols_link(outdir)
         return 0
     for dll in produced:
         _dump_imports(dll)
