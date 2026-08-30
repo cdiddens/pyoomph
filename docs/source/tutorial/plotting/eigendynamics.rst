@@ -11,7 +11,7 @@ As an example of such a movie, refer to :numref:`secadvstabrisingbubble`, where 
 
 	.. raw:: html 
 
-		<figure class="align-center" id="vidrisingbubble"><video autoplay="True" preload="auto" width="60%" loop=""><source src="../../_static/rising_bubble.mp4" type="video/mp4"></video><figcaption><p><span class="caption-text">Example of the eigendynamics of the rising bubble case.</span> </span></p></figcaption></figure>
+		<figure class="align-center" id="vidrisingbubble"><video autoplay="True" muted="" playsinline="" controls="" preload="auto" width="60%" loop=""><source src="../../_static/rising_bubble.mp4" type="video/mp4"></video><figcaption><p><span class="caption-text">Example of the eigendynamics of the rising bubble case.</span> </span></p></figcaption></figure>
 
 We first start by importing the problem class from :download:`rising_bubble.py` and defining a conventional plotter class. We don't have to do anything regarding the eigendynamics here. This plotter can therefore be also used for the base state, as done in the previous examples.
 
@@ -33,6 +33,8 @@ The final call of the method :py:meth:`~pyoomph.generic.problem.Problem.create_e
 Once done, you can assemble all generated images to a movie. It is noteworthy that for azimuthal instabilities, the transform ``"mirror_x"`` will also invert the eigenperturbation on the left part of the plot in a reasonable way.
 
 If you do not want to create a movie, but e.g. a sequence of images for a static document, consider adding ``fileext="pdf"`` to the constructor of the plotter class.
+
+The animation also works when the mesh is distributed over several processes with ``--distribute``: each frame perturbs the state by the eigenfunction on all processes at once, and the frames are identical to the ones of a serial run. The same holds for plotted tracers, which are gathered from all processes as well - only the fading trail of a tracer that has already left the domain is lost, since such a particle is not gathered any more.
 
 .. only:: html
 

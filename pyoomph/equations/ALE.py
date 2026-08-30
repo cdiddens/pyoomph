@@ -1,31 +1,35 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
+from .._deprecation import deprecated_kwargs as _deprecated_kwargs, deprecated_attribute_alias as _deprecated_attribute_alias
 from ..meshes.mesh import InterfaceMesh, AnyMesh
+from ..meshes.ordering import SortAlongAxis, check_sorting_arguments, sort_line_segments
+from ..meshes.meshdatacache import MeshDataCacheEntry
 from .. import GlobalLagrangeMultiplier, WeakContribution, IntegralConstraint
 from ..generic import Equations,InterfaceEquations,ODEEquations
 from .generic import get_interface_field_connection_space
@@ -35,27 +39,35 @@ from ..typings import *
 if TYPE_CHECKING:
     from ..generic.problem import Problem
     from ..generic.codegen import EquationTree
+    from ..solvers.generic import GenericEigenSolver
 
 class BaseMovingMeshEquations(Equations):
     """
         Defines the base class for moving mesh equations. This class should be inherited by all moving mesh equations.
-            
+
+        The coordinate space is whatever the highest space of all fields on the domain is. To ask for a
+        higher one than the fields require - a mesh on ``"C2"`` while only ``"C1"`` fields are
+        present, say - add an :py:class:`~pyoomph.equations.generic.ElementSpace` to the domain::
+
+            eqs = LaplaceSmoothedMesh() + ElementSpace("C2")
+
+        The moving-mesh classes used to take a ``coordinate_space`` argument of their own for this.
+        It went through ``activate_coordinates_as_dofs``, which *assigns* the space rather than
+        raising it to at least that order, so the outcome depended on whether the other fields were
+        defined before or after the smoother - and asking for a space below what the fields need was
+        rejected further down anyway. ``ElementSpace`` is order-independent and is the one place that
+        decides this.
+
         Args:
-            coordinate_space(Optional[str]): The coordinate space. Default is None.            
             coordsys(Optional[BaseCoordinateSystem]): The coordinate system. Default is None.
     """
 
-    def __init__(self,coordinate_space:Optional[str]=None,coordsys:Optional[BaseCoordinateSystem]=None):
+    def __init__(self,coordsys:BaseCoordinateSystem | None=None):
         super().__init__()
-        self.coordsys=coordsys                
-        self.coordinate_space=coordinate_space
-        
-        self.min_coordinate_space:Optional[str]=None
-        if self.coordinate_space is not None:
-            self.min_coordinate_space = self.coordinate_space
+        self.coordsys=coordsys
 
     def define_fields(self):
-        self.activate_coordinates_as_dofs(coordinate_space=self.min_coordinate_space)        
+        self.activate_coordinates_as_dofs()
 
     def define_scaling(self):
         self.set_scaling(mesh= scale_factor("spatial"))
@@ -63,21 +75,21 @@ class BaseMovingMeshEquations(Equations):
 
     def after_mapping_on_macro_elements(self):
         self.get_mesh().set_lagrangian_nodal_coordinates()
-        self.get_mesh().invalidate_lagrangian_kdtree()
+        self.get_mesh().bump_topology_generation()
 
     def with_average_position_constraint(self, problem:"Problem", *, act_on:str="mesh",ode_domain_name:str="globals",lagrange_prefix:str="lagr_intconstr_mesh_", set_zero_on_normal_mode_eigensolve:bool=True, **avg_pos:ExpressionOrNum)->Equations:
 
-        lagrs:Dict[str,ExpressionOrNum]={}
+        lagrs:dict[str,ExpressionOrNum]={}
         for c,v in avg_pos.items():
             if c not in {"x","y","z"}:
                 raise RuntimeError("can only set average positions of x,y,z, but not "+str(c))
             lagrs[c]=v
 
-        ode_additions = GlobalLagrangeMultiplier(**{lagrange_prefix+c:0 for c,_ in lagrs.items()},set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve)
+        ode_additions = GlobalLagrangeMultiplier(**{lagrange_prefix+c:0 for c,_ in lagrs.items()},set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve) #type:ignore
         #ode_additions +=TestScaling(**{lagrange_name:1/scale_factor("pressure")})
         #ode_additions += Scaling(**{lagrange_name: 1 / test_scale_factor("pressure")})
 
-        eq_additions = self
+        eq_additions:Equations = self
         for c,v in lagrs.items():
             l=var(lagrange_prefix+c,domain=ode_domain_name)
             eq_additions += WeakContribution(l-v, testfunction(act_on+"_"+c))
@@ -105,16 +117,14 @@ class PseudoElasticMesh(BaseMovingMeshEquations):
             E (ExpressionOrNum): The Young's modulus. Default is 1*scale_factor("spatial")**2.
             nu (ExpressionOrNum): The Poisson's ratio. Default is rational_num(3,10).
             spatial_error_factor (Optional[float]): The spatial error factor. Default is None.
-            coordinate_space (Optional[str]): The coordinate space. Default is None.            
             coordsys (Optional[BaseCoordinateSystem]): The coordinate system. Default is cartesian.
     """
-    def __init__(self, E:ExpressionOrNum=1*scale_factor("spatial")**2, nu:ExpressionOrNum=rational_num(3,10), spatial_error_factor:Optional[float]=None,coordinate_space:Optional[str]=None,coordsys:Optional[BaseCoordinateSystem]=cartesian):
-        super(PseudoElasticMesh, self).__init__(coordinate_space=coordinate_space,coordsys=coordsys)
+    def __init__(self, E:ExpressionOrNum=1*scale_factor("spatial")**2, nu:ExpressionOrNum=rational_num(3,10), spatial_error_factor:float | None=None,coordsys:BaseCoordinateSystem | None=cartesian):
+        super(PseudoElasticMesh, self).__init__(coordsys=coordsys)
         self.E = E
         self.nu = nu
         self.ALE_factor = 1
         self.spatial_error_factor = spatial_error_factor
-        self.min_coordinate_space=coordinate_space
 
     def get_squared_spatial_factor(self)->ExpressionOrNum:
         return self.E
@@ -137,7 +147,7 @@ class PseudoElasticMesh(BaseMovingMeshEquations):
         X = var("lagrangian")
         displ = x - X
         check=sym(grad(x_test,  coordsys=self.coordsys, lagrangian=True))        
-        self.add_residual(self.ALE_factor * Weak(sigma(displ), eps(x_test),coordinate_system=self.coordsys) )
+        self.add_residual(self.ALE_factor * Weak(sigma(displ), eps(x_test),coordsys=self.coordsys) )
 
 
 class LaplaceSmoothedMesh(BaseMovingMeshEquations):
@@ -153,8 +163,8 @@ class LaplaceSmoothedMesh(BaseMovingMeshEquations):
         Args:
             factor (ExpressionOrNum): The factor. Default is scale_factor("spatial")**2.            
     """
-    def __init__(self,factor:ExpressionOrNum=scale_factor("spatial")**2,coordinate_space:Optional[str]=None,coordsys:Optional[BaseCoordinateSystem]=cartesian,symmetrize:bool=False):
-        super(LaplaceSmoothedMesh, self).__init__(coordinate_space=coordinate_space,coordsys=coordsys)
+    def __init__(self,factor:ExpressionOrNum=scale_factor("spatial")**2,coordsys:BaseCoordinateSystem | None=cartesian,symmetrize:bool=False):
+        super(LaplaceSmoothedMesh, self).__init__(coordsys=coordsys)
         self.factor=factor
         self.symmetrize=symmetrize
 
@@ -170,24 +180,26 @@ class LaplaceSmoothedMesh(BaseMovingMeshEquations):
             tens=sym(grad(displ,coordsys=coordsys,lagrangian=True))
         else:
             tens=grad(displ,coordsys=coordsys,lagrangian=True)
-        self.add_residual(self.factor*Weak(tens, grad(x_test,coordsys=coordsys, lagrangian=True),coordinate_system=coordsys) )
+        self.add_residual(self.factor*Weak(tens, grad(x_test,coordsys=coordsys, lagrangian=True),coordsys=coordsys) )
 
 
 class SingleDirectionLaplaceSmoothedMesh(LaplaceSmoothedMesh):
-    def __init__(self, direction:Union[int,Literal["x","y","z"]], factor: ExpressionOrNum = scale_factor("spatial") ** 2,  coordinate_space: Optional[str] = None, coordsys: OptionalCoordinateSystem = cartesian):
-        super().__init__(factor, coordinate_space, coordsys, symmetrize=False)
-        self.direction=direction
+    def __init__(self, direction:int | Literal["x", "y", "z"], factor: ExpressionOrNum = scale_factor("spatial") ** 2, coordsys: BaseCoordinateSystem | None = cartesian):
+        super().__init__(factor, coordsys, symmetrize=False)
+        self.direction:int
         if isinstance(direction,str):
             self.direction={"x":0,"y":1,"z":2}[direction]
-    
+        else:
+            self.direction=direction
+
     def define_residuals(self):
         dirn=["x","y","z"][self.direction]
         x,x_test = var_and_test("mesh_"+dirn)
         X = var("lagrangian_"+dirn)
         displ = x - X
-        coordsys=self.coordsys        
+        coordsys=self.coordsys
         tens=grad(displ,coordsys=coordsys,lagrangian=True)[self.direction]
-        self.add_residual(self.factor*Weak(tens, grad(x_test,coordsys=coordsys, lagrangian=True)[self.direction],coordinate_system=coordsys) )
+        self.add_residual(self.factor*Weak(tens, grad(x_test,coordsys=coordsys, lagrangian=True)[self.direction],coordsys=coordsys) )
         ndim=self.get_mesh().get_code_gen().get_nodal_dimension()
         for i in range(ndim):
             if i!=self.direction:
@@ -205,12 +217,10 @@ class HyperelasticSmoothedMesh(BaseMovingMeshEquations):
     Args:
         mu (float): The shear modulus. Default is 1.
         kappa (float): The bulk modulus. Default is 1.
-        coordinate_space (Optional[str]): The coordinate space. Default is None.
         coordsys (Optional[BaseCoordinateSystem]): The coordinate system. Default is cartesian.
     """
-    def __init__(self,mu:float=1,kappa:float=1, coordinate_space: Optional[str] = None,  coordsys: Optional[BaseCoordinateSystem] = cartesian,use_subexpressions:bool=False):
-        super().__init__(coordinate_space,  coordsys)
-        self.use_subexpressions=use_subexpressions
+    def __init__(self,mu:float=1,kappa:float=1, coordsys: BaseCoordinateSystem | None = cartesian):
+        super().__init__(coordsys)
         self.mu=mu
         self.kappa=kappa
         
@@ -218,15 +228,19 @@ class HyperelasticSmoothedMesh(BaseMovingMeshEquations):
     def define_residuals(self):
         x=var("mesh")
         dxdX=grad(x,lagrangian=True,coordsys=self.coordsys)
+        # NB: J and I1min are deliberately NOT wrapped in subexpression(). This class activates the
+        # coordinates as dofs (BaseMovingMeshEquations.define_fields), so GiNaCSubExpression::derivative
+        # always takes the position-symbol escape hatch of dev_docs/code_generation.md 9.2: it
+        # differentiates the body on the spot and inlines the result at every use site, and the cached
+        # scalar is written but never read. Measured on a 16x16 quad Navier-Stokes with this smoother:
+        # +87% elemental residual+Jacobian (41.9 -> 78.5 ms), 82 kB -> 95 kB of generated C, and the
+        # pow() count up from 172 to 420. There used to be a use_subexpressions=True option here; it
+        # could not pay off on any element this class can be attached to, and was removed.
         J=determinant(dxdX)
-        if self.use_subexpressions:
-            J=subexpression(J)
         I1=trace( matproduct(transpose(dxdX),dxdX) )*J**rational_num(-2,3)        
         I1min=I1-self.get_nodal_dimension() # or 3?
-        if self.use_subexpressions:
-            I1min=subexpression(I1min)
         F=self.mu/2*I1min+self.kappa/2*(J-1)**2
-        self.add_functional_minimization(F,dimensional_testfunctions=False,coordinate_system=self.coordsys,lagrangian=True)
+        self.add_functional_minimization(F,dimensional_testfunctions=False,coordsys=self.coordsys,lagrangian=True)
         
 class YeohSmoothedMesh(BaseMovingMeshEquations):
     """Yeoh mesh smoothing. The mesh is smoothed by minimizing the energy functional:
@@ -240,13 +254,11 @@ class YeohSmoothedMesh(BaseMovingMeshEquations):
         C1 (float): The Yeoh constant C1. Default is 1.
         C2 (float): The Yeoh constant C2. Default is 10.
         C3 (float): The Yeoh constant C3. Default is 0.
-        coordinate_space (Optional[str]): The coordinate space. Default is None.        
         coordsys (Optional[BaseCoordinateSystem]): The coordinate system. Default is cartesian
-        
+
     """
-    def __init__(self,kappa:float=1, C1:float=1,C2:float=10,C3:float=0, coordinate_space: Optional[str] = None,  coordsys: Optional[BaseCoordinateSystem] = cartesian,use_subexpressions:bool=False):
-        super().__init__(coordinate_space,  coordsys)
-        self.use_subexpressions=use_subexpressions
+    def __init__(self,kappa:float=1, C1:float=1,C2:float=10,C3:float=0, coordsys: BaseCoordinateSystem | None = cartesian):
+        super().__init__(coordsys)
         self.C1=C1
         self.C2=C2
         self.C3=C3
@@ -256,21 +268,131 @@ class YeohSmoothedMesh(BaseMovingMeshEquations):
     def define_residuals(self):
         x=var("mesh")
         dxdX=grad(x,lagrangian=True,coordsys=self.coordsys)
+        # Not wrapped in subexpression() - see HyperelasticSmoothedMesh.define_residuals for why the
+        # option that used to do that was removed.
         J=determinant(dxdX)
-        if self.use_subexpressions:
-            J=subexpression(J)
         I1=trace( matproduct(transpose(dxdX),dxdX) )*J**rational_num(-2,3)
         I1min=I1-self.get_nodal_dimension()
         F=(self.C1*I1min+self.C2*I1min**2+self.C3*I1min**3+self.kappa*(J-1)**2)/2                                
-        #self.add_functional_minimization(scale_factor("spatial")*F,dxdX,dimensional_testfunctions=False,coordinate_system=self.coordsys,lagrangian=True)
-        self.add_functional_minimization(F,dimensional_testfunctions=False,coordinate_system=self.coordsys,lagrangian=True)
-        
+        #self.add_functional_minimization(scale_factor("spatial")*F,dxdX,dimensional_testfunctions=False,coordsys=self.coordsys,lagrangian=True)
+        self.add_functional_minimization(F,dimensional_testfunctions=False,coordsys=self.coordsys,lagrangian=True)
 
+
+class InterfaceMeshStiffening(InterfaceEquations):
+    """
+    Stiffens the mesh in the layer of *bulk* elements attached to an interface, without touching the
+    bulk equations themselves.
+
+    Interface conditions that drag the mesh along -- most prominently
+    :py:class:`~pyoomph.equations.solid.FSIConnection`, which slaves the fluid mesh position to the
+    solid displacement -- only constrain the nodes lying *on* the interface. Wherever the imposed
+    motion varies quickly along the interface (around corners and tips of an FSI structure, in
+    particular), the first layer of bulk elements has to absorb the entire mismatch between the
+    strongly moving interface nodes and the almost stationary interior, and is sheared or squashed
+    far more than the elements further inside.
+
+    This equation counteracts that by evaluating a mesh smoothing operator on the interface, but with
+    *gradients of the bulk* mesh test function, i.e. of ``testfunction("mesh",domain="..")``. The shape
+    function of a node that is not on the face does vanish on the face, but its gradient does not, so
+    the term reaches the interior nodes of the attached elements although it is only integrated over
+    the interface. It is the surface-concentrated limit of a bulk integral over a layer of thickness
+    ``h``, which is why the element size enters the prefactor: ``factor`` is then just the *relative*
+    extra stiffness of that layer, i.e. ``factor=1`` roughly doubles the mesh stiffness there. The
+    distortion is thereby pushed further into the domain, where more elements can share it.
+
+    Since it is a quadratic form in the gradient of the displacement, the contribution is positive
+    semi-definite and can therefore only add stiffness -- it cannot render the mesh problem indefinite.
+    It is nevertheless rank-deficient (only the face integration points are sampled), so it must be
+    used *in addition to*, never instead of, a bulk moving mesh equation.
+
+    ``factor`` may be any expression, e.g. one that is only large close to a corner, if the stiffening
+    shall be applied locally. Since the element size in the prefactor is the one of the *current*
+    (deformed) mesh - the undeformed one would need ``element_size_Lagrangian``, which oomph-lib does
+    not provide on face elements - the term is weakly nonlinear even when the bulk mesh equation is
+    linear, costing a few extra Newton steps. Pass ``stiffness`` to fix the prefactor and keep a linear
+    mesh problem.
+
+    Args:
+        factor: Extra stiffness of the attached element layer, relative to the bulk mesh stiffness. Default is 1.
+        mode: Which operator to use, see below. Default is ``"elastic"``.
+        stiffness: Absolute prefactor, overriding ``factor`` times the bulk mesh stiffness times the element size.
+        nu: Poisson ratio, only used for ``mode="elastic"``. Default is 3/10, as in :py:class:`PseudoElasticMesh`.
+        coordsys: Optional coordinate system override. Defaults to the one of the interface.
+
+    The available modes are:
+
+        * ``"elastic"``: penalizes the linear elastic energy of the displacement, the interface analogue of
+          :py:class:`PseudoElasticMesh`.
+        * ``"laplace"``: penalizes the full ``grad(x-X)``, the interface analogue of :py:class:`LaplaceSmoothedMesh`.
+        * ``"normal"``: penalizes only ``grad(x-X)*n``, i.e. it drives the displacement to be constant along the
+          normal direction, so that the attached elements follow the interface as rigidly as possible.
+
+    On a fluid-structure problem with a bending flap, all three keep the fluid mesh well away from the
+    tangling that the unstiffened mesh runs into; ``"elastic"`` was marginally the best of them, and going
+    from ``factor=5`` to ``factor=25`` changed little, since a surface term cannot rigidify the layer
+    completely.
+    """
+
+    required_parent_type = BaseMovingMeshEquations
+
+    def __init__(self,factor:ExpressionOrNum=1,*,mode:Literal["normal","laplace","elastic"]="elastic",stiffness:ExpressionOrNum | None=None,nu:ExpressionOrNum=rational_num(3,10),coordsys:BaseCoordinateSystem | None=None):
+        super().__init__()
+        if mode not in {"normal","laplace","elastic"}:
+            raise ValueError("mode must be 'normal', 'laplace' or 'elastic', not "+str(mode))
+        self.factor=factor
+        self.mode:Literal["normal","laplace","elastic"]=mode
+        self.stiffness=stiffness
+        self.nu=nu
+        self.coordsys=coordsys
+
+    def get_nondimensional_bulk_element_size(self)->Expression:
+        """The typical size of the attached bulk element, nondimensionalized by the spatial scale."""
+        # The size on the undeformed mesh would be the more natural choice here, since the operator itself
+        # is Lagrangian, but "element_size_Lagrangian" needs J_lagrangian_at_knot, which oomph-lib does not
+        # implement for face elements. The Eulerian size of the attached bulk element is used instead.
+        return nondim("cartesian_element_length_h",domain=self.get_parent_domain())
+
+    def get_stiffness(self)->ExpressionOrNum:
+        """The absolute prefactor of the interface contribution."""
+        if self.stiffness is not None:
+            return self.stiffness
+        try:
+            bulk_stiffness=cast(BaseMovingMeshEquations, self.get_parent_equations()).get_squared_spatial_factor()
+        except RuntimeError:
+            # Not all mesh smoothers expose a single stiffness prefactor (the hyperelastic ones do not).
+            # Their residual is nondimensionalized with scale_factor("spatial")**2 all the same.
+            bulk_stiffness=scale_factor("spatial")**2
+        return self.factor*bulk_stiffness*self.get_nondimensional_bulk_element_size()
+
+    def define_residuals(self):
+        # domain=".." is essential: on the interface itself, "mesh" would only be expanded in the face
+        # shape functions and the term could not reach the interior nodes of the attached elements.
+        # The gradients must be Lagrangian ones - pyoomph cannot differentiate the Lagrangian coordinate
+        # with respect to the Eulerian one, so an Eulerian grad(x-X) is not available anyhow.
+        x=var("mesh",domain="..")
+        X=var("lagrangian",domain="..")
+        xtest=testfunction("mesh",domain="..")
+        gradient:Callable[[Expression],Expression]=lambda v: grad(v,coordsys=self.coordsys,lagrangian=True)
+        displ=x-X
+        if self.mode=="normal":
+            n=var("normal")
+            a,b=dot(gradient(displ),n),dot(gradient(xtest),n)
+        elif self.mode=="laplace":
+            a,b=gradient(displ),gradient(xtest)
+        else:
+            mu=1/(2*(1+self.nu))
+            lmbda=self.nu/((1+self.nu)*(1-2*self.nu))
+            lmbda=2*mu*lmbda/(lmbda+2*mu)
+            eps:Callable[[Expression],Expression]=lambda v: sym(gradient(v))
+            a=lmbda*trace(eps(displ))*identity_matrix()+2*mu*eps(displ)
+            b=eps(xtest)
+        self.add_weak(self.get_stiffness()*a,b,lagrangian=True,coordsys=self.coordsys)
 
 
 class PinMeshCoordinates(Equations):
-    def __init__(self,*directions:Union[int,Literal["x","y","z"]]):
+    def __init__(self,*directions:int | Literal["x", "y", "z"]):
         super(PinMeshCoordinates, self).__init__()
+        self.directions:set[int] | None
         if len(directions)>0:
             self.directions=set()        
             for d in directions:
@@ -301,7 +423,7 @@ class SetLagrangianToEulerianAfterSolve(Equations):
         super(SetLagrangianToEulerianAfterSolve, self).after_newton_solve()
         if self.active:
             self.get_mesh().set_lagrangian_nodal_coordinates()
-            self.get_mesh().invalidate_lagrangian_kdtree()
+            self.get_mesh().bump_topology_generation()
 
 
 class ConnectMeshAtInterface(InterfaceEquations):
@@ -317,7 +439,7 @@ class ConnectMeshAtInterface(InterfaceEquations):
         self.lagr_mult_prefix=lagr_mult_prefix
         self.use_highest_space=use_highest_space
 
-    def get_required_fields(self) -> List[str]:
+    def get_required_fields(self) -> list[str]:
         dim = self.get_nodal_dimension()
         fields = ["mesh_x", "mesh_y", "mesh_z"]
         return fields[0:dim]
@@ -325,25 +447,27 @@ class ConnectMeshAtInterface(InterfaceEquations):
     def define_fields(self):
         for f in self.get_required_fields():
             if self.get_opposite_side_of_interface(raise_error_if_none=False) is None:
-                raise self.add_exception_info(RuntimeError("Cannot connect any fields at the interface if no opposite side is present"))
+                raise self._add_exception_info(RuntimeError("Cannot connect any fields at the interface if no opposite side is present"))
             inside_space=self.get_parent_domain()._coordinate_space            
             if inside_space=="":
-                raise RuntimeError("Cannot connect field "+f+" at the interface, since it cannot find in the inner domain. You might have to set coordinate_space explicitly in the moving mesh class")
+                raise RuntimeError("Cannot connect field "+f+" at the interface, since it cannot find in the inner domain. You might have to raise the coordinate space of that domain with an ElementSpace")
             outdom=self.get_opposite_side_of_interface().get_parent_domain()
             assert outdom is not None
             outside_space=outdom._coordinate_space #type:ignore
             inside_space=cast(FiniteElementSpaceEnum,inside_space)
             outside_space=cast(FiniteElementSpaceEnum,outside_space)
-            space = get_interface_field_connection_space(inside_space, outside_space,self.use_highest_space)
+            space = get_interface_field_connection_space(inside_space, outside_space,self.use_highest_space,
+                                                        parent_space=str(self.get_parent_domain()._coordinate_space),
+                                                        parent_dim=int(self.get_parent_domain().dimension))
             if space=="":
-                raise RuntimeError("Cannot connect field "+f+" at the interface, since it cannot find in the inner domain. You might have to set coordinate_space explicitly in the moving mesh class")
+                raise RuntimeError("Cannot connect field "+f+" at the interface, since it cannot find in the inner domain. You might have to raise the coordinate space of that domain with an ElementSpace")
             self.define_scalar_field(self.lagr_mult_prefix+f,space)
 
     def define_scaling(self):
         super(ConnectMeshAtInterface, self).define_scaling()
         for f in self.get_required_fields():
-            self.set_scaling(**{self.lagr_mult_prefix+f:1/test_scale_factor(f)})
-            self.set_test_scaling(**{self.lagr_mult_prefix + f: 1 / scale_factor(f)})
+            self.set_scaling({self.lagr_mult_prefix+f:1/test_scale_factor(f)})
+            self.set_test_scaling({self.lagr_mult_prefix + f: 1 / scale_factor(f)})
 
     def define_residuals(self):
         for f in self.get_required_fields():
@@ -401,11 +525,11 @@ class StabilizeElementSizeAtMovingInterface(InterfaceEquations):
         _x,xtest=var_and_test("mesh")
         parent=self.get_parent_equations(BaseMovingMeshEquations)
         assert isinstance(parent,BaseMovingMeshEquations)
-        self.add_residual(weak(es,estest,coordinate_system=parent.coordsys)) # es=size_lagr/size_euler
-        self.add_residual(-weak(1,estest,lagrangian=True,coordinate_system=parent.coordsys))
+        self.add_residual(weak(es,estest,coordsys=parent.coordsys)) # es=size_lagr/size_euler
+        self.add_residual(-weak(1,estest,lagrangian=True,coordsys=parent.coordsys))
         self.set_initial_condition("_elemscale",1)
         spatial_square=parent.get_squared_spatial_factor()
-        self.add_residual(weak(-self.factor*spatial_square*(es-1),scale_factor("spatial")*div(xtest,lagrangian=False,coordsys=parent.coordsys),coordinate_system=parent.coordsys))
+        self.add_residual(weak(-self.factor*spatial_square*(es-1),scale_factor("spatial")*div(xtest,lagrangian=False,coordsys=parent.coordsys),coordsys=parent.coordsys))
 
     def after_remeshing(self, eqtree: "EquationTree"):
         mesh=eqtree.get_mesh()
@@ -425,7 +549,7 @@ class VolumeEnforceStorage(ODEEquations):
             volume(ExpressionOrNum): The volume that should be enforced.
             scale(Union[Literal["auto"],ExpressionOrNum]): The scale factor. Default is "auto".
     """
-    def __init__(self,volume:ExpressionOrNum,scale:Union[Literal["auto"],ExpressionOrNum]="auto"):
+    def __init__(self,volume:ExpressionOrNum,scale:Literal["auto"] | ExpressionOrNum="auto"):
         super(VolumeEnforceStorage, self).__init__()
         self.volume=volume
         self.scale=scale
@@ -475,13 +599,13 @@ class EnforceVolumeByPressure(IntegralConstraint):
     Args:
         volume: The desired volume to be enforced. This can be a constant or any expression, e.g. a global parameter or a function of time.
     """
-    def __init__(self,volume:ExpressionOrNum,*,ode_storage_domain: Optional[str] = None, only_for_stationary_solve: bool = False, set_zero_on_normal_mode_eigensolve: bool = True, scaling_factor:Union[str,ExpressionNumOrNone]=None):
+    def __init__(self,volume:ExpressionOrNum,*,ode_storage_domain: str | None = None, only_for_stationary_solve: bool = False, set_zero_on_normal_mode_eigensolve: bool = True, scaling_factor:str | ExpressionNumOrNone=None):
         if scaling_factor is None:
             scaling_factor=1
         super().__init__(dimensional_dx=True,ode_storage_domain=ode_storage_domain, only_for_stationary_solve = only_for_stationary_solve, set_zero_on_normal_mode_eigensolve= set_zero_on_normal_mode_eigensolve, scaling_factor=scaling_factor,pressure=volume)        
         
-    def get_constraint(self,field:str,u:Expression):
-        return 1
+    def get_constraint(self,field:str,u:Expression)->Expression:
+        return Expression(1)
     
     def define_residuals(self):
         static=not self.get_current_code_generator()._coordinates_as_dofs
@@ -510,18 +634,23 @@ class EnforcedInterfacialLaplaceSmoothing(InterfaceEquations):
     
     """
     required_parent_type=BaseMovingMeshEquations
-    def __init__(self,coordinate_system=cartesian,sorting=None):
+    @_deprecated_kwargs(coordinate_system="coordsys")
+    def __init__(self,coordsys:"BaseCoordinateSystem | None"=cartesian,sorting:"SortAlongAxis | None"=None):
         super().__init__()
-        self.coordsys=coordinate_system
+        self.coordsys=coordsys
         self.verbose=True
-        self.sorting=sorting
+        # Which end of each interface segment gets arclength 0. Worth setting whenever the mesh can
+        # be rebuilt underneath this equation: the segment orientation the mesh happens to deliver
+        # may flip, and the reference arclength would jump with it.
+        self.sorting:"SortAlongAxis | None"=sorting
+        check_sorting_arguments(sorting,None,whom="EnforcedInterfacialLaplaceSmoothing")
         
-    def define_fields(self):        
+    def define_fields(self):
         # Get the coordinate space
-        space=self._get_combined_element()._assert_codegen()._coordinate_space
+        space=cast(FiniteElementSpaceEnum,self._master()._assert_codegen()._coordinate_space)
         # each interface will need a unique name, so that we have individual fields for each interface
         # This won't be necessary in the general case, since usually, you have corners between two boundaries
-        fn=self._get_combined_element()._assert_codegen().get_full_name()
+        fn=self._master()._assert_codegen().get_full_name()
         iname="__".join(fn.split("/")[1:])        
         self.define_scalar_field("_s_fixed_"+iname,space) # Fixed arclength of the reference configuration
         self.define_scalar_field("_s_solved_"+iname,space,testscale=scale_factor("spatial")**2) # solved arclength between start and end points
@@ -534,7 +663,7 @@ class EnforcedInterfacialLaplaceSmoothing(InterfaceEquations):
         if self.get_nodal_dimension()!=2: 
             raise RuntimeError("EnforcedInterfacialLaplaceSmoothing is only implemented for 2d meshes")
         # Bind everything
-        fn=self._get_combined_element()._assert_codegen().get_full_name()
+        fn=self._master()._assert_codegen().get_full_name()
         iname="__".join(fn.split("/")[1:])
         s,stest=var_and_test("_s_solved_"+iname)
         
@@ -547,53 +676,122 @@ class EnforcedInterfacialLaplaceSmoothing(InterfaceEquations):
         l=var("_tang_shift_"+iname,only_base_mode=True)
         n=var("normal")
         
-        self.add_weak(grad(s,coordsys=self.coordsys),grad(stest,coordsys=self.coordsys),coordinate_system=self.coordsys)
+        self.add_weak(grad(s,coordsys=self.coordsys),grad(stest,coordsys=self.coordsys),coordsys=self.coordsys)
         
         t=vector(-n[1],n[0])  # Tangential vector
-        self.add_weak(s-s0,ltest,coordinate_system=self.coordsys) # Ensure that the arclength is equal to the initial arclength 
+        self.add_weak(s-s0,ltest,coordsys=self.coordsys) # Ensure that the arclength is equal to the initial arclength 
         # by shifting the nodes tangentially along the line
-        self.add_weak(l*t,testfunction("mesh"),coordinate_system=self.coordsys)
+        self.add_weak(l*t,testfunction("mesh"),coordsys=self.coordsys)
         # Fix the reference configuration
         self.set_Dirichlet_condition("_s_fixed_"+iname,True)
         
-    def before_assigning_equations_postorder(self, mesh):
-        # Just make sure to initialize the arclengths of the interface nodes
-        fn=self._get_combined_element()._assert_codegen().get_full_name()
-        iname="__".join(fn.split("/")[1:])
-        data=mesh.get_problem().get_cached_mesh_data(mesh)
-        segs,_=data.get_interface_line_segments()
-        coords=data.get_coordinates()                
-        nodes=mesh.fill_node_index_to_node_map()
-        fixed_index=mesh.has_interface_dof_id("_s_fixed_"+iname)
-        dyn_index=mesh.has_interface_dof_id("_s_solved_"+iname)                
+    def _needs_merged_interface(self,mesh:"InterfaceMesh")->bool:
+        """Whether the reference arclength has to be measured on the globally merged interface.
+
+        Collective, and answered identically on every rank, so that it decides as a whole whether the
+        merge below is entered. The same gate as
+        :py:class:`~pyoomph.meshes.zeta.AssignZetaCoordinatesBase` uses, for the same reason: an
+        arclength is a property of the entire curve.
+        """
+        from ..generic.mpi import get_mpi_any, get_mpi_nproc
+        problem=mesh.get_problem()
+        if problem is None or not problem.is_distributed() or get_mpi_nproc()<=1:
+            return False
+        from ..meshes.meshdatamerge import needs_merging
+        return get_mpi_any(needs_merging(mesh))
+
+    def _walk_reference_arclengths(self,cache:"MeshDataCacheEntry")->list[tuple[int,float]]:
+        """(node index, arclength) along every segment of ``cache``, measured from the segment start."""
+        segs,_=cache.get_interface_line_segments()
+        coords=cache.get_coordinates()
+        # Orient the segments before walking them, not while walking them: this reversal used to sit
+        # inside the "for s in seg" loop below, where rebinding seg cannot change what the loop
+        # iterates over, so the arclength was always assigned in the mesh's own node order and
+        # sorting had no effect at all.
+        segs=sort_line_segments(coords,segs,sort_along_axis=self.sorting,whom="EnforcedInterfacialLaplaceSmoothing")
+        res:list[tuple[int,float]]=[]
         for seg in segs:
             al=0.0
             lastx=coords[0,seg[0]]
             lasty=coords[1,seg[0]]
-            
             for s in seg:
-                if self.sorting is not None:
-                    if self.sorting=="x+":
-                        if coords[0,seg[0]]>coords[0,seg[-1]]:
-                            seg=seg[::-1]
-                    elif self.sorting=="x-":
-                        if coords[0,seg[0]]<coords[0,seg[-1]]:
-                            seg=seg[::-1]
-                    elif self.sorting=="y+":
-                        if coords[1,seg[0]]>coords[1,seg[-1]]:
-                            seg=seg[::-1]
-                    elif self.sorting=="y-":
-                        if coords[1,seg[0]]<coords[1,seg[-1]]:
-                            seg=seg[::-1]
-                    else:
-                        raise RuntimeError("Unknown sorting option "+str(self.sorting))
-                            
                 x,y=coords[0,s],coords[1,s]
                 delta=numpy.sqrt((x-lastx)**2+(y-lasty)**2)
                 al+=delta
-                nodes[s].set_value(nodes[s].additional_value_index(fixed_index),al)
-                nodes[s].set_value(nodes[s].additional_value_index(dyn_index),al)
+                res.append((int(s),float(al)))
                 lastx,lasty=x,y
+        return res
+
+    def _set_arclengths_by_index(self,mesh:"InterfaceMesh",values:list[tuple[int,float]],fixed_index:int,dyn_index:int)->None:
+        nodes=mesh.fill_node_index_to_node_map()
+        for ind,al in values:
+            nodes[ind].set_value(nodes[ind].additional_value_index(fixed_index),al)
+            nodes[ind].set_value(nodes[ind].additional_value_index(dyn_index),al)
+
+    def _set_arclengths_by_position(self,mesh:"InterfaceMesh",table:list[tuple[float,float,float]],fixed_index:int,dyn_index:int)->None:
+        """Write the arclengths of the merged interface onto this rank's nodes, addressed by position.
+
+        By position, because the table numbers the points of the WHOLE interface, which says nothing
+        about this rank's node order -- the same reason
+        :py:func:`~pyoomph.meshes.zeta.assign_zetas_from_position_table` does it. Every local node is
+        one of those points, so the match is exact up to the last bits. It deliberately covers the
+        HALO nodes as well: ``_s_fixed_`` is pinned, so oomph never synchronises it, and a halo node
+        left at its own local arclength would assemble a different equation from its owner.
+        """
+        from scipy.spatial import cKDTree #type:ignore
+        nodes=[n for n in mesh.nodes()]
+        if not len(table) or not nodes:
+            return
+        tab=numpy.array(table,dtype=float).reshape(-1,3)
+        dist,idx=cKDTree(tab[:,0:2]).query(numpy.array([[n.x(0),n.x(1)] for n in nodes])) #type:ignore
+        extent=max(float(numpy.amax(numpy.abs(tab[:,0:2]))),1.0)
+        if float(numpy.amax(dist))>1e-8*extent:
+            raise RuntimeError("EnforcedInterfacialLaplaceSmoothing on '"+mesh.get_name()+"': a node of this rank is "+str(float(numpy.amax(dist)))+" away from the nearest point of the merged interface, which should be zero. The merged data does not describe the same interface.")
+        for n,i in zip(nodes,idx):
+            al=float(tab[i,2])
+            n.set_value(n.additional_value_index(fixed_index),al)
+            n.set_value(n.additional_value_index(dyn_index),al)
+
+    def before_assigning_equations_postorder(self, mesh:"AnyMesh"):
+        # Just make sure to initialize the arclengths of the interface nodes
+        assert isinstance(mesh,InterfaceMesh)
+        fn=self._master()._assert_codegen().get_full_name()
+        iname="__".join(fn.split("/")[1:])
+        problem=mesh.get_problem()
+        fixed_index=mesh.has_interface_dof_id("_s_fixed_"+iname)
+        dyn_index=mesh.has_interface_dof_id("_s_solved_"+iname)
+        # Nondimensional throughout. _s_fixed_/_s_solved_ are defined without a scale, so their values
+        # ARE nondimensional, and Node.x() -- what the position match below compares against -- is too.
+        # The walk used to read the dimensional cache, which on a problem with set_scaling(spatial=R0)
+        # wrote a length in metres into a nondimensional field.
+        if not self._needs_merged_interface(mesh):
+            data=problem.get_cached_mesh_data(mesh,nondimensional=True)
+            self._set_arclengths_by_index(mesh,self._walk_reference_arclengths(data),fixed_index,dyn_index)
+            return
+        # Distributed: an arclength is a property of the whole curve, so measuring it on this rank's
+        # part alone gives every rank its own chart starting at zero. The reference configuration is
+        # then discontinuous across the partition boundary and the tangential shift pulls the nodes to
+        # the wrong places -- measured on the spreading-droplet tutorial: a first Newton step of 8e-2
+        # against 4e-6 serially, and inf on the second. So merge the interface (collective, result on
+        # rank 0), walk it there, and hand every rank a table of (x, y, arclength).
+        from ..generic.mpi import get_mpi_rank, get_mpi_world_comm, mpi_share_root_failure
+        comm=get_mpi_world_comm()
+        assert comm is not None
+        cache=problem.get_cached_mesh_data(mesh,nondimensional=True,global_mesh=True)
+        table:"list[tuple[float,float,float]] | None"=None
+        error:BaseException | None=None
+        if get_mpi_rank()==0:
+            try:
+                assert cache is not None
+                coords=cache.get_coordinates()
+                table=[(float(coords[0,ind]),float(coords[1,ind]),al)
+                       for ind,al in self._walk_reference_arclengths(cache)]
+            except BaseException as e:
+                error=e
+        table=comm.bcast(table,root=0) #type:ignore
+        mpi_share_root_failure(error,context="measuring the reference arclength of the merged interface '"+mesh.get_name()+"'")
+        assert table is not None
+        self._set_arclengths_by_position(mesh,table,fixed_index,dyn_index)
 
 
     def with_corners(self, *corners):
@@ -604,18 +802,18 @@ class EnforcedInterfacialLaplaceSmoothing(InterfaceEquations):
         return res
     
            
-    def _get_forced_zero_dofs_for_eigenproblem(self, eqtree, eigensolver, angular_mode, normal_k):
+    def _get_forced_zero_dofs_for_eigenproblem(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver", angular_mode:int | float | None, normal_k:float | None)->set[str | int]:
         if angular_mode is None:
             return set()
-        
+
         angular_mode=int(angular_mode)
-        fn=self._get_combined_element()._assert_codegen().get_full_name()
-        iname="__".join(fn.split("/")[1:])        
-        
+        fn=self._master()._assert_codegen().get_full_name()
+        iname="__".join(fn.split("/")[1:])
+
         if angular_mode==0:
             return set()
-        else:            
-            info={fn+"/_s_fixed_"+iname,fn+"/_s_solved_"+iname,fn+"/_tang_shift_"+iname}
+        else:
+            info:set[str | int]={fn+"/_s_fixed_"+iname,fn+"/_s_solved_"+iname,fn+"/_tang_shift_"+iname}
             print("EnforcedInterfacialLaplaceSmoothing (mode m="+str(angular_mode)+"): Imposed zero tangential shift correction",self.get_current_code_generator().get_full_name(),"for",info)
             return info
         
@@ -625,7 +823,7 @@ class EnforcedInterfacialLaplaceSmoothingCorner(InterfaceEquations):
     """Helper class to pin the arclength and deactivate the tangential shift at a corner of an interface. This is used in EnforcedInterfacialLaplaceSmoothing.with_corners"""
     required_parent_type=EnforcedInterfacialLaplaceSmoothing
     def define_residuals(self):
-        fn=self._get_combined_element()._assert_codegen().get_full_name()
+        fn=self._master()._assert_codegen().get_full_name()
         iname="__".join(fn.split("/")[1:-1])
         self.set_Dirichlet_condition("_s_solved_"+iname,True) # fix the arclength of the corner
         self.set_Dirichlet_condition("_tang_shift_"+iname,0) # deactivate the tangential shift of the corner
@@ -638,11 +836,10 @@ class PrescribedMovingMesh(BaseMovingMeshEquations):
     Args:
         umesh: The prescribed mesh velocity.
         lagrangian: If True, the integration is performed in the Lagrangian frame. Default is False.
-        coordinate_space: The coordinate space. Default is None.
         coordsys: The coordinate system. Default is cartesian.
     """
-    def __init__(self, umesh:ExpressionOrNum,lagrangian=False,coordinate_space = None, coordsys = None):
-        super().__init__(coordinate_space,  coordsys)
+    def __init__(self, umesh:ExpressionOrNum,lagrangian=False, coordsys = None):
+        super().__init__(coordsys)
         self.umesh = umesh
         self.lagrangian = lagrangian
         
@@ -659,7 +856,7 @@ class ConstrainPositionsToC1Space(Equations):
     Args:
         where: Where to apply the constraint. If None, the constraint is applied to all nodes. If a callable, it should take a list of nondimensional coordinates and return True if the constraint should be applied to that node.
     """
-    def __init__(self,where:Optional[Callable[[List[float]],bool]]=None):
+    def __init__(self,where:Callable[[list[float]], bool] | None=None):
         super().__init__()
         self.where=where
     
@@ -688,7 +885,7 @@ class UnconstrainPositionsFromC1Space(Equations):
     Args:
         where: Where to apply the constraint. If None, the constraint is applied to all nodes. If a callable, it should take a list of nondimensional coordinates and return True if the constraint should be applied to that node.
     """
-    def __init__(self,where:Optional[Callable[[List[float]],bool]]=None):
+    def __init__(self,where:Callable[[list[float]], bool] | None=None):
         super().__init__()
         self.where=where
     
@@ -705,3 +902,7 @@ class UnconstrainPositionsFromC1Space(Equations):
                     n.remove_additional_dof_constraint(POSITION_CONSTRAIN_TO_C1, i)
                     
         return super().before_assigning_equations_preorder(mesh)
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

@@ -14,7 +14,7 @@ dependencies = [
 'mkl==2021.4.0; sys_platform == "darwin" and platform_machine != "arm64"'
 ]
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [  { name="Christian Diddens", email="c.diddens@utwente.nl" },  { name="Duarte Rocha", email="d.rocha@utwente.nl" },  { name="Maxim de Wildt",email="m.dewildt@utwente.nl" },  ]
 license = { file = "COPYING" }
 classifiers=[
@@ -29,7 +29,6 @@ classifiers=[
         'Operating System :: Microsoft :: Windows :: Windows 11',
         'Programming Language :: Python',
         'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.9',
         'Programming Language :: Python :: 3.10',
         'Programming Language :: Python :: 3.11',
         'Programming Language :: Python :: 3.12',
@@ -40,6 +39,13 @@ classifiers=[
     ]
 dynamic = ["version"]
 
+[project.optional-dependencies]
+# shapely is only needed by pyoomph.meshes.axisymm_topology, which detects and plans
+# axisymmetric pinch-off/coalescence surgery via morphological opening/closing of the
+# mirrored cross section. Everything else runs without it, so it is not a hard dependency;
+# the module raises a RuntimeError naming this extra when it is missing.
+topology = ["shapely>=2.0"]
+
 [project.urls]
 homepage = "https://pyoomph.github.io"
 documentation = "https://pyoomph.readthedocs.io/en/latest/index.html"
@@ -49,7 +55,7 @@ tracker = "https://github.com/pyoomph/pyoomph/issues"
 
 
 [build-system]
-requires = ["scikit-build-core>=0.10", "pybind11>=2.5.0"]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.0.0"]
 build-backend = "scikit_build_core.build"
 
 [tool.scikit-build]
@@ -60,15 +66,15 @@ minimum-version = "build-system.requires"
 # architecture) job lets the Python-independent `generic`/`pyoomph_core`
 # static libraries be reused, via normal CMake incremental rebuilds, across
 # every interpreter cibuildwheel loops over in that job. Only `_core`
-# (src/pybind/*.cpp) actually needs to recompile per Python version.
+# (src/nanobind/*.cpp) actually needs to recompile per Python version.
 # {state} just keeps wheel/editable/sdist builds from reconfiguring on top
 # of each other; it is not Python-version-specific.
 build-dir = "build/{state}"
 cmake.build-type = "Release"
 # The pure-Python package; the compiled extension is now installed as
-# `pyoomph/_core*.so` (importable as `pyoomph._core`) directly by
-# CMakeLists.txt's `install(TARGETS _core LIBRARY DESTINATION pyoomph)`, so
-# it lives inside the "pyoomph" package below and needs no separate entry
+# `pyoomph/_pyoomph_core*.so` (importable as `pyoomph._pyoomph_core`) directly
+# by CMakeLists.txt's `install(TARGETS _pyoomph_core LIBRARY DESTINATION
+# pyoomph)`, so it lives inside the "pyoomph" package below and needs no entry
 # here.
 wheel.packages = ["pyoomph"]
 
@@ -94,20 +100,66 @@ build-frontend = { name = "pip", args = ["--no-build-isolation", "--verbose", "-
 
 
 test-requires = "pytest"
-test-command = "pytest {package}/tests" # does not work, since the gmsh library has unresolvable requirements
+# Deselect the mixed-adaptive-mesh validation campaign (the test_adaptive_*_campaign and
+# test_mpi_adaptivity* modules, marked "campaign" -- see tests/conftest.py). cibuildwheel repeats this
+# command once per Python version per platform, so a suite that takes minutes locally costs a multiple of
+# that here. What remains is the test set that predates the campaign -- 177 tests, ~4 minutes -- which is
+# what a wheel actually needs to certify: that the built extension imports, compiles elements and solves.
+# Proving the refinement engine correct across every discretisation is a branch-merge job (run the full
+# suite with --full), not a per-wheel one.
+#
+# NB the quoting: this single string is also run by cmd.exe on Windows (there is no per-platform override),
+# so the marker expression is in DOUBLE quotes, and the TOML literal string (single quotes) is what lets it
+# be written that way without escaping.
+test-command = 'pytest {package}/tests -m "not campaign"'
 test-sources = ["tests"]
-# cp315 wheels build fine, but the test-install step pulls in scipy as a
-# runtime dependency, and scipy has no prebuilt wheel yet for cp315 (Python
-# 3.15 is still pre-release) on any platform. Pip then falls back to
-# building scipy from source, which fails (missing gfortran on macOS,
-# missing OpenBLAS on manylinux). Skip testing cp315 until scipy publishes
-# 3.15 wheels; the built pyoomph wheel itself is unaffected.
-test-skip = "cp315-*"
 # CMake now downloads+builds GiNaC/CLN itself (see cmake/ThirdPartyGiNaC.cmake)
 # instead of the old citools/download_and_build_static_ginac.sh script, so
 # wheel builds just need to turn that on. This is the default for all OSes
 # except Windows, which overrides it below (see [tool.cibuildwheel.windows]).
-config-settings = { "cmake.define.PYOOMPH_DOWNLOAD_CLN" = "ON", "cmake.define.PYOOMPH_DOWNLOAD_GINAC" = "ON", "cmake.define.PYOOMPH_USE_MPI" = "OFF", "cmake.define.PYOOMPH_PARANOID" = "OFF" }
+# PYOOMPH_HAS_SPECTRA=ON is asserted rather than left to the option() default, so that a wheel whose
+# Spectra/Eigen download failed at configure time fails the build instead of silently shipping without
+# the "spectra" eigensolver (tests/test_spectra_present.py + PYOOMPH_EXPECT_SPECTRA catch the rest).
+config-settings = { "cmake.define.PYOOMPH_DOWNLOAD_CLN" = "ON", "cmake.define.PYOOMPH_DOWNLOAD_GINAC" = "ON", "cmake.define.PYOOMPH_USE_MPI" = "OFF", "cmake.define.PYOOMPH_PARANOID" = "OFF", "cmake.define.PYOOMPH_HAS_SPECTRA" = "ON" }
+
+# Tag the cp312 build's wheel as cp312-abi3 instead of cp312-cp312: paired
+# with CMakeLists.txt's nanobind_add_module(_pyoomph_core STABLE_ABI ...),
+# which compiles that build against Python's Limited API
+# (Py_LIMITED_API=0x030C0000), the resulting wheel is then installable on
+# every CPython >= 3.12 (3.12, 3.13, 3.14, ... - no rebuild needed), so
+# .github/workflows/wheels.yml only needs to actually build cp312 once
+# (PYTHON_STABLE_ABI_BASE) instead of once per minor version. This override
+# only targets cp312 because that's the only identifier nanobind's
+# STABLE_ABI applies to here; CPython 3.10/3.11 (PYTHON_VERSIONS_LEGACY in
+# the workflow) don't support the Limited API tag nanobind targets, so they
+# keep building their own classic, version-specific wheels as before -
+# nanobind itself silently falls back to a non-abi3 build for them (see the
+# CMakeLists.txt comment), so no matching config-settings override is
+# needed on their side.
+[[tool.cibuildwheel.overrides]]
+select = "cp312-*"
+inherit.config-settings = "append"
+config-settings = { "wheel.py-api" = "cp312" }
+
+# The legacy tier gets a smoke test instead of the whole suite above. cibuildwheel runs
+# test-command once per WHEEL, i.e. once per Python version per platform - 3 wheels x 4 platforms =
+# 12 full suites per release, at ~26 minutes each as the suite stands. What those runs would prove
+# three times over is the same thing: cp310, cp311 and cp312 differ in the Python ABI, not in
+# anything the physics tests touch. So the full suite runs on the Stable ABI wheel, which is the one
+# every CPython >= 3.12 will actually install, and the two classic wheels only have to show that
+# their own extension loads and works with their own interpreter.
+#
+# The three files are chosen for coverage per second (~5 s locally, well under a minute on a
+# runner): test_compilers finds and drives the JIT C compilers, which is the part of a wheel most
+# likely to break on a user's machine; test_math_functions puts the vendored GiNaC through code
+# generation; test_stokes builds, assembles and solves. Anything version-specific about the wheel
+# shows up in the first import either way.
+#
+# test_openmp_present.py is the one addition to that list: it is the only test that FAILS rather
+# than skips when a wheel has no OpenMP (see its docstring), and it costs about a second.
+[[tool.cibuildwheel.overrides]]
+select = "cp310-* cp311-*"
+test-command = "pytest {package}/tests/test_compilers.py {package}/tests/test_math_functions.py {package}/tests/test_stokes.py {package}/tests/test_openmp_present.py"
 
 [tool.cibuildwheel.linux]
 before-all = [
@@ -118,6 +170,14 @@ before-test = [
 ]
 
 [tool.cibuildwheel.macos]
+# nanobind's own sources (nb_type.cpp) use C++17 aligned operator delete
+# (std::align_val_t), whose deallocation function only exists in the SDK
+# from macOS 10.13 onwards; cibuildwheel's x86_64 default of 10.9 is too
+# old and fails with "aligned deallocation function ... is only available
+# on macOS 10.13 or newer". arm64 wheels are unaffected (cibuildwheel's
+# arm64 default is already 11.0), but set this for both architectures for
+# consistency/future-proofing.
+environment = { MACOSX_DEPLOYMENT_TARGET = "10.13" }
 before-all = [
 # pkg-config is needed by GiNaC's own ./configure to locate CLN (see
 # cmake/ThirdPartyGiNaC.cmake) whenever PYOOMPH_DOWNLOAD_GINAC=ON (the
@@ -155,7 +215,12 @@ before-all = [
 # PYOOMPH_*_INCLUDE_DIR/PYOOMPH_*_LIB_DIR at a prebuilt CLN/GiNaC you
 # supply yourself, or skip Windows wheels for now and document a
 # from-source / WSL install path instead.
-config-settings = { "cmake.define.PYOOMPH_DOWNLOAD_CLN" = "OFF", "cmake.define.PYOOMPH_DOWNLOAD_GINAC" = "OFF", "cmake.define.PYOOMPH_USE_MPI" = "OFF", "cmake.define.PYOOMPH_PARANOID" = "OFF" }
+# PYOOMPH_HAS_SPECTRA is spelled out here as it is in every other build entry point (and in
+# build_for_develop.sh): it is ON by default, but a default is inherited rather than asserted, and a
+# CMake cache that was ever configured with it OFF keeps it OFF on every later build of that
+# directory. It matters most in this Windows block, where MPI is off and there is therefore no
+# PETSc/SLEPc at all, leaving Spectra the only eigensolver in the wheel that can target an eigenvalue.
+config-settings = { "cmake.define.PYOOMPH_DOWNLOAD_CLN" = "OFF", "cmake.define.PYOOMPH_DOWNLOAD_GINAC" = "OFF", "cmake.define.PYOOMPH_USE_MPI" = "OFF", "cmake.define.PYOOMPH_PARANOID" = "OFF", "cmake.define.PYOOMPH_HAS_SPECTRA" = "ON" }
 
 # Baseline config only (no strict/disallow_untyped_defs): the codebase
 # currently has a sizeable pre-existing type-error backlog, so this isn't
@@ -171,7 +236,7 @@ ignore_missing_imports = true
 include = ["pyoomph"]
 exclude = ["**/__pycache__"]
 pythonVersion = "3.12"
-# pyoomph._pyoomph_core is a compiled pybind11 extension: the repo tree only
+# pyoomph._pyoomph_core is a compiled nanobind extension: the repo tree only
 # ships its .pyi stub (pyoomph/_pyoomph_core.pyi), while the matching .so
 # lives wherever pyoomph was actually built/installed (e.g. site-packages
 # for an editable install merged into pyoomph.__path__). pyright can't see

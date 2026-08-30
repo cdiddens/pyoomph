@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -29,10 +30,10 @@
 from ..typings import NPFloatArray
 from ..equations.generic import SpatialErrorEstimator
 from ..expressions import CustomMultiReturnExpression, square_root, symbolic_diff, var_and_test,var,grad,dot,maximum,minimum,subexpression
-from ..expressions.generic import ExpressionNumOrNone, ExpressionOrNum, FiniteElementSpaceEnum, dyadic, evaluate_in_past, identity_matrix, material_derivative, partial_t, scale_factor, testfunction,weak
+from ..expressions.generic import ExpressionNumOrNone, ExpressionOrNum, FiniteElementSpaceEnum, dyadic, identity_matrix, partial_t, scale_factor, weak
 from ..generic import *
-from .navier_stokes import NavierStokesEquations , NavierStokesSlipLength, NoSlipBC #type:ignore
-from ..materials.generic import AnyFluidProperties, AnyFluidFluidInterface, AnyMaterialProperties, LiquidGasInterfaceProperties, MixtureGasProperties, MixtureLiquidProperties,LiquidSolidInterfaceProperties,SurfactantProperties
+from .navier_stokes import NavierStokesEquations #type:ignore
+from ..materials.generic import AnyFluidProperties, AnyFluidFluidInterface, LiquidGasInterfaceProperties, LiquidLiquidInterfaceProperties
 from ..meshes.mesh import AnySpatialMesh,AnyMesh,MeshFromTemplate2d,Element,Node
 from ..typings import *
 
@@ -180,19 +181,27 @@ class CompositionNSCHPhaseField(Equations):
         self.add_residual(weak(xi,grad(u_test)))
 
 
-def CompositionNSCHEquations(positive_props:AnyFluidProperties,negative_props:AnyFluidProperties,epsilon:ExpressionOrNum,mobility:ExpressionOrNum,interface_props:Optional[AnyFluidFluidInterface]=None,phase_field_name:str="phi",partial_integrate_advection:bool=False,swap_test_functions:bool=True,velocity_error_factor:float=100,skew_symmetric_advection:bool=False,piecewise_potential:bool=False,mobility_for_scale:ExpressionNumOrNone=None,potential_func:ExpressionNumOrNone=None):
+def CompositionNSCHEquations(positive_props:AnyFluidProperties,negative_props:AnyFluidProperties,epsilon:ExpressionOrNum,mobility:ExpressionOrNum,interface_props:AnyFluidFluidInterface | None=None,phase_field_name:str="phi",partial_integrate_advection:bool=False,swap_test_functions:bool=True,velocity_error_factor:float=100,skew_symmetric_advection:bool=False,piecewise_potential:bool=False,mobility_for_scale:ExpressionNumOrNone=None,potential_func:ExpressionNumOrNone=None):
     phi_clamp=subexpression(minimum(1,maximum(-1,var(phase_field_name))))
     mu=subexpression(positive_props.dynamic_viscosity*(1+phi_clamp)/2+negative_props.dynamic_viscosity*(1-phi_clamp)/2)
     #rho=subexpression(positive_props.mass_density*(1+var(phase_field_name))/2+negative_props.mass_density*(1-var(phase_field_name)))
     rho=subexpression(positive_props.mass_density*(1+phi_clamp)/2+negative_props.mass_density*(1-phi_clamp)/2)
 
     if interface_props is None:
-        interface_props=positive_props | negative_props
+        # positive_props and negative_props are both AnyFluidProperties (liquid or gas, never solid), so
+        # get_interface_properties (invoked via __or__) can only take the "liquid_gas" or "liquid_liquid"
+        # branch and thus can only return a LiquidGasInterfaceProperties or LiquidLiquidInterfaceProperties
+        # instance (i.e. AnyFluidFluidInterface). The declared return type of __or__ is a broader union
+        # (it also covers BaseInterfaceProperties/LiquidSolidInterfaceProperties for the solid-involving
+        # cases), which pyright cannot narrow away here, hence the assert to make the invariant explicit.
+        computed_interface_props=positive_props | negative_props
+        assert isinstance(computed_interface_props,(LiquidGasInterfaceProperties,LiquidLiquidInterfaceProperties))
+        interface_props=computed_interface_props
     sigma_nsch=3/(2*square_root(2))*interface_props.surface_tension
-    res=CompositionNSCHPhaseField(epsilon=epsilon,mobility=mobility, sigma_nsch=sigma_nsch,phase_name=phase_field_name,partial_integrate_advection=partial_integrate_advection,swap_test_functions=swap_test_functions,skew_symmetric_advection=skew_symmetric_advection,piecewise_potential=piecewise_potential,mobility_for_scale=mobility_for_scale,potential_func=potential_func)
+    res:Equations=CompositionNSCHPhaseField(epsilon=epsilon,mobility=mobility, sigma_nsch=sigma_nsch,phase_name=phase_field_name,partial_integrate_advection=partial_integrate_advection,swap_test_functions=swap_test_functions,skew_symmetric_advection=skew_symmetric_advection,piecewise_potential=piecewise_potential,mobility_for_scale=mobility_for_scale,potential_func=potential_func)
     res+=NavierStokesEquations(dynamic_viscosity=mu,mass_density=rho,boussinesq=True)
     #res+=SpatialErrorEstimator(evaluate_in_past(var(phase_field_name)),**{phase_field_name:1.0,"velocity":100})
-    res+=SpatialErrorEstimator(**{phase_field_name:1.0,"velocity":velocity_error_factor})
+    res+=SpatialErrorEstimator(**{phase_field_name:1.0,"velocity":velocity_error_factor}) #type:ignore
     #res+=SpatialErrorEstimator(**{phase_field_name:1.0})
 
     #u,u_test=var_and_test("velocity")
@@ -205,7 +214,7 @@ def CompositionNSCHEquations(positive_props:AnyFluidProperties,negative_props:An
 
 
 class RefinePhaseFieldGradients(Equations):
-    def __init__(self, level:Union[Literal["max"],int]="max",bound=0.8):
+    def __init__(self, level:Literal["max"] | int="max",bound=0.8):
         super(RefinePhaseFieldGradients, self).__init__()
         self.level = level
         self.bound=bound
@@ -278,11 +287,16 @@ class DisjunctDomainMarkerNSCH(Equations):
 
         if mesh.nelement()==0:
             return
-        marker_index=mesh.element_pt(0).get_code_instance().get_discontinuous_field_index(self.name)
+        marker_index=mesh.element_pt(0).get_jit_code().get_discontinuous_field_index(self.name)
+        # unhandled_nodes is an insertion-ordered dict rather than a set, and checknodes a stack
+        # rather than a set: both hold Node objects, and a set of those iterates by id(), i.e. by
+        # allocation address. Which connected component became droplet 0 - and which node seeded it
+        # when several share the extremal y - was therefore not reproducible between two runs, let
+        # alone between two MPI ranks marking the same geometry. The dict is only used as a set.
         # Reset all markers
-        unhandled_nodes:Set[Node]=set()
-        unhandled_elems:Set[Element]=set()
-        nodes2elem:Dict[Node,List[Element]]={}
+        unhandled_nodes:dict[Node,None]={}
+        unhandled_elems:set[Element]=set()
+        nodes2elem:dict[Node,list[Element]]={}
         # Create the look-up tables for unhandles nodes and node->elements map
         for e in mesh.elements():
             e.internal_data_pt(marker_index).set_value(0,-1)
@@ -290,7 +304,7 @@ class DisjunctDomainMarkerNSCH(Equations):
             for ni in range(e.nnode()):
                 n=e.node_pt(ni)
                 if n.value(phase_ind)>self.mark_threshold:
-                    unhandled_nodes.add(n)
+                    unhandled_nodes[n]=None
                     if n not in nodes2elem.keys():
                         nodes2elem[n]=[]
                     nodes2elem[n].append(e)
@@ -310,11 +324,11 @@ class DisjunctDomainMarkerNSCH(Equations):
                 break
 
             # Flood-fill like algorithm
-            checknodes:Set[Node]=set([startnode]) # seed the start node
+            checknodes:list[Node]=[startnode] # seed the start node
             while len(checknodes)>0:
                 nn=checknodes.pop() # get one node out of the bucket
                 if nn in unhandled_nodes: # only check further if the node was not handled before
-                    unhandled_nodes.remove(nn)
+                    unhandled_nodes.pop(nn)
                     for e in nodes2elem[nn]: # go over all elements the node is part of
                         if e in unhandled_elems:
                             e.internal_data_pt(marker_index).set_value(0,domain_index) # mark the element
@@ -323,7 +337,7 @@ class DisjunctDomainMarkerNSCH(Equations):
                             for ni in range(e.nnode()):
                                 n=e.node_pt(ni)
                                 if n in unhandled_nodes:
-                                    checknodes.add(n)
+                                    checknodes.append(n)
             domain_index+=1
 
     def after_newton_solve(self):
@@ -337,3 +351,7 @@ class DisjunctDomainMarkerNSCH(Equations):
         self._update_marker(mesh)
         return super().on_apply_boundary_conditions(mesh)
         
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

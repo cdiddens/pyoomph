@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -23,6 +23,7 @@ The main author may be contacted at c.diddens@utwente.nl
 
 #include "meshtemplate.hpp"
 #include "elements.hpp"
+#include "elements_concrete.hpp"
 #include "exception.hpp"
 #include "codegen.hpp"
 #include "ccompiler.hpp"
@@ -99,254 +100,10 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		}
 	}
 
-	// Precompute the element's "default" (straight-sided) facet node pointers, used as the
-	// fallback for facets that aren't attached to a curved entity, and initialise per-facet
-	// storage (facets/permutation) to be filled in later via set_facet().
-	MeshTemplateMacroElementBase::MeshTemplateMacroElementBase(MeshTemplateElement *e, std::vector<MeshTemplateNode *> *nodes) : facets(e->nfacets(), NULL), permutation(e->nfacets(), std::vector<unsigned>()), default_facet_nodes(e->nfacets())
-	{
-		for (unsigned int i = 0; i < e->nfacets(); i++)
-		{
-			MeshTemplateFacet *f = e->construct_facet(i);
-			for (unsigned int j = 0; j < f->nodeinds.size(); j++)
-				default_facet_nodes[i].push_back((*nodes)[f->nodeinds[j]]->oomph_node);
-			delete f;
-		}
-	}
-
-	// Attach `new_facet` as local facet `ifacet` and compute the node permutation that maps
-	// the macro element's canonical facet-node order onto new_facet's own order, using
-	// `for_orientation` (the element's straight-sided version of the same facet) as reference.
-	void MeshTemplateMacroElementBase::set_facet(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation)
-	{
-		facets[ifacet] = new_facet;
-		permutation[ifacet] = find_permutation(ifacet, new_facet, for_orientation);
-	}
-
-	MeshTemplateQMacroElement2::MeshTemplateQMacroElement2(MeshTemplateDomain *domain, unsigned index, MeshTemplateElement *e, std::vector<MeshTemplateNode *> *nodes) : oomph::QMacroElement<2>(domain, index), MeshTemplateMacroElementBase(e, nodes)
-	{
-	}
-
-	// A 2d quad edge only has 2 nodes, hence only 2 possible orderings: return whichever
-	// ordering makes new_facet's first node coincide with for_orientation's first node.
-	std::vector<unsigned> MeshTemplateQMacroElement2::find_permutation(const unsigned &, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation)
-	{
-		if (new_facet->nodeinds[0] == for_orientation->nodeinds[0])
-		{
-			return std::vector<unsigned>{0, 1};
-		}
-		else
-		{
-			return std::vector<unsigned>{1, 0};
-		}
-	}
-
-	// Evaluate the physical position on local facet (i_direct-4, one of the 4 edges of the
-	// reference square) at parametric position s. Without a curved entity, linearly blend
-	// between the two facet corner nodes; with one, blend the corners' curve parameters and
-	// map that through the curved entity's parametric_to_position().
-	void MeshTemplateQMacroElement2::macro_element_boundary(const unsigned &t, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f)
-	{
-		unsigned fi = i_direct - 4;
-		double lambda = 0.5 * (s[0] + 1);
-		if (!facets[fi] || !facets[fi]->curved_entity)
-		{
-			for (unsigned int i = 0; i < f.size(); i++)
-			{
-				f[i] = default_facet_nodes[fi][0]->x(t, i) * (1 - lambda) + default_facet_nodes[fi][1]->x(t, i) * lambda;
-			}
-		}
-		else
-		{
-			std::vector<double> parametric(1);
-			std::vector<double> default_f(2);
-			for (unsigned int i = 0; i < 2; i++)
-				default_f[i] = default_facet_nodes[fi][0]->x(t, i) * (1 - lambda) + default_facet_nodes[fi][1]->x(t, i) * lambda;
-			parametric[0] = (1 - lambda) * facets[fi]->parametrics[permutation[fi][0]][0] + (lambda)*facets[fi]->parametrics[permutation[fi][1]][0];
-			std::vector<double> pos(2);
-			facets[fi]->curved_entity->parametric_to_position(t, parametric, pos);
-			f[0] = pos[0];
-			f[1] = pos[1];
-		}
-	}
-
-	////
-
-	MeshTemplateTMacroElement2::MeshTemplateTMacroElement2(MeshTemplateDomain *domain, unsigned index, MeshTemplateElement *e, std::vector<MeshTemplateNode *> *nodes) : oomph::TMacroElement<2>(domain, index), MeshTemplateMacroElementBase(e, nodes)
-	{
-	}
-
-	// Same 2-node edge-orientation logic as MeshTemplateQMacroElement2::find_permutation, for the triangular macro element.
-	std::vector<unsigned> MeshTemplateTMacroElement2::find_permutation(const unsigned &, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation)
-	{
-		if (new_facet->nodeinds[0] == for_orientation->nodeinds[0])
-		{
-			return std::vector<unsigned>{0, 1};
-		}
-		else
-		{
-			return std::vector<unsigned>{1, 0};
-		}
-	}
-
-	// Triangle counterpart of MeshTemplateQMacroElement2::macro_element_boundary: linear
-	// (or curved-entity) blending along local edge (i_direct-4) of the reference triangle.
-	void MeshTemplateTMacroElement2::macro_element_boundary(const unsigned &t, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f)
-	{
-		unsigned fi = i_direct - 4;
-		double lambda = 0.5 * (s[0] + 1);
-		if (!facets[fi] || !facets[fi]->curved_entity)
-		{
-			for (unsigned int i = 0; i < f.size(); i++)
-			{
-				f[i] = default_facet_nodes[fi][0]->x(t, i) * (1 - lambda) + default_facet_nodes[fi][1]->x(t, i) * lambda;
-			}
-		}
-		else
-		{
-			std::vector<double> parametric(1);
-			std::vector<double> default_f(2);
-			for (unsigned int i = 0; i < 2; i++)
-				default_f[i] = default_facet_nodes[fi][0]->x(t, i) * (1 - lambda) + default_facet_nodes[fi][1]->x(t, i) * lambda;
-			parametric[0] = (1 - lambda) * facets[fi]->parametrics[permutation[fi][0]][0] + (lambda)*facets[fi]->parametrics[permutation[fi][1]][0];
-			std::vector<double> pos(2);
-			facets[fi]->curved_entity->parametric_to_position(t, parametric, pos);
-			f[0] = pos[0];
-			f[1] = pos[1];
-		}
-	}
-
-	////
-
-	MeshTemplateQMacroElement3::MeshTemplateQMacroElement3(MeshTemplateDomain *domain, unsigned index, MeshTemplateElement *e, std::vector<MeshTemplateNode *> *nodes) : oomph::QMacroElement<3>(domain, index), MeshTemplateMacroElementBase(e, nodes)
-	{
-	}
-
-	// A 3d brick face has 4 nodes and its node order relative to the element isn't fixed a
-	// priori, so brute-force search over all 4! permutations for the one under which
-	// for_orientation's nodes (reordered by perm) match new_facet's node order.
-	std::vector<unsigned> MeshTemplateQMacroElement3::find_permutation(const unsigned &, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation)
-	{
-		std::vector<unsigned> perm(4);
-		for (unsigned int i = 0; i < 4; i++)
-			perm[i] = i;
-
-		while (true)
-		{
-			for (unsigned int i = 0; i < 4; i++)
-			{
-				if (for_orientation->nodeinds[perm[i]] != new_facet->nodeinds[i])
-				{
-					break;
-				}
-				else if (i == 3)
-				{
-					return perm;
-				}
-			}
-			if (!std::next_permutation(perm.begin(), perm.end()))
-			{
-				std::ostringstream oss;
-				oss << std::endl
-					<< "  NF :" << new_facet->nodeinds[0] << "  " << new_facet->nodeinds[1] << "  " << new_facet->nodeinds[2] << "  " << new_facet->nodeinds[3];
-				oss << std::endl
-					<< "  FO :" << for_orientation->nodeinds[0] << "  " << for_orientation->nodeinds[1] << "  " << for_orientation->nodeinds[2] << "  " << for_orientation->nodeinds[3] << std::endl;
-				throw_runtime_error("Strange permutation: " + oss.str());
-			}
-		}
-	}
-
-	// Evaluate the physical position on local face (i_direct-20, one of the 6 faces of the
-	// reference cube) at parametric position s, by bilinearly blending in the face's two
-	// local directions (lambda0, lambda1). Falls back to blending nodal positions directly
-	// if the face has no curved entity attached; otherwise blends the corner curve
-	// parameters (permuted via `permutation` into the facet's own node order) and maps
-	// through the curved entity. Note: contains left-over std::cout debug output.
-	void MeshTemplateQMacroElement3::macro_element_boundary(const unsigned &t, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f)
-	{
-
-		unsigned fi = i_direct - 20;
-		std::cout << "STARTING FACE I " << fi << std::endl;
-		double lambda0 = 0.5 * (s[0] + 1);
-		double lambda1 = 0.5 * (s[1] + 1);
-
-		if (!facets[fi] || !facets[fi]->curved_entity)
-		{
-			for (unsigned int i = 0; i < f.size(); i++)
-			{
-				f[i] = (default_facet_nodes[fi][0]->x(t, i) * (1 - lambda0) + default_facet_nodes[fi][1]->x(t, i) * lambda0) * (1 - lambda1) + (default_facet_nodes[fi][2]->x(t, i) * (1 - lambda0) + default_facet_nodes[fi][3]->x(t, i) * lambda0) * lambda1;
-			}
-		}
-		else
-		{
-			std::vector<double> parametric(2);
-			std::vector<double> default_f(3);
-			for (unsigned int i = 0; i < 3; i++)
-			{
-				default_f[i] = (default_facet_nodes[fi][0]->x(t, i) * (1 - lambda0) + default_facet_nodes[fi][1]->x(t, i) * lambda0) * (1 - lambda1) + (default_facet_nodes[fi][2]->x(t, i) * (1 - lambda0) + default_facet_nodes[fi][3]->x(t, i) * lambda0) * lambda1;
-			}
-
-			// return;
-			std::vector<unsigned> perm = permutation[fi];
-			/*for (unsigned int i=0;i<4;i++) perm[i]=i;
-			std::vector<unsigned> iperm(4);
-			for (unsigned int i=0;i<4;i++) iperm[perm[i]]=i;
-			std::cout << "PERM IS " << " :  " << perm[0] << " " << perm[1] << " " << perm[2] << "  " << perm[3] << std::endl;
-		   */
-			/*   for (unsigned int i=0;i<3;i++)
-			   {
-				  f[i]=((1-lambda0)*facets[fi]->parametrics[iperm[0]][i]+(lambda0)*facets[fi]->parametrics[iperm[1]][i])*(1-lambda1)+((1-lambda0)*facets[fi]->parametrics[iperm[2]][i]+(lambda0)*facets[fi]->parametrics[iperm[3]][i])*lambda1;
-			   }*/
-
-			for (unsigned int i = 0; i < 2; i++)
-			{
-				parametric[i] = ((1 - lambda0) * facets[fi]->parametrics[perm[0]][i] + (lambda0)*facets[fi]->parametrics[perm[1]][i]) * (1 - lambda1) + ((1 - lambda0) * facets[fi]->parametrics[perm[2]][i] + (lambda0)*facets[fi]->parametrics[perm[3]][i]) * lambda1;
-			}
-			std::vector<double> pos(3);
-			facets[fi]->curved_entity->parametric_to_position(t, parametric, pos);
-			std::vector<double> test(3);
-			facets[fi]->curved_entity->position_to_parametric(t, pos, test);
-			std::cout << "COMPARING PARAMS " << parametric[0] << "  " << parametric[1] << "  vs " << test[0] << "  " << test[1] << "  with pos " << pos[0] << "  " << pos[1] << "  " << pos[2] << std::endl;
-			f[0] = pos[0];
-			f[1] = pos[1];
-			f[2] = pos[2];
-			/*
-			std::cout << "SETTING F TO " << f[0] << "  " << f[1] << "  " << f[2] << std::endl;
-			std::cout << "WHILE DEFAULT_F is " << default_f[0] << "  " << default_f[1] << "  " << default_f[2] << std::endl;
-			std::vector<double> defpar(2);
-			facets[fi]->curved_entity->position_to_parametric(t,default_f,defpar);
-			std::cout << "PARAMETERICS " << parametric[0] << "  " << parametric[1] << "   vs def param " << defpar[0] << "  " << defpar[1] << std::endl;
-			std::cout << "SUBPARAMETERICS  " << lambda0 << "  " << lambda1 << std::endl;
-			//double rad=f[0]*f[0]+f[1]*f[1]+(f[2]+0.3582272)*(f[2]+0.3582272);
-			//std::cout << "RAD " << rad << std::endl;
-			for (unsigned int i=0;i<4;i++)
-			{
-			 std::cout << facets[fi]->parametrics[i][0] << "  " << facets[fi]->parametrics[i][1] << std::endl;
-			}
-			*/
-		}
-	}
-
-	// oomph-lib Domain used only to dispatch macro_element_boundary() calls; no state of its own.
+	// Holds (and, via ~Domain, owns) the macro elements of one mesh template. No dispatch logic: a
+	// GenericMacroElement evaluates its own blend rather than asking its Domain for facet positions.
 	MeshTemplateDomain::MeshTemplateDomain()
 	{
-	}
-
-	// Forward the boundary evaluation to the concrete MeshTemplateXMacroElementN stored at
-	// Macro_element_pt[i_macro] (identified via dynamic_cast, since oomph-lib's MacroElement
-	// base doesn't know about our curved-facet extension).
-	void MeshTemplateDomain::macro_element_boundary(const unsigned &t, const unsigned &i_macro, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f)
-	{
-		// TODO: Remove the if via virtual base
-		if (dynamic_cast<MeshTemplateQMacroElement2 *>(Macro_element_pt[i_macro]))
-		{
-			MeshTemplateQMacroElement2 *macro = dynamic_cast<MeshTemplateQMacroElement2 *>(Macro_element_pt[i_macro]);
-			macro->macro_element_boundary(t, i_direct, s, f);
-		}
-		else if (dynamic_cast<MeshTemplateQMacroElement3 *>(Macro_element_pt[i_macro]))
-		{
-			MeshTemplateQMacroElement3 *macro = dynamic_cast<MeshTemplateQMacroElement3 *>(Macro_element_pt[i_macro]);
-			macro->macro_element_boundary(t, i_direct, s, f);
-		}
 	}
 
 	// Register this element's nodes as belonging to collection `dom`, so that later
@@ -711,12 +468,18 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		ninds[25] = templ->add_intermediate_node_unique(node_indices[6], node_indices[7]);
 		ninds[26] = node_indices[7];
 
-		// Missing from the intermediate layer
-		ninds[10] = templ->add_intermediate_node_unique(ninds[9], ninds[11]);
-		ninds[12] = templ->add_intermediate_node_unique(ninds[9], ninds[15]);
-		ninds[14] = templ->add_intermediate_node_unique(ninds[11], ninds[17]);
-		ninds[16] = templ->add_intermediate_node_unique(ninds[15], ninds[17]);
-		ninds[13] = templ->add_intermediate_node_unique(node_indices[0], node_indices[3], node_indices[5], node_indices[6], false);
+		// Missing from the intermediate layer. These four are the side-face centres: placed at the
+		// mid-point of the two vertical edge mid-points (as before), but *identified* by the four
+		// corners of the face they sit in - the wedge or pyramid on the other side of that face
+		// builds the same node from different parents, and only the corner set is common to both.
+		ninds[10] = templ->add_entity_centre_node_unique({node_indices[0], node_indices[1], node_indices[4], node_indices[5]}, {ninds[9], ninds[11]}, true);
+		ninds[12] = templ->add_entity_centre_node_unique({node_indices[0], node_indices[2], node_indices[4], node_indices[6]}, {ninds[9], ninds[15]}, true);
+		ninds[14] = templ->add_entity_centre_node_unique({node_indices[1], node_indices[3], node_indices[5], node_indices[7]}, {ninds[11], ninds[17]}, true);
+		ninds[16] = templ->add_entity_centre_node_unique({node_indices[2], node_indices[3], node_indices[6], node_indices[7]}, {ninds[15], ninds[17]}, true);
+		// The cell centre is interior, so it is never shared - but keying it on four of the eight
+		// corners could collide with a genuine face key elsewhere, so name it by all eight.
+		ninds[13] = templ->add_entity_centre_node_unique({node_indices[0], node_indices[1], node_indices[2], node_indices[3], node_indices[4], node_indices[5], node_indices[6], node_indices[7]},
+														 {node_indices[0], node_indices[3], node_indices[5], node_indices[6]}, false);
 		/*
 		 for (unsigned int j=0;j<27;j++)
 		 {
@@ -1111,9 +874,19 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		ninds[16] = templ->add_intermediate_node_unique(ninds[12], ninds[14]);
 		ninds[17] = templ->add_intermediate_node_unique(ninds[13], ninds[14]);
 
-		for (unsigned offs = 0; offs < 6; offs++)
+		// offs 0..2 are the vertical edges (corner to corner, already canonical); offs 3..5 pair a
+		// bottom edge mid-point with the top one above it, i.e. they are the centres of the three
+		// quadrilateral side faces. Those faces are shared with bricks and pyramids, which place the
+		// same node from their own parents, so identify them by the face's four corners.
+		for (unsigned offs = 0; offs < 3; offs++)
 		{
 		  ninds[6 + offs] = templ->add_intermediate_node_unique(ninds[offs], ninds[offs + 12]);
+		}
+		static const unsigned quad_face_corners[3][4] = {{0, 1, 12, 13}, {0, 2, 12, 14}, {1, 2, 13, 14}};
+		for (unsigned offs = 3; offs < 6; offs++)
+		{
+		  const unsigned *fc = quad_face_corners[offs - 3];
+		  ninds[6 + offs] = templ->add_entity_centre_node_unique({ninds[fc[0]], ninds[fc[1]], ninds[fc[2]], ninds[fc[3]]}, {ninds[offs], ninds[offs + 12]}, true);
 		}
 		
 		return new MeshTemplateElementWedgeC2(ninds);
@@ -1210,7 +983,9 @@ Index : Local coordinates (s0,s1,s2)
 		ninds[10] = templ->add_intermediate_node_unique(ninds[1], ninds[4]);
 		ninds[11] = templ->add_intermediate_node_unique(ninds[2], ninds[4]);
 		ninds[12] = templ->add_intermediate_node_unique(ninds[3], ninds[4]);
-		ninds[13] = templ->add_intermediate_node_unique(ninds[0], ninds[2]);
+		// The base-face centre, placed on the 0-2 diagonal as before but identified by all four base
+		// corners: the brick or wedge sharing that face names it the same way.
+		ninds[13] = templ->add_entity_centre_node_unique({ninds[0], ninds[1], ninds[2], ninds[3]}, {ninds[0], ninds[2]}, true);
 
 		return new MeshTemplateElementPyramidC2(ninds);
 	}
@@ -1442,6 +1217,7 @@ Index : Local coordinates (s0,s1,s2)
 			throw_runtime_error("Tried to add a 1d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
 		MeshTemplateElementLineC2 *res = new MeshTemplateElementLineC2(n1, n2, n3);
 		elements.push_back(res);
+		mesh_template->note_predefined_higher_order_element();
 		res->link_nodes_with_domain(this);		
 	}
 
@@ -1469,6 +1245,7 @@ Index : Local coordinates (s0,s1,s2)
 			throw_runtime_error("Tried to add a 2d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
 		MeshTemplateElementQuadC2 *res = new MeshTemplateElementQuadC2(n1, n2, n3, n4, n5, n6, n7, n8, n9);
 		elements.push_back(res);
+		mesh_template->note_predefined_higher_order_element();
 		res->link_nodes_with_domain(this);
 	}
 
@@ -1512,6 +1289,7 @@ Index : Local coordinates (s0,s1,s2)
 			throw_runtime_error("Tried to add a 2d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
 		MeshTemplateElementTriC2 *res = new MeshTemplateElementTriC2(n1, n2, n3, n4, n5, n6);
 		elements.push_back(res);
+		mesh_template->note_predefined_higher_order_element();
 		res->link_nodes_with_domain(this);		
 	}
 
@@ -1539,7 +1317,34 @@ Index : Local coordinates (s0,s1,s2)
 			throw_runtime_error("Tried to add a 3d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
 		MeshTemplateElementBrickC2 *res = new MeshTemplateElementBrickC2(inds);
 		elements.push_back(res);
+		mesh_template->note_predefined_higher_order_element();
 		res->link_nodes_with_domain(this);
+	}
+
+	// Is the tetrahedron spanned by these four template nodes right-handed in oomph-lib's sense?
+	//
+	// oomph's TElement<3,NNODE_1D> puts its local coordinate origin at node 3 and the s0/s1/s2 axes
+	// towards nodes 0/1/2, so the handedness that matters is det(p0-p3, p1-p3, p2-p3) - NOT the more
+	// familiar det(p1-p0, p2-p0, p3-p0) of the two conventions used by most mesh generators. Get it
+	// wrong and nothing complains: the integration measure uses |J|, so volumes, mass and stiffness
+	// matrices all stay right, and only the FACE NORMAL comes out pointing inwards. That silently
+	// flips the sign of every Neumann/Robin flux and makes interior-penalty DG inconsistent (the
+	// exact solution stops satisfying the discrete equations; the error then merely decays like
+	// 1/DG_alpha, which reads like a coercivity problem rather than a wrong mesh).
+	//
+	// The gmsh importer has always known this - it permutes gmsh's tets by [0,2,1,3] on the way in
+	// (pyoomph/meshes/gmsh.py) - but a hand-built MeshTemplate had no such protection, and every
+	// hand-built tet mesh in tests/ was wound the other way.
+	static bool tetra_is_right_handed(MeshTemplate *templ, const nodeindex_t &n0, const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3)
+	{
+		std::vector<double> p0 = templ->get_node_position(n0), p1 = templ->get_node_position(n1);
+		std::vector<double> p2 = templ->get_node_position(n2), p3 = templ->get_node_position(n3);
+		double a[3], b[3], c[3];
+		for (unsigned i = 0; i < 3; i++) { a[i] = p0[i] - p3[i]; b[i] = p1[i] - p3[i]; c[i] = p2[i] - p3[i]; }
+		double det = a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0]) + a[2] * (b[0] * c[1] - b[1] * c[0]);
+		// A degenerate (det==0) tetrahedron has no handedness to repair; leave it alone and let it
+		// fail later where the actual problem - zero volume - can be diagnosed.
+		return det >= 0.0;
 	}
 
 	void MeshTemplateElementCollection::add_tetra_3d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4)
@@ -1550,9 +1355,13 @@ Index : Local coordinates (s0,s1,s2)
 		}
 		else if (dim != 3)
 			throw_runtime_error("Tried to add a 3d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
-		MeshTemplateElementTetraC1 *res = new MeshTemplateElementTetraC1(n1, n2, n3, n4);
+		// Either winding is accepted; a left-handed one is repaired by swapping two vertices, which is
+		// the smallest change that fixes the face normals and leaves the element geometrically identical.
+		MeshTemplateElementTetraC1 *res = (tetra_is_right_handed(mesh_template, n1, n2, n3, n4)
+											   ? new MeshTemplateElementTetraC1(n1, n2, n3, n4)
+											   : new MeshTemplateElementTetraC1(n1, n3, n2, n4));
 		elements.push_back(res);
-		res->link_nodes_with_domain(this);		
+		res->link_nodes_with_domain(this);
 	}
 
 	void MeshTemplateElementCollection::add_tetra_3d_C2(const std::vector<nodeindex_t> &inds)
@@ -1563,8 +1372,21 @@ Index : Local coordinates (s0,s1,s2)
 		}
 		else if (dim != 3)
 			throw_runtime_error("Tried to add a 3d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
-		MeshTemplateElementTetraC2 *res = new MeshTemplateElementTetraC2(inds);
+		if (inds.size() < 10)
+			throw_runtime_error("A second-order tetrahedron needs 10 node indices, got " + std::to_string(inds.size()));
+		std::vector<nodeindex_t> use = inds;
+		if (!tetra_is_right_handed(mesh_template, inds[0], inds[1], inds[2], inds[3]))
+		{
+			// The same vertex swap 1<->2 as in the C1 case, carried over to the mid-side nodes. In
+			// TElementShape<3,3> the mid-side node of edge (i,j) sits at index
+			// (0,1)->4 (0,2)->5 (0,3)->6 (1,2)->7 (2,3)->8 (1,3)->9, so swapping vertices 1 and 2
+			// exchanges 4<->5 and 8<->9 and fixes 6 and 7 (whose edges are invariant under the swap).
+			static const unsigned swap[10] = {0, 2, 1, 3, 5, 4, 6, 7, 9, 8};
+			for (unsigned i = 0; i < 10; i++) use[i] = inds[swap[i]];
+		}
+		MeshTemplateElementTetraC2 *res = new MeshTemplateElementTetraC2(use);
 		elements.push_back(res);
+		mesh_template->note_predefined_higher_order_element();
 		res->link_nodes_with_domain(this);
 	}
 
@@ -1604,6 +1426,7 @@ Index : Local coordinates (s0,s1,s2)
 			throw_runtime_error("Tried to add a 3d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
 		MeshTemplateElementWedgeC2 *res = new MeshTemplateElementWedgeC2(inds);
 		elements.push_back(res);
+		mesh_template->note_predefined_higher_order_element();
 		res->link_nodes_with_domain(this);		
 	}
 
@@ -1617,10 +1440,11 @@ Index : Local coordinates (s0,s1,s2)
 			throw_runtime_error("Tried to add a 3d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
 		MeshTemplateElementPyramidC2 *res = new MeshTemplateElementPyramidC2(inds);
 		elements.push_back(res);
+		mesh_template->note_predefined_higher_order_element();
 		res->link_nodes_with_domain(this);		
 	}
 	
-	// Attach the compiled element code `code_inst` to this collection and, if the code's
+	// Attach the compiled element code `jit_code` to this collection and, if the code's
 	// dominant nodal space requires more nodes than what the elements currently have
 	// (e.g. C1TB/C2/C2TB), convert every element in-place to that higher-order space (via
 	// convert_for_C*_space, which creates/reuses the required extra nodes). If any element
@@ -1628,11 +1452,11 @@ Index : Local coordinates (s0,s1,s2)
 	// nodes: an intermediate node is periodic iff *all* of its parent corner nodes have a
 	// periodic master, in which case its master is the intermediate node between those
 	// masters (found by matching the sorted parent-id keys in inter_nodes_periodic).
-	void MeshTemplateElementCollection::set_element_code(DynamicBulkElementInstance *code_inst)
+	void MeshTemplateElementCollection::set_element_code(DynamicJITCode *jit_code)
 	{
-		code_instance = code_inst;
+		jitcode = jit_code;
 		bool has_converted_to_C2 = false;
-		std::string dom_space = code_inst->get_func_table()->dominant_space;
+		std::string dom_space = jit_code->get_func_table()->dominant_space;
 		// Make to C2 or C1TB if not done yet
 		if (dom_space == "C1TB") 
 		{
@@ -1665,7 +1489,7 @@ Index : Local coordinates (s0,s1,s2)
 				}				
 			}
 		}
-		else if (code_inst->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields || dom_space == "C2" || code_inst->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields || dom_space == "C2TB") 
+		else if (jit_code->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields || dom_space == "C2" || jit_code->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields || dom_space == "C2TB") 
 		{
 			for (unsigned int ie = 0; ie < elements.size(); ie++)
 			{
@@ -1824,12 +1648,15 @@ Index : Local coordinates (s0,s1,s2)
 		facetmap.clear();
 		domain=NULL;
 		inter_nodes_periodic.clear();
+		intermediate_node_map.clear(); // keyed by node index, so it dies with the nodes
 		kdtree.reset(1);
 	}
 
 	MeshTemplate::~MeshTemplate()
 	{
-		reset();
+		// Qualified: a destructor cannot reach a Python subclass's _reset (see PyMeshTemplateTrampoline),
+		// and calling into Python during teardown is not wanted either. Only the C++ state is reset.
+		MeshTemplate::reset();
 	}
 
 	// Unconditionally append a new node and register its position in the KD-tree (used by
@@ -1907,24 +1734,197 @@ Index : Local coordinates (s0,s1,s2)
 	// call actually created a new node (rather than finding an existing boundary one), and
 	// that node lies on a boundary, record it in inter_nodes_periodic so a matching
 	// intermediate node on the periodic partner side can later be linked up (see set_element_code).
-	nodeindex_t MeshTemplate::add_intermediate_node_unique(const nodeindex_t &n1, const nodeindex_t &n2)
+	// Identity from `key_corners` (the corner nodes of the mesh entity this node belongs to),
+	// position from `parents` (the nodes it is the average of). See intermediate_node_map for why
+	// those are not always the same set. Boundary and domain membership are inherited as the
+	// intersection over the entity's corners - a face centre is on a boundary only if the whole face
+	// is - and the periodicity record keeps the *parents*, which is what set_element_code() matches
+	// against when it links up the partner side.
+	void MeshTemplate::build_topological_id_cache()
 	{
-		nodeindex_t ni = add_node_unique(0.5 * (nodes[n1]->x + nodes[n2]->x), 0.5 * (nodes[n1]->y + nodes[n2]->y), 0.5 * (nodes[n1]->z + nodes[n2]->z));
-		// Merge the boundary information!
-		if (nodes[ni]->on_boundaries.empty())
+		if (topo_cache_nodes == nodes.size() && topo_cache_intermediates == intermediate_node_map.size()) return;
+		topo_intermediate_corners.clear();
+		for (const auto &kv : intermediate_node_map)
 		{
-			std::set_intersection(nodes[n1]->on_boundaries.begin(), nodes[n1]->on_boundaries.end(), nodes[n2]->on_boundaries.begin(), nodes[n2]->on_boundaries.end(), std::inserter(nodes[ni]->on_boundaries, nodes[ni]->on_boundaries.begin()));
+			std::vector<nodeindex_t> corners;
+			for (nodeindex_t c : kv.first)
+				if (c != (nodeindex_t)-1) corners.push_back(c); // the key is padded to 8 with -1
+			if (corners.size() >= 2) topo_intermediate_corners[kv.second] = corners;
 		}
+		topo_node_id_cache.assign(nodes.size(), std::array<unsigned long long, 2>{0ULL, 0ULL});
+		topo_node_expansion_cache.assign(nodes.size(), std::vector<std::pair<std::size_t, double>>());
+		topo_cache_nodes = nodes.size();
+		topo_cache_intermediates = intermediate_node_map.size();
+	}
+
+	// See the declaration. Resolves the expansion and the digest together, memoised, recursing through
+	// intermediate nodes (a brick's cell centre is keyed on corners that may themselves be face centres).
+	const std::vector<std::pair<std::size_t, double>> &MeshTemplate::topological_node_expansion(nodeindex_t ni)
+	{
+		build_topological_id_cache();
+		static const std::vector<std::pair<std::size_t, double>> empty;
+		if (ni >= topo_node_expansion_cache.size()) return empty;
+		if (topo_node_id_cache[ni][0] || topo_node_id_cache[ni][1]) return topo_node_expansion_cache[ni];
+
+		auto it = topo_intermediate_corners.find(ni);
+		if (it == topo_intermediate_corners.end())
+		{
+			// A corner, or a node of a predefined higher-order element: those never passed through
+			// add_intermediate_node_unique(), so intermediate_node_map has never seen them (see
+			// has_predefined_higher_order_elements) and their entity is not recoverable here. A corner is
+			// its own expansion; the second case is indistinguishable from it, which is why a mesh read in
+			// at second order cannot be matched topologically against a C1 neighbour's refinement.
+			topo_node_expansion_cache[ni] = std::vector<std::pair<std::size_t, double>>(1, std::make_pair((std::size_t)ni, 1.0));
+			topo_node_id_cache[ni] = topo_digest_of_template_index(ni);
+			return topo_node_expansion_cache[ni];
+		}
+		std::vector<nodeindex_t> corners = it->second;
+		const std::size_t nc = corners.size();
+		// Only an entity whose corner count is a power of two carries the dyadic weights a refinement
+		// produces (an edge mid-point 1/2, a quadrilateral face centre 1/4, a cell centre 1/8). A triangle
+		// centroid bubble is 1/3, which no refinement ever creates and which is not even exact in double,
+		// so it gets an opaque identity instead -- safe, because only C1 CORNERS enter an expansion and a
+		// bubble is never one.
+		const bool dyadic = (nc >= 2) && ((nc & (nc - 1)) == 0);
+		if (!dyadic)
+		{
+			std::vector<std::size_t> sc(corners.begin(), corners.end());
+			std::sort(sc.begin(), sc.end());
+			topo_node_expansion_cache[ni].clear();
+			topo_node_id_cache[ni] = topo_digest_of_corner_set(sc);
+			return topo_node_expansion_cache[ni];
+		}
+		std::vector<std::pair<std::size_t, double>> expansion;
+		const double w = 1.0 / (double)nc;
+		for (nodeindex_t c : corners)
+		{
+			const std::vector<std::pair<std::size_t, double>> &ce = topological_node_expansion(c);
+			if (ce.empty()) { expansion.clear(); break; } // an opaque corner makes this node opaque too
+			for (auto &t : ce) expansion.push_back(std::make_pair(t.first, t.second * w));
+		}
+		if (expansion.empty())
+		{
+			std::vector<std::size_t> sc(corners.begin(), corners.end());
+			std::sort(sc.begin(), sc.end());
+			topo_node_id_cache[ni] = topo_digest_of_corner_set(sc);
+			topo_node_expansion_cache[ni].clear();
+			return topo_node_expansion_cache[ni];
+		}
+		topo_node_id_cache[ni] = topo_digest_of_expansion(expansion);
+		topo_node_expansion_cache[ni] = expansion;
+		return topo_node_expansion_cache[ni];
+	}
+
+	std::array<unsigned long long, 2> MeshTemplate::topological_node_id(nodeindex_t ni)
+	{
+		topological_node_expansion(ni);
+		build_topological_id_cache();
+		if (ni >= topo_node_id_cache.size()) return topo_digest_of_template_index(ni);
+		return topo_node_id_cache[ni];
+	}
+
+	nodeindex_t MeshTemplate::add_intermediate_node_generic(const nodeindex_t *key_corners, unsigned nkey, const nodeindex_t *parents, unsigned nparents, bool boundary_possible)
+	{
+		intermediate_node_key_t key;
+		key.fill((nodeindex_t)-1);
+		if (nkey > key.size())
+			throw_runtime_error("Intermediate node key of " + std::to_string(nkey) + " corners exceeds the maximum of " + std::to_string(key.size()));
+		std::copy(key_corners, key_corners + nkey, key.begin());
+		std::sort(key.begin(), key.end()); // the key is a set: an entity is the same from either side
+
+		double x = 0.0, y = 0.0, z = 0.0;
+		for (unsigned i = 0; i < nparents; i++) { x += nodes[parents[i]]->x; y += nodes[parents[i]]->y; z += nodes[parents[i]]->z; }
+		const double n = (double)nparents;
+		x /= n; y /= n; z /= n;
+
+		bool created;
+		nodeindex_t ni;
+		auto it = intermediate_node_map.find(key);
+		if (it != intermediate_node_map.end())
+		{
+			ni = it->second;
+			created = false;
+		}
+		else
+		{
+			if (has_predefined_higher_order_elements)
+			{
+				// A mesh that came with its own higher-order nodes has nodes this map never saw, so
+				// the geometric lookup is still the only way to find them.
+				const std::size_t nbefore = nodes.size();
+				ni = add_node_unique(x, y, z);
+				created = (nodes.size() != nbefore);
+			}
+			else
+			{
+				// The map is complete by construction, so no geometric lookup at all. The k-d tree
+				// still gets the point, but deferred: a conversion adds one node per entity and never
+				// queries in between, and indexing them one at a time makes nanoflann rebuild a
+				// sub-index per node. Any later query flushes the whole backlog in one range add.
+				MeshTemplateNode *nn = new MeshTemplateNode(x, y, z);
+				nn->index = nodes.size();
+				nodes.push_back(nn);
+				if (kdtree.add_point_deferred(x, y, z) != nn->index)
+				{
+					throw_runtime_error("Something is wrong with the KDTree");
+				}
+				ni = nn->index;
+				created = true;
+			}
+			intermediate_node_map[key] = ni;
+		}
+
+		// Fold the final intersection straight into the destination, so the two-corner case - by far
+		// the most common, one per element edge - does a single set_intersection and no temporary.
 		if (nodes[ni]->part_of_domain.empty())
 		{
-			std::set_intersection(nodes[n1]->part_of_domain.begin(), nodes[n1]->part_of_domain.end(), nodes[n2]->part_of_domain.begin(), nodes[n2]->part_of_domain.end(), std::inserter(nodes[ni]->part_of_domain, nodes[ni]->part_of_domain.begin()));
+			std::set<MeshTemplateElementCollection *> acc, tmp;
+			const std::set<MeshTemplateElementCollection *> *cur = &nodes[key_corners[0]]->part_of_domain;
+			for (unsigned i = 1; i + 1 < nkey && !cur->empty(); i++)
+			{
+				std::set<MeshTemplateElementCollection *> &out = ((i & 1) ? acc : tmp);
+				out.clear();
+				std::set_intersection(cur->begin(), cur->end(), nodes[key_corners[i]]->part_of_domain.begin(), nodes[key_corners[i]]->part_of_domain.end(), std::inserter(out, out.begin()));
+				cur = &out;
+			}
+			if (nkey > 1)
+				std::set_intersection(cur->begin(), cur->end(), nodes[key_corners[nkey - 1]]->part_of_domain.begin(), nodes[key_corners[nkey - 1]]->part_of_domain.end(), std::inserter(nodes[ni]->part_of_domain, nodes[ni]->part_of_domain.begin()));
+			else
+				nodes[ni]->part_of_domain = *cur;
 		}
-		if (nodes.size() == (ni + 1) && (!nodes[ni]->on_boundaries.empty())) // NODE WAS ADDED, store the information for later on patching the periodicity
+
+		if (!boundary_possible)
+			return ni;
+
+		if (nodes[ni]->on_boundaries.empty())
 		{
-			inter_nodes_periodic.push_back(MeshTemplatePeriodicIntermediateNodeInfo(ni, {n1, n2}));
+			std::set<unsigned int> acc, tmp;
+			const std::set<unsigned int> *cur = &nodes[key_corners[0]]->on_boundaries;
+			for (unsigned i = 1; i + 1 < nkey && !cur->empty(); i++)
+			{
+				std::set<unsigned int> &out = ((i & 1) ? acc : tmp);
+				out.clear();
+				std::set_intersection(cur->begin(), cur->end(), nodes[key_corners[i]]->on_boundaries.begin(), nodes[key_corners[i]]->on_boundaries.end(), std::inserter(out, out.begin()));
+				cur = &out;
+			}
+			if (nkey > 1)
+				std::set_intersection(cur->begin(), cur->end(), nodes[key_corners[nkey - 1]]->on_boundaries.begin(), nodes[key_corners[nkey - 1]]->on_boundaries.end(), std::inserter(nodes[ni]->on_boundaries, nodes[ni]->on_boundaries.begin()));
+			else
+				nodes[ni]->on_boundaries = *cur;
+		}
+
+		if (created && (!nodes[ni]->on_boundaries.empty())) // NODE WAS ADDED, store the information for later on patching the periodicity
+		{
+			inter_nodes_periodic.push_back(MeshTemplatePeriodicIntermediateNodeInfo(ni, std::vector<nodeindex_t>(parents, parents + nparents)));
 		}
 
 		return ni;
+	}
+
+	nodeindex_t MeshTemplate::add_intermediate_node_unique(const nodeindex_t &n1, const nodeindex_t &n2)
+	{
+		const nodeindex_t k[2] = {n1, n2};
+		return add_intermediate_node_generic(k, 2, k, 2, true);
 	}
 
 	// Get-or-create the node at the centroid of (n1,n2,n3) (e.g. a triangle-face bubble
@@ -1933,81 +1933,21 @@ Index : Local coordinates (s0,s1,s2)
 	// truly lie on a domain boundary even if all three parents do).
 	nodeindex_t MeshTemplate::add_intermediate_node_unique(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, bool boundary_possible)
 	{
-		nodeindex_t ni = add_node_unique((nodes[n1]->x + nodes[n2]->x + nodes[n3]->x) / 3, (nodes[n1]->y + nodes[n2]->y + nodes[n3]->y) / 3, (nodes[n1]->z + nodes[n2]->z + nodes[n3]->z) / 3);
-
-		if (nodes[ni]->part_of_domain.empty())
-		{
-			std::set<MeshTemplateElementCollection *> part_of_domain, old;
-			std::set_intersection(nodes[n1]->part_of_domain.begin(), nodes[n1]->part_of_domain.end(), nodes[n2]->part_of_domain.begin(), nodes[n2]->part_of_domain.end(), std::inserter(part_of_domain, part_of_domain.begin()));
-			old = part_of_domain;
-			part_of_domain.clear();
-			std::set_intersection(nodes[n3]->part_of_domain.begin(), nodes[n3]->part_of_domain.end(), old.begin(), old.end(), std::inserter(part_of_domain, part_of_domain.begin()));
-			nodes[ni]->part_of_domain = part_of_domain;
-		}
-
-		if (!boundary_possible)
-			return ni;
-		// Check boundary
-		if (nodes[ni]->on_boundaries.empty())
-		{
-			std::set<unsigned int> on_boundaries, old;
-			std::set_intersection(nodes[n1]->on_boundaries.begin(), nodes[n1]->on_boundaries.end(), nodes[n2]->on_boundaries.begin(), nodes[n2]->on_boundaries.end(), std::inserter(on_boundaries, on_boundaries.begin()));
-			old = on_boundaries;
-			on_boundaries.clear();
-			std::set_intersection(nodes[n3]->on_boundaries.begin(), nodes[n3]->on_boundaries.end(), old.begin(), old.end(), std::inserter(on_boundaries, on_boundaries.begin()));
-			nodes[ni]->on_boundaries = on_boundaries;
-		}
-
-		if (nodes.size() == (ni + 1) && (!nodes[ni]->on_boundaries.empty())) // NODE WAS ADDED, store the information for later on patching the periodicity
-		{
-			inter_nodes_periodic.push_back(MeshTemplatePeriodicIntermediateNodeInfo(ni, {n1, n2, n3}));
-		}
-
-		return ni;
+		const nodeindex_t k[3] = {n1, n2, n3};
+		return add_intermediate_node_generic(k, 3, k, 3, boundary_possible);
 	}
 
 	// Same as the 3-parent overload above, but for the centroid of 4 nodes (e.g. a
 	// quadrilateral face/cell-center node).
 	nodeindex_t MeshTemplate::add_intermediate_node_unique(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, bool boundary_possible)
 	{
-		nodeindex_t ni = add_node_unique(0.25 * (nodes[n1]->x + nodes[n2]->x + nodes[n3]->x + nodes[n4]->x), 0.25 * (nodes[n1]->y + nodes[n2]->y + nodes[n3]->y + nodes[n4]->y),
-										 0.25 * (nodes[n1]->z + nodes[n2]->z + nodes[n3]->z + nodes[n4]->z));
+		const nodeindex_t k[4] = {n1, n2, n3, n4};
+		return add_intermediate_node_generic(k, 4, k, 4, boundary_possible);
+	}
 
-		if (nodes[ni]->part_of_domain.empty())
-		{
-			std::set<MeshTemplateElementCollection *> part_of_domain, old;
-			std::set_intersection(nodes[n1]->part_of_domain.begin(), nodes[n1]->part_of_domain.end(), nodes[n2]->part_of_domain.begin(), nodes[n2]->part_of_domain.end(), std::inserter(part_of_domain, part_of_domain.begin()));
-			old = part_of_domain;
-			part_of_domain.clear();
-			std::set_intersection(nodes[n3]->part_of_domain.begin(), nodes[n3]->part_of_domain.end(), old.begin(), old.end(), std::inserter(part_of_domain, part_of_domain.begin()));
-			old = part_of_domain;
-			part_of_domain.clear();
-			std::set_intersection(nodes[n4]->part_of_domain.begin(), nodes[n4]->part_of_domain.end(), old.begin(), old.end(), std::inserter(part_of_domain, part_of_domain.begin()));
-			nodes[ni]->part_of_domain = part_of_domain;
-		}
-
-		if (!boundary_possible)
-			return ni;
-		// Check boundary
-		if (nodes[ni]->on_boundaries.empty())
-		{
-			std::set<unsigned int> on_boundaries, old;
-			std::set_intersection(nodes[n1]->on_boundaries.begin(), nodes[n1]->on_boundaries.end(), nodes[n2]->on_boundaries.begin(), nodes[n2]->on_boundaries.end(), std::inserter(on_boundaries, on_boundaries.begin()));
-			old = on_boundaries;
-			on_boundaries.clear();
-			std::set_intersection(nodes[n3]->on_boundaries.begin(), nodes[n3]->on_boundaries.end(), old.begin(), old.end(), std::inserter(on_boundaries, on_boundaries.begin()));
-			old = on_boundaries;
-			on_boundaries.clear();
-			std::set_intersection(nodes[n4]->on_boundaries.begin(), nodes[n4]->on_boundaries.end(), old.begin(), old.end(), std::inserter(on_boundaries, on_boundaries.begin()));
-			nodes[ni]->on_boundaries = on_boundaries;
-		}
-
-		if (nodes.size() == (ni + 1) && (!nodes[ni]->on_boundaries.empty())) // NODE WAS ADDED, store the information for later on patching the periodicity
-		{
-			inter_nodes_periodic.push_back(MeshTemplatePeriodicIntermediateNodeInfo(ni, {n1, n2, n3, n4}));
-		}
-
-		return ni;
+	nodeindex_t MeshTemplate::add_entity_centre_node_unique(const std::vector<nodeindex_t> &key_corners, const std::vector<nodeindex_t> &parents, bool boundary_possible)
+	{
+		return add_intermediate_node_generic(key_corners.data(), (unsigned)key_corners.size(), parents.data(), (unsigned)parents.size(), boundary_possible);
 	}
 
 	// Look up the numeric index of an already-registered boundary name; throws if unknown
@@ -2279,11 +2219,39 @@ Index : Local coordinates (s0,s1,s2)
 	// `res`) so that node positions during refinement follow the curved geometry rather than
 	// straight-sided interpolation: for each local facet, look up whether the corresponding
 	// mesh facet carries a curved entity and, if so, attach it via macro->set_facet().
+	// Collect the edges of every curved facet. A triangular facet contributes all three of its vertex
+	// pairs; a quadrilateral one only its four consecutive pairs, since its diagonals join two points
+	// of the surface without being edges of anything, and curving them would bulge an element's
+	// interior rather than its boundary.
+	void MeshTemplate::build_curved_edge_map()
+	{
+		curved_edge_map_built = true;
+		for (auto *f : facets)
+		{
+			if (!f || !f->curved_entity) continue;
+			const unsigned n = f->nodeinds.size();
+			if (n < 2) continue;
+			for (unsigned int k = 0; k < n; k++)
+			{
+				// A 3-node facet is a triangle (every pair is an edge); otherwise take consecutive pairs.
+				unsigned l = (k + 1) % n;
+				if (n == 3 || n == 2 || true)
+				{
+					nodeindex_t a = f->nodeinds[k], b = f->nodeinds[l];
+					if (a == b) continue;
+					auto key = std::make_pair(std::min(a, b), std::max(a, b));
+					if (!curved_edge_map.count(key)) curved_edge_map[key] = f;
+				}
+				if (n == 2) break;
+			}
+		}
+	}
+
 	BulkElementBase *MeshTemplate::factory_element(MeshTemplateElement *el, MeshTemplateElementCollection *coll)
 	{
 		// Generate all nodes if not present
-		const JITFuncSpec_Table_FiniteElement_t *functable = coll->code_instance->get_func_table();
-		BulkElementBase::__CurrentCodeInstance = coll->code_instance;		
+		const JITFuncSpec_Table_FiniteElement_t *functable = coll->jitcode->get_func_table();
+		BulkElementBase::JITCodeScope __jit_scope1(coll->jitcode);
 		unsigned ntot = 0;
 		for (unsigned int si=0;si<functable->num_present_continuous_spaces;si++)
 		{
@@ -2297,7 +2265,7 @@ Index : Local coordinates (s0,s1,s2)
 		bool require_macro_elem = false;
 
 		std::vector<nodeindex_t> nodeindices = el->get_node_indices();
-		std::string domspace = coll->code_instance->get_func_table()->dominant_space;
+		std::string domspace = coll->jitcode->get_func_table()->dominant_space;
 		if (el->get_geometric_type_index() == 8 && (domspace == "C1" || domspace=="C1TB")) // QC2 -> QC1
 		{
 			// Reduce the element
@@ -2344,6 +2312,16 @@ Index : Local coordinates (s0,s1,s2)
 				else
 				{
 					nodes[nii]->oomph_node = new pyoomph::BoundaryNode(this->problem->time_stepper_pt(), n_lagrangian, n_lagrangian_type, nodal_dim, 1, ntot);
+				}
+				// The cross-domain topological identity of a level-0 node is its TEMPLATE index. Two
+				// domains sharing an interface generate distinct Node objects for it (flush_oomph_nodes()
+				// below clears the cache between domains), but they read the same MeshTemplateNode, so
+				// this number is the one thing they agree on without looking at a coordinate. See
+				// pyoomph::Node::interface_topological_id.
+				{
+					pyoomph::Node *tn = static_cast<pyoomph::Node *>(nodes[nii]->oomph_node);
+					tn->set_interface_topological_expansion(this->topological_node_expansion(nodes[nii]->index));
+					tn->set_interface_topological_id(this->topological_node_id(nodes[nii]->index));
 				}
 
 				if (nodal_dim > 0)
@@ -2405,164 +2383,141 @@ Index : Local coordinates (s0,s1,s2)
 		{
 			if (!domain)
 				domain = new MeshTemplateDomain();
+
+			// Which reference shape the macro coordinates live in. This is the only thing the macro map
+			// needs to know about the element type -- the blend itself is shape-agnostic.
+			MacroElementShape shape;
 			if (dynamic_cast<BulkElementQuad2dC1 *>(res) || dynamic_cast<BulkElementQuad2dC2 *>(res))
-			{
-				MeshTemplateQMacroElement2 *macro = NULL;
-				for (unsigned int ifacet = 0; ifacet < el->nfacets(); ifacet++)
-				{
-					MeshTemplateFacet *test_facet = el->construct_facet(ifacet);
-					if (pyoomph_verbose)
-					{
-						std::cout << "LOOKING FOR FACET ";
-						for (auto &i : test_facet->sorted_inds)
-							std::cout << "  " << i;
-						std::cout << std::endl;
-					}
-					for (auto &fm : facetmap)
-					{
-						if (pyoomph_verbose)
-						{
-							std::cout << "	DEFINED ";
-							for (auto &i : fm.first->sorted_inds)
-								std::cout << "  " << i;
-							std::cout << std::endl;
-						}
-					}
-
-					if (facetmap.count(test_facet))
-					{
-						if (pyoomph_verbose)
-							std::cout << "MACRO ELEM: FACET IDENTIFIED" << std::endl;
-						MeshTemplateFacet *actual_facet = facets[facetmap[test_facet]];
-						if (actual_facet->curved_entity)
-						{
-							if (pyoomph_verbose)
-								std::cout << "MACRO ELEM: CURVED ENTITY PRESENT : MACRO " << macro << std::endl;
-							if (!macro)
-							{
-								macro = new MeshTemplateQMacroElement2(domain, domain->nmacro_element(), el, &nodes);
-								domain->push_back_macro_element(macro);
-							}
-							macro->set_facet(ifacet, actual_facet, test_facet);
-						}
-					}
-					delete test_facet;
-				}
-				if (macro)
-				{
-					if (pyoomph_verbose)
-						std::cout << "ADDING MACRO ELEMENT " << std::endl;
-					res->set_macro_elem_pt(macro);
-					res->map_nodes_on_macro_element();
-				}
-			}
+				shape = MacroElementShape::Quad2d;
 			else if (dynamic_cast<BulkElementTri2dC1 *>(res) || dynamic_cast<BulkElementTri2dC2 *>(res))
-			{
-				MeshTemplateTMacroElement2 *macro = NULL;
-				for (unsigned int ifacet = 0; ifacet < el->nfacets(); ifacet++)
-				{
-					MeshTemplateFacet *test_facet = el->construct_facet(ifacet);
-					if (pyoomph_verbose)
-					{
-						std::cout << "LOOKING FOR FACET ";
-						for (auto &i : test_facet->sorted_inds)
-							std::cout << "  " << i;
-						std::cout << std::endl;
-					}
-					for (auto &fm : facetmap)
-					{
-						if (pyoomph_verbose)
-						{
-							std::cout << "	DEFINED ";
-							for (auto &i : fm.first->sorted_inds)
-								std::cout << "  " << i;
-							std::cout << std::endl;
-						}
-					}
-
-					if (facetmap.count(test_facet))
-					{
-						if (pyoomph_verbose)
-							std::cout << "MACRO ELEM: FACET IDENTIFIED" << std::endl;
-						MeshTemplateFacet *actual_facet = facets[facetmap[test_facet]];
-						if (actual_facet->curved_entity)
-						{
-							if (pyoomph_verbose)
-								std::cout << "MACRO ELEM: CURVED ENTITY PRESENT : MACRO " << macro << std::endl;
-							if (!macro)
-							{
-								macro = new MeshTemplateTMacroElement2(domain, domain->nmacro_element(), el, &nodes);
-								domain->push_back_macro_element(macro);
-							}
-							macro->set_facet(ifacet, actual_facet, test_facet);
-						}
-					}
-					delete test_facet;
-				}
-				if (macro)
-				{
-					if (pyoomph_verbose)
-						std::cout << "ADDING MACRO ELEMENT " << std::endl;
-					res->set_macro_elem_pt(macro);
-					res->map_nodes_on_macro_element();
-				}
-			}
+				shape = MacroElementShape::Tri2d;
 			else if (dynamic_cast<BulkElementBrick3dC1 *>(res) || dynamic_cast<BulkElementBrick3dC2 *>(res))
-			{
-				MeshTemplateQMacroElement3 *macro = NULL;
-				for (unsigned int ifacet = 0; ifacet < el->nfacets(); ifacet++)
-				{
-					MeshTemplateFacet *test_facet = el->construct_facet(ifacet);
-					if (pyoomph_verbose)
-					{
-						std::cout << "LOOKING FOR FACET ";
-						for (auto &i : test_facet->sorted_inds)
-							std::cout << "  " << i;
-						std::cout << std::endl;
-					}
-					for (auto &fm : facetmap)
-					{
-						if (pyoomph_verbose)
-						{
-							std::cout << "	DEFINED ";
-							for (auto &i : fm.first->sorted_inds)
-								std::cout << "  " << i;
-							std::cout << std::endl;
-						}
-					}
+				shape = MacroElementShape::Brick3d;
+			else if (dynamic_cast<BulkElementTetra3dC1 *>(res) || dynamic_cast<BulkElementTetra3dC2 *>(res))
+				shape = MacroElementShape::Tet3d;
+			else if (dynamic_cast<BulkElementWedge3dC1 *>(res))
+				shape = MacroElementShape::Wedge3d;
+			else if (dynamic_cast<BulkElementPyramid3dC1 *>(res))
+				shape = MacroElementShape::Pyramid3d;
+			else
+				throw_runtime_error("MacroElements (curved boundaries) are not implemented for this element type yet");
 
-					if (facetmap.count(test_facet))
+			// The element's vertex nodes, in the order macro_c1_shape() uses. FiniteElement::vertex_node_pt
+			// already returns exactly that order for both the Q and T families (and skips the higher-order
+			// nodes of a C2 element, which take no part in the blend).
+			std::vector<oomph::Node *> vertices(res->nvertex_node());
+			for (unsigned int v = 0; v < vertices.size(); v++)
+				vertices[v] = res->vertex_node_pt(v);
+
+			GenericMacroElement *macro = NULL;
+			for (unsigned int ifacet = 0; ifacet < el->nfacets(); ifacet++)
+			{
+				MeshTemplateFacet *test_facet = el->construct_facet(ifacet);
+				if (!facetmap.count(test_facet))
+				{
+					delete test_facet;
+					continue;
+				}
+				MeshTemplateFacet *actual_facet = facets[facetmap[test_facet]];
+				delete test_facet;
+				if (!actual_facet->curved_entity)
+					continue;
+
+				// Match the facet's nodes against the element's vertices by identity. This is what replaces
+				// the old find_permutation(): each blend weight is carried together with the vertex it
+				// belongs to, so no ordering convention has to be discovered or agreed on. Facet nodes that
+				// are not element vertices (a C2 facet's mid-side node) simply take no part in the blend.
+				std::vector<unsigned> local_vertices, parametric_index;
+				for (unsigned int k = 0; k < actual_facet->nodeinds.size(); k++)
+				{
+					oomph::Node *fn = nodes[actual_facet->nodeinds[k]]->oomph_node;
+					if (!fn)
+						continue;
+					for (unsigned int v = 0; v < vertices.size(); v++)
 					{
-						if (pyoomph_verbose)
-							std::cout << "MACRO ELEM: FACET IDENTIFIED" << std::endl;
-						MeshTemplateFacet *actual_facet = facets[facetmap[test_facet]];
-						if (actual_facet->curved_entity)
+						if (vertices[v] == fn)
 						{
-							if (pyoomph_verbose)
-								std::cout << "MACRO ELEM: CURVED ENTITY PRESENT : MACRO " << macro << std::endl;
-							if (!macro)
-							{
-								macro = new MeshTemplateQMacroElement3(domain, domain->nmacro_element(), el, &nodes);
-								domain->push_back_macro_element(macro);
-							}
-							macro->set_facet(ifacet, actual_facet, test_facet);
+							local_vertices.push_back(v);
+							parametric_index.push_back(k);
+							break;
 						}
 					}
-					delete test_facet;
 				}
-				if (macro)
+				// A facet contributes nothing unless at least an edge of it is pinned to the entity.
+				if (local_vertices.size() < 2)
+					continue;
+
+				if (pyoomph_verbose)
+					std::cout << "MACRO ELEM: curved facet " << ifacet << " with " << local_vertices.size() << " vertices" << std::endl;
+				if (!macro)
 				{
-					if (pyoomph_verbose)
-						std::cout << "ADDING MACRO ELEMENT " << std::endl;
-					res->set_macro_elem_pt(macro);
-					res->map_nodes_on_macro_element();
+					macro = new GenericMacroElement(domain, domain->nmacro_element(), shape, vertices);
+					domain->push_back_macro_element(macro);
+				}
+				macro->add_curved_facet(actual_facet, local_vertices, parametric_index);
+			}
+
+			// Curved edges this element touches without owning the facet they belong to. Without this an
+			// unstructured mesh is not watertight: measured on a gmsh tetrahedral ball, 45 of 126
+			// elements have a face on the sphere but another 25 touch it along an edge only, and
+			// whichever of the two builds a node on that edge first decides where it goes.
+			if (!curved_edge_map_built) build_curved_edge_map();
+			if (!curved_edge_map.empty())
+			{
+				// The template node index behind each of the element's C1 vertices.
+				std::map<oomph::Node *, nodeindex_t> node_to_template;
+				for (auto &nii : nodeindices)
+					if (nodes[nii]->oomph_node) node_to_template[nodes[nii]->oomph_node] = nii;
+
+				for (auto &e : macro_edges(shape))
+				{
+					if (e.first >= vertices.size() || e.second >= vertices.size()) continue;
+					if (!node_to_template.count(vertices[e.first]) || !node_to_template.count(vertices[e.second])) continue;
+					nodeindex_t a = node_to_template[vertices[e.first]], b = node_to_template[vertices[e.second]];
+					auto it = curved_edge_map.find(std::make_pair(std::min(a, b), std::max(a, b)));
+					if (it == curved_edge_map.end()) continue;
+
+					// Skip edges already carried by one of this element's curved facets: the facet's own
+					// deviation covers them, and adding them twice would double the edge's contribution.
+					bool covered = false;
+					if (macro)
+					{
+						for (unsigned int f = 0; f < macro->ncurved_facets() && !covered; f++)
+						{
+							const std::vector<unsigned> &lv = macro->curved_facet_vertices(f);
+							bool has_a = false, has_b = false;
+							for (auto &v : lv) { if (v == e.first) has_a = true; if (v == e.second) has_b = true; }
+							covered = has_a && has_b;
+						}
+					}
+					if (covered) continue;
+
+					MeshTemplateFacet *ef = it->second;
+					std::vector<unsigned> lv, pi;
+					for (unsigned int k = 0; k < ef->nodeinds.size(); k++)
+					{
+						if (ef->nodeinds[k] == a) { lv.push_back(e.first); pi.push_back(k); }
+						else if (ef->nodeinds[k] == b) { lv.push_back(e.second); pi.push_back(k); }
+					}
+					if (lv.size() != 2) continue;
+					if (!macro)
+					{
+						macro = new GenericMacroElement(domain, domain->nmacro_element(), shape, vertices);
+						domain->push_back_macro_element(macro);
+					}
+					macro->add_curved_facet(ef, lv, pi);
 				}
 			}
-			else
-				throw_runtime_error("MacroElements not implement for this element type");
+
+			if (macro)
+			{
+				if (pyoomph_verbose)
+					std::cout << "ADDING MACRO ELEMENT with " << macro->ncurved_facets() << " curved sub-entities" << std::endl;
+				res->set_macro_elem_pt(macro);
+				res->map_nodes_on_macro_element();
+			}
 		}
 
-		BulkElementBase::__CurrentCodeInstance = NULL;
 		return res;
 	}
 
@@ -2613,7 +2568,7 @@ Index : Local coordinates (s0,s1,s2)
 		samplepos.resize(samples.size(), std::vector<double>(pts[0].size()));
 		for (unsigned int i = 0; i < samplepos.size(); i++)
 		{
-			interpolate(samples[i], samplepos[i]);
+			CurvedEntityCatmullRomSpline::interpolate(samples[i], samplepos[i]); // called from the constructor
 		}
 	}
 
@@ -2678,6 +2633,7 @@ Index : Local coordinates (s0,s1,s2)
 	// doesn't converge to tolerance, refine the sample table (double its resolution) and retry recursively.
 	void CurvedEntityCatmullRomSpline::position_to_parametric(const unsigned &t, const std::vector<double> &position, std::vector<double> &parametric)
 	{
+		// Closest precomputed sample as the initial guess
 		double mindist = 1.0e20;
 		int minind = -1;
 		for (unsigned i = 0; i < samplepos.size(); i++)
@@ -2692,70 +2648,56 @@ Index : Local coordinates (s0,s1,s2)
 				minind = i;
 			}
 		}
-		double t0 = samples[minind];
-		std::vector<double> tang;
-		dinterpolate(t0, tang);
-		int maxind = -1;
-		double besttang = -1.0;
-		for (unsigned int i = 0; i < std::min(position.size(), tang.size()); i++)
-		{
-			if (tang[i] * tang[i] > besttang)
-			{
-				besttang = tang[i] * tang[i];
-				maxind = i;
-			}
-		}
-		// Optimize via newton
-		double troot = t0;
-		mindist = sqrt(mindist);
-		unsigned iter = 0;
-		double eps = 1e-10;
-		std::vector<double> current, J;
 
-		while (mindist > eps)
+		// Project onto the spline, i.e. solve (c(t) - position).c'(t) = 0 by Gauss-Newton (the second
+		// derivative of the curve, which the exact Newton step would need, is not available here; near the
+		// curve its contribution is negligible anyway). This used to be a Newton iteration on the single
+		// coordinate with the largest tangent component, which inverts the curve exactly but only works for
+		// a position that actually lies on it - it gave up with "Cannot invert spline" otherwise. Mesh nodes
+		// are only guaranteed to lie on the spline when the mesh generator placed them there: gmsh does, a
+		// generator that is handed the spline as a polygonal chain (see pyoomph/meshes/tqmesh.py) does not,
+		// and the nearest point on the curve is the right answer for those as well - it is what the circle
+		// arc's inverse, a plain atan2 around the center, has always returned.
+		const unsigned dim = std::min(position.size(), pts.front().size());
+		double troot = samples[minind];
+		std::vector<double> current, J;
+		bool converged = false;
+		for (unsigned iter = 0; iter < 100; iter++)
 		{
 			interpolate(troot, current);
-			mindist = current[maxind] - position[maxind];
 			dinterpolate(troot, J);
-			troot -= mindist / J[maxind];
-			mindist = fabs(mindist);
-			if (iter++ > 1000)
+			double f = 0.0, g = 0.0;
+			for (unsigned int j = 0; j < dim; j++)
+			{
+				f += (current[j] - position[j]) * J[j];
+				g += J[j] * J[j];
+			}
+			if (g < 1e-30)
+			{
+				converged = true; // stationary point of the parametrization, nothing to improve here
 				break;
+			}
+			double dt = f / g;
+			troot = std::min(std::max(troot - dt, 0.0), N - 1.0);
+			if (fabs(dt) < 1e-12 * std::max(1.0, N - 1.0))
+			{
+				converged = true;
+				break;
+			}
 		}
-		if (mindist > eps)
+
+		if (!converged)
 		{
+			// A wiggly spline can have several local minima of the distance, so a poor initial guess may
+			// send the iteration back and forth between them - a finer sample table fixes that.
 			if (samples.size() < 10000)
 			{
 				gen_samples(2 * samples.size());
 				position_to_parametric(t, position, parametric);
 				return;
 			}
-			else
-			{
-				throw_runtime_error("Cannot invert spline");
-			}
+			throw_runtime_error("Cannot invert spline");
 		}
-		else
-		{
-			interpolate(troot, current);
-			double dist = 0.0;
-			for (unsigned int j = 0; j < std::min(position.size(), current.size()); j++)
-				dist += (position[j] - current[j]) * (position[j] - current[j]);
-			if (sqrt(dist) > 100 * eps)
-			{
-				if (samples.size() < 10000)
-				{
-					gen_samples(2 * samples.size());
-					position_to_parametric(t, position, parametric);
-					return;
-				}
-				else
-				{
-					throw_runtime_error("Cannot invert spline");
-				}
-			}
-		}
-		// TODO: Also a dist check
 		parametric[0] = troot;
 	}
 
@@ -2771,7 +2713,7 @@ Index : Local coordinates (s0,s1,s2)
 	   for (unsigned int ie=0;ie<bulk_element_collections[i]->elements.size();ie++)
 	   {
 			 const MeshTemplateElement * e=bulk_element_collections[i]->elements[ie];
-		 const DynamicBulkElementInstance * code=e->get_dynamic_code();
+		 const DynamicJITCode * code=e->get_dynamic_code();
 
 			 for (unsigned int iC2=0;iC2<code->get_num_fields_C2();iC2++)
 			 {

@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -57,6 +57,10 @@ double sqrt(double);
 double fabs(double);
 double fmax(double, double);
 double fmin(double, double);
+// tcc is called with -nostdinc, so every libm function used by generated code must be declared here. A missing one is
+// not a compile error but an implicit int-returning declaration, i.e. silently garbled results (erf/erfc used to be).
+double erf(double);
+double erfc(double);
 
 long long unsigned int strlen(const char *);
 char *strdup(const char *);
@@ -64,6 +68,13 @@ void *malloc(size_t);
 void *free(void *);
 void *calloc(size_t, size_t);
 char *strncpy(char *, const char *, size_t);
+// strcpy is used by the generated JIT_ELEMENT_init to fill in the space names (codegen.cpp), and its
+// omission here cost a Windows wheel failure that read as something else entirely: tcc warned
+// "implicit declaration of function 'strcpy'", EXITED 0, and wrote no DLL at all, so pyoomph only
+// noticed when LoadLibrary reported error 126 - which is Windows saying the file does not exist, not
+// that a dependency is missing. On ELF the same implicit declaration is harmless, the symbol being
+// resolved at dlopen; that asymmetry is why this went unnoticed for so long.
+char *strcpy(char *, const char *);
 
 #define bool _Bool
 #define true 1
@@ -83,8 +94,18 @@ float __mzerosf=-0.0;
 #define PYOOMPH_NULL NULL
 #endif
 
+// Deliberately empty, and measured: defining it as __restrict changes nothing. Rebuilding the heated-
+// cylinder Navier-Stokes element with `#define PYOOMPH_RESTRICT __restrict` produced a BYTE-IDENTICAL
+// object file - 8841 instructions either way, and still 168 loads of shapeinfo->jacobian_size inside
+// the assembly. GCC does not carry the qualifier through the always_inline _impl body, so the store to
+// jacobian[] keeps aliasing every shapeinfo-> read in the innermost trial loop.
+//
+// The fix for that aliasing is not this macro but the buffer aliases the code generator emits (the
+// trial-side counterpart of the testfunction/dx_testfunction pointers), together with the _jacsize /
+// _msize locals the scatter macros below use. Do not re-try the qualifier expecting a win.
+// It is also still incomplete: the Hessian signature takes no PYOOMPH_RESTRICT at all.
 //#define PYOOMPH_RESTRICT __restrict
-#define PYOOMPH_RESTRICT  // Does not really help so far, but also not completed in e.g. the args for e.g. Hessian, etc
+#define PYOOMPH_RESTRICT
 
 // This file defines the structures which are required to transfer the oomph-lib data (e.g. shape functions) to the C-compiled code
 
@@ -98,6 +119,28 @@ float __mzerosf=-0.0;
 #define SPACE_INDEX_D2 1
 #define SPACE_INDEX_D1TB 2
 #define SPACE_INDEX_D1 3
+
+// Second spatial derivatives of the shape functions.
+//
+// Storage is the full square [i][j], not the symmetry-packed form oomph-lib uses in N2deriv. That is
+// deliberate: the second derivative is only symmetric when the element has no codimension. pyoomph
+// builds spatial derivatives from the metric (dpsi/dx_i = g^{ab} t_{a,i} dpsi/ds_b), which on a
+// surface gives the tangential derivative of the surface gradient,
+//    D_ij psi = M_i^b M_j^c psi_,bc + M_j^c [ (d g^{ab}/d s_c) t_{a,i} + g^{ab} x_{i,ac} ] psi_,b ,
+// and that is genuinely asymmetric - on a unit circle it comes out as t_i t_j psi'' - n_i t_j psi'.
+// (Its trace is still exactly the Laplace-Beltrami operator, since the asymmetric part is
+// trace-free, so div(grad(u)) on an interface is correct.) Packing would silently alias the two
+// orders. The symmetry is exploited one level up instead: the code generator canonicalises
+// d/dx_i d/dx_j to i<=j only on domains where element_dim == nodal_dimension, so codimension-free
+// problems still emit only 6 of the 9 interpolation loops.
+//
+// The first index is the INNER derivative direction, the second the OUTER differentiation
+// direction, i.e. slot(i,j) addresses d/dx_j ( d psi / d x_i ).
+#define PYOOMPH_MAX_NODAL_DIM 3
+#define MAX_N2DERIV (PYOOMPH_MAX_NODAL_DIM * PYOOMPH_MAX_NODAL_DIM)
+#define PYOOMPH_D2_SLOT(i, j) (PYOOMPH_MAX_NODAL_DIM * (i) + (j))
+
+struct JITFuncSpec_Table_FiniteElement; /* fwd decl: JITElementInfo carries a pointer to it (see below) */
 
 typedef struct JITElementInfo
 {
@@ -130,7 +173,18 @@ typedef struct JITElementInfo
   unsigned int ndof; // Number of local dofs
 
   bool alloced;
-  void *elem_ptr; // Pointer to the element //TODO: This is problematic, as the this pointer cannot be restored for multiple inheritance
+  /* The element itself, always stored as a properly upcast pyoomph::BulkElementBase* so that the
+     round trip through void* survives multiple inheritance (a raw `this` from a derived class does
+     not). Handed back to fill_shape_buffer_for_point below, which used to find its element through
+     a process-wide _currently_assembled_element pointer instead - unusable under parallel assembly
+     and stale for the whole time between two assemblies. */
+  void *elem_ptr;
+  /* This code's own function table. Generated code reaches global parameters, required-shape
+     tables and the exported callbacks through here. It used to be a file-scope `static` in every
+     generated .so, assigned by JIT_ELEMENT_init; that broke as soon as one .so served two Problems,
+     since dlopen dedupes by inode and the second init silently repointed it - after which the first
+     Problem's elements read the second Problem's global_parameters. */
+  struct JITFuncSpec_Table_FiniteElement *functable;
 
   struct JITElementInfo * PYOOMPH_RESTRICT bulk_eleminfo;
   // struct JITElementInfo * otherbulk_eleminfo;
@@ -156,7 +210,9 @@ typedef struct JITElementInfo
 #define ARRAY_DECL_NHANG(what) what[MAX_HANG]
 #define ARRAY_DECL_NFIELDS(what) what[MAX_FIELDS]
 #define ARRAY_DECL_RESIDUAL_DESTINATION(what) what[MAX_RESIDUAL_DESTINATIONS]
+#define ARRAY_DECL_N2DERIV(what) what[MAX_N2DERIV]
 #define DX_SHAPE_FUNCTION_DECL(what) const double(*what)[MAX_NODAL_DIM]
+#define D2X_SHAPE_FUNCTION_DECL(what) const double(*what)[MAX_N2DERIV]
 
 #else
 
@@ -167,7 +223,9 @@ typedef struct JITElementInfo
 #define ARRAY_DECL_NHANG(what) *PYOOMPH_RESTRICT what
 #define ARRAY_DECL_NFIELDS(what) * PYOOMPH_RESTRICT what
 #define ARRAY_DECL_RESIDUAL_DESTINATION(what) * PYOOMPH_RESTRICT what
+#define ARRAY_DECL_N2DERIV(what) * PYOOMPH_RESTRICT what
 #define DX_SHAPE_FUNCTION_DECL(what) double * const * const  PYOOMPH_RESTRICT what
+#define D2X_SHAPE_FUNCTION_DECL(what) double * const * const  PYOOMPH_RESTRICT what
 #endif
 
 
@@ -195,7 +253,7 @@ typedef struct JITShapeInfo
   double ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(int_pt_weights_d_coords)); // Weights derived by coordinates, [i_dim,l_node], i.e. w*dJ_Eulerian/dX^l_i
   double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT int_pt_weights_d2_coords; // Weights derived by coordinates, [i_dim,j_dim,l_node_i,l_node_j], i.e. w*d2J_Eulerian/(dX^l_i*dX^l_j)
   
-  double elemsize_Eulerian,elemsize_Eulerian_cartesian;            // Eulerian element size, with e.g. 2*pi*r in integration or not
+  double elemsize_Eulerian[3],elemsize_Eulerian_cartesian[3];      // Eulerian element size (history index), with e.g. 2*pi*r in integration or not
   double elemsize_Lagrangian,elemsize_Lagrangian_cartesian; // Lagrangian element size
   double ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(elemsize_d_coords)); // Eulerian element size derived by coordinates, [i_dim,l_node], i.e. sum(w*dJ_Eulerian)/dX^l_i
   double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT elemsize_d2_coords; // Weights derived by coordinates, [i_dim,j_dim,l_node_i,l_node_j], i.e. sum(w*d2J_Eulerian)/(dX^l_i*dX^l_j)      
@@ -205,37 +263,54 @@ typedef struct JITShapeInfo
 
 
   double ARRAY_DECL_NNODE(shapes)[NUM_CONTINUOUS_SPACES];               // non-derived shapes
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dx_shapes))[NUM_CONTINUOUS_SPACES]; // Derived shapes (node index, coord index)
+  // First index is the history level, exactly like int_pt_weight[] above: 0 is the current
+  // configuration, 1 and 2 are the previous ones, used by evaluate_in_past(...,apply_on_others=True).
+  // Only the EULERIAN derivative needs this - the undifferentiated shapes and the Lagrangian/local
+  // coordinate derivatives are properties of the reference element and do not move with the mesh.
+  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dx_shapes))[3][NUM_CONTINUOUS_SPACES]; // Derived shapes (history, space, node index, coord index)
   double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dX_shapes))[NUM_CONTINUOUS_SPACES]; // Corresponding Lagrangian version
   double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dS_shapes))[NUM_CONTINUOUS_SPACES]; // Corresponding local coordinate version
+  // Second spatial derivatives, slot index built with PYOOMPH_D2_SLOT(inner dir, outer dir).
+  // d2x_shapes carries the history level like dx_shapes above, for evaluate_in_past(...,apply_on_others=True).
+  double ARRAY_DECL_N2DERIV(ARRAY_DECL_NNODE(d2x_shapes))[3][NUM_CONTINUOUS_SPACES]; // (history, space, node index, slot)
+  double ARRAY_DECL_N2DERIV(ARRAY_DECL_NNODE(d2S_shapes))[NUM_CONTINUOUS_SPACES];    // Corresponding local coordinate version (space, node index, slot)
   double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(d_dx_shape_dcoord))))[NUM_CONTINUOUS_SPACES]; // derivative of dx_shape w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index)
   double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_dx2_shape_dcoord[NUM_CONTINUOUS_SPACES]; // second derivative of dx_shape_C2 w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index,deriv. coord node index2, deriv coord dir index2)
-  double ARRAY_DECL_NNODE(ARRAY_DECL_NNODE(nodal_shapes))[NUM_CONTINUOUS_SPACES]; // shapes (node index, node index). In principle just delta_{i,j}
+  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(ARRAY_DECL_N2DERIV(ARRAY_DECL_NNODE(d_d2x_shape_dcoord))))[NUM_CONTINUOUS_SPACES]; // derivative of d2x_shape w/r to nodal coords (node index, slot, deriv. coord node index, deriv coord dir index)
+  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_d2x2_shape_dcoord[NUM_CONTINUOUS_SPACES]; // second derivative of d2x_shape w/r to nodal coords (node index, slot, deriv. coord node index, deriv coord dir index, deriv. coord node index2, deriv coord dir index2)
 
   double ARRAY_DECL_NNODE(shape_DL);                // DL shapes (node index)
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dx_shape_DL));            // DL shapes (node index, coord index)
+  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dx_shape_DL))[3];         // DL shapes (history, node index, coord index)
   double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dX_shape_DL));            // Corresponding Lagrangian derivatives
   double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dS_shape_DL));            // Corresponding local coordinate version
+  double ARRAY_DECL_N2DERIV(ARRAY_DECL_NNODE(d2x_shape_DL))[3];     // DL second spatial derivatives (history, node index, slot)
+  double ARRAY_DECL_N2DERIV(ARRAY_DECL_NNODE(d2S_shape_DL));        // Corresponding local coordinate version
   double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(d_dx_shape_dcoord_DL)))); // derivative of dx_shape_DL w/r to nodal coords (intpt,node index, coord index, deriv. coord node index, deriv coord dir index)
   double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_dx2_shape_dcoord_DL; // second derivative of dx_shape_DL w/r to nodal coords (intpt,node index, coord index, deriv. coord node index, deriv coord dir index,deriv. coord node index2, deriv coord dir index2)
-  double ARRAY_DECL_NNODE(ARRAY_DECL_NNODE(nodal_shape_DL)); // DL shapes (node index, node index). In principle just delta_{i,j}
-  
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(d_dshape_dx_tensor))));
-  
+  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(ARRAY_DECL_N2DERIV(ARRAY_DECL_NNODE(d_d2x_shape_dcoord_DL)))); // derivative of d2x_shape_DL w/r to nodal coords (node index, slot, deriv. coord node index, deriv coord dir index)
+  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_d2x2_shape_dcoord_DL; // second derivative of d2x_shape_DL w/r to nodal coords (node index, slot, deriv. coord node index, deriv coord dir index, deriv. coord node index2, deriv coord dir index2)
+
   #ifdef FIXED_SIZE_SHAPE_BUFFER
   double *shape_Pos; // Pos space shapes. These will be mapped to the dominant element space
-  double (*dx_shape_Pos)[MAX_NODAL_DIM];
+  double (*dx_shape_Pos[3])[MAX_NODAL_DIM];
   double (*dX_shape_Pos)[MAX_NODAL_DIM];
   double (*dS_shape_Pos)[MAX_NODAL_DIM];
+  double (*d2x_shape_Pos[3])[MAX_N2DERIV];
+  double (*d2S_shape_Pos)[MAX_N2DERIV];
   double (*d_dx_shape_dcoord_Pos)[MAX_NODAL_DIM][MAX_NODES][MAX_NODAL_DIM];
+  double (*d_d2x_shape_dcoord_Pos)[MAX_N2DERIV][MAX_NODES][MAX_NODAL_DIM];
   #else
   double * PYOOMPH_RESTRICT shape_Pos; // Pos space shapes. These will be mapped to the dominant element space
-  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dx_shape_Pos;
+  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dx_shape_Pos[3];
   double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dX_shape_Pos;
   double * PYOOMPH_RESTRICT* PYOOMPH_RESTRICT dS_shape_Pos;
-  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d_dx_shape_dcoord_Pos;  
+  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2x_shape_Pos[3];
+  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2S_shape_Pos;
+  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d_dx_shape_dcoord_Pos;
+  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d_d2x_shape_dcoord_Pos;
   #endif
    double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT* PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_dx2_shape_dcoord_Pos; // second derivative of dx_shape_DL w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index,deriv. coord node index2, deriv coord dir index2)
+   double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT* PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_d2x2_shape_dcoord_Pos; // second derivative of d2x_shape w/r to nodal coords (node index, slot, deriv. coord node index, deriv coord dir index, deriv. coord node index2, deriv coord dir index2)
 
   // double ** shape_D0; //DL shapes (intpt, "node" index) -> Actually always 1 //TODO: Simplify this
   // double *** dx_shape_D0; //DL shapes (intpt, "node" index,coord index) -> Actually always zero //TODO: Simplify this
@@ -243,9 +318,21 @@ typedef struct JITShapeInfo
   unsigned int jacobian_size;
   unsigned int mass_matrix_size;
 
-  double ARRAY_DECL_NDIM(normal);            // direction //TODO: This does not allow for divergence of the normal etc.
-  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT* PYOOMPH_RESTRICT d_normal_dcoord; // Derivative of the normal wrt. nodal coordinates [ipt][dir][coord node][coord dir]
-  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_normal_d2coord; // Second order derivative of the normal wrt. nodal coordinates [ipt][dir][coord node 1][coord dir 1][coord node 2][coord dir 2]
+  double ARRAY_DECL_NDIM(normal)[3];         // (history, direction)
+  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT* PYOOMPH_RESTRICT d_normal_dcoord; // Derivative of the normal wrt. nodal coordinates [dir][coord node][coord dir]
+  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_normal_d2coord; // Second order derivative of the normal wrt. nodal coordinates [dir][coord node 1][coord dir 1][coord node 2][coord dir 2]
+
+  // First SPATIAL derivative of the normal, dn_i/dx_j - i.e. minus the second fundamental form, whose
+  // trace div(n) is the mean curvature. Built as -M_i^(c) M_j^(b) n_k X_{k,bc} (see
+  // fill_shape_info_at_s), hence symmetric in i,j and independent of the normal's orientation
+  // convention. The history index matches normal[] above.
+  //
+  // The "coord node" index of the sensitivities below is the node of the BULK element, exactly as for
+  // d_normal_dcoord: on an interface the normal's coordinate dependence is expressed in terms of the
+  // parent element's nodes, and the generated code loops over that same set.
+  double ARRAY_DECL_NDIM(ARRAY_DECL_NDIM(dnormal_dx))[3];                        // [history][normal comp i][spatial dir j]
+  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d_dnormal_dx_dcoord;  // [i][j][coord node][coord dir]
+  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_dnormal_dx_d2coord; // [i][j][coord node][coord dir][coord node 2][coord dir 2]
 
   // double * dx_shape_at_center_C1; //Gradients of C1 space at center //Required for SUPG
 
@@ -267,10 +354,16 @@ typedef struct JITShapeInfo
   
 
 
+  /* Set while assemble_multi_residual_jacobian drives several contributions through one shared fill
+     of this buffer, so the generated bodies loop over the integration point the caller already
+     filled instead of refilling all of them. Lives here rather than in the function table because
+     the table is shared by every element of the code while this is a property of one element's
+     assembly; on the table it could not survive a parallel element loop. */
+  bool during_shared_multi_assembling;
+
   struct JITShapeInfo * PYOOMPH_RESTRICT bulk_shapeinfo;
   // struct JITShapeInfo * otherbulk_shapeinfo; //Bulk element on the other side
   struct JITShapeInfo * PYOOMPH_RESTRICT opposite_shapeinfo; // Shape info on the other side
-  int ARRAY_DECL_NNODE(opposite_node_index);                // Reindex the nodes on the opposite side (can be different due to orientation)
 } JITShapeInfo_t;
 
 typedef void (*JITFuncSpec_ResidualAndJacobian_FiniteElement)(const JITElementInfo_t *, const JITShapeInfo_t *, double * PYOOMPH_RESTRICT, double * PYOOMPH_RESTRICT, double * PYOOMPH_RESTRICT, unsigned);
@@ -280,15 +373,30 @@ typedef void (*JITFuncSpec_GetZ2Fluxes_FiniteElement)(const JITElementInfo_t *, 
 typedef double (*JITFuncSpec_InitialCondition_FiniteElement)(const JITElementInfo_t *, int, double *, double *, double *,double, int, double);
 typedef double (*JITFuncSpec_DirichletCondition_FiniteElement)(const JITElementInfo_t *, int, double *, double *, double *,double, double);
 typedef double (*JITFuncSpec_EvalIntegralExpr_FiniteElement)(const JITElementInfo_t *, const JITShapeInfo_t *, unsigned);
-typedef void (*JITFuncSpec_EvalTracerAdvection_FiniteElement)(const JITElementInfo_t *, const JITShapeInfo_t *, unsigned, double, double *);
+/* Tracer advection: (eleminfo, shapeinfo, index, result). One registered entry per tracer name AND
+   per nodal time-history level - the caller blends the levels itself, since the blending weights
+   follow from t(0),t(1),t(2), which are not known when this code is generated. */
+typedef void (*JITFuncSpec_EvalTracerAdvection_FiniteElement)(const JITElementInfo_t *, const JITShapeInfo_t *, unsigned, double *);
 
 typedef double (*JITFuncSpec_GeometricJacobian)(const JITElementInfo_t *, const double *);
 
 typedef void (*JITFuncSpec_GeometricJacobianSpatialDerivative)(const JITElementInfo_t *, const double *, double *);
 
+// d2X_psi (Lagrangian second derivatives) is reserved but not implemented - the code generator
+// refuses to set it. It is declared now so that adding it later is not a second ABI break.
+// There is deliberately no d2S_psi: local-coordinate derivatives have no flag of their own either.
+// dS_shapes rides on dX_psi - D1XBasisFunctionLocalCoord derives from D1XBasisFunctionLagr, so
+// mark_shapes_required classifies it as a Lagrangian derivative - and d2S_shapes rides on d2x_psi.
 typedef struct JITFuncSpec_RequiredShapes_For_Space
 {
-  bool psi,dx_psi,dX_psi;  
+  bool psi,dx_psi,dX_psi,d2x_psi,d2X_psi;
+  // Does an ASSEMBLED entry differentiate this space's Eulerian shape derivative with respect to the
+  // nodal positions, i.e. does the generated code read d_dx_shape_dcoord for this space? Marked from
+  // the very set of shape expansions that emits those reads (write_spatial_interpolation's
+  // required_coorddiffs), so the flag and the reads cannot drift apart. Only meaningful on a moving
+  // mesh; the rank-4 fill it gates is the single most expensive item of a moving-mesh Jacobian
+  // assembly, and it used to run for every required space whether it was read or not.
+  bool dx_psi_dcoord;
 } JITFuncSpec_RequiredShapes_For_Space_t;
 
 typedef struct JITFuncSpec_RequiredShapes_FiniteElement
@@ -301,12 +409,20 @@ typedef struct JITFuncSpec_RequiredShapes_FiniteElement
   JITFuncSpec_RequiredShapes_For_Space_t DL;    
   JITFuncSpec_RequiredShapes_For_Space_t D0;      
     
-  bool normal;                                   
+  bool normal;
+  // Separate from `normal`, because dn_i/dx_j needs the GEOMETRY's second local derivatives, which
+  // are otherwise only computed when some field asks for d2x_psi. A plain var("normal") must not
+  // start paying for d2shape_local.
+  bool normal_deriv;
   bool elemsize_Eulerian,elemsize_Lagrangian;
   bool elemsize_Eulerian_cartesian,elemsize_Lagrangian_cartesian;  
 
   bool history_integral_dx1;
   bool history_integral_dx2;
+  // Whether the geometry itself (Eulerian shape derivatives, normal, element size) is needed on the
+  // mesh as it was 1 or 2 steps ago, i.e. whether the [1]/[2] slots have to be filled at all.
+  bool history_geometry1;
+  bool history_geometry2;
   struct JITFuncSpec_RequiredShapes_FiniteElement *bulk_shapes;
   struct JITFuncSpec_RequiredShapes_FiniteElement *opposite_shapes;
   // struct JITFuncSpec_RequiredShapes_FiniteElement * otherbulk_shapes;
@@ -352,11 +468,31 @@ typedef struct JITFuncSpec_Table_FiniteElement_SpaceInfo
 
  unsigned int * interface_dof_indices; // For continuous fields (C2TB-C1), this is of length numfields-numfields_basebulk and gives the index for additional dofs on interface nodes. Created at problem level
 
+ // Parallel to fieldnames: the index into contribution_names (and hence the row/column class of
+ // contributes_to_jacobian / contributes_to_mass_matrix) that each field of this space belongs to.
+ // -2 for a field that is present but takes part in NO contribution of this code, which is a
+ // POSITIVE statement: that field's row and column of this element's block are empty, so nothing has
+ // to be stored for them. Distinguished from -1, which means "could not be attributed" and must be
+ // read as coupled to everything -- conflating the two is what forced a structural zero onto the
+ // diagonal of every unclassifiable dof. Lets an element translate a local dof into the class the
+ // symbolic coupling tables are indexed by; see dev_docs/structural_assembly.md.
+ int * field_contribution_index;
+
  unsigned space_index; // Index to the arrays [4]
  bool is_dominant; // Is this the dominant space for the element, i.e. the geometric space where also the coordinates live? (e.g. C2TB>C2>C1TB>C1) // Set during problem level 
 
 } JITFuncSpec_Table_FiniteElement_SpaceInfo_t;
 
+
+/* Per-block property bits for jacobian_block_flags / mass_matrix_block_flags below.
+   A SET bit means "proven at code generation time from the symbolic block expression"; an UNSET bit
+   means "not proven", never "disproven" -- a consumer may exploit a set bit and must assume nothing
+   from a clear one. Kept in sync with the module attributes exported in src/nanobind/mesh.cpp
+   (_pyoomph_core.JACOBIAN_BLOCK_*). */
+#define JACOBIAN_BLOCK_SYMMETRIC 1u         /* block (i,j) == +transpose of block (j,i); set on BOTH mirror entries (diagonal blocks: self-transpose) */
+#define JACOBIAN_BLOCK_ANTISYMMETRIC 2u     /* block (i,j) == -transpose of block (j,i); set on BOTH mirror entries */
+#define JACOBIAN_BLOCK_CONSTANT 4u          /* entries independent of unknowns, nodal positions, global parameters, time AND time-stepper weights */
+#define JACOBIAN_BLOCK_CONSTANT_FIXED_DT 8u /* as CONSTANT, but may contain time-stepper (BDF/Newmark) weights, i.e. constant as long as dt is; implied by CONSTANT */
 
 typedef struct JITFuncSpec_Table_FiniteElement
 {
@@ -400,6 +536,14 @@ typedef struct JITFuncSpec_Table_FiniteElement
   JITFuncSpec_RequiredShapes_FiniteElement_t *shapes_required_ResJac;
   JITFuncSpec_RequiredShapes_FiniteElement_t *shapes_required_Hessian;
   JITFuncSpec_RequiredShapes_FiniteElement_t merged_required_shapes;
+  // The same OR restricted to the contributions that are actually ASSEMBLED (residual/Jacobian/mass
+  // and Hessian). merged_required_shapes additionally covers integral, local, extremum, Z2-flux and
+  // tracer-advection expressions, which are evaluated on their own and never build a Jacobian - using
+  // it to decide what to attach as external data let one output observable widen the dense elemental
+  // block of every element of the domain. Attachment and the equation remapping that addresses the
+  // attached dofs must always read the SAME one of the two, or the remap hands out local equation
+  // numbers for data the element does not carry. Buffer sizing and the evaluators keep the full merge.
+  JITFuncSpec_RequiredShapes_FiniteElement_t assembly_required_shapes;
   unsigned numglobal_params;
   unsigned *global_paramindices;
   double **global_parameters;
@@ -435,12 +579,16 @@ typedef struct JITFuncSpec_Table_FiniteElement
 
   int integration_order;
   bool moving_nodes;
-  bool use_shared_shape_buffer_during_multi_assemble,during_shared_multi_assembling;
+  bool use_shared_shape_buffer_during_multi_assemble; /* the pass flag itself lives in JITShapeInfo_t */
 
   void *handle; // Handle to the SO
   JITFuncSpec_ResidualAndJacobian_FiniteElement *ResidualAndJacobian;
   JITFuncSpec_ResidualAndJacobian_FiniteElement *ResidualAndJacobianSteady;
+  /* Twins of the two above for elements in which nothing hangs, selected per element by
+     BulkElementBase::fill_in_generic_residual_contribution_jit. Never NULL where the corresponding
+     hanging slot is non-NULL: where no specialised body was emitted they simply point at it. */
   JITFuncSpec_ResidualAndJacobian_FiniteElement *ResidualAndJacobian_NoHang;
+  JITFuncSpec_ResidualAndJacobian_FiniteElement *ResidualAndJacobianSteady_NoHang;
   bool * missing_residual_assembly; // Some residuals are not calculated (if not needed, e.g. for azimuthal eigenproblem). We cannot FD then!
 
   JITFuncSpec_HessianVectorProduct_FiniteElement *HessianVectorProduct;
@@ -449,6 +597,18 @@ typedef struct JITFuncSpec_Table_FiniteElement
   unsigned num_Z2_flux_terms,num_Z2_flux_terms_for_eigen;
   JITFuncSpec_GetZ2Fluxes_FiniteElement GetZ2Fluxes,GetZ2FluxesForEigen;
   JITFuncSpec_RequiredShapes_FiniteElement_t shapes_required_Z2Fluxes;
+
+  /* Compound-flux grouping for the Z2 error estimator. oomph-lib normalises each group by its own
+     recovered-flux norm and combines the groups by taking the maximum, so two error criteria added
+     independently to one domain coexist without either diluting the other.
+     All four pointers stay NULL and num_Z2_compound_fluxes stays 0 for the historical case of a
+     single, fully relative, unweighted group; the estimator checks that to keep its old code path
+     (and hence bit-identical errors) for everything that does not ask for grouping.
+     Z2_flux_group_index has num_Z2_flux_terms entries, the other two num_Z2_compound_fluxes. */
+  unsigned num_Z2_compound_fluxes,num_Z2_compound_fluxes_for_eigen;
+  unsigned *Z2_flux_group_index,*Z2_flux_group_index_for_eigen;
+  double *Z2_group_normalize_relative,*Z2_group_normalize_relative_for_eigen;
+  double *Z2_group_weight,*Z2_group_weight_for_eigen;
 
   JITFuncSpec_InitialCondition_FiniteElement *InitialConditionFunc;
   unsigned num_ICs;
@@ -476,6 +636,25 @@ typedef struct JITFuncSpec_Table_FiniteElement
   char **contribution_names;
   bool ARRAY_DECL_RESIDUAL_DESTINATION(ARRAY_DECL_NFIELDS(contributes_to_residual));
   bool ARRAY_DECL_RESIDUAL_DESTINATION(ARRAY_DECL_NFIELDS(ARRAY_DECL_NFIELDS(contributes_to_jacobian)));
+  // Same shape as contributes_to_jacobian, but restricted to the mass-matrix half of each Jacobian
+  // contribution (the part carrying a time derivative of the column field). Always a subset of
+  // contributes_to_jacobian. Decided symbolically at code generation time, so it is a superset of
+  // whatever entries turn out to be numerically nonzero -- i.e. a valid sparsity pattern. Used to give
+  // the mass matrix its own tight, value-independent pattern; see dev_docs/structural_assembly.md.
+  bool ARRAY_DECL_RESIDUAL_DESTINATION(ARRAY_DECL_NFIELDS(ARRAY_DECL_NFIELDS(contributes_to_mass_matrix)));
+  // Same again for the SECOND derivative: whether d2(residual)/d(field_i)d(field_j) is not
+  // identically zero. A Hessian contracted with a vector lives on THIS pattern, which is typically far
+  // tighter than the Jacobian's -- every linear term of the residual drops out of it.
+  bool ***contributes_to_hessian;
+  // Proven properties of the individual elemental blocks, indexed exactly like contributes_to_jacobian
+  // ([residual index][row class][column class]) with the JACOBIAN_BLOCK_* bits above. Consumers MUST
+  // check contributes_to_jacobian/_mass_matrix first: all bits are 0 for a non-contributing block, not
+  // because nothing was proven, but because the block is identically zero (and hence trivially
+  // symmetric and constant) so there was nothing to record.
+  // For the mass half CONSTANT and CONSTANT_FIXED_DT always coincide: the time-stepper weights sit in
+  // the Jacobian half only, so a constant mass block is constant outright. Both bits are set there.
+  unsigned char ***jacobian_block_flags;
+  unsigned char ***mass_matrix_block_flags;
   // Fields defined on this domain (i.e. without taking over from parent)
   unsigned num_defined_fields_on_this_domain;
   char **defined_field_names_on_this_domain;
@@ -507,8 +686,7 @@ typedef struct JITFuncSpec_Table_FiniteElement
 
   // Exported functions
   void (*check_compiler_size)(unsigned long long,unsigned long long,char *);  
-  double (*get_element_size)(void *);
-  void (*fill_shape_buffer_for_point)(unsigned,JITFuncSpec_RequiredShapes_FiniteElement_t *,int);
+  void (*fill_shape_buffer_for_point)(const JITElementInfo_t *,unsigned,JITFuncSpec_RequiredShapes_FiniteElement_t *,int);
   void (*clean_up)(struct JITFuncSpec_Table_FiniteElement *functable);
 } JITFuncSpec_Table_FiniteElement_t;
 
@@ -595,16 +773,64 @@ static double signum(double x)
   residuals[local_eqn] += _res_contrib;
 #define END_RESIDUAL() }
 
+// The Residual/Jacobian/Mass function is emitted ONCE, as an implementation taking a compile-time
+// constant flag, behind a three-line entry point that calls it with 0, 1 and 2. Forcing the inline is
+// the whole point: the compiler then folds `if (flag)` and `if (flag == 2)` away, so a residual-only
+// assembly runs a body that contains no Jacobian code at all - it does not merely skip it. That matters
+// because the register allocator works on the whole function, and a large Jacobian block was measured
+// to slow the residual-only path it never enters (dev_docs/code_generation.md 9.4.6).
+//
+// A compiler without the attribute simply gets one body with a runtime flag, exactly as before:
+// correct, just not specialised.
+//
+// Per compiler, from the vendor documentation rather than from testing (we build with GCC here):
+//
+//  * MSVC has no __attribute__ syntax; the equivalent is the __forceinline KEYWORD, which "overrides
+//    the cost-benefit analysis". It is honoured under the /O2 that ccompiler.py passes. It cannot
+//    inline under /Ob0 (the debug default) and issues no diagnostic in that case, so a debug build
+//    degrades silently to the runtime-flag form - which is exactly the intended fallback.
+//    clang-cl defines _MSC_VER and accepts __forceinline, so it takes this branch too; that is why
+//    _MSC_VER is tested FIRST, since clang-cl may define both.
+//  * Clang accepts the GNU spelling and defines __GNUC__, so it takes the GCC branch. Its
+//    always_inline "disables inlining heuristics and inlining is always attempted regardless of
+//    optimization level", but like every compiler here it "does not guarantee that inline
+//    substitution actually occurs".
+//  * GCC diagnoses a FAILURE to inline an always_inline function as a hard ERROR, not a warning. On a
+//    JIT path that turns a missed optimisation into a failed compile, so it is worth knowing that the
+//    documented causes - target-option mismatch across translation units, definition not available,
+//    varargs, recursion - none of them apply here: one translation unit, one -march, and the
+//    implementation is defined immediately above its only three callers.
+//
+// The __OPTIMIZE__ term is about the debug build: with PYOOMPH_DEBUG=1 ccompiler.py compiles at -O0,
+// where specialising buys nothing (nobody measures a debug build) and a single out-of-line body is far
+// easier to step through than three inlined copies of it. Measured on the 3D solid element:
+//
+//   -O0, guarded (this branch off): dispatcher 121 B + one _impl of 210 775 B, .so 403 672 B, 0.51 s
+//   -O0, always_inline forced     : one symbol of 221 877 B,                    .so 420 008 B, 0.59 s
+//   -O3, always_inline            : one symbol of  71 523 B,                    .so  94 128 B
+//
+// Note what those numbers do NOT say: forcing it at -O0 does not triple the code. GCC folds the
+// constant `flag` branches while inlining, even with no optimiser running, so the three copies collapse
+// to +5%. The guard is worth having for debuggability and the 16% of compile time, not because the
+// alternative is catastrophic - an earlier version of this comment claimed it was.
+#if defined(_MSC_VER)
+#define PYOOMPH_RJM_IMPL static __forceinline void
+#elif defined(__GNUC__) && !defined(__TINYC__) && defined(__OPTIMIZE__)
+#define PYOOMPH_RJM_IMPL static inline __attribute__((always_inline)) void
+#else
+#define PYOOMPH_RJM_IMPL static void
+#endif
+
 #define BEGIN_JACOBIAN() \
   if (flag)              \
   {
 
-#define ADD_TO_JACOBIAN_NOHANG_NOHANG() jacobian[local_eqn * shapeinfo->jacobian_size + local_unknown] += _J_contrib;
+#define ADD_TO_JACOBIAN_NOHANG_NOHANG() jacobian[local_eqn * _jacsize + local_unknown] += _J_contrib;
 
 #define ADD_TO_MASS_MATRIX_NOHANG_NOHANG(MPART)                                    \
   if (flag == 2)                                                                   \
   {                                                                                \
-    mass_matrix[local_eqn * shapeinfo->mass_matrix_size + local_unknown] += MPART; \
+    mass_matrix[local_eqn * _msize + local_unknown] += MPART; \
   }
 
 #define END_JACOBIAN() }
@@ -635,31 +861,43 @@ static double signum(double x)
   {                                             \
     _H_contrib = CONTRIB;
 
-// Hanging macros
-#define BEGIN_RESIDUAL_CONTINUOUS_SPACE(EQN, CONTRIB, HANGINFO, LINDEX)                                             \
-  if (HANGINFO[LINDEX].nummaster)                                                                                   \
+// Hanging macros.
+//
+// The leading HANGON argument is what lets ONE emitted body serve both the hanging and the
+// non-hanging element populations (dev_docs/code_generation.md 9.4.14). It is either the literal 1
+// or the constant `_impl` parameter pyoomph_hang_on, so after inlining the compiler sees a compile-
+// time constant:
+//
+//  * HANGON == 0: `&&` short-circuits, so HANGINFO is never even loaded, `nummaster` folds to 0, the
+//    guard collapses to `(EQN) >= 0`, the master loop to a single iteration and hang_weight to 1.0 -
+//    i.e. exactly the shape of BEGIN_JACOBIAN_NOHANG, without emitting the body a second time.
+//  * HANGON == 1: the arithmetic of the hanging path, unchanged.
+//
+// Testing `nummaster || (EQN) >= 0` BEFORE evaluating CONTRIB is the second half of the point: a
+// pinned, non-hanging dof used to compute its contribution and then throw it away. Only a real hang
+// needs the contribution before the row is known (the same value is scattered to several masters),
+// and that case still gets it. CONTRIB is pure arithmetic plus pure callbacks, so not evaluating it
+// is unobservable - pyoomph does not unmask FP exceptions.
+#define BEGIN_RESIDUAL_CONTINUOUS_SPACE(HANGON, EQN, CONTRIB, HANGINFO, LINDEX)                                     \
+  nummaster = ((HANGON) && HANGINFO[LINDEX].nummaster) ? HANGINFO[LINDEX].nummaster : 0u;                           \
+  if (nummaster || (EQN) >= 0)                                                                                      \
   {                                                                                                                 \
-    nummaster = HANGINFO[LINDEX].nummaster;                                                                         \
-  }                                                                                                                 \
-  else                                                                                                              \
-  {                                                                                                                 \
-    nummaster = 1;                                                                                                  \
-  }                                                                                                                 \
-  _res_contrib = CONTRIB;                                                                                       \
-  for (int m = 0; m < nummaster; m++)                                                                               \
-  {                                                                                                                 \
-    if (HANGINFO[LINDEX].nummaster)                                                                                 \
+    const unsigned _nmaster = (nummaster ? nummaster : 1u);                                                         \
+    _res_contrib = CONTRIB;                                                                                         \
+    for (unsigned m = 0; m < _nmaster; m++)                                                                         \
     {                                                                                                               \
-      local_eqn = HANGINFO[LINDEX].masters[m].local_eqn;                                                            \
-      hang_weight = HANGINFO[LINDEX].masters[m].weight;                                                             \
-    }                                                                                                               \
-    else                                                                                                            \
-    {                                                                                                               \
-      local_eqn = EQN;                                                                                              \
-      hang_weight = 1.0;                                                                                            \
-    }                                                                                                               \
-    if (local_eqn >= 0) /*&& (!eleminfo->nullified_residual_dof || !eleminfo->nullified_residual_dof[local_eqn] )*/ \
-    {
+      if (nummaster)                                                                                                \
+      {                                                                                                             \
+        local_eqn = HANGINFO[LINDEX].masters[m].local_eqn;                                                          \
+        hang_weight = HANGINFO[LINDEX].masters[m].weight;                                                           \
+      }                                                                                                             \
+      else                                                                                                          \
+      {                                                                                                             \
+        local_eqn = EQN;                                                                                            \
+        hang_weight = 1.0;                                                                                          \
+      }                                                                                                             \
+      if (local_eqn >= 0) /*&& (!eleminfo->nullified_residual_dof || !eleminfo->nullified_residual_dof[local_eqn] )*/ \
+      {
 
 #define ADD_TO_RESIDUAL_CONTINUOUS_SPACE() \
   assert(local_eqn < eleminfo->ndof);      \
@@ -667,54 +905,55 @@ static double signum(double x)
 
 #define END_RESIDUAL_CONTINUOUS_SPACE() \
   }                                     \
+  }                                     \
   }
 
-#define BEGIN_JACOBIAN_HANG(EQN, CONTRIB, HANGINFO, LINDEX)             \
-  if (HANGINFO[LINDEX].nummaster)                                       \
-  {                                                                     \
-    nummaster2 = HANGINFO[LINDEX].nummaster;                            \
-  }                                                                     \
-  else                                                                  \
-  {                                                                     \
-    nummaster2 = 1;                                                     \
-  }                                                                     \
-  _J_contrib = CONTRIB;                                               \
-  for (int m2 = 0; m2 < nummaster2; m2++)                               \
-  {                                                                     \
-    if (HANGINFO[LINDEX].nummaster)                                     \
-    {                                                                   \
-      local_unknown = HANGINFO[LINDEX].masters[m2].local_eqn;           \
-      hang_weight2 = HANGINFO[LINDEX].masters[m2].weight;               \
-    }                                                                   \
-    else                                                                \
-    {                                                                   \
-      local_unknown = EQN;                                              \
-      hang_weight2 = 1.0;                                               \
-    }                                                                   \
-    if (local_unknown >= 0)                                             \
-    {
+// Note the asymmetry to BEGIN_JACOBIAN_NOHANG, which is deliberate and predates this: that macro
+// DECLARES its own `double _J_contrib`, shadowing the one declared per integration block, while this
+// one ASSIGNS the outer variable.
+#define BEGIN_JACOBIAN_HANG(HANGON, EQN, CONTRIB, HANGINFO, LINDEX)       \
+  nummaster2 = ((HANGON) && HANGINFO[LINDEX].nummaster) ? HANGINFO[LINDEX].nummaster : 0u; \
+  if (nummaster2 || (EQN) >= 0)                                           \
+  {                                                                       \
+    const unsigned _nmaster2 = (nummaster2 ? nummaster2 : 1u);            \
+    _J_contrib = CONTRIB;                                                 \
+    for (unsigned m2 = 0; m2 < _nmaster2; m2++)                           \
+    {                                                                     \
+      if (nummaster2)                                                     \
+      {                                                                   \
+        local_unknown = HANGINFO[LINDEX].masters[m2].local_eqn;           \
+        hang_weight2 = HANGINFO[LINDEX].masters[m2].weight;               \
+      }                                                                   \
+      else                                                                \
+      {                                                                   \
+        local_unknown = EQN;                                              \
+        hang_weight2 = 1.0;                                               \
+      }                                                                   \
+      if (local_unknown >= 0)                                             \
+      {
 
-#define ADD_TO_JACOBIAN_HANG_NOHANG() jacobian[local_eqn * shapeinfo->jacobian_size + local_unknown] += hang_weight * _J_contrib;
-#define ADD_TO_JACOBIAN_NOHANG_HANG() jacobian[local_eqn * shapeinfo->jacobian_size + local_unknown] += hang_weight2 * _J_contrib;
-#define ADD_TO_JACOBIAN_HANG_HANG() jacobian[local_eqn * shapeinfo->jacobian_size + local_unknown] += hang_weight * hang_weight2 * _J_contrib;
+#define ADD_TO_JACOBIAN_HANG_NOHANG() jacobian[local_eqn * _jacsize + local_unknown] += hang_weight * _J_contrib;
+#define ADD_TO_JACOBIAN_NOHANG_HANG() jacobian[local_eqn * _jacsize + local_unknown] += hang_weight2 * _J_contrib;
+#define ADD_TO_JACOBIAN_HANG_HANG() jacobian[local_eqn * _jacsize + local_unknown] += hang_weight * hang_weight2 * _J_contrib;
 
 #define ADD_TO_MASS_MATRIX_HANG_NOHANG(MPART)                                                      \
   if (flag == 2)                                                                                   \
   {                                                                                                \
-    mass_matrix[local_eqn * shapeinfo->mass_matrix_size + local_unknown] += hang_weight * (MPART); \
+    mass_matrix[local_eqn * _msize + local_unknown] += hang_weight * (MPART); \
   }
 #define ADD_TO_MASS_MATRIX_NOHANG_HANG(MPART)                                                       \
   if (flag == 2)                                                                                    \
   {                                                                                                 \
-    mass_matrix[local_eqn * shapeinfo->mass_matrix_size + local_unknown] += hang_weight2 * (MPART); \
+    mass_matrix[local_eqn * _msize + local_unknown] += hang_weight2 * (MPART); \
   }
 #define ADD_TO_MASS_MATRIX_HANG_HANG(MPART)                                                                       \
   if (flag == 2)                                                                                                  \
   {                                                                                                               \
-    mass_matrix[local_eqn * shapeinfo->mass_matrix_size + local_unknown] += hang_weight * hang_weight2 * (MPART); \
+    mass_matrix[local_eqn * _msize + local_unknown] += hang_weight * hang_weight2 * (MPART); \
   }
 
 #define END_JACOBIAN_HANG() \
+  }                         \
   }                         \
   }
 
@@ -822,6 +1061,12 @@ static double signum(double x)
    if (!symmetry_assembly_same_field) hessian_buffer[local_eqn*n_dof*n_dof+local_deriv*n_dof+local_unknown] +=_H_symm_contrib;\
 
 // Mass matrix not symmetric!
+//
+// DEAD: these two are never expanded. The generated code composes the name
+// "ADD_TO_MASS_HESSIAN_<HANG>_<HANG>_<HANG>" (src/codegen.cpp), which resolves to the aliases further
+// down that forward to the UNDERSCORE-FREE ADD_TO_MASS_HESSIAN_FACTOR - and that one is defined
+// unconditionally outside this #ifdef, so it wins in both branches. Kept only because deleting them
+// would look like a behaviour change in a diff; nothing reaches them.
 #define __ADD_TO_MASS_HESSIAN_FACTOR(FACTOR, MCONTRIB)                               \
   if (flag >= 2)                                                                   \
   { \

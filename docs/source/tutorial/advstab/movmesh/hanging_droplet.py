@@ -1,24 +1,25 @@
+#  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -28,18 +29,27 @@
 from pyoomph import *
 from pyoomph.equations.navier_stokes import * # Navier-Stokes for the flow
 from pyoomph.equations.ALE import * # Moving mesh equations
-from pyoomph.meshes.remesher import Remesher2d # Remeshing
 from pyoomph.utils.num_text_out import NumericalTextOutputFile # Tool to write a file with numbers
 
 # Make a mesh of a hanging hemispherical droplet with radius 1
+# Remeshing is done by recreation, i.e. define_geometry is called again for each remeshing event
 class HangingDropletMesh(GmshTemplate):
     def define_geometry(self):
         self.default_resolution=0.05
         self.mesh_mode="tris"
-        self.create_lines((0,-1),"axis",(0,0),"wall",(1,0))
-        self.circle_arc((0,-1),(1,0),center=(0,0),name="interface")
+        if self.is_remeshing():
+            # Remeshing: the interface has deformed meanwhile, so we rebuild it from the current mesh.
+            # The interface is a single connected curve from the apex (on the axis) to the contact line
+            interface_coords=self.get_boundary_coordinates("droplet/interface",sort_along_axis="x+")[0]
+            interface_pts=[self.point(x,y) for x,y in interface_coords]
+            self.spline(interface_pts,name="interface")
+            p_apex,p_contact_line=interface_pts[0],interface_pts[-1]
+        else:
+            # Initial mesh: a hemisphere
+            p_apex,p_contact_line=self.point(0,-1),self.point(1,0)
+            self.circle_arc(p_apex,p_contact_line,center=(0,0),name="interface")
+        self.create_lines(p_apex,"axis",(0,0),"wall",p_contact_line)
         self.plane_surface("axis","wall","interface",name="droplet")
-        self.remesher=Remesher2d(self) # attach a remesher
 
 
 class HangingDropletProblem(Problem):
@@ -105,7 +115,7 @@ if __name__=="__main__":
         critical_curve_out=NumericalTextOutputFile(problem.get_output_directory("critical_curve.txt"))
         critical_curve_out.header("V","Bo_c") # header line
         critical_curve_out.add_row(problem.V.value,problem.Bo.value) # V and Bo_c -> file
-        problem.output_at_increased_time() # also Paraview output
+        problem.output(increase_time_for_PVD=True) # also Paraview output
 
         # Increase the volume, still tracking for the critical Bond number:
         dV=0.1*problem.V.value
@@ -113,7 +123,7 @@ if __name__=="__main__":
             dV=problem.arclength_continuation("V",dV,max_ds=0.1*problem.V.value) 
             problem.remesh_handler_during_continuation()
             critical_curve_out.add_row(problem.V.value,problem.Bo.value)
-            problem.output_at_increased_time()
+            problem.output(increase_time_for_PVD=True)
 
 
         

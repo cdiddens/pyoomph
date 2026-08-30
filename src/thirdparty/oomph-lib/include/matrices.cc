@@ -1919,7 +1919,14 @@ namespace oomph
 #endif
 
     // if soln is not setup then setup the distribution
-    if (!soln.built())
+    //FOR PYOOMPH: ... or if what is already there is the wrong size. soln is often a variable that
+    // outlives a single call -- LinearSolver::Gradient_for_glob_conv_newton_solve is a member -- so
+    // a later call, after the matrix changed shape, found it "built" and accumulated into
+    // soln_pt[j] for j up to ncol()-1 of the NEW matrix, straight past the end of the buffer still
+    // sized for the old one. Silent, and fatal only much later and somewhere else. Rebuilding costs
+    // nothing when the size already matches, and the initialise(0.0) just below means nothing is
+    // lost by rebuilding when it does not.
+    if (!soln.built() || soln.nrow() != this->ncol())
     {
       LinearAlgebraDistribution* dist_pt =
         new LinearAlgebraDistribution(x.distribution_pt()->communicator_pt(),
@@ -2753,19 +2760,24 @@ namespace oomph
         }
 
         // compute the nnz offset for each processor
-        unsigned next_row = 0;
+        //FOR PYOOMPH: ascending-first_row walk instead of the scan for a rank whose first_row
+        // matches a running counter -- see the same rewrite in the distributed->global branch
+        // below for what a rank owning no rows did to the original.
         unsigned nnz_count = 0;
         Vector<unsigned> nnz_offset(nproc, 0);
-        for (int p = 0; p < nproc; p++)
         {
-          unsigned pp = 0;
-          while (new_first_row[pp] != next_row)
+          std::vector<bool> placed(nproc, false);
+          for (int i = 0; i < nproc; i++)
           {
-            pp++;
+            int next = -1;
+            for (int p = 0; p < nproc; p++)
+            {
+              if (!placed[p] && (next < 0 || new_first_row[p] < new_first_row[next])) next = p;
+            }
+            placed[next] = true;
+            nnz_offset[next] = nnz_count;
+            nnz_count += nnz_from_proc[next];
           }
-          nnz_offset[pp] = nnz_count;
-          nnz_count += nnz_from_proc[pp];
-          next_row += new_nrow_local[pp];
         }
 
         // allocate storage for the values and column indices
@@ -2946,10 +2958,15 @@ namespace oomph
         new_row_start[dist_pt->nrow_local()] = nnz_count;
 
         // wait for sends to complete
+        //FOR PYOOMPH: guarded and sized by n_send_req. It used to be n_recv_req, which is a
+        // different number as soon as the two distributions are not mirror images of each other --
+        // MPI_Waitall then wrote n_send_req statuses into an n_recv_req-long buffer, and where
+        // n_recv_req was 0 it skipped the wait altogether and the send buffers were freed by the
+        // rebuild below while MPI was still reading them.
         unsigned n_send_req = send_req.size();
-        if (n_recv_req > 0)
+        if (n_send_req > 0)
         {
-          Vector<MPI_Status> send_status(n_recv_req);
+          Vector<MPI_Status> send_status(n_send_req);
           MPI_Waitall(n_send_req, &send_req[0], &send_status[0]);
         }
         // if (my_rank == 0)
@@ -3006,19 +3023,32 @@ namespace oomph
 
         // conpute the offset for the values and column index data
         // compute the nnz offset for each processor
-        int next_row = 0;
+        //
+        //FOR PYOOMPH: rewritten to walk the ranks in ascending first_row order directly. The
+        // original scanned for the rank whose first_row equals a running row counter, which only
+        // works while the first_rows are all distinct. They are not as soon as a rank owns no rows:
+        // a uniform distribution of 2 rows over 4 ranks is first_row [0,0,1,1] with nrow_local
+        // [0,1,0,1], and the scan then locked onto rank 0 (empty, so the counter never advanced)
+        // four times over, leaving nnz_count at 0. The value/column buffers below were allocated
+        // empty and the rows arriving from the other ranks were written past the end of the heap
+        // block -- "corrupted size vs. prev_size" from an MPI_Type_free further down. Ties are
+        // harmless here because only an EMPTY rank can share another's first_row, and an empty rank
+        // contributes no nonzeros, so where it lands in the order changes nothing.
         unsigned nnz_count = 0;
         Vector<unsigned> nnz_offset(nproc, 0);
-        for (int p = 0; p < nproc; p++)
         {
-          unsigned pp = 0;
-          while (dist_first_row[pp] != next_row)
+          std::vector<bool> placed(nproc, false);
+          for (int i = 0; i < nproc; i++)
           {
-            pp++;
+            int next = -1;
+            for (int p = 0; p < nproc; p++)
+            {
+              if (!placed[p] && (next < 0 || dist_first_row[p] < dist_first_row[next])) next = p;
+            }
+            placed[next] = true;
+            nnz_offset[next] = nnz_count;
+            nnz_count += dist_nnz_pt[next];
           }
-          nnz_offset[pp] = nnz_count;
-          nnz_count += dist_nnz_pt[pp];
-          next_row += dist_nrow_local[pp];
         }
 
         // get pointers to the (current) distributed data
@@ -3198,10 +3228,15 @@ namespace oomph
         }
 
         // wait for sends to complete
+        //FOR PYOOMPH: guarded and sized by n_send_req. It used to be n_recv_req, which is a
+        // different number as soon as the two distributions are not mirror images of each other --
+        // MPI_Waitall then wrote n_send_req statuses into an n_recv_req-long buffer, and where
+        // n_recv_req was 0 it skipped the wait altogether and the send buffers were freed by the
+        // rebuild below while MPI was still reading them.
         unsigned n_send_req = send_req.size();
-        if (n_recv_req > 0)
+        if (n_send_req > 0)
         {
-          Vector<MPI_Status> send_status(n_recv_req);
+          Vector<MPI_Status> send_status(n_send_req);
           MPI_Waitall(n_send_req, &send_req[0], &send_status[0]);
         }
 

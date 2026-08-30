@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -28,7 +29,7 @@
 import os
 from . plotting import BasePlotter
 from ..typings import *
-import pyvista
+import pyvista #type:ignore
 
 if TYPE_CHECKING:
     from ..generic.problem import Problem
@@ -56,16 +57,18 @@ class _PyVistaPlotPartMesh(_PyVistaPlotPartBase):
         
 
 class PyVistaPlotter(BasePlotter):
-    def __init__(self, problem:Optional["Problem"]=None,filetrunk:str="plot_{:05d}",fileext:Union[str,List[str]]="svg",eigenvector:Optional[int]=None,eigenmode:"MeshDataEigenModes"="abs",):
-        super().__init__(problem=problem,eigenvector=eigenvector,eigenmode=eigenmode) #type:ignore[arg-type] # problem may be attached later via "problem += plotter"
+    def __init__(self, problem:"Problem | None"=None,filetrunk:str="plot_{:05d}",fileext:str | list[str]="svg",eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs",):
+        super().__init__(problem=problem,eigenvector=eigenvector,eigenmode=eigenmode) # problem may be attached later via "problem += plotter"
         self.filetrunk=filetrunk
         self.fileext=fileext
-        self._parts:List[_PyVistaPlotPartBase]=[]
+        self._parts:list[_PyVistaPlotPartBase]=[]
         self.add_eigen_to_mesh_positions=False
         self._output_dir="_plots"
 
-    def _get_mesh_data(self,msh:Union[str,"AnySpatialMesh"],problem_name:str=""):        
-        return self.get_problem(problem_name=problem_name).get_cached_mesh_data(msh,nondimensional=False,tesselate_tri=False,eigenvector=self.eigenvector,eigenmode=self.eigenmode,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions)
+    def _get_mesh_data(self,msh:"str | AnySpatialMesh",problem_name:str=""):
+        res=self.get_problem(problem_name=problem_name).get_cached_mesh_data(msh,nondimensional=False,tesselate_tri=False,eigenvector=self.eigenvector,eigenmode=self.eigenmode,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions,global_mesh=True)
+        assert res is not None # only rank 0 plots, and that is the rank the merged data ends up on
+        return res
         
                 
     def add_plot(self,what:str):
@@ -76,14 +79,18 @@ class PyVistaPlotter(BasePlotter):
         for p in self._parts:
             p._add_to_plotter(self,pl)
         #pl.show()
-        pdir=os.path.join(self._problem.get_output_directory(),self._output_dir)
+        pdir=os.path.join(self.get_problem().get_output_directory(),self._output_dir)
         os.makedirs(pdir,exist_ok=True)
-        pl.save_graphic(os.path.join(pdir,self.filetrunk.format(self.get_problem()._output_step)+"."+self.fileext),raster=True,painter=False)
+        file_exts=self.fileext if isinstance(self.fileext,(list,tuple,set)) else [self.fileext]
+        for fe in file_exts:
+            pl.save_graphic(os.path.join(pdir,self.filetrunk.format(self.get_problem()._output_step)+"."+fe),raster=True,painter=False)
         
         
         
-    def _get_meshio_data(self,msh:Union[str,"AnySpatialMesh"],problem_name:str=""):
+    def _get_meshio_data(self,msh:"str | AnySpatialMesh",problem_name:str=""):
         from .meshio import _convert_mesh_to_meshio
         return _convert_mesh_to_meshio(self.get_problem(), self._get_mesh_data(msh,problem_name=problem_name))
 
 
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

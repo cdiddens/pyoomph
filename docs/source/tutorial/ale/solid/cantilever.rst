@@ -32,7 +32,7 @@ Finally, we can just run the problem by gradually increasing the pressure load, 
 .. literalinclude:: cantilever.py
    :language: python
    :start-at: with AiryCantileverProblem() as problem:
-   :end-at: problem.output_at_increased_time()
+   :end-at: problem.output(increase_time_for_PVD=True)
 
 ..  figure:: cantilever.*
 	:name: figalecantilever

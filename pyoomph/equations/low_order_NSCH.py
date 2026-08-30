@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -29,6 +30,7 @@
 from .. import *
 from ..expressions import *
 from ..materials import *
+from ..typings import *
 
 
 # Piecewise potential to prevent overshooting
@@ -93,7 +95,7 @@ class PiecewiseLowOrderNSCHPotential(CustomMultiReturnExpression):
 
 #https://arxiv.org/abs/1911.06718
 class LowOrderNSCH(Equations):
-    def __init__(self,rho_a,rho_b,mu_a,mu_b,epsilon,gamma,mobility,*,W=rational_num(1,4),gravity=0,low_order=True,with_cut_off=True,with_subexpressions=True,mobility_mode:int=0,phase_boundary_level:Union[int,Literal["max"]]=0,phase_boundary_threshold:float=0.8,incompressiblity_PI:bool=False,real_pressure:bool=False,use_sym_grad_u:bool=True,swap_test_functions:bool=True,piecewise_potential:bool=True,compression_term_lambda:ExpressionOrNum=0):
+    def __init__(self,rho_a,rho_b,mu_a,mu_b,epsilon,gamma,mobility,*,W=rational_num(1,4),gravity=0,low_order=True,with_cut_off=True,with_subexpressions=True,mobility_mode:int=0,phase_boundary_level:int | Literal["max"]=0,phase_boundary_threshold:float=0.8,incompressiblity_PI:bool=False,real_pressure:bool=False,use_sym_grad_u:bool=True,swap_test_functions:bool=True,piecewise_potential:bool=True,compression_term_lambda:ExpressionOrNum=0):
         super().__init__()
         self.low_order=low_order
         self.gravity=gravity
@@ -273,9 +275,17 @@ class LowOrderNSCH(Equations):
             
             
 class MaterialBasedLowOrderNSCH(LowOrderNSCH):
-    def __init__(self, fluidA:AnyFluidProperties, fluidB:AnyFluidProperties, epsilon, mobility, *, interface:Optional[AnyFluidFluidInterface]=None,W=rational_num(1, 4), gravity=0, low_order=True, with_cut_off=True, with_subexpressions=True, mobility_mode: int = 0, phase_boundary_level: Union[int, Literal['max']] = 0, incompressiblity_PI: bool = False, real_pressure: bool = False, use_sym_grad_u: bool = True, swap_test_functions: bool = True, piecewise_potential:bool=True,compression_term_lambda:ExpressionOrNum=0):
+    def __init__(self, fluidA:AnyFluidProperties, fluidB:AnyFluidProperties, epsilon, mobility, *, interface:AnyFluidFluidInterface | None=None,W=rational_num(1, 4), gravity=0, low_order=True, with_cut_off=True, with_subexpressions=True, mobility_mode: int = 0, phase_boundary_level: int | Literal['max'] = 0, incompressiblity_PI: bool = False, real_pressure: bool = False, use_sym_grad_u: bool = True, swap_test_functions: bool = True, piecewise_potential:bool=True,compression_term_lambda:ExpressionOrNum=0):
         if interface is None:
-            interface=fluidA | fluidB
+            # fluidA and fluidB are both AnyFluidProperties (liquid or gas, never solid), so
+            # get_interface_properties (invoked via __or__) can only take the "liquid_gas" or "liquid_liquid"
+            # branch and thus can only return a LiquidGasInterfaceProperties or LiquidLiquidInterfaceProperties
+            # instance (i.e. AnyFluidFluidInterface). The declared return type of __or__ is a broader union
+            # (it also covers BaseInterfaceProperties/LiquidSolidInterfaceProperties for the solid-involving
+            # cases), which pyright cannot narrow away here, hence the assert to make the invariant explicit.
+            computed_interface=fluidA | fluidB
+            assert isinstance(computed_interface,(LiquidGasInterfaceProperties,LiquidLiquidInterfaceProperties))
+            interface=computed_interface
         super().__init__(fluidA.mass_density, fluidB.mass_density, fluidA.dynamic_viscosity, fluidB.dynamic_viscosity, epsilon, interface.surface_tension, mobility, W=W, gravity=gravity, low_order=low_order, with_cut_off=with_cut_off, with_subexpressions=with_subexpressions, mobility_mode=mobility_mode, phase_boundary_level=phase_boundary_level, incompressiblity_PI=incompressiblity_PI, real_pressure=real_pressure, use_sym_grad_u=use_sym_grad_u, swap_test_functions=swap_test_functions,piecewise_potential=piecewise_potential,compression_term_lambda=compression_term_lambda)
         
         
@@ -300,3 +310,7 @@ class LowOrderNSCHWetting(InterfaceEquations):
         else:
             s=testfunction("phi")
         self.add_weak(peqs.epsilon**2*gphi_norm*cos(self.theta),s)
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

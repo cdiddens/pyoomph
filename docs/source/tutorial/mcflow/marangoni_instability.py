@@ -1,24 +1,25 @@
+#  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -90,9 +91,19 @@ class MarangoniHeleShawProblem(Problem):
 
 if __name__=="__main__":
     with MarangoniHeleShawProblem() as problem:
+        # A threaded direct solver sums in whatever order the threads finish in, so two runs differ in
+        # the last bits. That would normally be irrelevant, but here the mesh adapts to the solution:
+        # a roundoff-level difference flips a refinement decision and the two runs end up with
+        # different element counts. One thread makes the solve reproducible. Measured at 6% slower on
+        # this problem, which is small enough that the solve is not the bottleneck.
+        problem.set_num_threads(1)
         # Slightly perturb the interface
         # 10 random numbers with a small amplitude linearily interpolated on the interval 0:1
-        randpert=DeterministicRandomField(min_x=[0],max_x=[1],amplitude=0.002,Nresolution=10)
+        # The seed is what makes the run reproducible: without it the cloud is drawn from numpy's
+        # global state, so every run starts from a different perturbation. Since this perturbation is
+        # what the instability grows from, and the mesh adapts to the result, an unseeded run gives a
+        # different number of elements every time - which makes the script useless as a regression.
+        randpert=DeterministicRandomField(min_x=[0],max_x=[1],amplitude=0.002,Nresolution=10,seed=12345)
         yn=var("coordinate_y")/problem.domain_width # normalized coordinate
         randpert=randpert(yn) # interpolated random fields
         # Perturb the interface composition slightly

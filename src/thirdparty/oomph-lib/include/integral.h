@@ -98,14 +98,14 @@ namespace oomph
     void operator=(const PointIntegral&) = delete;
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return 1;
     }
 
     /// Return coordinate s[j] (j=0) of integration point i --
     /// deliberately broken!
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       throw OomphLibError("Local coordinate vector is of size zero, so this "
                           "should never be called.",
@@ -117,7 +117,7 @@ namespace oomph
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return 1.0;
     }
@@ -174,19 +174,19 @@ namespace oomph
     void operator=(const Gauss&) = delete;
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate s[j] (j=0) of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -220,19 +220,19 @@ namespace oomph
     void operator=(const Gauss&) = delete;
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate s[j] (j=0) of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -266,19 +266,19 @@ namespace oomph
     void operator=(const Gauss&) = delete;
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate x[j] (j=0) of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -312,19 +312,19 @@ namespace oomph
     void operator=(const Gauss&) = delete;
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate x[j] of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -358,19 +358,19 @@ namespace oomph
     void operator=(const Gauss&) = delete;
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate s[j] of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -405,19 +405,19 @@ namespace oomph
     void operator=(const Gauss&) = delete;
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate s[j] of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -451,19 +451,19 @@ namespace oomph
     void operator=(const Gauss&) = delete;
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate s[j] of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -497,19 +497,19 @@ namespace oomph
     void operator=(const Gauss&) = delete;
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate x[j] of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -543,19 +543,19 @@ namespace oomph
     void operator=(const Gauss&) = delete;
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate x[j] of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -656,19 +656,19 @@ namespace oomph
     void operator=(const TGauss&) = delete;
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate x[j] of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -702,19 +702,19 @@ namespace oomph
     void operator=(const TGauss&) = delete;
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate x[j] of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -749,19 +749,19 @@ namespace oomph
     void operator=(const TGauss&) = delete;
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate x[j] of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -788,19 +788,19 @@ namespace oomph
     void operator=(const TGauss&) = delete;
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate x[j] of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -836,19 +836,19 @@ namespace oomph
     void operator=(const TGauss&) = delete;
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate x[j] of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -882,19 +882,19 @@ namespace oomph
     void operator=(const TGauss&) = delete;
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate x[j] of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -929,19 +929,19 @@ namespace oomph
     void operator=(const TGauss&) = delete;
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate x[j] of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -973,19 +973,19 @@ namespace oomph
     void operator=(const TGauss&) = delete;
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate x[j] of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -1018,19 +1018,19 @@ namespace oomph
     void operator=(const TGauss&) = delete;
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate x[j] of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -1066,19 +1066,19 @@ namespace oomph
     void operator=(const TGauss&) = delete;
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate x[j] of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -1110,19 +1110,19 @@ namespace oomph
     void operator=(const TGauss&) = delete;
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate x[j] of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -1156,19 +1156,19 @@ namespace oomph
     void operator=(const TGauss&) = delete;
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate x[j] of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -1204,19 +1204,19 @@ namespace oomph
     void operator=(const TGauss&) = delete;
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate x[j] of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -1252,19 +1252,19 @@ namespace oomph
     void operator=(const TGauss&) = delete;
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate x[j] of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -1299,19 +1299,19 @@ namespace oomph
     GaussLobattoLegendre();
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate s[j] (j=0) of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -1358,19 +1358,19 @@ namespace oomph
     GaussLobattoLegendre();
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate s[j] (j=0) of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -1424,19 +1424,19 @@ namespace oomph
     GaussLobattoLegendre();
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate s[j] (j=0) of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -1503,19 +1503,19 @@ namespace oomph
     GaussLegendre();
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate s[j] (j=0) of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -1562,19 +1562,19 @@ namespace oomph
     GaussLegendre();
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate s[j] (j=0) of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }
@@ -1628,19 +1628,19 @@ namespace oomph
     GaussLegendre();
 
     /// Number of integration points of the scheme
-    unsigned nweight() const
+    unsigned nweight() const override
     {
       return Npts;
     }
 
     /// Return coordinate s[j] (j=0) of integration point i
-    double knot(const unsigned& i, const unsigned& j) const
+    double knot(const unsigned& i, const unsigned& j) const override
     {
       return Knot[i][j];
     }
 
     /// Return weight of integration point i
-    double weight(const unsigned& i) const
+    double weight(const unsigned& i) const override
     {
       return Weight[i];
     }

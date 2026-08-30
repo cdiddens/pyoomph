@@ -10,14 +10,64 @@ oomph-lib is hosted at https://github.com/oomph-lib/oomph-lib
 Following changes were made with respect to the original oomph-lib files:
 These changes are indicated by a comment start with "//FOR PYOOMPH"
 ##########################################################################
-1) Only a portion of the folder src/generic was copied (oomph-lib from 15th April 2024)
+1) Only a portion of the folder src/generic was copied.
+
+   The snapshot is oomph-lib commit 9e463548c663f5e4117dda13f297f2ea746b9822 of
+   29th December 2023, NOT 15th April 2024 as this file used to claim. April 2024 is
+   when the copy was committed to pyoomph; the checkout it was made from is older, which
+   is why the LIC headers still read "Copyright (C) 2006-2023". The date was verified by
+   blob-matching pyoomph's initial commit against oomph-lib's history: 100 of the 111
+   files then vendored are byte-identical to that commit. The dates in the per-file
+   entries below that say "15th April 2024" are kept as they were written, but they all
+   refer to modifications OF that December 2023 snapshot.
+
+   ONE PAIR OF FILES COMES FROM A DIFFERENT, MUCH NEWER SNAPSHOT: partitioning.cc and
+   partitioning.h were re-downloaded on 21st May 2026 (see their own entry below). The
+   vendored tree is therefore a mix of two upstream revisions. Anything that assumes a
+   single baseline -- a future re-vendor, a three-way merge -- has to treat those two
+   files separately.
+
 2) Following files have been changed and the positions marked with "//FOR PYOOMPH"
 
-eigen_solver.cc (Changed on 15th April 2024):    
-Removed cfortran, arpack and lapack_qz dependencies and disabled functionality.
-Eigensolving is handled in another way in pyoomph.
+3) Files that were vendored initially and have since been DELETED (commit c92cb09,
+   17th July 2026), because the corresponding functionality is not part of pyoomph:
+   complex_matrices.{cc,h}, dg_elements.{cc,h}, eigen_solver.{cc,h},
+   face_element_as_geometric_object.h, fsi.{cc,h}, generic.h,
+   multi_domain.{cc,h,template.cc}, Qspectral_elements.{cc,h}, spines.{cc,h},
+   triangle_mesh.{cc,h}.
+   The eigen_solver.cc entry that used to stand here (removal of cfortran/arpack/lapack_qz;
+   eigensolving is handled in another way in pyoomph) is kept for the record only -- the
+   file itself is gone. Consequences of these deletions inside the files that REMAIN are
+   listed under "problem.cc / mesh.cc (TriangleMeshBase, SpineMesh and DG excision)" below.
 
-mesh.cc (Changed on 15th April 2024):    
+4) Two sweeps touched many files at once for build-hygiene reasons only. They change no
+   behaviour, so their individual sites are NOT marked with "//FOR PYOOMPH" -- marking a
+   few hundred keyword edits would drown the real modifications. They are recorded here
+   instead, and this entry is the reason a plain diff against upstream shows many more
+   files than the list in 2).
+
+   a) "override" sweep (commit 5cc7e4f, 19th July 2026): virtual member functions that
+      override a base-class function had "override" added (and the redundant "virtual"
+      dropped) to silence -Wsuggest-override / -Winconsistent-missing-override. 28 headers:
+      algebraic_elements.h, assembly_handler.h, binary_tree.h, domain.h, double_vector.h,
+      double_vector_with_halo.h, element_with_external_element.h, element_with_moving_nodes.h,
+      error_estimator.h, explicit_timesteppers.h, generalised_timesteppers.h, geom_objects.h,
+      integral.h, linear_solver.h, macro_element.h, macro_element_node_update_element.h,
+      matrices.h, mesh_as_geometric_object.h, nodes.h, oomph_definitions.h, oomph_utilities.h,
+      refineable_brick_element.h, refineable_elements.h, refineable_line_element.h,
+      refineable_quad_element.h, sample_point_container.h, sample_point_parameters.h,
+      unstructured_two_d_mesh_geometry_base.h.
+
+   b) unused-variable sweep (commits d6ad0e2 and 5cc7e4f): dead counters and their
+      increments were deleted, and oomph-lib's "int success = system(...); success += 1;"
+      idiom for silencing -Wunused-result was replaced by "(void)system(...)". Affected:
+      error_estimator.cc (test_count), linear_solver.cc (determinant_exponent),
+      mesh.cc (number_of_retained_elements, count), oomph_utilities.cc (5x system()),
+      problem.cc (sum/sum_total, el_count, n_submesh_read, tmp),
+      refineable_mesh.cc (discrepancy_count, discrepancy_count_buff),
+      sample_point_container.cc (iter).
+
+mesh.cc (Changed on 15th April 2024):
 Removed elastic_problems.h to get rid of frontal_solver, HSL_MA42, etc
 Also removed SolidICProblem SolidMesh::Solid_IC_problem
 
@@ -57,3 +107,702 @@ Included <initializer_list> for clang compilation on Mac
 
 
 
+
+oomph_definitions.cc (Changed on 30th July 2026):
+Reference-counted TerminateHelper's Exception_stringstream_pt, and null-guarded the two places that
+dereference it. It is a namespace-level global that every OomphLibException writes its banner into,
+but Problem's CONSTRUCTOR allocates it (TerminateHelper::setup()) and Problem's DESTRUCTOR frees it
+and sets it to null (TerminateHelper::clean_up_memory()). With more than one Problem alive, the first
+one destroyed therefore pulled the stream out from under all the others, and the next OomphLibError
+any of them raised segfaulted while writing its message -- from the error path, giving no hint of the
+cause. Merely rebinding a variable (p = Problem(); ...; p = Problem(); ...), i.e. any loop over cases,
+was enough to trigger it. setup() now allocates only if the stream is absent and bumps a counter;
+clean_up_memory() frees only when the last Problem goes. Consequence: the buffer accumulates across
+concurrently live Problems rather than being cleared whenever one is constructed -- it is a
+diagnostic printed only by the terminate handler, and suppress_exception_error_messages() still
+clears it when an error is caught. The null guards matter separately, since an OomphLibError can be
+raised when no Problem is alive at all. See pyoomph's tests/test_multiple_problems.py.
+
+problem.cc / matrices.cc (Changed on 4th August 2026, globally convergent Newton heap overflow):
+Fixed a heap overflow that any solve with the globally convergent Newton method armed for the rest
+of the session. Problem::newton_solve() calls Linear_solver_pt->enable_computation_of_gradient()
+when Use_globally_convergent_newton_method is set, and NOTHING ever cleared it again -- so every
+later solve kept computing the gradient into LinearSolver::Gradient_for_glob_conv_newton_solve,
+while reset_gradient(), which is what resizes it, is only reached through that same branch. Since
+CRDoubleMatrix::multiply_transpose() sizes its output only when it is not already built, the first
+solve after the dof count grew (a spatial adaptation, say) accumulated into soln_pt[j] for j up to
+the new ncol()-1, past the end of a buffer still sized for the problem as it was.
+
+Reproduced by p.solve(globally_convergent_newton=True) followed by p.solve(spatial_adapt=1).
+Confirmed with valgrind: "Invalid write of size 8 ... 0 bytes after a block of size 4,680 alloc'd",
+allocated by multiply_transpose during the gcn solve (585 dofs) and written during the adaptive one.
+The crash it produces lands nowhere near the cause and is not reproducible in one place -- observed
+as a SIGSEGV inside MKL Pardiso's mkl_serv_free on one run and as a null oomph::Node::position()
+during the next residual assembly on another.
+
+Two changes, either of which is sufficient; both are in because they fix different things:
+  - problem.cc: an else-branch to the enable, so a solve that does not use the method switches the
+    gradient computation back off. This is the actual asymmetry.
+  - matrices.cc: CRDoubleMatrix::multiply_transpose() also rebuilds soln when the size does not
+    match, instead of only when it is unbuilt. This turns any other stale-soln caller from a silent
+    buffer overflow into a correct result; it costs nothing when the size already agrees.
+See pyoomph's tests/test_globally_convergent_newton.py.
+
+problem.h / problem.cc (Changed on 3rd August 2026, adaptive-resolve recovery):
+Added two empty virtual hooks and one exception class so that a Newton failure in an ADAPTIVE solve
+loop no longer has to end the run. Both hooks are no-ops by default, so a Problem that does not
+override them behaves exactly as before, byte for byte.
+
+  - Problem::adaptive_solve_checkpoint(isolve, just_adapted), called immediately before and
+    immediately after every adapt() inside an adaptive solve. Called at five sites: both branches of
+    the adaptation loops in newton_solve(max_adapt) and unsteady_newton_solve(dt,max_adapt,...), and
+    before/after the single adapt() in doubly_adaptive_unsteady_newton_solve_helper(). The
+    just_adapted==false call is the only moment at which the pre-adapt state still exists; since
+    these loops always SOLVE first and adapt afterwards, that state is a converged solution (or a
+    completed timestep), which is what makes a rollback worth taking.
+  - Problem::recover_from_failed_adaptive_resolve(linear_solver_error, iterations), called from the
+    three catch(NewtonSolverError) blocks that would otherwise "die horribly" -- in
+    steady_newton_solve(), unsteady_newton_solve(dt,shift_values) and newton_solve(max_adapt). If it
+    returns true the caller throws AdaptiveResolveRecovered instead of the fatal OomphLibError.
+  - AdaptiveResolveRecovered, declared next to NewtonSolverError. Derived from std::runtime_error
+    and deliberately NOT from OomphLibError or NewtonSolverError, because it has to fly past every
+    catch block in oomph-lib: steady_newton_solve() wraps newton_solve(max_adapt) in
+    catch(NewtonSolverError), so an exception of either of those types would simply be turned back
+    into a fatal error one frame up.
+
+The arclength path (arc_length_step_solve_helper) was deliberately left alone: it keeps Dof_pt-indexed
+dof_current/dof_derivative vectors live across its adapt(), so a rollback there would have to
+re-establish them, and its non-linear-solver failures already recover by shrinking Ds.
+
+pyoomph overrides both hooks (Problem::_adaptive_solve_checkpoint /
+_recover_from_failed_adaptive_resolve, forwarded to Python) to snapshot the state before each
+adaptation and restore it on failure. See pyoomph's dev_docs/adaptive_resolve_recovery.md and
+tests/test_adaptive_resolve_recovery.py.
+
+problem.cc (Changed on 30th July 2026, second change):
+Fixed two out-of-bounds writes on the distributed path, in Problem::get_dofs(DoubleVector&) and
+Problem::set_dofs(const DoubleVector&). Both looped to ndof(), which is the GLOBAL number of dofs,
+while the DoubleVector holds only nrow_local() doubles and Dof_pt only this rank's dofs -- as
+newton_solve() itself acknowledges by indexing Dof_pt with a local index. Every call on a distributed
+problem therefore ran off the end of two buffers and corrupted the heap; silently, since the abort
+usually came much later in an unrelated allocation. Both now loop over the local rows, and set_dofs
+additionally handles being handed a replicated rather than a distributed vector. Serially
+nrow_local() == ndof(), so nothing changes there. Note that oomph-lib guards the corresponding
+HISTORY overloads, get_dofs(t,...) and set_dofs(t,...), with a PARANOID "Not designed for distributed
+problems" throw; these two had no such guard. pyoomph reaches them through get_current_dofs() and
+set_current_dofs(). See pyoomph's tests/test_mpi_newton_abort.py.
+
+problem.h (Changed on 30th July 2026):
+Moved get_my_eqns() and parallel_sparse_assemble() from the private to the protected section and made
+the latter virtual, so that a derived Problem can substitute its own distributed assembly. No
+implementation was touched: a class that does not override sees exactly the previous behaviour.
+pyoomph overrides it to freeze the distributed assembly plan -- which rows a rank contributes to,
+which rank owns each of them, the column indices, and the permutation that merges the pieces arriving
+from several ranks into one row -- so that only values and residuals travel per assembly. oomph-lib
+recomputes all of that every time, and its owner-side merge rescans the row built so far for every
+incoming entry. pyoomph falls back to this implementation whenever the pattern cannot be frozen.
+See pyoomph's dev_docs/structural_assembly.md.
+
+problem.h / problem.cc (Changed on 29th July 2026, second change):
+Added an optional per-element structural sparsity mask to the sparse assembly. New virtual
+sparsity_mask_for_element(matrix_index, elem_pt, nvar) returns NULL by default -- so behaviour is
+unchanged -- or an nvar*nvar array of 0/1 marking positions of the elemental block that must be
+stored even when they currently evaluate to zero. It is fetched once per element per matrix (hoisted
+above the i/j loops, so there is no virtual call per entry) and applied with OR, never instead of,
+the numerical test: the mask can therefore only ever ADD entries. A mask that over-reports merely
+stores explicit zeros, whereas one that under-reported would silently drop real entries.
+Applied in the maps, vectors_of_pairs, two_vectors and two_arrays variants and in
+parallel_sparse_assemble. Deliberately NOT in the "lists" variant: it filters a second time during
+compression, when merging duplicate column indices, at a point where the elemental (i,j) is out of
+scope, and feeding it explicit zeros there makes it emit the same column index twice; pyoomph
+refuses that combination instead. See pyoomph's dev_docs/structural_assembly.md.
+
+problem.h / problem.cc (Changed on 29th July 2026):
+Made the "is this entry small enough not to store?" threshold of the sparse assembly per matrix.
+The sparse assembly routines can build several matrices in one pass over the elements (the Jacobian
+AND the mass matrix for an eigenproblem), but all of them shared the single Numerical_zero_for_sparse_assembly
+member. Added a virtual numerical_zero_for_sparse_assembly(matrix_index) returning that member by
+default -- so behaviour is unchanged -- and called it instead of reading the member directly at the
+seven filter sites in the five serial assembly variants and the distributed one. pyoomph overrides it
+to keep structurally zero entries in the Jacobian, which makes its sparsity pattern depend on the
+equation numbering alone and hence reusable by the linear solver across Newton steps, while leaving
+the mass matrix on its own (roughly three times tighter) pattern. See pyoomph's
+dev_docs/structural_assembly.md.
+
+refineable_mesh.h / refineable_mesh.cc (Changed on 28th July 2026):
+Split TreeBasedRefineableMeshBase::adapt(elemental_error) into its two existing halves --
+select_elements_for_refinement_and_unrefinement(), which only translates the elemental errors into
+per-element refine/unrefine flags, and execute_selected_adaptation(), which acts on them. adapt() is
+now the composition of the two and is unchanged in behaviour; no logic was altered, only moved (the
+two n_refine/n_unrefine locals became out-params, and the DocInfo setup moved to the executing half).
+pyoomph needs to interpose between deciding and acting: two meshes that share a coupled interface are
+adapted individually, and that gap is the only place their decisions can be reconciled exactly -- an
+unrefinement is vetoed per FATHER by unanimity among its sons, which no comparison of the errors at
+the interface can see. See pyoomph's dev_docs/interface_refinement_coupling.md.
+
+
+##########################################################################
+The entries below were reconstructed on 31st July 2026 by diffing the vendored tree against
+the December 2023 upstream snapshot. They describe modifications that were already in the
+tree and correctly marked in the source, but had never been written down here.
+##########################################################################
+
+partitioning.cc / partitioning.h (Re-downloaded on 21st May 2026):
+These two files, and ONLY these two, were replaced with a much newer upstream version rather
+than being patched -- the METIS API changed incompatibly between the December 2023 snapshot
+and today, and porting the new call signature backwards was more work than taking the new
+file. Both carry their own "PYOOMPH MODIFICATIONS" block at the top saying so. On top of that
+upstream version, pyoomph removes the #include of "metis.h" and routes METIS_PartGraphKway
+through this module -> Python -> the pymetis package -> back to here, so that no C METIS has
+to be linked. idx_t/real_t/METIS_API/METIS_NOPTIONS/METIS_OPTION_* and METIS_SetDefaultOptions
+are #defined locally in partitioning.h to keep the call sites compiling; the option values are
+arbitrary but must stay consistent with what the Python side expects. The now-unreachable
+OOMPH_TRANSITION_TO_VERSION_3 branches and the wgtflag/numflag arguments of the old API were
+dropped along with them.
+
+elements.cc (Changed on 28th September 2024):
+FiniteElement::J_eulerian(s) and J_eulerian_at_knot() return 1 for a zero-dimensional (point)
+element instead of throwing. Added when single-point ("ODE") elements were introduced.
+ oomph-lib has no point elements to integrate over, so it treats
+the case as a programming error; pyoomph does integrate over point elements (single-point
+"ODE" elements attached to a mesh), where the correct Jacobian of the mapping is exactly 1.
+The original throw is left in place, commented out, next to the marker.
+
+elements.h (Changed on 19th July 2026):
+Two using-declarations pull FiniteElement::face_to_bulk_coordinate_fct_pt and
+bulk_coordinate_derivatives_fct_pt into scope in the derived class, to silence -Woverloaded-virtual.
+
+mesh.h / mesh.cc (Changed on 25th May 2026, block dof arrangement):
+Mesh::assign_global_eqn_numbers() takes an additional out-parameter,
+Vector<unsigned long>& Block_dof_pt_start, recording the equation number at which each node's
+(or element's internal) block of dofs starts. pyoomph uses it to hand the linear algebra a
+block structure rather than a flat dof vector. NOTE this changes the signature of a public
+Mesh method, so it is not a drop-in replacement for stock oomph-lib.
+mesh.h additionally guards two loops over refineable elements with "if (!ref_el_pt->tree_pt())"
+(this guard is older -- it is present in the very first vendored commit): in pyoomph a
+RefineableElement may legitimately have no tree (a non-tree-based mesh whose elements are
+nevertheless refineable-derived), which stock oomph-lib never produces and therefore
+dereferences unconditionally.
+
+linear_algebra_distribution.cc / linear_algebra_distribution.h (Changed on 25th May 2026):
+Counterpart of the block dof arrangement above: LinearAlgebraDistribution::build() patches the
+first-row vector so that a rank's rows begin on a block boundary rather than mid-block. The
+block_dof_pt_start parameter itself is present but commented out at the call sites in
+problem.cc and linear_solver.cc; the feature is currently reached through
+Problem::is_block_dof_arrangement_used() / block_dof_pt_start() instead. See also the
+"Experimental block jacobian for orbits" work in pyoomph (commit 590a740).
+
+octree.cc / octree.h (Changed on 24th July 2026):
+The three-dimensional twin of the quadtree.h/quadtree.cc change listed above. OcTreeForest's
+constructor gained a "bool skip_init_calls" flag that returns before the neighbour/rotation
+scheme is constructed, and check_all_neighbours(), construct_north_equivalents() and
+find_neighbours() were made virtual and protected, so that a pyoomph-derived forest can run
+its own initialisation. Needed for adaptive tree refinement of tetrahedral meshes.
+
+refineable_mesh.cc (Changed on 25th July 2026, second change):
+In synchronise_nonhanging_nodes(), the "has this node's position changed?" test compared
+nod_pt->x(dir) -- the CURRENT position -- against x_exp, which get_x(t,...) interpolates at
+history level t. On meshes whose position history at t>=1 is left at zero (simplex meshes on
+stationary problems, where ntstorage() > 1 but only t=0 and t=1 are ever initialised) that
+comparison flagged every non-hanging node as "position differs" and generated spurious halo
+synchronisation records, which then deadlocked the collective that consumes them. Now reads
+x(t,dir) so both sides are at the same history level.
+
+error_estimator.cc (Changed on 19th July 2026):
+Z2ErrorEstimator::doc_flux() built its output filename from comm_pt->my_rank() unconditionally.
+When oomph-lib is built with MPI but the mesh is not distributed, comm_pt is null and this
+segfaulted. The rank suffix is now hoisted into a string that stays empty in that case.
+(Upstream fixed the same site independently, in a different way, after our snapshot.)
+
+problem.cc / mesh.cc (TriangleMeshBase, SpineMesh and DG excision, 17th July 2026):
+Consequence of the file deletions listed in 3) above. Roughly twenty sites that used to
+dynamic_cast to TriangleMeshBase, SpineMesh or DGElement, and branch on the result, now take
+the structured / non-spine / continuous branch unconditionally; the one place that cannot
+degrade silently, Problem::get_inverse_mass_matrix_times_residuals() for a discontinuous
+formulation, throws instead. Each site carries a marker plus a one-line note saying which support was removed.
+
+problem.cc (Changed on 4th June 2026, distributed assembly range):
+Problem::parallel_sparse_assemble() called get_my_eqns(handler, el_lo, el_hi_plus_one - 1, ...).
+el_hi_plus_one is unsigned and get_my_eqns() takes the INCLUSIVE upper index, so an empty
+element range wrapped the subtraction to a huge number. This happens on a rank that ends up
+with a single element. Guarded with "if (el_hi_plus_one > 0)".
+
+problem.h (Changed on 25th May 2026, block dof arrangement):
+Added Block_dof_arrangement_used / Block_dof_pt_start and the accessors
+is_block_dof_arrangement_used(), set_block_dof_arrangement_used() and block_dof_pt_start().
+See the mesh.h and linear_algebra_distribution entries above.
+
+Qelements.h / Telements.h / Telements.cc / timesteppers.h (Changed on 19th July 2026):
+"extern template" declarations for QElement<d,n>, TElement<d,n>::Default_integration_scheme,
+TElement<d,n>::Node_on_face and Steady<n>. These templates are explicitly instantiated (or
+explicitly specialised) in the corresponding .cc file; without the extern declarations every
+translation unit that includes the header instantiates them again, which for the static
+Default_integration_scheme members means duplicate definitions across pyoomph's many JIT and
+core objects. In Telements.cc the explicit instantiations of TBubbleEnrichedGauss<2,3> and
+<3,3> were removed for the same reason: they are FULL class-template specialisations, so the
+instantiation has no effect and clang rejects it with -Winstantiation-after-specialization.
+
+mesh_as_geometric_object.cc (Changed on 17th July 2026):
+Removed the #include of "multi_domain.h", which is no longer vendored (see 3).
+
+Vector.h (Changed on 15th July 2026, second change):
+Declared the copy assignment operator explicitly, "= default", alongside the copy constructor.
+Declaring one of them makes the implicit generation of the other deprecated (-Wdeprecated-copy).
+
+
+##########################################################################
+BACKPORTS. Unlike everything above, the two entries below do not adapt oomph-lib to pyoomph --
+they pull features INTO our December 2023 snapshot that upstream oomph-lib added after it. When
+this copy is next re-vendored from a newer upstream, these should be dropped rather than merged.
+##########################################################################
+
+problem.h / problem.cc (Backported on 31st July 2026): Target_error_safety_factor
+Adaptive timestepping predicted the next dt from (epsilon/error)^(1/(order+1)), i.e. it aimed the
+next step exactly AT the error tolerance. A prediction that lands on the tolerance overshoots it
+about half the time, and with Keep_temporal_error_below_tolerance (the default) every overshoot
+costs a rejected step and a full re-solve. Added the member Target_error_safety_factor and the
+accessor target_error_safety_factor(), and made the prediction aim at
+Target_error_safety_factor*epsilon instead. It defaults to 1.0, which reproduces the previous
+formula bit for bit, so nothing changes unless a user sets it; Hairer et al. (1993, p168) suggest
+0.25-0.40 as most efficient. The rejection message now also points at the knob when the factor is
+still at its default. pyoomph exposes it as Problem.target_error_safety_factor.
+Upstream equivalent: oomph-lib commits of 13th/28th December 2023 and 4th January 2024.
+
+elements.h / problem.cc (Backported on 31st July 2026): InvertedElementError
+Added the exception class oomph::InvertedElementError (deriving from OomphLibError, copied
+verbatim from upstream) plus the two catch blocks upstream added for it: one in
+Problem::adaptive_unsteady_newton_solve(), which rejects the timestep and halves dt, and one in
+the arclength continuation loop, which rejects the step and scales Ds by 2/3. Both mirror the
+existing NewtonSolverError handling right above them. An element that inverts part-way through a
+step is a symptom of the step being too large, not of an ill-posed problem, so retrying smaller is
+usually the right response -- whereas the previous behaviour was to keep assembling from a mesh
+that had turned inside out.
+Unlike upstream, which raises this from its own element-quality checks, pyoomph raises it from
+BulkElementBase::fill_shape_buffer_for_integration_point() in src/elements.cpp, right where the
+Eulerian mapping is turned into the physical integration weight (int_pt_weight[0] = w*J). Note it
+does NOT test that J: pyoomph's J is sqrt(det(g_ab)), the metric form that lets it integrate over
+elements of lower dimension than the nodal space, and it is non-negative by construction, so an
+inside-out element has a perfectly ordinary positive J. The test is on the signed determinant of
+the tangent matrix dx/ds, which only exists where the mapping is square -- interface and point
+elements have no orientation to lose and are skipped.
+Detection is global and OFF by default (BulkElementBase::detect_inverted_elements, set from Python
+with set_detect_inverted_elements()); with no catching solver in the loop an inversion would
+otherwise turn a survivable garbage step into an abort. Cost, measured on a 60x60 quad mesh over
+240 interleaved Jacobian assemblies per arm: disabled is indistinguishable from a build without
+the check, enabled is about +2%.
+Upstream equivalent: oomph-lib commit of 14th February 2024.
+
+communicator.cc (Changed on 3rd August 2026):
+OomphCommunicator::broadcast(const int&, DenseMatrix<double>&) sent the matrix dimensions with
+MPI_UNSIGNED rather than MPI_UNSIGNED_LONG. The two locals being broadcast are declared `unsigned`,
+which is four bytes, while MPI_UNSIGNED_LONG describes an eight-byte datum -- so every receiving
+rank wrote eight bytes into a four-byte object, running off the end of nrow into ncol and off the
+end of ncol into whatever the compiler had placed next on the stack. Undefined behaviour on any MPI
+run that broadcasts a DenseMatrix.
+It survived because on little-endian x86 the extra four bytes are the zero half of the value, so
+nrow and ncol themselves usually came out right and only the neighbouring stack slot was clobbered.
+Found while chasing a different bug: spatial adaptation diverging between ranks under `mpirun` with
+no --distribute, where this broadcast is used to share recovered flux coefficients between the ranks
+of a replicated-mesh error estimation (pyoomph::LagrZ2ErrorEstimator::get_element_errors). Fixing it
+does move the computed elemental errors, by about 5e-7 relative -- but it is NOT the cause of that
+divergence, which remains open: the errors still differ by 60-92% between ranks afterwards.
+
+refineable_mesh.cc (Changed on 3rd August 2026):
+TreeBasedRefineableMeshBase::complete_hanging_nodes flattens each hanging node's recursive master
+chain, accumulates the weights in a std::map<Node*,double> to merge repeated masters, and then copied
+that map straight into the HangInfo. A map keyed by Node* iterates in ADDRESS order, so the master
+list was written in whatever order the nodes happened to be allocated -- which differs from run to
+run and from process to process. Every later sum over masters (hanging values, hanging positions, and
+the constrained rows the assembly builds) therefore added the same terms in a different order, and
+floating-point addition is not associative.
+The masters are now written in a canonical order instead: their index in the mesh's node vector,
+which unlike a heap address is reproducible. A std::map<Node*,unsigned> of that index is built once
+per call and the merged entries are stable_sorted by it.
+This was not a cosmetic ulp. Because an elemental error estimate is built from nodal values, a
+one-ulp difference could flip a refinement decision at a threshold, after which the meshes diverge
+outright -- observed as two MPI ranks refining opposite ends of a rising bubble, disagreeing about
+ndof, and killing the linear solve with "Column too large". It was equally present in SERIAL: the
+same binary on the same input produced different answers on consecutive runs. See
+dev_docs/replicated_mpi_correctness.md §4 for the reproducer and the full diagnosis.
+Upstream equivalent: none, this is a pyoomph fix.
+
+refineable_quad_element.cc (Changed on 4th August 2026):
+RefineableQElement<2>::node_created_by_neighbour maps a son node's fractional position into the
+edge neighbour's frame with the quad box map (s_lo/s_hi/translate_s) and then asks that neighbour
+get_node_at_local_coordinate. In pyoomph's MIXED quad+tri forests the edge neighbour can be a
+TRIANGLE, for which that map means nothing -- but a triangle's node coordinates live in [0,1]^2 and
+a quad's in [-1,1]^2, so the frames overlap and the lookup can MATCH a triangle node by accident and
+return a node from a completely different edge. The quad son then adopts that node: the mesh gains a
+coincident duplicate node, and the adopted node -- which is a real node of the coarse triangle -- is
+dragged onto the quad's edge by the hanging-node position interpolation, folding every triangle that
+owns it. Observed on a gmsh mesh with a quad boundary layer (Quads=1) along a curved free surface:
+one adapt() moved two coarse-triangle mid-side nodes by 0.19 and 0.086 domain units and produced
+eight folded elements, visible as tears in the VTK output. Fixed by skipping a neighbour that is not
+a RefineableQElement<2>; the cross-shape case is handled topologically by
+pyoomph::BulkElementBase::mixed_quad_shared_node, which the pyoomph override of this method calls
+once the base implementation has declined. Pure-quad meshes are unaffected (the cast always succeeds).
+Upstream equivalent: none, this is a pyoomph fix (upstream oomph-lib has no mixed quad+tri forests).
+
+refineable_brick_element.cc (Changed on 4th August 2026):
+The 3d analogue of the refineable_quad_element.cc guard above, added at the same time and for the same
+reason: RefineableQElement<3>::node_created_by_neighbour maps a son node into the face/edge neighbour
+with the brick box map and then asks it get_node_at_local_coordinate, which is meaningless -- but not
+harmless -- if that neighbour is a tet, wedge or pyramid, since their local coordinates overlap the
+brick's [-1,1]^3 and the lookup can match a node of a completely different facet. Both the face loop
+and the edge loop now skip a neighbour that is not a RefineableQElement<3>.
+Unlike the 2d one this is NOT a live fix: it is unreachable today, and that was verified rather than
+argued. A mixed 3d forest gets no octree neighbour pointers at all (DynamicOcTreeForest::find_neighbours
+returns early, mesh3d.hpp) and a brick inside one refines through BulkElementBase::build_as_brick_son
+rather than oomph's octree build (elements.cpp), so the two conditions the bug needs are mutually
+exclusive. An instrumented build reporting every non-brick neighbour reaching this function counted
+ZERO across test_adaptive_3d_campaign (all 11 mixed layouts x 3 refinement states), test_mixed_3d and
+test_tet_refinement. The guard is here so that the planned topological cross-shape face/edge neighbour
+finder -- needed for non-uniform wedge/pyramid hanging, see mixed_adaptive_meshes.md -- does not walk
+into the trap the moment it starts populating those neighbour pointers. Pure-brick forests are
+unaffected (the cast always succeeds).
+Upstream equivalent: none, this is a pyoomph fix (upstream oomph-lib has no mixed 3d forests).
+
+mesh.h + refineable_mesh.cc (Changed on 7th August 2026):
+Two no-op virtuals on Mesh -- reconcile_boundary_node_membership_locally() and
+reconcile_boundary_node_membership_across_processes() -- and their two call sites in
+TreeBasedRefineableMeshBase::adapt_mesh. pyoomph's TemplatedMeshBase overrides them to correct nodal
+boundary membership against its own per-face boundary tags: oomph gives a new node the boundaries
+shared by ALL its generating nodes (RefineableQElement<2>/<3>::get_boundaries and pyoomph's tri/tet/
+wedge/pyramid equivalents), and two nodes can share a boundary label without the edge between them
+lying on that boundary, so an element with two or more faces on the SAME boundary mislabels the
+interior edges joining them, compounding at every refinement (84 of 165 marked nodes spurious at three
+refinements for a tet with two faces on one boundary).
+Both call sites are load-bearing rather than convenient. The local one sits just after the
+setup_boundary_element_info() block but OUTSIDE it, because the repair reads the face tags rather than
+Boundary_element_pt, and it must precede the repositioning of hanging boundary nodes onto their macro
+element further down, which reads boundary membership. The collective one sits just after the closing
+brace of "if (this->nelement()>0)" and before classify_halo_and_haloed_nodes(): everything inside that
+block is skipped on a rank holding no elements of a submesh, so a collective in there deadlocks, and
+the halo/haloed NODE lists are not rebuilt until afterwards, so only the ELEMENT lists can drive it.
+Only the h-adaptive adapt_mesh is hooked; p_adapt_mesh is not, as pyoomph has no p-refinable elements.
+The two declarations sit just ABOVE mesh.h's "#ifdef OOMPH_HAS_MPI" block (corrected on 22nd August
+2026; they were inside it at first). Only the second one communicates, but both call sites in
+refineable_mesh.cc are unconditional, so an MPI-less configuration -- which is what every wheel is --
+did not compile at all.
+See dev_docs/boundary_node_membership.md.
+Upstream equivalent: none, this is a pyoomph fix.
+
+problem.cc (Changed on 8th August 2026):
+Sparse_assemble_with_arrays_previous_allocation caches, per matrix and per row, how many entries the
+previous assembly stored there, so the next one can allocate the row at the right size straight away.
+Both places that size it (Problem::parallel_sparse_assemble and the serial two-arrays variant of
+sparse_assemble_row_or_column_compressed) only did so "if (size()==0)", so the record kept the SHAPE
+of whichever assembly filled it first. That breaks as soon as a problem assembles different numbers of
+matrices: an ordinary Newton step assembles n_matrix=1, get_eigenproblem_matrices() assembles
+n_matrix=2 (Jacobian + mass matrix), and the eigen assembly then read
+Sparse_assemble_with_arrays_previous_allocation[1] on a one-entry vector. Under MPI that is not
+theoretical -- parallel_sparse_assemble is used for every nproc>1 run, distributed or not -- so
+mpirun -n 2 on any script that calls solve() and then solve_eigenproblem() segfaulted on the first
+eigen assembly (reproduced with docs/source/tutorial/advstab/movmesh/hanging_droplet.py). It looked
+mesh-dependent because assign_eqn_numbers() empties the record, so a remesh in between hid it, and
+serially the nproc==1 branch of get_eigenproblem_matrices() plus the default vectors_of_pairs assembly
+method avoid this storage altogether.
+Both sites now grow the outer vector to n_matrix and reset any row-count entry whose length does not
+match the current one, instead of trusting the first shape they ever saw.
+Upstream equivalent: none yet; this is an upstream oomph-lib bug, not a pyoomph-specific one.
+
+matrices.cc (Changed on 8th August 2026, CRDoubleMatrix::redistribute with ranks that own no rows):
+Both branches of CRDoubleMatrix::redistribute() computed the per-rank nnz offsets by scanning, for
+each step, for the rank whose first_row equals a running row counter. That only works while every
+first_row is distinct, and they are not as soon as a rank owns no rows: LinearAlgebraDistribution's
+uniform layout of 2 rows over 4 ranks is first_row [0,0,1,1] with nrow_local [0,1,0,1]. The scan then
+locked onto rank 0 -- empty, so the counter never advanced -- for all four steps, and nnz_count came
+out as zero. The value and column-index buffers are allocated from that count, so the rows arriving
+from the other ranks were received straight past the end of a zero-sized heap block; the symptom was
+"corrupted size vs. prev_size" out of an MPI_Type_free further down in the same function, i.e. nowhere
+near the write. Reached from get_eigenproblem_matrices(), whose non-distributed MPI branch assembles
+over a distributed layout and redistributes back to a replicated one, so any eigenvalue problem with
+fewer equations than ranks aborted (docs/source/tutorial/advstab/cartesiannormal/turing_dispersion.py,
+a 0d 2-dof problem, on 3 or more ranks).
+Both now walk the ranks in ascending first_row order directly. Ties are harmless because only an empty
+rank can share another's first_row and it contributes no nonzeros, so its place in the order does not
+move any offset.
+Upstream equivalent: none yet; this is an upstream oomph-lib bug, not a pyoomph-specific one.
+
+matrices.cc (Changed on 8th August 2026, CRDoubleMatrix::redistribute send-wait sized by the recv count):
+Both branches waited for their non-blocking sends with
+
+    unsigned n_send_req = send_req.size();
+    if (n_recv_req > 0) { Vector<MPI_Status> send_status(n_recv_req);
+                          MPI_Waitall(n_send_req, &send_req[0], &send_status[0]); }
+
+i.e. guarded and sized by the number of RECEIVES. The two counts are equal only when the source and
+target distributions are mirror images of each other. Redistributing 2 rows over 4 ranks (first_row
+[0,0,1,1], nrow_local [0,1,0,1]) gives rank 1 three sends and one receive, so MPI_Waitall wrote three
+statuses into a one-element buffer; and a rank with sends but no receives skipped the wait entirely,
+so build_without_copy() below freed the send buffers while MPI was still reading them
+("munmap_chunk(): invalid pointer" on rank 1 of turing_dispersion.py at 4 ranks). Now guarded and
+sized by n_send_req.
+Upstream equivalent: none yet; this is an upstream oomph-lib bug, not a pyoomph-specific one.
+
+linear_solver.cc (Changed on 9th August 2026, SuperLUSolver::clean_up_memory leaked the distributed matrix copy):
+SuperLUSolver::factorise_distributed() takes its own copy of the local matrix (Dist_value_pt,
+Dist_index_pt, Dist_start_pt) on every call, because SuperLU_DIST is allowed to overwrite what it is
+handed. clean_up_memory() deletes that copy, but the whole MPI block it sits in is guarded by
+"if (Dist_solver_data_pt != 0)" -- the opaque handle the SuperLU_DIST backend writes into its "data"
+out-parameter. pyoomph replaces that backend with its own shim
+(superlu_dist_distributed_matrix() in src/nanobind/solver.cpp, which forwards to the Python linear
+solver); the shim keeps its factorisation on the Python side and never writes a handle back, so
+Dist_solver_data_pt stays NULL for the entire run and the delete[] never executed. factorise() calls
+clean_up_memory() first and then allocates a fresh copy, so every Newton step leaked
+nnz_local*12 + (nrow_local+1)*4 bytes per rank -- 3.8 MB per step on
+docs/source/tutorial/mcflow/marangoni_instability.py, whose four ranks together reached 12.8 GB in
+5.5 minutes and were killed by the OOM killer partway through the run. Serial runs are unaffected:
+they go through the SuperLU serial entry point, which makes no such copy.
+The three delete[]s are now outside that guard and keyed on the pointers themselves, so they run
+whichever backend is in use. The backend teardown calls (opt_flag 3) stay inside the guard, since the
+pyoomph shim has no handle to tear down and its Python solvers do not implement that op_flag.
+Upstream equivalent: none yet; upstream never hits it, because its SuperLU_DIST backend does set
+Dist_solver_data_pt.
+
+problem.cc (Changed on 9th August 2026, get_residuals into a replicated vector filled rank 0 only):
+Problem::get_residuals() routes every nproc>1 run -- distributed or not -- through
+parallel_sparse_assemble(), which sends each element contribution to
+target_dist_pt->rank_of_global_row(eqn). For a NON-distributed target distribution that lookup can
+only ever answer 0: first_row(p) is 0 and nrow_local(p) is nrow on every p, so rank 0's row range
+already contains every equation. The other ranks received nothing and kept the zeros the vector was
+built with, which made the return value of get_residuals() depend on the rank whenever the caller
+handed in a replicated vector. Problem::get_derivative_wrt_global_parameter() does exactly that (it
+assembles into the caller's result vector), so d(residual)/d(parameter) came back correct on rank 0
+and identically zero everywhere else. The fold/Hopf handlers derive their eigenvector guess by
+solving against that vector, so under mpirun they solved against a right-hand side that was zero
+outside rank 0's rows: the guess pointed somewhere else than serially, and the augmented Newton solve
+converged onto a different fold -- docs/source/tutorial/pde/patterns/kuramoto_sivanshinsky_bifurcation.py
+reported gamma=0.27625 under mpirun against 0.28259 serially, both fully converged.
+The replicated case now broadcasts the assembled vector from rank 0 after the assembly.
+Upstream equivalent: none yet; this is an upstream oomph-lib bug, not a pyoomph-specific one.
+
+problem.cc (Changed on 9th August 2026, FD parameter derivative mixed two distributions):
+The finite-difference branch of Problem::get_derivative_wrt_global_parameter() left its second
+residual vector (newres) unbuilt, so get_residuals() gave it whatever
+create_new_linear_algebra_distribution() returns -- under mpirun the uniform DISTRIBUTED layout, even
+for an undistributed problem. The difference loop then indexes newres and result by the same local
+row while result may be replicated (it is when the bifurcation handlers call in), reading past the end
+of newres's buffer for every row beyond the first rank's share. newres is now built on result's
+distribution before the assembly. Only the FD branch is affected; pyoomph registers its global
+parameters as analytically differentiable, so it normally takes the branch above it.
+Upstream equivalent: none yet; this is an upstream oomph-lib bug, not a pyoomph-specific one.
+
+problem.h / problem.cc (Changed on 12th August 2026, actions_after_newton_dof_update hook):
+New protected virtual "void actions_after_newton_dof_update(const DoubleVector& dx) {}" (problem.h,
+next to the other actions_* hooks), called in Problem::newton_solve() between synchronise_all_dofs()
+and actions_after_newton_step(), i.e. after "*Dof_pt[l] -= Relaxation_factor*dx_pt[l]" has been
+applied and before anything looks at the new state. It exists for pyoomph's static condensation
+(dev_docs/static_condensation.md): the eliminated dofs are replaced by identity rows with a zero
+right-hand side, so the solver returns dx = 0 for them, and their real increment is
+dx_L = y_C - X_C*dx_{E_C}, which needs the retained entries of dx. actions_after_newton_step() alone
+cannot serve this -- it exposes no increment at all, and by the time it runs dx is the only place the
+retained increment still exists in unmixed form (the dofs already carry it scaled by
+Relaxation_factor, and one Newton step later it is gone).
+Only Problem::newton_solve() got the call. The other Newton entry points (steady_newton_solve,
+newton_solve(max_adapt), all unsteady_newton_solve overloads, adaptive_ and
+doubly_adaptive_unsteady_newton_solve) have no dof-update loop of their own and funnel into it.
+newton_solve_continuation() does have its own update loop and was deliberately left alone: pyoomph
+never condenses an arclength continuation step (the augmented system assembles full), so a hook there
+would only fire with nothing to reconstruct.
+The hook fires in the globally-convergent (line search) branch too, where dx has been negated and
+rescaled in place and no longer describes what the dofs did; putting the call inside the direct-update
+branch instead would have made the hook mean two different things depending on a flag. pyoomph refuses
+to combine static condensation with the line search, and the doc comment says so.
+Upstream equivalent: none; this is a pyoomph-specific extension point, inert for any other user of
+the library.
+
+problem.h / problem.cc / linear_solver.cc (Changed on 12th August 2026, widened on 13th August 2026,
+preferred_linear_solver_distribution):
+New public virtual "void preferred_linear_solver_distribution(LinearAlgebraDistribution*& dist_pt)"
+(problem.h, next to actions_after_newton_dof_update), which leaves dist_pt at 0 by default and whose
+caller takes ownership of anything it assigns. Consulted in two places: at the very top of
+Problem::create_new_linear_algebra_distribution() (which decides the Jacobian's row layout for
+get_jacobian), and in the distributed branch of SuperLUSolver::solve(Problem*, DoubleVector&), where
+it replaces the UNIFORM split that branch otherwise builds.
+It exists for pyoomph's static condensation (dev_docs/static_condensation.md section 9), which rests
+on "the rank owning a row of the Jacobian is the rank that can invert the element-local block that
+row belongs to". On a DISTRIBUTED problem that means the dof distribution: under the uniform split
+the row a rank owns is generally not one of its own dofs, so no rank holds a component's block in
+full and nobody can write the reconstructed value back. On a REPLICATED one (mpirun without
+--distribute, every rank holding the whole mesh) the rows are split uniformly by nobody's choice, and
+the cut points fall inside element-local blocks essentially always -- one per rank boundary -- so
+pyoomph hands back the same split with its cuts moved forward to the next block boundary.
+This replaces the narrower "bool prefer_dof_distribution_for_linear_solver() const" of the first
+version, which could only ask for the dof distribution and was consulted in the solver alone. Null
+(the default) everywhere else, so nothing in oomph-lib or for any other user changes.
+The dead code just below the solver call site (the commented-out "if (problem_pt->distributed())"
+block) is an older, unconditional version of the same idea and was left as it was.
+Upstream equivalent: none; this is a pyoomph-specific extension point, inert for any other user.
+
+problem.h / problem.cc (Changed on 24th August 2026, reorder_global_eqn_numbers):
+New public virtual "void reorder_global_eqn_numbers(Vector<double*>& dof_pt)" (problem.h, next to
+preferred_linear_solver_distribution), a no-op by default. Called from Problem::assign_eqn_numbers()
+at exactly one point: immediately after "n_dof = Mesh_pt->assign_global_eqn_numbers(...)" and before
+the "#ifdef OOMPH_HAS_MPI" block that either calls synchronise_eqn_numbers() or builds
+Dof_distribution_pt. An override permutes dof_pt and the matching Data::eqn_number() entries; it must
+not change WHICH values are dofs.
+It exists for pyoomph's user-selectable dof layouts (dev_docs/dof_ordering.md): oomph numbers every
+nodal value of a mesh before any element-internal one, which is the wrong layout for both consumers
+that care -- a block preconditioner (Hypre BoomerAMG) wants a node's fields adjacent so it can
+coarsen the vector system, and static condensation wants an element's selected dofs adjacent so a
+replicated row split can cut between the blocks rather than through them.
+The position in the function is the whole point and is not incidental. Everything that consumes the
+numbering is built BELOW it: Mesh::assign_local_eqn_numbers() with the elemental info,
+InterfaceMesh::update_equation_remapping(), the Dirichlet pinned-equation set, the dof distribution
+and pyoomph's sparsity generation id. A permutation applied here is therefore what the numbering IS,
+and nothing that caches a dof index can survive it -- which is what makes this safe where permuting
+after assign_eqn_numbers() had returned would not have been.
+The same call also serves both MPI modes. On a DISTRIBUTED problem the equation numbers at this point
+are still rank-local (0..my_n-1, halo data being Is_pinned) and synchronise_eqn_numbers() shifts them
+by the rank's base afterwards, so a rank-local permutation leaves each rank's global range
+contiguous, which the distributed assembly and the condensation row ownership both require. On a
+serial or replicated run the numbers are already global and the permutation is the whole thing.
+Upstream equivalent: none; this is a pyoomph-specific extension point, inert for any other user of
+the library.
+
+problem.h / mesh.cc / linear_algebra_distribution.* / linear_solver.cc (Note added 24th August 2026,
+Block_dof_pt_start):
+The "Block_dof_pt_start" / "Block_dof_arrangement_used" machinery (problem.h, filled in
+Mesh::assign_global_eqn_numbers and Problem::assign_eqn_numbers) is DEAD and has been since it was
+added. Every consumer is commented out: the block-aware LinearAlgebraDistribution constructor
+(linear_algebra_distribution.h/.cc), and the call to it in SuperLUSolver::solve and
+Problem::assign_eqn_numbers. It was an attempt at the same goal pyoomph now reaches through
+reorder_global_eqn_numbers plus Problem::dof_ordering_row_cuts: keeping an MPI row split from cutting
+inside a node's block, so that Hypre AMG sees whole blocks.
+Left in place rather than reverted, because reverting it would touch four files of vendored code to
+delete something already inert. The Python property that exposed it
+(Problem.nodal_block_dof_arrangement_used) now RAISES and names the replacement, since a property
+that silently does nothing is worse than one that is gone.
+
+Telements.h (Changed on 15th August 2026, TBubbleEnrichedElementShape<3,3>::d2shape_local):
+d2psids(9, 2) added the quartic-bubble term as "32.0 * d2_quartic_bubble_ds3" instead of "..._ds2",
+i.e. it used the mixed d^2/(ds0 ds1) derivative where the pure d^2/ds2^2 one belongs. Every other
+line of that block pairs the slot index with the matching bubble index, so this is a plain
+copy-paste typo. Found by finite-differencing d2shape_local against dshape_local: node 9, slot 2 was
+the only one of the 90 entries that disagreed (analytic 5.798 vs. FD 2.877 at s=(0.23,0.31,0.19));
+after the fix all 90 agree to 1e-11.
+It surfaced now because pyoomph's second spatial derivatives (grad(grad(...)), div(grad(...)),
+partial_x(...,2)) are the first thing in the tree to call d2shape_local at all - the whole
+d2shape_* family is dead code in the vendored subset otherwise.
+Upstream equivalent: none yet; this is a genuine bug in oomph-lib and should be reported upstream.
+
+linear_solver.cc (Changed on 17th August 2026, "ndof=0" in the distributed solve timing line):
+SuperLUSolver::solve(DoubleMatrixBase*) and solve_transpose(DoubleMatrixBase*) print the size of the
+system they just solved as "matrix_pt->nrow()", read after factorise() has returned. On more than one
+process SuperLUSolver::solve(Problem*) forces Dist_delete_matrix_data to true, so
+factorise_distributed() caches ndof and first_row and then calls cr_matrix_pt->clear() to release the
+Jacobian before the (possibly memory-hungry) factorisation runs. nrow() therefore reads a cleared
+matrix and every Newton step of every mpirun'd script reported
+"Time for LinearSolver solve (ndof=0)" -- e.g. docs/source/tutorial/multidom/simple_fsi.py at 2 ranks,
+whose Problem::newton_solve line two lines further down correctly said ndof=17167. Purely a reporting
+artifact: the solve itself is handed the cached ndof and is unaffected. Serial runs go through
+factorise_serial(), which does not clear, and always printed the right number.
+The row count is now taken before factorise() and printed from that.
+Upstream equivalent: none yet; this is an upstream oomph-lib bug, not a pyoomph-specific one, but
+upstream only hits it on the SuperLU_DIST path.
+
+problem.cc (Changed on 18th August 2026, Problem::arc_length_step_solve_helper, predictor stage):
+"Ds_current = (*parameter_pt - Parameter_current)/Parameter_derivative;" divided by the parameter
+derivative without checking it. That line re-derives the arclength step actually taken in case the
+user's actions_after_parameter_increase clamped the parameter, so it is a no-op unless something
+moved the parameter somewhere else. A tangent with dparameter/ds exactly 0 is not a pathology, it is
+the tangent AT a fold - the parameter turns around there, so it does not move along the branch - and
+pyoomph now primes exactly that tangent to continue around a located fold from the bifurcation GUI
+(BifurcationController._prime_fold_continuation_tangent). Unguarded the line computed 0/0, the NaN
+went into the predicted dofs on the next lines and came back out of the linear solver as
+"array must not contain infs or NaNs".
+Now skipped when Parameter_derivative is 0: the parameter was never asked to move, so there is
+nothing to re-derive and Ds_current keeps the value it was given.
+Upstream equivalent: none; upstream never prescribes the tangent by hand, so it cannot reach a
+Parameter_derivative of exactly 0 (calculate_continuation_derivatives_helper builds it as
+1/sqrt(1+theta^2*chi), which is always positive).
+
+integral.cc (Changed on 21st August 2026, Gauss<2,3>::Knot, the 3x3 rule for 2D quadrilaterals):
+five of the nine entries read 0.774596662941483 where the outer Gauss-Legendre knot is
+0.774596669241483 -- two digits transposed, 6.3e-9 -- and only on the positive knot. The rule
+therefore kept the correct total weight, which is why it passed every consistency check, but was no
+longer symmetric. That leaves a defect in the assembly rather than an error refinement can remove:
+the integral of a mid-side shape function derivative over an element came out as 7.0e-9 instead of
+identically zero, so a field lying exactly in the C2 space no longer produced a zero residual and
+results on 2D quadrilateral meshes were wrong by about 1e-9 HOWEVER FINE THE MESH. Measured on a
+Poisson problem with a linear exact solution, the mid-side node deviation drops from 8.5e-10 to
+4.0e-15; C1 quadrilaterals and triangles of any order use different rules and were always exact.
+The knot is now a named constant that is negated for the lower half, so symmetry is exact in IEEE
+arithmetic. An audit of every Gauss<D,N> knot and weight table against exact Legendre roots found no
+other entry worse than 4e-15, so this was the only one. tests/test_quadrature.py guards the rules
+directly -- odd monomials over a symmetric domain, and a Poisson solution lying in the space -- for
+lines, quadrilaterals, triangles and bricks; it was verified to fail on the pre-fix build, on
+exactly the three quadrilateral cases.
+Upstream equivalent: none; this is an upstream oomph-lib typo, present in the same table there.
+
+mesh.cc + problem.cc (Changed on 23rd August 2026, periodic boundary conditions under --distribute):
+Periodicity is pointer aliasing, not a constraint: BoundaryNodeBase::make_node_periodic points the
+copy node's Value/Eqn_number arrays at its master's, and BoundaryNode::assign_eqn_numbers is a no-op
+on a copy. Nothing in the distribution machinery knows that - mesh.cc, problem.cc, refineable_mesh.cc
+and partitioning.cc do not contain the word "periodic" - so master and copy were two independent
+Data* keys in every halo map while being one array, and pyoomph refused the combination outright.
+Two changes, both marked //FOR PYOOMPH.
+(a) Mesh::setup_shared_node_scheme and Mesh::classify_halo_and_haloed_nodes skip nodes with
+is_a_copy() when building Shared_node_pt, Halo_node_pt, Haloed_node_pt and the
+processors_associated_with_data / processor_in_charge maps; the copies are given their master's halo
+status at the end of classify_halo_and_haloed_nodes instead of getting a verdict of their own. Safe
+because a copy owns no data - whatever the master receives IS the copy's data - and necessary because
+the two members of a pair sit at opposite ends of the domain: no partitioning puts them in the same
+halo layer, so the schemes, which are built out of element adjacency, structurally cannot pair them
+up. is_a_copy() is a local property of the node and identical on every rank, so both sides of every
+scheme skip the same nodes and the ordering invariants still hold.
+Giving the pair one agreed owner instead - computable without communicating in Mesh::distribute,
+where the mesh is still replicated and element_domain has been broadcast - was tried first and does
+NOT work: the forced owner holds the OTHER member, so the node is not in the shared node scheme with
+it and the overlooked-halo reconciliation throws "Failed to find node that is shared node N ... in
+shared node lookup scheme with processor P which is in charge". Patching that reconciliation only
+moved the failure to three or more ranks, where the intermediate is a third rank that also lacks the
+node.
+(b) Problem::synchronise_eqn_numbers no longer bumps a copy's equation numbers. Data::eqn_number(i)
+returns a long& into the SHARED array and master and copy are both in Node_pt, so every periodic dof
+got my_eqn_num_base added twice - invisible on rank 0, silently out of range everywhere else. Needed
+independently of (a); the position bump is guarded by position_is_a_copy() for symmetry, though
+make_periodic never aliases positions.
+(b) was verified by ablation: restoring the stock loop while keeping (a) makes five of the twelve
+tests in tests/test_mpi_periodic.py fail, all with PETSc's "Column too large: col 1440 max 991".
+The pyoomph half of the fix is Mesh::ensure_halos_for_periodic_boundaries (src/mesh.cpp), which keeps
+a boundary element from each side of the seam on every rank so the master is always present - (a)
+depends on that, since the master then becomes the only node of the pair the halo exchange reaches,
+and stubbing it out fails 6 of the tests -
+plus two refusals in Problem: _require_no_distributed_periodic_refinement, because Mesh::distribute
+ends with setup_tree_forest(), which rebuilds tree neighbours by matching shared nodes, so the
+TreeRoot::Neighbour_periodic links do not survive it; and
+_require_no_distributed_periodic_position_dofs, because make_periodic aliases only the values, so on
+a moving mesh a copy carries position dofs of its own and (a) leaves nothing to carry them.
+See dev_docs/distributed_periodic_bc.md and tests/test_mpi_periodic.py.
+Upstream equivalent: none, this is a pyoomph fix (upstream oomph-lib does not support periodic
+boundary conditions on a distributed mesh either).
+
+mesh.cc (Changed on 29th August 2026, tree-less halo elements):
+Mesh::get_all_halo_data walks the tree of every root halo element it finds to be a RefineableElement,
+dereferencing tree_pt() without checking it. In pyoomph that cast carries no information: EVERY element
+derives from RefineableSolidElement (pyoomph::FiniteElementBase), and a halo element can still have no
+tree, so the cast succeeds on a null tree pointer and the walk segfaults. Measured with a breakpoint on
+docs/source/tutorial/advstab/eigenbranch_continuation.py under mpirun -n 2 --distribute: the element
+that takes the new branch is a BULK pyoomph::BulkElementQuad2dC2 (Ndof=35, one external data,
+Non_halo_proc_ID=1) in the halo layer of the 222-element bulk mesh -- not a face element, as the first
+version of this entry said. Why that mesh's halo elements carry no tree while e.g. the fixed-mesh Bratu
+problem of tests/mpi_bifurcation_worker.py does is not established. A tree-less element is its own only
+leaf, so the guard added here treats it like the non-refineable branch does and adds the element's own
+internal data to the map.
+Reached from every bifurcation-tracking handler: MyFoldHandler/MyPitchForkHandler etc. call
+Problem::setup_dof_halo_scheme() while constructing the augmented dof distribution
+(AugmentedDofDistributionHelper::initialise, src/bifurcation.cpp), so activate_bifurcation_tracking on
+such a distributed problem crashed there - three tutorials in the --distribute sweep of 29th August 2026
+(advstab/movmesh/hanging_droplet.py fold, advstab/azimuthal/rayleigh_benard_azimuthal_stability.py
+pitchfork, advstab/eigenbranch_continuation.py eigenbranch), each with a backtrace ending in
+Tree::stick_leaves_into_vector (this=0x0). With the guard, all three run to completion under mpirun -n 2 --distribute
+(rayleigh_benard_azimuthal_stability.py needs the COMPLEX PETSc build for its m=1 leg, as it does
+serially - with the real one it stops at "cannot handle a complex eigenvalue problem", which is an
+environment matter and not this bug).
+The identical guard already exists, also marked FOR PYOOMPH, at the two sibling sites in mesh.h
+(halo_element_pt and haloed_element_pt); this call site was simply missed. The two remaining copies of
+the pattern in problem.cc (load_balance) are untouched, pyoomph does not reach them.
+See dev_docs/mpi_augmented_systems.md section 6b.
+Upstream equivalent: none; upstream never has a refineable element without a tree.

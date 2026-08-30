@@ -176,7 +176,7 @@ namespace oomph
     /// Overload function that is used to advance time in the object
     /// reference by object_pt by an amount dt
     void timestep(ExplicitTimeSteppableObject* const& object_pt,
-                  const double& dt);
+                  const double& dt) override;
   };
 
   /// ===========================================================
@@ -201,7 +201,7 @@ namespace oomph
     /// Function that is used to advance time in the object
     // reference by object_pt by an amount dt
     void timestep(ExplicitTimeSteppableObject* const& object_pt,
-                  const double& dt);
+                  const double& dt) override;
   };
 
 
@@ -226,7 +226,7 @@ namespace oomph
 
     /// Function that is used to advance the solution by time dt
     void timestep(ExplicitTimeSteppableObject* const& object_pt,
-                  const double& dt);
+                  const double& dt) override;
   };
 
 
@@ -259,7 +259,7 @@ namespace oomph
 
     /// Function that is used to advance the solution by time dt
     void timestep(ExplicitTimeSteppableObject* const& object_pt,
-                  const double& dt);
+                  const double& dt) override;
   };
 
 } // namespace oomph

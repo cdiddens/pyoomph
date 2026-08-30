@@ -1529,10 +1529,7 @@ namespace oomph
       std::stringstream tmp;
       tmp << Total_memory_usage_system_string << " >> "
           << Total_memory_usage_filename;
-      int success = system(tmp.str().c_str());
-
-      // Dummy command to shut up compiler warnings
-      success += 1;
+      (void)system(tmp.str().c_str());
     }
 
 
@@ -1635,7 +1632,7 @@ namespace oomph
           << ".bash; chmod a+x kill_continuous_top" << modifier << ".bash; "
           << Top_system_string << " \" >> run_continuous_top" << modifier
           << ".bash; chmod a+x run_continuous_top" << modifier << ".bash ";
-      int success = system(tmp.str().c_str());
+      (void)system(tmp.str().c_str());
 
       // Add comment to annotate?
       if (comment != "")
@@ -1647,10 +1644,7 @@ namespace oomph
       std::stringstream tmp2;
       tmp2 << "./run_continuous_top" << modifier << ".bash  >> "
            << Top_output_filename << " & ";
-      success = system(tmp2.str().c_str());
-
-      // Dummy command to shut up compiler warnings
-      success += 1;
+      (void)system(tmp2.str().c_str());
     }
 
 
@@ -1688,10 +1682,7 @@ namespace oomph
       std::stringstream tmp2;
       tmp2 << "./kill_continuous_top" << modifier << ".bash  >> "
            << Top_output_filename << " & ";
-      int success = system(tmp2.str().c_str());
-
-      // Dummy command to shut up compiler warnings
-      success += 1;
+      (void)system(tmp2.str().c_str());
     }
 
 
@@ -1704,10 +1695,7 @@ namespace oomph
       std::stringstream tmp;
       tmp << " echo \"OOMPH-LIB EVENT: " << comment << "\"  >> "
           << Top_output_filename;
-      int success = system(tmp.str().c_str());
-
-      // Dummy command to shut up compiler warnings
-      success += 1;
+      (void)system(tmp.str().c_str());
     }
 
 

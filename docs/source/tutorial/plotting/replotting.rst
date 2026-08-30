@@ -1,3 +1,5 @@
+.. _secreplotting:
+
 Replotting of existing data
 ---------------------------
 

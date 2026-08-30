@@ -1,0 +1,124 @@
+# Verifies that the macOS Accelerate linear solver reuses its symbolic factorization
+# (SparseRefactor) instead of re-running SparseFactor on every Newton step.
+#
+# Why this exists as its own workflow rather than a job in the wheels build:
+#   * The Accelerate backend is compiled in only on Apple (src/mac_accelerate.cpp is wrapped in
+#     #ifdef __APPLE__), so none of it is exercised by the Linux/Windows CI, and it cannot even be
+#     compile-checked off a Mac. This is the only thing that catches a typo in it.
+#   * It only makes sense on arm64. MKL Pardiso is unavailable there, which is precisely why the
+#     Accelerate backend matters on Apple silicon in the first place.
+#
+# Deliberately WITHOUT the prebuilt PETSc/SLEPc that the arm64 wheel and tutorial jobs now install:
+# pyoomph's autodetection prefers PETSc/MUMPS to Accelerate on arm64 (pyoomph/__init__.py), so a
+# PETSc on the path here would quietly select the solver this workflow exists to exercise away.
+#
+# Manual dispatch only. It builds GiNaC and CLN from source (see below), which takes a while, and
+# there is no reason to pay that on every push -- the code it covers changes rarely.
+#
+# NOTE: GitHub only offers workflow_dispatch for workflows present on the DEFAULT branch. This file
+# has to be merged to main before the "Run workflow" button appears, even to run it against another
+# branch.
+
+name: Test macOS Accelerate solver reuse
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or SHA to test"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  accelerate-reuse:
+    # macos-14 is the arm64 (Apple silicon) image. Do not switch this to macos-*-intel: the point of
+    # the test is the arm64 path.
+    runs-on: macos-14
+    # The build dominates: CMake downloads and builds CLN and then GiNaC from source. That is the
+    # documented macOS route (INSTALL.md) and the default of PYOOMPH_DOWNLOAD_CLN/GINAC, so it is the
+    # path most likely to just work; Homebrew's ginac was not used because pyoomph expects its own
+    # hash-ordering patch, which a system GiNaC does not carry.
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Confirm the runner really is arm64
+        # Cheap, and it fails in seconds rather than after an hour's build if the image ever changes.
+        run: |
+          set -eux
+          uname -m
+          test "$(uname -m)" = "arm64"
+
+      - name: Install build tools
+        # From INSTALL.md's macOS section, minus openmpi: MPI is switched off in the build below, and
+        # dropping it removes a large dependency this test does not need. bzip2 and patch ship with
+        # macOS, so only wget and pkg-config are actually installed here.
+        #
+        # Individual installs are tolerated failing (Homebrew renamed pkg-config to pkgconf, and an
+        # already-provided formula can error), but wget is then checked for explicitly: it is used to
+        # fetch the CLN/GiNaC tarballs, and discovering it is missing an hour into the build would be
+        # an expensive way to find out.
+        run: |
+          set -eux
+          brew install wget || true
+          brew install pkgconf || brew install pkg-config || true
+          command -v wget
+          command -v pkg-config || command -v pkgconf
+
+      - name: Install Python build dependencies
+        run: python -m pip install --upgrade pip nanobind scikit_build_core numpy scipy
+
+      - name: Build and install pyoomph
+        # MPI off (not needed here, and it halves the surface that can fail to configure).
+        # PARANOID off to match how pyoomph is normally shipped.
+        run: |
+          set -eux
+          python -m pip install . -v \
+            --config-settings=cmake.define.PYOOMPH_USE_MPI=OFF \
+            --config-settings=cmake.define.PYOOMPH_HAS_SPECTRA=ON \
+            --config-settings=cmake.define.PYOOMPH_PARANOID=OFF
+
+      - name: Show what was built
+        # If the Accelerate solver did not get compiled in, say so here rather than letting the check
+        # script fail with something less obvious.
+        run: |
+          set -eux
+          cd ..
+          python -c "
+          import pyoomph
+          from pyoomph import _pyoomph_core as core
+          print('pyoomph', pyoomph.__file__)
+          assert hasattr(core, 'MacAccelerateSparseSolver'), 'MacAccelerateSparseSolver missing: the Accelerate backend was not compiled in'
+          s = core.MacAccelerateSparseSolver()
+          for m in ('refactorize_values_only', 'num_symbolic_factorizations', 'num_numeric_refactorizations'):
+              assert hasattr(s, m), 'missing ' + m + ': stale build?'
+          print('Accelerate backend present, methods:', core.MacAccelerateSparseSolver.available_methods())
+          "
+
+      - name: Check the symbolic factorization is reused
+        # Run from OUTSIDE the checkout. This is a non-editable install, and no compiled extension is
+        # tracked in git, so with the repository as the working directory "import pyoomph" would pick
+        # up the source tree instead of the installed package and fail on the missing extension.
+        run: |
+          set -eux
+          cd ..
+          python "$GITHUB_WORKSPACE/citools/check_accelerate_reuse.py"
+
+      - name: Smoke-test the installed package
+        # Broad sanity check that the build is not subtly broken in a way the focused script would not
+        # notice. Non-fatal on purpose: it covers far more than this workflow is about (compilers,
+        # optional solvers), and a failure there should not be reported as "Accelerate reuse is broken".
+        continue-on-error: true
+        run: |
+          cd ..
+          python -m pyoomph check all

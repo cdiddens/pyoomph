@@ -100,7 +100,7 @@ Then, we add the equation for :math:`T`, which can be achieved by
    :start-at: # We want to adjust T, so that the residual R=integral(u^2) - Udesired^2 = 0
    :end-at: eqs += WeakContribution(dot(var("velocity"), var("velocity")) - Udesired*Udesired, Ttest)
 
-:py:meth:`~pyoomph.generic.codegen.WeakContribution` is just an equation class which just adds a single contribution to the weak formulation. Here, just the spatial integral of :math:`\vec{u}^2  - U_\text{desired}^2` over the domain to the residuals of :math:`T`. 
+:py:meth:`~pyoomph.equations.generic.WeakContribution` is just an equation class which just adds a single contribution to the weak formulation. Here, just the spatial integral of :math:`\vec{u}^2  - U_\text{desired}^2` over the domain to the residuals of :math:`T`. 
 
 There is one caveat for this particular equation, namely that it is quadratic in the velocity, i.e. :math:`\vec{u}^2`. By default, pyoomph starts with a zero velocity field, which then produces a zero Jacobian row in the first Newton iteration. So we first must find a reasonable guess for the velocity field without trying to adjust the unknown forcing :math:`T`. We therefore remove :math:`T` from the degrees of freedom and solve for the velocity and pressure only:
 

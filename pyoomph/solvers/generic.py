@@ -1,54 +1,84 @@
+from __future__ import annotations
 
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
-from ..meshes.mesh import ODEStorageMesh
+from ..meshes.mesh import AnyMesh, ODEStorageMesh
 from ..typings import *
 import numpy
+import os
+import weakref
 
 
 import scipy.sparse #type:ignore
 
-DefaultMatrixType=scipy.sparse.csr_matrix
-_TypeGenericLASolver=TypeVar("_TypeGenericLASolver",bound=Type["GenericLinearSystemSolver"])
-_TypeGenericEigenSolver=TypeVar("_TypeGenericEigenSolver",bound=Type["GenericEigenSolver"])
 
-CoreLinearSolverEnum=Literal["superlu","umfpack","petsc","mumps","pardiso","accelerate","petsc_mumps"]
-CoreEigenSolverEnum=Literal["scipy","pardiso","slepc","accelerate","slepc_mumps"]
-EigenSolverWhich=Literal["LM","SM","LR","SR","SI"]
-_default_la_solver:Optional[Union["GenericLinearSystemSolver",CoreLinearSolverEnum]]=None
-_default_eigen_solver:Optional[Union["GenericEigenSolver",CoreEigenSolverEnum]]=None
+# Passed for the arrays a given op_flag leaves unused, so the backends see a real (empty) array rather
+# than None: oomph passes a null pointer there and the shim then hands Python a zero-length ndarray.
+_EMPTY_F64=numpy.zeros(0,dtype=numpy.float64)
+_EMPTY_I32=numpy.zeros(0,dtype=numpy.int32)
+
+
+class SolverError(RuntimeError):
+	"""Raised by a linear solver backend when a system could not be solved: a singular matrix, a
+	factorisation that ran out of memory, an iterative solve that gave up.
+
+	What separates it from an ordinary ``RuntimeError`` (which it derives from, so existing ``except
+	RuntimeError`` around a solve keeps working) is what pyoomph does with it. The solver shim
+	(``src/nanobind/solver.cpp``) reports a ``SolverError`` to oomph-lib as a failed Newton solve, so an
+	adaptive time step halves ``dt`` and an arclength step scales ``Ds`` by 2/3 and both retry, instead
+	of the exception unwinding the whole run.
+
+	Raise it only for failures a smaller step could plausibly fix. A solver that is misconfigured or
+	unavailable -- no MUMPS in this PETSc build, an unmatched field-split name, Pardiso under MPI --
+	must stay an ordinary error: it would fail identically on every retry, and the run would shrink its
+	step until it underflowed and then blame the time step rather than showing the real message.
+
+	Backends subclass it one per backend (``PardisoError``, ``PETScSolverError``, ``ScipySolverError``),
+	so a caller can still tell which one gave up.
+	"""
+
+DefaultMatrixType:TypeAlias=scipy.sparse.csr_matrix # spelled as an alias: a bare assignment is a variable, which cannot be used in an annotation
+_TypeGenericLASolver=TypeVar("_TypeGenericLASolver",bound=type["GenericLinearSystemSolver"])
+_TypeGenericEigenSolver=TypeVar("_TypeGenericEigenSolver",bound=type["GenericEigenSolver"])
+
+CoreLinearSolverEnum:TypeAlias=Literal["superlu","umfpack","petsc","pardiso","accelerate","petsc_mumps"]
+CoreEigenSolverEnum:TypeAlias=Literal["scipy","pardiso","spectra","slepc","accelerate","slepc_mumps"]
+EigenSolverWhich:TypeAlias=Literal["LM","SM","LR","SR","SI"]
+_default_la_solver:"GenericLinearSystemSolver | CoreLinearSolverEnum | None"=None
+_default_eigen_solver:"GenericEigenSolver | CoreEigenSolverEnum | None"=None
+_default_eigen_solver_resolver:"Callable[[],GenericEigenSolver | CoreEigenSolverEnum] | None"=None
 
 if TYPE_CHECKING:
     from ..generic.problem import Problem
 
 _PETSCSLEPC_INSTALL_URL="https://pyoomph.readthedocs.io/en/latest/tutorial/installation/petscslepc.html"
 _PYPA_INSTALL_URL="https://pyoomph.readthedocs.io/en/latest/tutorial/installation/pypa.html"
-_SOLVER_INSTALL_HINTS:Dict[str,Tuple[str,str]]={
+_SOLVER_INSTALL_HINTS:dict[str,tuple[str,str]]={
 	"petsc":("PETSc",_PETSCSLEPC_INSTALL_URL),
 	"petsc_mumps":("PETSc with MUMPS support",_PETSCSLEPC_INSTALL_URL),
 	"slepc":("SLEPc",_PETSCSLEPC_INSTALL_URL),
@@ -57,52 +87,484 @@ _SOLVER_INSTALL_HINTS:Dict[str,Tuple[str,str]]={
 	"accelerate":("the macOS Accelerate framework",_PYPA_INSTALL_URL),
 }
 
-def _unavailable_solver_message(kind:str,name:str,available:List[str],e:Exception)->str:
+def _mpi_any_rank(flag:bool)->bool:
+	"""True if ``flag`` holds on ANY rank.
+
+	Imported lazily, and short-circuited on a single process: pyoomph.generic.mpi initialises MPI on
+	import, and this module is imported by every script including the ones that never touch a solver.
+	"""
+	from ..generic.mpi import get_mpi_nproc,get_mpi_any
+	if get_mpi_nproc()<=1:
+		return bool(flag)
+	return get_mpi_any(bool(flag))
+
+def _unavailable_solver_message(kind:str,name:str,available:list[str],e:Exception)->str:
 	msg=kind+" '"+name+"' is not available ("+type(e).__name__+": "+str(e)+"). Available: "+str(available)+"."
 	hint=_SOLVER_INSTALL_HINTS.get(name)
 	if hint is not None:
 		msg+=" See "+hint[1]+" for how to install "+hint[0]+"."
 	return msg
 
-def set_default_linear_solver(solv:Union["GenericLinearSystemSolver",CoreLinearSolverEnum]):
+def set_default_linear_solver(solv:"GenericLinearSystemSolver | CoreLinearSolverEnum"):
 	global _default_la_solver
 	_default_la_solver=solv
 
-def get_default_linear_solver()->Optional[Union["GenericLinearSystemSolver",CoreLinearSolverEnum]]:
+def get_default_linear_solver()->"GenericLinearSystemSolver | CoreLinearSolverEnum | None":
 	return _default_la_solver
 
 
-def set_default_eigen_solver(solv:Union["GenericEigenSolver",CoreEigenSolverEnum]):
-	global _default_eigen_solver
+def set_default_eigen_solver(solv:"GenericEigenSolver | CoreEigenSolverEnum"):
+	global _default_eigen_solver,_default_eigen_solver_resolver
 	_default_eigen_solver=solv
+	_default_eigen_solver_resolver=None # an explicit choice wins over the autodetection below
 
-def get_default_eigen_solver()->Optional[Union["GenericEigenSolver",CoreEigenSolverEnum]]:
+def set_default_eigen_solver_resolver(resolver:Callable[[],"GenericEigenSolver | CoreEigenSolverEnum"]):
+	"""Register a callable that picks the default eigensolver the first time one is actually needed.
+
+	The autodetection in pyoomph/__init__.py has to import petsc4py/slepc4py to find out whether SLEPc
+	with MUMPS is usable, which costs more time than the entire rest of `import pyoomph` and is wasted
+	on the majority of scripts, which never solve an eigenproblem. Deferring the probe keeps the import
+	cheap without changing which solver is eventually selected.
+	"""
+	global _default_eigen_solver,_default_eigen_solver_resolver
+	_default_eigen_solver=None
+	_default_eigen_solver_resolver=resolver
+
+def get_default_eigen_solver()->"GenericEigenSolver | CoreEigenSolverEnum | None":
+	global _default_eigen_solver
+	if _default_eigen_solver is None and _default_eigen_solver_resolver is not None:
+		_default_eigen_solver=_default_eigen_solver_resolver()
 	return _default_eigen_solver
 
 class GenericLinearSystemSolver:
-	_registered_solvers:Dict[str,Type["GenericLinearSystemSolver"]]={}
+	_registered_solvers:dict[str,type["GenericLinearSystemSolver"]]={}
 	idname:str
 	
 
 	def __init__(self,problem:"Problem"):
 		self.problem=problem
+		#: Switch to a symmetric factorization whenever the assembled matrix is symbolically proven
+		#: symmetric (see Problem._get_proven_matrix_symmetry). Falls back silently to the general
+		#: factorization on any doubt - augmented (tracking) systems, custom assemblers, unproven
+		#: blocks - so leaving it on cannot produce a wrong result, only different pivoting/roundoff.
+		self.exploit_proven_symmetry:bool=True
+		#: Outcome of the last _use_symmetric_factorisation_now() call (None = never asked), plus the
+		#: reason. For tests and benchmarks: a comparison where the symmetric path silently fell back
+		#: looks like a null result, so check this before believing one.
+		self.last_symmetry_decision:Optional[bool]=None
+		self.last_symmetry_decision_reason:str=""
+		#: Set while solve_gathered_to_root() drives a SERIAL backend on rank 0 with the gathered
+		#: system. That nested solve_serial() call goes through the same op_flag==2 branch as an
+		#: ordinary serial solve and would otherwise apply the Newton-step post-processing a second
+		#: time -- once on rank 0's gathered vector and once on each rank's block after the scatter.
+		#: Which of the two is the right place is not a matter of taste: the post-processing reduces,
+		#: and a reduction inside a rank-0-only branch deadlocks.
+		self._suppress_newton_step_postprocessing:bool=False
+
+	def _custom_solve_routine_active(self)->bool:
+		"""Is a custom assembler installed that wants to drive the solve itself?
+
+		Only the augmented (bifurcation-tracker) assemblers do. Deflation does not -- it is pure
+		post-processing of the increment -- which is why the two are asked separately: a backend that
+		cannot hand out a re-solve callable can still support deflation.
+		"""
+		ca=self.problem._custom_assembler #type:ignore
+		return ca is not None and ca.has_custom_solve_routine()
+
+	def _postprocess_newton_step(self,x:NPFloatArray,first_row:int=0,reduce_dot:bool=False)->NPFloatArray:
+		"""Turn the solved increment into the one the Newton update should take.
+
+		Today that means the deflation rescale and nothing else. ``first_row``/``reduce_dot`` describe
+		the row block ``x`` is: pass the block's offset and ``reduce_dot=True`` from a distributed
+		entry point, the defaults from a serial one. They are the CALLER's knowledge -- deciding them
+		from ``len(x)`` would send rank 0 (which owns every row of a small system) and rank 1 (which
+		owns none) into different branches of a collective.
+		"""
+		if self._suppress_newton_step_postprocessing:
+			return x
+		op=getattr(self.problem,"_deflation_operator",None)
+		if op is None or len(op)==0:
+			return x
+		return op.rescale_newton_step(x,first_row=first_row,reduce_dot=reduce_dot)
+
+	def _solve_newton_step(self,solve_fn:Callable[[NPFloatArray],NPFloatArray],b:NPFloatArray,
+						   first_row:int=0,reduce_dot:bool=False)->NPFloatArray:
+		"""Solve ``J x = b`` for the Newton increment, applying whatever post-processing is installed.
+
+		The one place every backend goes through, so that a new post-processing step is added once
+		rather than in each of them:
+
+		* a **deflation operator** turns the increment into the deflated one by a scalar rescale (one
+		  extra dot product, no extra solve -- see bifurcation_tools.DeflationOperator);
+		* a **custom assembler** with ``has_custom_solve_routine()`` (the augmented trackers) gets the
+		  solve handed to it as a callable, as before.
+
+		``first_row``/``reduce_dot`` describe the row block ``b`` is: pass the block's offset and
+		``reduce_dot=True`` from a distributed entry point, the defaults from a serial one. They are
+		the CALLER's knowledge -- deciding them from ``len(b)`` would send rank 0 (which owns every row
+		of a small system) and rank 1 (which owns none) into different branches of a collective.
+		"""
+		if self._custom_solve_routine_active():
+			ca=self.problem._custom_assembler #type:ignore
+			assert ca is not None
+			return ca.custom_solve_routine(solve_fn,b)
+		return self._postprocess_newton_step(solve_fn(b),first_row=first_row,reduce_dot=reduce_dot)
+
+	def _use_symmetric_factorisation_now(self)->bool:
+		"""Per-solve decision whether the matrix about to be factorised is proven symmetric.
+
+		Never cached: the same problem flips between symmetric and not when a bifurcation tracker or
+		custom assembler is (de)activated, so backends must ask again at every op_flag==1.
+		"""
+		if not self.exploit_proven_symmetry:
+			self.last_symmetry_decision,self.last_symmetry_decision_reason=False,"disabled by exploit_proven_symmetry=False"
+			return False
+		jac_sym,_=self.problem._get_proven_matrix_symmetry(self.problem._get_solved_residual())
+		self.last_symmetry_decision=jac_sym
+		self.last_symmetry_decision_reason="jacobian proven symmetric" if jac_sym else "jacobian not proven symmetric (or augmented/custom assembly)"
+		return jac_sym
+
+	@property
+	def problem(self)->"Problem":
+		# Stored as a weakref: a strong reference here would form a Problem<->solver
+		# cycle that keeps the Problem alive as long as any mesh (itself pinned by the
+		# Problem's own nb::keep_alive) transitively references this solver.
+		p=self._problem_wr()
+		assert p is not None, "The Problem this solver belonged to has already been destroyed"
+		return p
+
+	@problem.setter
+	def problem(self,p:"Problem | None"):
+		self._problem_wr=weakref.ref(p) if p is not None else (lambda:None)
+
+	def requires_explicit_diagonal(self)->bool:
+		"""Whether this solver needs an entry stored on every diagonal of the Jacobian, including where
+		the equations put nothing there.
+
+		Needing one is a property of the factorisation, not of the problem: PETSc's own LU rejects a
+		matrix with a missing diagonal outright ("Matrix is missing diagonal entry i"), while MUMPS,
+		Pardiso and SuperLU do not care. It is not free to say yes -- the extra stored zeros change the
+		matrix the solver sees and therefore its pivoting -- so the default is no, and a solver should
+		override this only when its configured factorisation genuinely requires it.
+
+		A solver that answers wrongly in the "no" direction is not silently broken: the user gets the
+		factoriser's own clear complaint and can force the issue with
+		``problem.force_jacobian_diagonal_entries = True``.
+		"""
+		return False
+
+	def get_determinant_sign(self)->int | None:
+		"""Sign of the determinant of the matrix last factorised, or None if this solver cannot say.
+
+		Only the SIGN, and only its CHANGES, are meaningful: the value carries whatever overall sign
+		convention and row scaling the assembled system has, so it is not the mathematical sign of
+		det(J). What it is good for is detecting that an odd number of real eigenvalues has crossed
+		zero between two continuation points - a fold or a branch point - without solving an
+		eigenproblem. See dev_docs/quick_continuation.md.
+
+		The caller must check that the system is not augmented before trusting it (bifurcation tracking
+		factorises a bordered matrix whose determinant does not vanish at the bifurcation);
+		``Problem._get_n_unaugmented_dofs()==0`` is the sentinel for "not augmented".
+
+		Returns +1, -1, 0 for an exactly singular factorisation, or None when unavailable. The default
+		is None, so a solver only reports a sign if it genuinely has one to report - like
+		:py:meth:`requires_explicit_diagonal`, answering wrongly here is worse than not answering.
+		"""
+		return None
 
 	def setup_solver(self)->None:
 		pass
+
+	def _report_structure_id_mismatch(self,what:str)->None:
+		"""Say that the sparsity pattern moved under an unchanged ``problem.jacobian_structure_id``.
+
+		Both reuse paths (Pardiso's symbolic factorisation and PETSc's preallocated Mat) verify the
+		pattern rather than trusting the id, and fall back correctly when it does not match, so this
+		is never a correctness problem -- but whether it is a *defect* depends on the system.
+
+		On an augmented one -- bifurcation, eigenbranch or periodic-orbit tracking -- it is expected:
+		the elemental block there is larger than the field description, so no symbolic mask applies
+		and the pattern falls back to being value-filtered, which the id cannot promise anything
+		about. eigenbranch_continuation.py produces hundreds of these. On a plain system it really is
+		a missing invalidation, and the wording used to say so unconditionally, which turned that
+		tutorial's log into hundreds of requests to report a non-bug.
+
+		Reported once per solver object either way: the second occurrence adds nothing the first did
+		not, and staying silent altogether would hide the case that IS worth reporting.
+		"""
+		if getattr(self,"_structure_id_mismatch_reported",False):
+			return
+		self._structure_id_mismatch_reported=True
+		try:
+			augmented=self.problem._get_n_unaugmented_dofs()!=self.problem.ndof() #type:ignore
+		except Exception:
+			augmented=False
+		msg=("the Jacobian sparsity pattern changed although problem.jacobian_structure_id did not, "
+			 "so "+what+" was rebuilt instead of reused. ")
+		if augmented:
+			msg="NOTE: "+msg+("Expected on this augmented (tracking) system, whose pattern is "
+							  "value-filtered. Costs a rebuild per solve; not an error. Reported once.")
+		else:
+			msg="WARNING: "+msg+("This system is not augmented, so it is a bug in the pattern "
+								 "invalidation -- please report it. Reported once.")
+		print(msg)
 
 	def _before_assigning_equation_numbers(self)->None:		
 		pass
 
 
 	def solve_distributed(self, op_flag: int, allow_permutations: int, n: int, nnz_local: int, nrow_local: int, first_row: int, values: NPFloatArray, col_index: NPIntArray, row_start: NPIntArray, b: NPFloatArray, nprow: int, npcol: int, doc: int, data: NPUInt64Array, info: NPIntArray)->None:
+		if self.gathers_to_root_under_mpi:
+			return self._solve_distributed_on_root(op_flag,allow_permutations,n,nnz_local,nrow_local,first_row,values,col_index,row_start,b,nprow,npcol,doc,data,info)
 		raise RuntimeError("This solver cannot be used with multiple MPI processes.")
 
 	def solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPIntArray,colptr:NPIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
 		raise NotImplementedError("You need to specialise the function 'solve_serial'")
 
-	
+
 	def distributed_possible(self)->bool:
 		return True
+
+	#################### Gather-to-root: a serial backend under mpirun ####################
+
+	# Whether solve_distributed() may fall back to gathering the whole system onto rank 0 and calling
+	# this solver's own solve_serial() there. Opt-in, so a backend that has not thought about MPI keeps
+	# getting the loud refusal above rather than a silent serialisation.
+	#
+	# Setting it asserts two things about solve_serial(): it performs no MPI collective (it runs on rank
+	# 0 alone, so anything collective inside it hangs the job), and it does not mind being called with
+	# a system much larger than this rank assembled.
+	gathers_to_root_under_mpi:bool=False
+
+	# True for a backend that genuinely solves in parallel. Only used to word the messages: a gathering
+	# backend works, it just does not scale, and the two should not read the same.
+	solves_natively_distributed:bool=False
+
+	_gather_layout:"Any"=None
+	_gather_notice_printed:bool=False
+
+	def _note_external_serial_solve(self)->None:
+		"""Tell the solver that someone called solve_serial() directly, outside solve_distributed().
+
+		Several utilities (Lyapunov exponents, the periodic driving response, Halley's method) build a
+		globally REPLICATED system in Python and call solve_serial() on every rank. That writes the same
+		factorisation slot the gathered path keeps rank 0's factors in. Interleaved with a gathered
+		Newton solve, rank 0 would then back-substitute against the wrong factors while the other ranks
+		had no way to notice. Dropping the layout makes the next gathered back-substitution fail loudly
+		instead.
+		"""
+		self._gather_layout=None
+
+	def _agree_on_gathered_outcome(self,code:int)->int:
+		"""Collective: agree on how the gathered solve went. 0 = fine, 1 = SolverError, 2 = anything else.
+
+		Every rank must call this, and the answer decides what all of them do next -- which is the whole
+		point: rank 0 is the only one that solves, so it is the only one that can see the failure, and a
+		branch taken on anything else would split the ranks between different collectives.
+		"""
+		import numpy
+		from mpi4py import MPI #type:ignore
+		from ..generic.mpi import get_mpi_world_comm,mpi_wait_idle
+		comm=get_mpi_world_comm()
+		assert comm is not None
+		send=numpy.array([code],dtype=numpy.int32)
+		recv=numpy.zeros(1,dtype=numpy.int32)
+		req=comm.Iallreduce(send,recv,op=MPI.MAX) #type:ignore
+		mpi_wait_idle(req,"the gathered solve on rank 0")
+		return int(recv[0])
+
+	def _report_gather_to_root_once(self,n:int)->None:
+		"""Say once, on rank 0, that the system is being solved on one rank -- and what that costs."""
+		if self._gather_notice_printed:
+			return
+		self._gather_notice_printed=True
+		from ..generic.mpi import get_mpi_rank,get_mpi_nproc
+		if get_mpi_rank()!=0 or self.problem.is_quiet():
+			return
+		msg=("NOTE: the linear solver '"+str(getattr(self,"idname",type(self).__name__))+"' is not "
+			 "MPI-parallel, so the assembled system ("+str(n)+" dofs) is gathered onto rank 0 and solved "
+			 "there while the other "+str(get_mpi_nproc()-1)+" rank(s) wait. Assembly stays parallel; the "
+			 "solve does not scale. Use petsc_mumps for a genuinely distributed solve.")
+		# Freeing the other cores only helps if rank 0 is allowed to use them, and Open MPI binds by
+		# core at -n 2 and by socket above it. pyoomph cannot change that from inside the process:
+		# binding is applied by mpirun before exec.
+		if hasattr(os,"sched_getaffinity"):
+			allowed=len(os.sched_getaffinity(0))
+			total=os.cpu_count() or allowed
+			if allowed<total:
+				msg+=("\n      Rank 0 may use "+str(allowed)+" of "+str(total)+" CPUs, so its threads cannot "
+					  "take the cores the waiting ranks give up. Re-run with 'mpirun --bind-to none' and "
+					  "set the thread count via problem.set_num_threads(...).")
+		print(msg,flush=True)
+
+	def _solve_distributed_on_root(self, op_flag: int, allow_permutations: int, n: int, nnz_local: int, nrow_local: int, first_row: int, values: NPFloatArray, col_index: NPIntArray, row_start: NPIntArray, b: NPFloatArray, nprow: int, npcol: int, doc: int, data: NPUInt64Array, info: NPIntArray)->None:
+		"""Gather the row-distributed system onto rank 0, solve it there, scatter the solution back.
+
+		oomph-lib routes every run with nproc>1 through the distributed entry point, whether or not the
+		problem was distributed (SuperLUSolver::solve branches on nproc(), not on the mesh), so a serial
+		backend is otherwise unusable under mpirun at all. This makes it usable: the element loop is
+		still split across the ranks, only the factorisation is serialised.
+
+		Nothing here writes ``data`` or ``info``. ``data`` arrives as None -- pyoomph's shim never puts a
+		handle there, which is also why op_flag==3 never arrives (oomph guards its cleanup on that same
+		handle being non-null).
+		"""
+		import numpy
+		from ..generic.mpi import (get_mpi_rank,get_mpi_nproc,mpi_row_layout,mpi_gather_csr_rows,
+								   mpi_gather_vector,mpi_scatter_vector,mpi_share_any_failure)
+		# Every branch below is decided either on op_flag (which oomph passes identically to all ranks)
+		# or on the agreed outcome code. Nothing branches on a local count.
+		if op_flag==3:
+			self._gather_layout=None
+			return
+		if op_flag not in (1,2):
+			raise RuntimeError("Cannot handle op_flag "+str(op_flag)+" in the gather-to-root solve")
+		if get_mpi_nproc()<=1:
+			# Only reachable if a solver was forced to Distributed on a single process; the "local"
+			# block is then the whole system and there is nothing to gather.
+			self.solve_serial(op_flag,n,nnz_local,1 if op_flag==2 else 0,values,col_index,row_start,b,n,1)
+			return
+		# Replicated condition, checked before the first collective so all ranks refuse together. An
+		# augmented handler's custom solve routine would run on rank 0 alone while it reaches back into
+		# the problem, which is collective; the custom assembler is not supported under MPI anyway.
+		# Deflation used to be refused here for the same reason and is not any more: it needs no
+		# re-solve, only a rescale of the scattered increment, which every rank does on its own block
+		# below.
+		if self._custom_solve_routine_active():
+			raise RuntimeError("An augmented assembly handler's custom solve routine cannot be used "
+							   "together with a linear solver that gathers the system onto rank 0 under "
+							   "MPI: it would run on rank 0 only. Use petsc_mumps, or run serially.")
+
+		rank=get_mpi_rank()
+		error:BaseException | None=None
+		if op_flag==1:
+			self._report_gather_to_root_once(n)
+			layout=mpi_row_layout(n,first_row,nrow_local,nnz_local)
+			assert layout is not None
+			self._gather_layout=layout
+			gathered=mpi_gather_csr_rows(layout,values,col_index,row_start)
+			if rank==0:
+				assert gathered is not None
+				vals_g,cols_g,rs_g=gathered
+				try:
+					# The argument convention is the one oomph uses serially for a CRDoubleMatrix
+					# (linear_solver.cc:2261-2264, 2303-2314): CSR data through the SuperLU-named
+					# (values, rowind, colptr) slots, nrhs=0 and b unused on a factorise, transpose=1.
+					self.solve_serial(1,n,layout.nnz_total,0,vals_g,cols_g,rs_g,_EMPTY_F64,n,1)
+				except BaseException as e:
+					error=e
+			code=self._agree_on_gathered_outcome(0 if error is None else (1 if isinstance(error,SolverError) else 2))
+		else:
+			layout=self._gather_layout
+			# Replicated: op_flag==1 always precedes a back-substitution (oomph gates the call on the
+			# factorisation having been allocated) and sets the layout on every rank before it can fail.
+			if layout is None:
+				raise RuntimeError("A gathered back-substitution was requested without a preceding "
+								   "gathered factorisation. Something solved with this backend outside "
+								   "the distributed path in between.")
+			local_code=0
+			if len(b)!=int(layout.vec_counts[rank]):
+				error=RuntimeError("The gathered layout expects "+str(int(layout.vec_counts[rank]))+
+								   " local rows on this rank, but the right-hand side has "+str(len(b))+".")
+				local_code=2
+			b_global=mpi_gather_vector(layout,b if local_code==0 else numpy.zeros(int(layout.vec_counts[rank])))
+			if rank==0 and local_code==0:
+				assert b_global is not None
+				try:
+					# The plain solve only: the Newton-step post-processing happens after the scatter,
+					# on every rank's own block, because it reduces.
+					self._suppress_newton_step_postprocessing=True
+					try:
+						self.solve_serial(2,n,0,1,_EMPTY_F64,_EMPTY_I32,_EMPTY_I32,b_global,n,1)
+					finally:
+						self._suppress_newton_step_postprocessing=False
+				except BaseException as e:
+					error=e
+					local_code=1 if isinstance(e,SolverError) else 2
+			code=self._agree_on_gathered_outcome(local_code)
+			if code==0:
+				mpi_scatter_vector(layout,b_global,b)
+				# After the scatter, not before: every rank now holds its own row block of the
+				# increment and can reduce the one dot product deflation needs. Doing it on rank 0
+				# inside the gathered solve would be a collective inside a single-rank branch.
+				b[:]=self._postprocess_newton_step(b,first_row=int(layout.vec_displs[rank]),reduce_dot=True)
+		if code==0:
+			return
+		if code==1:
+			# A SolverError is left to the shim in src/nanobind/solver.cpp, which MPI_Allreduces the
+			# "did this rank report a solver failure" flag right after this call and turns it into a
+			# retryable NewtonSolverError on every rank -- it says so explicitly, for exactly this case.
+			# So only rank 0 raises, and b keeps the right-hand side rather than a fabricated solution:
+			# if anything ever swallowed the NewtonSolverError, a bounded wrong step is far easier to
+			# notice than a zero one, which looks like convergence.
+			self._gather_layout=None
+			if error is not None:
+				raise error
+			return
+		# Anything else cannot go through the shim: it rethrows a non-SolverError BEFORE reaching its
+		# Allreduce, so rank 0 would unwind while the others sat in it. Agree here instead.
+		self._gather_layout=None
+		mpi_share_any_failure(error,context="solving the gathered linear system on rank 0")
+
+	#################### A system built in Python, solved across the ranks ####################
+
+	def solves_python_built_systems_distributed(self)->bool:
+		"""Can this backend factorise a row-distributed system that Python, not oomph-lib, assembled?
+
+		Separate from :py:attr:`solves_natively_distributed`, which is about the Newton solve reaching
+		:py:meth:`solve_distributed` from C++. Only a backend that overrides
+		:py:meth:`solve_python_built_distributed` answers yes; everything else gets the replicating
+		default below, which is correct but does the same factorisation on every rank.
+		"""
+		return False
+
+	def solve_python_built_distributed(self,ntot:int,nrow_local:int,first_row:int,mat_local:"Any",b_local:NPFloatArray)->NPFloatArray:
+		"""Solve ``A x = b`` for a system assembled in PYTHON and row-distributed across the ranks.
+
+		``mat_local`` is this rank's ``(nrow_local, ntot)`` CSR block with GLOBAL column indices -- the
+		layout oomph-lib's own distributed assembly produces and the one PETSc's MPIAIJ wants -- and
+		``b_local`` its matching row block. Returns this rank's block of the solution.
+
+		Collective: every rank must call it, with the same ``ntot``.
+
+		This default replicates rather than parallelising: it allgathers the whole square system onto
+		every rank and calls :py:meth:`solve_serial` there, which is what PeriodicDrivingResponse used
+		to do inline for a system it had built globally in the first place. It is the right fallback
+		because it asks nothing of a backend beyond a working serial solve, so pardiso/scipy/accelerate
+		keep working under ``--distribute``; it is a fallback because nproc identical factorisations is
+		not what ``mpirun -n 8`` was asking for. PETSc overrides it.
+		"""
+		from ..generic.mpi import get_mpi_nproc,mpi_allgather_square_csr,mpi_allgather_vector
+		mat_g=mpi_allgather_square_csr(ntot,first_row,nrow_local,mat_local,
+									   context="replicating a Python-built system on every rank").tocsr()
+		b_g=mpi_allgather_vector(ntot,first_row,nrow_local,b_local,
+								 context="replicating a Python-built right-hand side on every rank")
+		if get_mpi_nproc()>1:
+			self._report_replicated_python_solve_once(ntot)
+		# The factorisation slot is shared with the gathered Newton path, and this writes it with a
+		# system of a completely different size. Say so, so that a later gathered back-substitution
+		# fails loudly rather than silently against these factors -- see _note_external_serial_solve.
+		self._note_external_serial_solve()
+		sol=numpy.array(b_g,dtype=numpy.float64,copy=True)
+		self.solve_serial(1,ntot,mat_g.nnz,1,mat_g.data,mat_g.indices,mat_g.indptr,sol,0,1)
+		self.solve_serial(2,ntot,mat_g.nnz,1,mat_g.data,mat_g.indices,mat_g.indptr,sol,0,1)
+		return numpy.ascontiguousarray(sol[first_row:first_row+nrow_local])
+
+	_replicated_python_solve_reported:bool=False
+
+	def _report_replicated_python_solve_once(self,n:int)->None:
+		"""Say once, on rank 0, that a Python-built system is being solved redundantly on every rank."""
+		if self._replicated_python_solve_reported:
+			return
+		self._replicated_python_solve_reported=True
+		from ..generic.mpi import get_mpi_rank,get_mpi_nproc
+		if get_mpi_rank()!=0 or self.problem.is_quiet():
+			return
+		print("NOTE: the linear solver '"+str(getattr(self,"idname",type(self).__name__))+"' cannot "
+			  "factorise a distributed system that pyoomph assembled in Python, so this one ("+str(n)+
+			  " rows) is replicated onto every rank and solved "+str(get_mpi_nproc())+" times over. "
+			  "Assembly stays parallel; the solve does not. Use petsc_mumps for a genuinely distributed "
+			  "solve.",flush=True)
 
 	@classmethod
 	def register_solver(cls,*,override:bool=False)->Callable[[_TypeGenericLASolver],_TypeGenericLASolver]:
@@ -120,9 +582,12 @@ class GenericLinearSystemSolver:
 		if name in GenericLinearSystemSolver._registered_solvers.keys():
 			return GenericLinearSystemSolver._registered_solvers[name](problem)
 		else:
-			libname=name
-			if libname=="petsc_mumps":
-				libname="petsc"
+			# The module a backend lives in, where it is not simply named after it. superlu/umfpack
+			# were only ever registered by accident: pyoomph/__init__.py imports solvers.scipy inside
+			# its superlu fallback, and solvers.pardiso pulls it in for the eigensolver. Under mpirun
+			# the default cascade picks petsc_mumps, so neither happens and an explicit --superlu then
+			# failed with "No module named 'pyoomph.solvers.superlu'".
+			libname={"petsc_mumps":"petsc","superlu":"scipy","umfpack":"scipy"}.get(name,name)
 			try:
 				import importlib
 				#__import__(name)
@@ -135,7 +600,7 @@ class GenericLinearSystemSolver:
 				raise RuntimeError(_unavailable_solver_message("Linear Algebra solver",name,list(GenericLinearSystemSolver._registered_solvers.keys()),e)) from e
 
 
-	def set_num_threads(self,nthreads:Optional[int]) -> None:
+	def set_num_threads(self,nthreads:int | None) -> None:
 		pass
 
 ##########
@@ -147,14 +612,38 @@ class EigenMatrixManipulatorBase:
 		super(EigenMatrixManipulatorBase, self).__init__()
 		self.problem=problem
 
-	def resolve_equations_by_name(self,name:str) -> Set[int]:
+	def _not_present_locally(self,mesh:Any=None)->bool:
+		"""Whether a named part of the mesh is simply absent from THIS rank.
+
+		Only ever true on a distributed problem. A corner interface such as ``domain/bottom/left`` is a
+		single point and so belongs to exactly one partition; on the others the submesh is either
+		missing or present but empty, and asking it for its fields reports none.
+
+		Distinguishing that from a mistyped field name is not possible from here, so a distributed run
+		trades the typo diagnostic for the ability to run at all. It has to: raising on the ranks that
+		do not hold the piece is not a clean error but a SPLIT, with those ranks unwinding while the
+		owner walks into the next collective alone. That is how this surfaced -- as MPI_ERR_BUFFER out
+		of PETSc, several stack frames away from the name that could not be resolved.
+		"""
+		if not self.problem.is_distributed():
+			return False
+		return mesh is None or mesh.nelement()==0
+
+	def resolve_equations_by_name(self,name:str) -> set[int]:
+		"""The global equation numbers of the dofs named by e.g. ``domain/left/velocity_y``.
+
+		On a distributed problem this returns only what the CALLING RANK can see, which is the whole
+		point: the caller restricts itself to the rows it owns anyway, and every owned row is reachable
+		from a local non-halo element. A part of the mesh that lives entirely on another rank must
+		therefore resolve to nothing here rather than to an error -- see _not_present_locally().
+		"""
 		from ..generic.problem import Problem
 		from .. import _pyoomph_core as _pyoomph
 		splt=name.split("/")
-		root=self.problem
+		root:"Problem | AnyMesh"=self.problem
 		fieldname=None
 		#print("IN ",name)
-		for i,k in enumerate(splt):			
+		for i,k in enumerate(splt):
 			if not isinstance(root,ODEStorageMesh):
 				nextone=root.get_mesh(k,return_None_if_not_found=True)
 				if nextone is None and root==self.problem:
@@ -169,7 +658,9 @@ class EigenMatrixManipulatorBase:
 				nextone=None
 			if nextone is None:
 				if i<len(splt)-1:
-					print("Splitted is :",splt)					
+					if self._not_present_locally():
+						return set()
+					print("Splitted is :",splt)
 					raise RuntimeError("Cannot access the mesh "+str("/".join(splt[0:i-1]))+" to access the degrees of freedom "+str(name))
 				else:
 					fieldname=splt[-1]
@@ -181,14 +672,18 @@ class EigenMatrixManipulatorBase:
 		assert isinstance(root,_pyoomph.Mesh)
 		fi = root.get_field_information()
 		if fieldname not in fi.keys():
+			# An EMPTY submesh reports no fields at all, which is not the same as the user naming a
+			# field that does not exist.
+			if self._not_present_locally(root):
+				return set()
 			raise RuntimeError("Cannot find field "+str(fieldname)+" in mesh "+root.get_full_name())
-		res:Set[int]=set()
+		res:set[int]=set()
 		if  isinstance(root,ODEStorageMesh):
-			ode = root.get_element()
-			_, inds = ode._ode_elem_to_numpy()
+			odeelem = root.get_element()
+			_, inds = odeelem._ode_elem_to_numpy()
 			if not fieldname in inds.keys():
 				raise RuntimeError("Cannot get the field '"+fieldname+"' on ODE domain "+root.get_full_name())
-			eqn=ode.internal_data_pt(inds[fieldname]).eqn_number(0)
+			eqn=odeelem.internal_data_pt(inds[fieldname]).eqn_number(0)
 			if eqn>=0:
 				res.add(eqn)
 		else:
@@ -228,15 +723,29 @@ class EigenMatrixManipulatorBase:
 						raise RuntimeError("DISCONT FIELDS HERE")
 		return res
 
-	def apply_on_J_and_M(self,solver:"GenericEigenSolver",J:DefaultMatrixType,M:DefaultMatrixType)->Tuple[DefaultMatrixType,DefaultMatrixType]:
+	def apply_on_J_and_M(self,solver:"GenericEigenSolver",J:DefaultMatrixType,M:DefaultMatrixType)->tuple[DefaultMatrixType,DefaultMatrixType]:
 		return J,M
+
+	def apply_on_distributed_J_and_M(self,solver:"GenericEigenSolver",J:Any,M:Any)->tuple[Any,Any]:
+		"""Counterpart of apply_on_J_and_M for a row-partitioned eigenproblem.
+
+		J and M are the eigensolver backend's own matrices (a petsc4py ``Mat`` for the SLEPc solver),
+		not scipy ones: on a distributed problem no rank holds the whole matrix, so the row surgery
+		apply_on_J_and_M does has to happen where the ownership range is known. Only the backend's
+		matrix interface is used here, so this module still does not import PETSc.
+
+		Manipulators that have no distributed equivalent inherit this and stop the run with a clear
+		message rather than silently leaving the constraint unapplied.
+		"""
+		raise RuntimeError(type(self).__name__+" cannot be applied to a distributed (MPI) eigenproblem yet. Run the eigenproblem without --distribute, or drop the manipulator.")
 
 
 class EigenMatrixSetDofsToZero(EigenMatrixManipulatorBase):
-	def __init__(self,problem:"Problem",*doflist:str):
+	def __init__(self,problem:"Problem",*doflist:str | int):
 		super(EigenMatrixSetDofsToZero, self).__init__(problem)
-		self.doflist=set(doflist)
-		self.zeromap:Set[int]=set()
+		self.doflist:set[str | int]=set(doflist)
+		self.zeromap:set[int]=set()
+		self.last_zeroed_rows:int=0
 
 
 	def setcsrrow2id(self,amat:DefaultMatrixType, rowind:int):
@@ -285,9 +794,10 @@ class EigenMatrixSetDofsToZero(EigenMatrixManipulatorBase):
 
 		return A
 
-	def apply_on_J_and_M(self,solver:"GenericEigenSolver",J:DefaultMatrixType,M:DefaultMatrixType) -> Tuple[DefaultMatrixType, DefaultMatrixType]:
-		self.zeromap:Set[int]=set()
+	def _resolve_zeromap(self)->set[int]:
+		"""The global equation numbers this manipulator constrains."""
 		from .. import _pyoomph_core as _pyoomph
+		zeromap:set[int]=set()
 		for d in self.doflist:
 			if isinstance(d,str):
 				eqs=self.resolve_equations_by_name(d)
@@ -295,7 +805,30 @@ class EigenMatrixSetDofsToZero(EigenMatrixManipulatorBase):
 				eqs=set([d])
 			if  _pyoomph.get_verbosity_flag() != 0:
 				print("INFO ",d,eqs)
-			self.zeromap=self.zeromap.union(eqs)
+			zeromap=zeromap.union(eqs)
+		return zeromap
+
+	def apply_on_distributed_J_and_M(self,solver:"GenericEigenSolver",J:Any,M:Any) -> tuple[Any, Any]:
+		# Same constraint as the scipy version below -- J's row becomes delta_ij and M's becomes zero --
+		# expressed as the backend's own row operation, which knows the ownership range.
+		#
+		# Restricted to locally owned rows on purpose. resolve_equations_by_name() walks the local
+		# elements, which on a distributed mesh includes halo elements, so it also reports equation
+		# numbers this rank does not own; those rows belong to the rank that does own them, and that rank
+		# reaches them through its own non-halo elements. Filtering here is therefore complete as well as
+		# safe, and it keeps the call free of off-process row communication.
+		_,nrow_local,first_row,_=solver.get_eigen_row_layout()
+		zeromap=self._resolve_zeromap()
+		self.zeromap=zeromap
+		rows=sorted(r for r in zeromap if first_row<=r<first_row+nrow_local)
+		self.last_zeroed_rows=len(rows)   # so a test can tell "applied nothing here" from "never ran"
+		# Collective on both matrices, so every rank calls them even with nothing of its own to zero.
+		J.zeroRows(rows,diag=1.0)
+		M.zeroRows(rows,diag=0.0)
+		return J,M
+
+	def apply_on_J_and_M(self,solver:"GenericEigenSolver",J:DefaultMatrixType,M:DefaultMatrixType) -> tuple[DefaultMatrixType, DefaultMatrixType]:
+		self.zeromap=self._resolve_zeromap()
 		#print("GOING TO SET TO ZERO",self.zeromap)
 		N=J.shape[0]
 		Adiag=numpy.ones(N)
@@ -309,10 +842,10 @@ class EigenMatrixSetDofsToZero(EigenMatrixManipulatorBase):
 		
 
 
-	def apply_on_J_and_M___OLD(self,solver:"GenericEigenSolver",J:DefaultMatrixType,M:DefaultMatrixType) -> Tuple[DefaultMatrixType, DefaultMatrixType]:
+	def apply_on_J_and_M___OLD(self,solver:"GenericEigenSolver",J:DefaultMatrixType,M:DefaultMatrixType) -> tuple[DefaultMatrixType, DefaultMatrixType]:
 		# TODO OLD VERSION: Slow, remove
 		from .. import _pyoomph_core as _pyoomph
-		self.zeromap:Set[int]=set()
+		self.zeromap=set()
 		for d in self.doflist:
 			if isinstance(d,str):
 				eqs=self.resolve_equations_by_name(d)
@@ -335,22 +868,119 @@ class EigenMatrixSetDofsToZero(EigenMatrixManipulatorBase):
 
 
 class GenericEigenSolver:
-	_registered_solvers:Dict[str,Type["GenericEigenSolver"]]={}
+	_registered_solvers:dict[str,type["GenericEigenSolver"]]={}
 	idname:str
 	def __init__(self,problem:"Problem"):
 		self.problem=problem
-		self.matrix_manipulators:List[EigenMatrixManipulatorBase]=[]
+		self.matrix_manipulators:list[EigenMatrixManipulatorBase]=[]
 		self.real_contribution:str=""
-		self.imag_contribution:Optional[str]=None
-		self.ncv:Optional[int]=None
+		self.imag_contribution:str | None=None
+		self.ncv:int | None=None
+		self.last_assembly_was_complex:bool=False
+		#: Use a symmetric eigensolver (scipy eigsh / SLEPc GHEP) when J and M are both symbolically
+		#: proven symmetric. Those drivers additionally need M positive semi-definite, which the
+		#: symmetry proof does not give: the assembled M is screened for it numerically before the
+		#: symmetric driver is engaged (see _mass_matrix_can_be_positive_semidefinite).
+		self.exploit_proven_symmetry:bool=True
+		#: Outcome/reason of the last _use_symmetric_eigensolver_now() call (None = never asked);
+		#: also read by the Pardiso/Accelerate shift-invert operators to pick a symmetric mode.
+		self.last_symmetry_decision:Optional[bool]=None
+		self.last_symmetry_decision_reason:str=""
 
-	def _before_assigning_equation_numbers(self)->None:		
+	def _use_symmetric_eigensolver_now(self)->bool:
+		"""Per-solve decision whether the eigenproblem J,M pair is proven symmetric.
+
+		Requires BOTH matrices proven symmetric, a purely real assembly (imag_contribution unset -
+		expansion-mode residual sets carry no symmetry proofs anyway) and no matrix manipulators
+		(EigenMatrixSetDofsToZero replaces J rows by identity rows, which breaks symmetry after
+		assembly). Positive semi-definiteness of M is assumed, not proven - see exploit_proven_symmetry.
+		"""
+		if not self.exploit_proven_symmetry:
+			self.last_symmetry_decision,self.last_symmetry_decision_reason=False,"disabled by exploit_proven_symmetry=False"
+			return False
+		if self.imag_contribution is not None:
+			self.last_symmetry_decision,self.last_symmetry_decision_reason=False,"complex assembly (imag_contribution set)"
+			return False
+		if self.matrix_manipulators:
+			self.last_symmetry_decision,self.last_symmetry_decision_reason=False,"matrix manipulators break symmetry after assembly"
+			return False
+		jac_sym,mass_sym=self.problem._get_proven_matrix_symmetry(self.real_contribution)
+		decision=jac_sym and mass_sym
+		self.last_symmetry_decision=decision
+		self.last_symmetry_decision_reason="J and M proven symmetric" if decision else "J or M not proven symmetric (or augmented/custom assembly)"
+		return decision
+
+	def _mass_matrix_can_be_positive_semidefinite(self,M:Any,first_row:int=0,collective:bool=True)->bool:
+		"""Cheap necessary condition for a symmetric M to be positive semi-definite.
+
+		_use_symmetric_eigensolver_now only establishes that M is SYMMETRIC, but the symmetric drivers
+		use M as an inner product and need it positive semi-definite on top of that. PSD was initially
+		just assumed, on the grounds that partial_t generates Gram matrices - which is false as soon as
+		partial_t couples two different fields. The pendulum ODE (phi'=psi, psi'=-sin(phi)) assembles
+		M=[[0,1],[1,0]]: symmetric, eigenvalues +-1, and SLEPc aborts with "The inner product is not
+		well defined: indefinite matrix".
+
+		Screened in one pass over the stored entries: a PSD matrix has M[i,i]>=0 everywhere, and a
+		vanishing M[i,i] forces the whole of row i to vanish with it. Necessary, not sufficient - it
+		cannot certify PSD, it only catches the matrices that certainly are not, which is what the
+		cross-coupled mass matrices are.
+
+		``first_row`` is this rank's global row offset when M holds only a local row block (columns are
+		global either way); the verdict is then reduced across ranks, so all of them engage or none do.
+
+		``collective=False`` skips that reduction, and is required whenever M is already a whole global
+		matrix that only ONE rank holds -- the gathered path in ScipyEigenSolver, where rank 0 re-enters
+		solve() with the assembled system while every other rank waits in mpi_share_root_failure. The
+		reduction has no partner there, and the two ranks deadlock in different collectives (rank 0 in
+		this allreduce, the rest in that broadcast) until the test harness times out at 900 s.
+		"""
+		Mc=M.tocsr() if not hasattr(M,"indptr") else M
+		ok=True
+		if Mc.nnz>0:
+			absM=abs(Mc)
+			scale=absM.max()
+			if scale>0:
+				tol=1e-12*scale
+				diag=Mc.diagonal(first_row)
+				rowsum=numpy.asarray(absM.sum(axis=1)).ravel()[:len(diag)]
+				# A zero row is fine (pinned dofs, pressure): it only makes M singular, which
+				# shift-invert handles. A zero DIAGONAL with a non-zero row is not.
+				if bool((diag<-tol).any()) or bool(((diag<=tol)&(rowsum>tol)).any()):
+					ok=False
+		if not collective:
+			return ok
+		return not _mpi_any_rank(not ok)
+
+	@property
+	def problem(self)->"Problem":
+		# See GenericLinearSystemSolver.problem: kept as a weakref so this solver does not
+		# form an uncollectible Problem<->solver reference cycle.
+		p=self._problem_wr()
+		assert p is not None, "The Problem this solver belonged to has already been destroyed"
+		return p
+
+	@problem.setter
+	def problem(self,p:"Problem | None"):
+		self._problem_wr=weakref.ref(p) if p is not None else (lambda:None)
+
+	def _before_assigning_equation_numbers(self)->None:
 		pass
 
 	def supports_target(self)->bool:
 		return False
 
-	def setup_matrix_contributions(self,real_contribution:str,imag_contribution:Optional[str]=None):
+	def supports_complex_target(self)->bool:
+		"""Whether a target with a nonzero IMAGINARY part is honoured, not just a real one.
+
+		Separate from supports_target() because a real PETSc/SLEPc build answers yes to that one and
+		then silently drops the imaginary part of the target (petsc4py casts a numpy complex to its
+		real ScalarType with nothing but a ComplexWarning). A Hopf's left eigenvector then came back as
+		some unrelated real mode - see NormalFormCalculator.get_left_eigenvector, which falls back to
+		scipy rather than believe it.
+		"""
+		return False
+
+	def setup_matrix_contributions(self,real_contribution:str,imag_contribution:str | None=None):
 		self.real_contribution=real_contribution
 		self.imag_contribution=imag_contribution
 	
@@ -368,7 +998,7 @@ class GenericEigenSolver:
 			return subclass
 		return decorator
 
-	def solve(self,neval:int,shift:Optional[Union[float,complex]]=None,sort:bool=True,which:EigenSolverWhich="LM",OPpart:Optional[Literal["r","i"]]=None,v0:Optional[Union[NPComplexArray,NPFloatArray]]=None,target:Optional[complex]=None,custom_J_and_M:Optional[Tuple[DefaultMatrixType]]=None,with_left_eigenvectors:bool=False,quiet:bool=True)->Tuple[NPComplexArray,NPComplexArray,DefaultMatrixType,DefaultMatrixType]:
+	def solve(self,neval:int,shift:float | complex | None=None,sort:bool=True,which:EigenSolverWhich="LM",OPpart:Literal["r", "i"] | None=None,v0:NPComplexArray | NPFloatArray | None=None,target:complex | None=None,custom_J_and_M:tuple[DefaultMatrixType,DefaultMatrixType] | None=None,with_left_eigenvectors:bool=False,quiet:bool=True)->tuple[NPComplexArray,NPComplexArray,DefaultMatrixType,DefaultMatrixType]:
 		raise RuntimeError("Here")
 	
 	@staticmethod
@@ -398,40 +1028,187 @@ class GenericEigenSolver:
 		self.matrix_manipulators.clear()
 
 
-	def get_J_M_n_and_type(self)->Tuple[DefaultMatrixType,DefaultMatrixType,int,bool]:
+	def get_eigen_row_layout(self)->tuple[int,int,int,bool]:
+		"""Row layout ``(n, nrow_local, first_row, distributed)`` of the eigenproblem matrices.
+
+		They are assembled on the problem's BASE dof distribution, which is row-partitioned once the
+		problem has been distributed: each rank then holds only rows ``first_row .. first_row+nrow_local-1``,
+		with GLOBAL column indices. Serially, and under MPI without ``--distribute`` (where oomph-lib
+		redistributes the assembled matrices back to a globally replicated form), ``nrow_local == n``,
+		``first_row == 0`` and ``distributed`` is False.
+
+		"Base" matters while a bifurcation tracker is installed: the problem's own dof distribution is
+		then the augmented one (base dofs plus the eigenvector blocks and the scalars), but the
+		eigenproblem assembled is the base state's -- see Problem::BaseDofDistributionScope.
+		"""
+		return self.problem._get_base_dof_distribution_info() #type:ignore
+
+	def _solve_gathered_on_root(self,neval:int,**kwargs:Any)->tuple[NPComplexArray,NPComplexArray,DefaultMatrixType,DefaultMatrixType]:
+		"""Solve a distributed eigenproblem by gathering J and M onto rank 0.
+
+		Under --distribute each rank assembles only its own (nrow_local x n) row block, which a serial
+		eigensolver cannot work with. Gathering them into one square matrix on rank 0 and solving there
+		is not parallel -- SLEPc is, and is preferred -- but it is correct, and it is the difference
+		between the serial backends (scipy, pardiso, spectra) being usable under --distribute and not
+		being usable at all.
+		"""
+		from ..generic.mpi import (get_mpi_rank,get_mpi_world_comm,mpi_row_layout,mpi_gather_csr_rows,
+								   mpi_share_root_failure)
+		from scipy.sparse import csr_matrix #type:ignore
+		# Collective, and it must run on every rank: it is what assembles the local blocks.
+		J,M,n,_is_complex=self.get_J_M_n_and_type()
+		_n,nrow_local,first_row,_distributed=self.get_eigen_row_layout()
+
+		def _gather(mat:DefaultMatrixType):
+			layout=mpi_row_layout(n,first_row,nrow_local,mat.nnz)
+			assert layout is not None
+			got=mpi_gather_csr_rows(layout,mat.data,mat.indices,mat.indptr,
+									context="gathering the eigenproblem onto rank 0")
+			if got is None:
+				return None
+			vals,cols,rs=got
+			return csr_matrix((vals,cols,rs),shape=(n,n))
+
+		Jg,Mg=_gather(J),_gather(M)
+		evals:Any=None
+		evects:Any=None
+		error:BaseException | None=None
+		# Everything inside this block runs on rank 0 ALONE, with the other ranks already waiting at
+		# mpi_share_root_failure below. Nothing called from here may be collective: the two sides then
+		# block in different collectives and the job hangs rather than failing, which is how the
+		# distributed scipy eigen tests turned into 900 s timeouts (see the PSD screen's `collective`).
+		if get_mpi_rank()==0:
+			assert Jg is not None and Mg is not None
+			try:
+				# get_J_M_n_and_type() skips the matrix manipulators when the problem is distributed --
+				# they rewrite whole rows of a square global matrix, which is not what a rank holds
+				# there. Here it is, so they apply.
+				for manip in self.matrix_manipulators:
+					Jg,Mg=manip.apply_on_J_and_M(self,Jg,Mg)
+				evals,evects,_,_=self.solve(neval,custom_J_and_M=(Jg,Mg),**kwargs)
+			except BaseException as e:
+				error=e
+		# Ends the job on every rank if rank 0 failed, rather than leaving them in the broadcast below.
+		mpi_share_root_failure(error,context="solving the gathered eigenproblem on rank 0")
+		comm=get_mpi_world_comm()
+		assert comm is not None
+		# Eigenvectors are contractually replicated at full global length on every rank (see
+		# Problem.rotate_eigenvectors), so a broadcast is exactly the right shape here.
+		evals,evects=comm.bcast((evals,evects) if get_mpi_rank()==0 else None,root=0) #type:ignore
+		# The LOCAL blocks are returned, not the gathered ones: the caller's accuracy report multiplies
+		# them by a globally replicated eigenvector and reduces over the ranks, which only works if each
+		# rank contributes its own rows.
+		return evals,evects,J,M
+
+	def get_parallel_row_split(self,n:int)->tuple[int,int,bool]:
+		"""``(nrow_local, first_row, parallel)`` for the PETSc/MPI matrices of an n-row eigenproblem.
+
+		Under ``mpirun -n>1`` such a system is ALWAYS solved in parallel, on COMM_WORLD, whether or not
+		the mesh was distributed. The two cases differ only in where the row split comes from:
+
+		- ``--distribute``: from oomph's dof distribution, because that is how the matrices were
+		  assembled and each rank genuinely holds only its own rows.
+		- plain ``mpirun``: oomph assembles in parallel and then redistributes the result back to a
+		  globally replicated form, so every rank holds the whole matrix. A contiguous split of ``n`` is
+		  imposed here and each rank contributes only its slice (see :py:meth:`local_row_block`).
+		  Nothing is recomputed; the slicing is a view onto a matrix the rank already has.
+
+		The replicated case is in one respect the safer of the two: each row is contributed by exactly
+		one rank, from matrices that are identical across ranks, so the blocks cannot disagree.
+
+		What this does NOT save is matrix memory -- every rank still stores the whole J and M. The win is
+		the factorisation, whose factors are typically far larger than the matrix and which is where both
+		the time and the real memory go.
+		"""
+		from ..generic.mpi import get_mpi_nproc,get_mpi_rank
+		nproc=get_mpi_nproc()
+		if nproc<=1:
+			return n,0,False
+		_,nrow_local,first_row,distributed=self.get_eigen_row_layout()
+		if not distributed:
+			rank=get_mpi_rank()
+			base,rem=divmod(n,nproc)
+			nrow_local=base+(1 if rank<rem else 0)
+			first_row=rank*base+min(rank,rem)
+		return nrow_local,first_row,True
+
+	@staticmethod
+	def local_row_block(mat:DefaultMatrixType,first_row:int,nrow_local:int)->DefaultMatrixType:
+		"""This rank's contiguous slice of rows of a GLOBALLY assembled matrix.
+
+		Column indices stay global, which is what MatMPIAIJSetPreallocationCSR wants; only the row
+		pointers are rebased, which scipy's slicing does.
+		"""
+		sub=mat[first_row:first_row+nrow_local,:]
+		return sub if isinstance(sub,DefaultMatrixType) else sub.tocsr() #type:ignore
+
+	def get_J_M_n_and_type(self)->tuple[DefaultMatrixType,DefaultMatrixType,int,bool]:
+		"""Assemble the eigenproblem's J and M and report the global size and whether they are complex.
+
+		The matrices are ``(nrow_local, n)`` rather than square whenever the problem is distributed;
+		see get_eigen_row_layout(). Every caller that has to know the difference asks for the layout
+		itself, so that the serial shape stays exactly what it always was.
+		"""
 		from scipy.sparse import csr_matrix #type:ignore
 		if not self.problem._set_solved_residual(self.real_contribution,True,False):
 			raise RuntimeError("Cannot set the residual "+self.real_contribution+" for eigen calculation since it has no contribution at all")
-		n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = self.problem.assemble_eigenproblem_matrices(0) #type:ignore		
-		matM=csr_matrix((M_val, M_ci, M_rs), shape=(n, n))	#TODO: Is csr or csc?
-		matJ=csr_matrix((-J_val, J_ci, J_rs), shape=(n, n))
+		n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = self.problem.assemble_eigenproblem_matrices(0) #type:ignore
+		# shape=(M_nr, n), not (n, n): M_nr is the LOCAL row count, and on a distributed problem it is
+		# smaller than n. Passing (n,n) with a short indptr is what made every distributed eigen solve
+		# die inside scipy before the eigensolver was ever reached.
+		matM=csr_matrix((M_val, M_ci, M_rs), shape=(M_nr, n))	#TODO: Is csr or csc?
+		matJ=csr_matrix((-J_val, J_ci, J_rs), shape=(J_nr, n))
 		is_complex=False
-		if self.imag_contribution is not None:      
-			if self.problem._set_solved_residual(self.imag_contribution,False,False):					
+		if self.imag_contribution is not None:
+			if self.problem._set_solved_residual(self.imag_contribution,False,False):
 				matM=cast(csr_matrix,matM.copy())
 				matJ=cast(csr_matrix,matJ.copy())
 				n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = self.problem.assemble_eigenproblem_matrices(0) #type:ignore
-				matMi = csr_matrix((M_val, M_ci, M_rs), shape=(n, n))  # TODO: Is csr or csc?
-				matJi = csr_matrix((-J_val, J_ci, J_rs), shape=(n, n))
-				if M_nzz>0:
+				matMi = csr_matrix((M_val, M_ci, M_rs), shape=(M_nr, n))  # TODO: Is csr or csc?
+				matJi = csr_matrix((-J_val, J_ci, J_rs), shape=(J_nr, n))
+				# Both counts are per-rank, so on a distributed problem a partition whose local block
+				# happens to carry no imaginary entries would answer differently from the others -- and
+				# they would then disagree about whether this is a complex eigenproblem, which is not a
+				# wrong answer but a deadlock, since the two branches issue different collectives
+				# downstream. Decide it globally.
+				has_Mi=_mpi_any_rank(M_nzz>0)
+				has_Ji=_mpi_any_rank(J_nzz>0)
+				if has_Mi:
 					matM=cast(csr_matrix,matM+complex(0,1)*matMi)
 					is_complex = True
-				if J_nzz>0:
+				if has_Ji:
 					matJ =cast(csr_matrix,matJ+ complex(0, 1) * matJi)
 					is_complex=True
 
 		self.problem._set_solved_residual("",True,True)
 
 		#print("Applying Matrix manipulators")
-		for manip in self.matrix_manipulators:
-			#print("APPLY MANIP",manip)
-			#if isinstance(manip,EigenMatrixSetDofsToZero):      
-				#print("APPLY MANIP",manip,manip.doflist)
-			matJ,matM=manip.apply_on_J_and_M(self,matJ,matM)
+		# Skipped, NOT refused, when distributed: these manipulators rewrite whole rows of a square
+		# global matrix, which is not what a rank holds here. The eigensolver applies them afterwards to
+		# its own distributed matrices, where the ownership range is known -- see
+		# apply_on_distributed_J_and_M() and SlepcEigenSolver.solve(). A backend that neither handles
+		# them there nor can work distributed at all is stopped earlier, by distributed_possible().
+		if self.matrix_manipulators and not self.get_eigen_row_layout()[3]:
+			for manip in self.matrix_manipulators:
+				#print("APPLY MANIP",manip)
+				#if isinstance(manip,EigenMatrixSetDofsToZero):
+					#print("APPLY MANIP",manip,manip.doflist)
+				matJ,matM=manip.apply_on_J_and_M(self,matJ,matM)
 
-		if matM.nnz==0: #type:ignore
+		if not _mpi_any_rank(matM.nnz>0): #type:ignore
 			raise RuntimeError("The mass matrix has no entries. This likely means that you do not have any time derivatives in your system")
 
 		if not self.problem.is_quiet():
-			print("Matrices assembled ("+str(matJ.shape[0])+" x "+str(matJ.shape[1])+"). Invoking eigensolver")
+			# Rank 0 only, and the GLOBAL shape: every rank reaching this line would otherwise print its
+			# own local row count, which reads like a much smaller problem than the one being solved.
+			from ..generic.mpi import get_mpi_rank
+			if get_mpi_rank()==0:
+				print("Matrices assembled ("+str(n)+" x "+str(n)+"). Invoking eigensolver")
+		# Recorded so a caller (in practice tests/mpi_eigen_worker.py) can tell which branch was taken.
+		# Under MPI it is agreed across ranks by construction, see the allreduce above.
+		self.last_assembly_was_complex=is_complex
 		return matJ,matM,n,is_complex
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

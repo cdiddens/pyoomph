@@ -1,0 +1,436 @@
+name: Build one wheel per OS and run the test suite
+
+# One button that, per OS, builds a single wheel (Python 3.12 by default) and runs the
+# pytest suite against it - the whole point being that the tests run on the *installed*
+# wheel in cibuildwheel's own throwaway venv, not on the source tree, so nothing in the
+# checkout can shadow the package.
+#
+# The pytest invocation is not repeated here: it comes from pyproject.toml's
+# [tool.cibuildwheel] test-command (`pytest {package}/tests -m "not campaign"`) and
+# test-sources, which is exactly what the release Wheels workflow runs on its Stable ABI
+# wheel. Change it there and both follow.
+#
+# Difference to wheels.yml: this builds only ONE Python version per platform and never
+# uploads anything anywhere. Use it to check a branch; use wheels.yml to ship.
+#
+# One consequence of that shortcut: the wheel built here is a classic, version-specific one
+# even for 3.12. Setting CIBW_CONFIG_SETTINGS as an env var below completely replaces
+# pyproject.toml's [[tool.cibuildwheel.overrides]], including the cp312 wheel.py-api=cp312
+# entry that tags the released wheel cp312-abi3. The compiled code is the same either way -
+# the Stable ABI story is what test_wheels_multiversion.yml exists to check.
+#
+# Eigensolvers, per platform. macOS arm64 downloads the complex PETSc/SLEPc built by
+# prebuild_petsc_slepc.yml and puts it on the test venv's PYTHONPATH, so the suite runs the SLEPc
+# path there instead of skipping it - it is also the platform pyoomph most needs it on, since there
+# is no MKL on Apple silicon and PETSc/MUMPS is what the autodetection then picks for the linear
+# solver as well. Everywhere else the wheel's built-in spectra eigensolver over Pardiso is what
+# runs, which is what a `pip install pyoomph` user gets. Nothing is skipped for a missing SLEPc
+# either way: the tests that need an eigensolver capable of TARGETING an eigenvalue ask for that
+# capability (conftest.has_complex_target_eigensolver), which spectra also has. That the arm64 job
+# really got its PETSc is checked by tests/test_slepc_present.py via PYOOMPH_EXPECT_COMPLEX_SLEPC,
+# because otherwise it would silently fall back to spectra and stay green.
+#
+# The wheel is built with its threaded-assembly backend pinned ON - OpenMP on Linux, GCD
+# on macOS - and the suite run with PYOOMPH_EXPECT_OPENMP / PYOOMPH_EXPECT_THREADED, so
+# tests/test_openmp_present.py asserts instead of skipping: a wheel that silently lost its
+# backend would make --omp N a no-op, which nothing else in this workflow would notice.
+# That requires a threaded-assembly-capable tree (cmake's PYOOMPH_USE_OPENMP /
+# PYOOMPH_USE_GCD, tests/test_openmp_present.py) in whatever `ref` is built.
+#
+# NOTE: GitHub only offers the "Run workflow" button for workflows that exist on the
+# DEFAULT branch, which is why this file lives on main even though development happens on
+# develop. Pick the branch to test via the `ref` input.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or SHA to build and test (defaults to the branch this is dispatched on)
+        required: false
+        type: string
+        default: ""
+      python_version:
+        description: Python version to build the wheel for
+        required: false
+        type: string
+        default: "3.12"
+      prebuild_run_id:
+        description: Optional "Prebuild static CLN/GiNaC" run id to take the CLN/GiNaC artifacts from (defaults to the latest successful run)
+        required: false
+        type: string
+      petsc_prebuild_run_id:
+        description: Optional "Prebuild PETSc/SLEPc" run id to take the macOS arm64 PETSc artifact from (defaults to the latest successful run)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  # gh run list/download below reads another workflow's run artifacts.
+  actions: read
+
+jobs:
+  wheel_and_tests:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    # The suite itself is ~25 minutes; the rest is the wheel build. Generous, because a
+    # cold macOS runner is much slower than a Linux one.
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64
+            runner: ubuntu-latest
+            platform: linux
+            prebuild_artifact: static-ginac-cln-linux-x86_64
+          - label: macos-intel-x86_64
+            runner: macos-15-intel
+            platform: macos
+            prebuild_artifact: static-ginac-cln-macos-intel-x86_64
+          - label: macos-arm64
+            runner: macos-14
+            platform: macos
+            prebuild_artifact: static-ginac-cln-macos-arm64
+            # The one platform that gets PETSc/SLEPc; see the header. The cpXY suffix is appended at
+            # run time, since petsc4py/slepc4py are compiled extension modules.
+            petsc_artifact: petsc-slepc-macos-arm64
+          - label: windows-msys2-ucrt64
+            runner: windows-latest
+            platform: windows
+            prebuild_artifact: static-ginac-cln-windows-msys2-ucrt64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      # A full CPython of the version under test, purely as a DONOR of Tcl/Tk. cibuildwheel tests
+      # Windows wheels with a nuget CPython, which ships without tkinter, so the one test that
+      # imports the bifurcation GUI in-process skipped there and nowhere else; citools/
+      # windows_add_tkinter.py copies the missing pieces across in before-test. Same minor version
+      # on purpose - _tkinter.pyd is version-specific. First, so that the driver interpreter set up
+      # below is the one $pythonLocation ends up pointing at.
+      - name: Set up a Tk donor interpreter (Windows)
+        if: matrix.platform == 'windows'
+        id: tkdonor
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Set up Python
+        # Only the interpreter that *drives* cibuildwheel; the wheel itself is built for
+        # inputs.python_version by cibuildwheel's own managed interpreters.
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Compute the cibuildwheel build selector
+        id: cibw
+        shell: bash
+        env:
+          PYVER: ${{ inputs.python_version }}
+        run: echo "selector=cp${PYVER//./}-*" >> "${GITHUB_OUTPUT}"
+
+      # CLN and GiNaC are not rebuilt here: compiling both from source costs more than the
+      # rest of this workflow put together, and they are exactly the same static libraries
+      # the release wheels are built against. Windows *needs* them (pyproject.toml's
+      # [tool.cibuildwheel.windows] turns PYOOMPH_DOWNLOAD_CLN/GINAC off - there is no MSVC
+      # port of CLN), and using them everywhere keeps this wheel comparable to a shipped one.
+      - name: Resolve prebuild run id
+        id: prebuild
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANUAL_RUN_ID: ${{ inputs.prebuild_run_id }}
+        shell: bash
+        run: |
+          if [[ -n "${MANUAL_RUN_ID}" ]]; then
+            RUN_ID="${MANUAL_RUN_ID}"
+          else
+            RUN_ID="$(gh run list \
+              --workflow prebuild_static_ginac_cln.yml \
+              --repo "${GITHUB_REPOSITORY}" \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+          fi
+
+          if [[ -z "${RUN_ID}" || "${RUN_ID}" == "null" ]]; then
+            echo "Could not resolve a successful prebuild run id - run the 'Prebuild static CLN/GiNaC' workflow first" >&2
+            exit 1
+          fi
+
+          echo "Using prebuild run id ${RUN_ID}"
+          echo "run_id=${RUN_ID}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download the static CLN/GiNaC artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          rm -rf prebuilt
+          mkdir -p prebuilt
+          gh run download "${{ steps.prebuild.outputs.run_id }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --name "${{ matrix.prebuild_artifact }}" \
+            --dir prebuilt
+          find prebuilt -maxdepth 4 -type d | sort
+
+      - name: Install build dependencies (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglu1-mesa-dev libxcursor-dev libopengl0
+
+      # macOS needs no libomp: it threads through GCD/libdispatch (PYOOMPH_USE_GCD below), which links
+      # no OpenMP runtime and so cannot collide with MKL's libiomp5. The static-libomp build that used
+      # to be here is only for the opt-in OpenMP-on-mac path (citools/build_static_libomp.sh,
+      # PYOOMPH_USE_OPENMP=ON).
+
+      - name: Resolve the PETSc/SLEPc prebuild run id
+        if: matrix.petsc_artifact
+        id: petsc_prebuild
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANUAL_RUN_ID: ${{ inputs.petsc_prebuild_run_id }}
+        shell: bash
+        run: |
+          if [[ -n "${MANUAL_RUN_ID}" ]]; then
+            RUN_ID="${MANUAL_RUN_ID}"
+          else
+            RUN_ID="$(gh run list \
+              --workflow prebuild_petsc_slepc.yml \
+              --repo "${GITHUB_REPOSITORY}" \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+          fi
+          [[ -n "${RUN_ID}" && "${RUN_ID}" != "null" ]] || {
+            echo "Could not resolve a successful PETSc prebuild run id - run the 'Prebuild PETSc/SLEPc' workflow first" >&2
+            exit 1; }
+          echo "Using PETSc prebuild run id ${RUN_ID}"
+          echo "run_id=${RUN_ID}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install the PETSc/SLEPc prebuild
+        if: matrix.petsc_artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYVER: ${{ inputs.python_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # petsc4py's extension dlopens Homebrew's libgfortran - MUMPS and ScaLAPACK are Fortran, and
+          # the prebuild runner had it only because it installed gcc to compile them. The image this
+          # job runs on provides no unversioned `gcc` prefix, so the import died with "Library not
+          # loaded: /opt/homebrew/opt/gcc/lib/gcc/current/libgfortran.5.dylib" - and, since every
+          # SLEPc test only asks whether petsc4py imports, as a wall of failures half an hour into
+          # the suite rather than here. Checked, not assumed, for the same reason.
+          brew install gcc || brew link --overwrite gcc
+          test -e "$(brew --prefix gcc)/lib/gcc/current/libgfortran.5.dylib"
+          rm -rf petsc-prebuilt && mkdir -p petsc-prebuilt
+          gh run download "${{ steps.petsc_prebuild.outputs.run_id }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --name "${{ matrix.petsc_artifact }}-cp${PYVER//./}" \
+            --dir petsc-prebuilt
+          # Unpacked at the absolute path it was CONFIGURED with: PETSc bakes the prefix into
+          # petscvariables, the RPATHs and the macOS install_names, so anywhere else fails to import.
+          sudo mkdir -p /opt
+          sudo tar xzf petsc-prebuilt/pyoomph-petsc.tar.gz -C /opt
+          cat /opt/pyoomph-petsc/env.sh
+          set -a; source /opt/pyoomph-petsc/env.sh; set +a
+          # Handed to the SUITE only, through CIBW_TEST_ENVIRONMENT below, and never exported into
+          # the job: a petsc4py on PYTHONPATH during the build would leak into the isolated build
+          # environment cibuildwheel creates, and the wheel itself is built with PYOOMPH_USE_MPI=OFF
+          # and links nothing of PETSc anyway.
+          #
+          # The COMPLEX arch, not env.sh's real one. pyoomph's autodetection takes SLEPc wherever
+          # petsc4py imports, so a real build here would not fall back to spectra for the azimuthal
+          # and Hopf cases - it would run them and truncate every complex target to its real part.
+          COMPLEX_LIB="${PETSC_DIR}/${PETSC_ARCH_COMPLEX}/lib"
+          echo "PYOOMPH_PETSC_TEST_ENV=PYOOMPH_EXPECT_COMPLEX_SLEPC=1 PETSC_DIR=${PETSC_DIR} PETSC_ARCH_REAL=${PETSC_ARCH_REAL} PETSC_ARCH_COMPLEX=${PETSC_ARCH_COMPLEX} PYTHONPATH=${COMPLEX_LIB} DYLD_LIBRARY_PATH=${PETSC_DIR}/mpi/lib:${COMPLEX_LIB}" >> "${GITHUB_ENV}"
+
+      - name: Build and test the wheel (Linux/macOS)
+        if: matrix.platform != 'windows'
+        env:
+          CIBW_BUILD: ${{ steps.cibw.outputs.selector }}
+          CIBW_SKIP: "*-musllinux_*"
+          CIBW_ARCHS: native
+          CIBW_BUILD_FRONTEND: build
+          CIBW_BEFORE_ALL_LINUX: >
+            bash -lc 'if command -v dnf >/dev/null 2>&1; then dnf -y install wget bzip2 patch;
+            elif command -v yum >/dev/null 2>&1; then yum -y install wget bzip2 patch;
+            elif command -v apk >/dev/null 2>&1; then apk add --no-cache wget bzip2 patch;
+            elif command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y wget bzip2 patch;
+            else echo "No supported package manager for before-all" >&2; exit 1; fi'
+          CIBW_BEFORE_TEST_LINUX: >
+            bash -lc 'if command -v dnf >/dev/null 2>&1; then dnf -y install mesa-libGLU libXcursor libglvnd-opengl libXinerama;
+            elif command -v yum >/dev/null 2>&1; then yum -y install mesa-libGLU libXcursor libglvnd-opengl libXinerama;
+            elif command -v apk >/dev/null 2>&1; then apk add --no-cache glu libxcursor libxinerama || apk add --no-cache mesa libxcursor libxinerama || true;
+            elif command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y libglu1-mesa libxcursor1 libopengl0 libxinerama1;
+            else echo "No supported package manager for before-test" >&2; exit 1; fi'
+          CIBW_ENVIRONMENT: >
+            PYOOMPH_GINAC_INCLUDE_DIR=$PWD/prebuilt/GiNaC_static/install/include
+            PYOOMPH_GINAC_LIB_DIR=$PWD/prebuilt/GiNaC_static/install/lib
+            PYOOMPH_CLN_INCLUDE_DIR=$PWD/prebuilt/GiNaC_static/install/include
+            PYOOMPH_CLN_LIB_DIR=$PWD/prebuilt/GiNaC_static/install/lib
+            MACOSX_DEPLOYMENT_TARGET=10.13
+          # cibuildwheel's own macOS repair command, plus a copy: it moves the wheel into --output-dir
+          # only after its TESTS pass, and deletes the temp it was sitting in before the job's later
+          # steps run, so a red macOS job uploaded no wheel at all - exactly the run whose binary is
+          # worth having. {delocate_archs} and the rest are the documented default, unchanged; only
+          # the mkdir and the cp are added. (Windows does the same in its own repair command below;
+          # Linux needs nothing, its wheel arrives the ordinary way.)
+          CIBW_REPAIR_WHEEL_COMMAND_MACOS: >
+            delocate-wheel --require-archs {delocate_archs} -w {dest_dir} -v {wheel} &&
+            mkdir -p "$GITHUB_WORKSPACE/wheelhouse" &&
+            cp {dest_dir}/*.whl "$GITHUB_WORKSPACE/wheelhouse/"
+          # The threaded-assembly backend differs by platform: Linux links libgomp (OpenMP), macOS
+          # threads through GCD/libdispatch and links no OpenMP runtime at all (so nothing collides
+          # with MKL's libiomp5). Both are pinned ON so a runner that silently loses its backend fails
+          # the build instead of shipping a serial wheel.
+          CIBW_CONFIG_SETTINGS: >
+            cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF
+            cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF
+            cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON
+            cmake.define.PYOOMPH_USE_MPI=OFF
+            cmake.define.PYOOMPH_PARANOID=OFF
+            ${{ matrix.platform == 'macos' && 'cmake.define.PYOOMPH_USE_GCD=ON' || 'cmake.define.PYOOMPH_USE_OPENMP=ON' }}
+            cmake.define.PYOOMPH_HAS_SPECTRA=ON
+          # Turns tests/test_openmp_present.py from a skip into a hard failure: the built extension
+          # must report a threaded loop back to Python, not merely have CMake find one. EXPECT_OPENMP
+          # asserts OpenMP specifically (Linux); EXPECT_THREADED asserts either backend (macOS/GCD).
+          # PYOOMPH_PETSC_TEST_ENV is empty on every platform but macOS arm64, where the step
+          # above filled it in with the prebuilt complex PETSc/SLEPc.
+          CIBW_TEST_ENVIRONMENT: ${{ matrix.platform == 'macos' && 'PYOOMPH_EXPECT_THREADED=1 PYOOMPH_EXPECT_SPECTRA=1' || 'PYOOMPH_EXPECT_OPENMP=1 PYOOMPH_EXPECT_SPECTRA=1' }} ${{ env.PYOOMPH_PETSC_TEST_ENV }}
+        uses: pypa/cibuildwheel@v4.1.0
+        with:
+          output-dir: wheelhouse
+
+      - name: Set up MSYS2
+        if: matrix.platform == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            make
+            patch
+            git
+            pkgconf
+            base-devel
+            mingw-w64-ucrt-x86_64-toolchain
+
+      - name: Build and test the wheel (Windows/MSYS2)
+        # Windows builds through MSYS2/MinGW rather than MSVC - CLN has no MSVC port, and its
+        # MinGW-built libstdc++ could not be mixed into an MSVC extension anyway.
+        if: matrix.platform == 'windows'
+        shell: msys2 {0}
+        env:
+          CC: gcc
+          CXX: g++
+        run: |
+          export PATH="$(cygpath -u "$pythonLocation"):$PATH"
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade "cibuildwheel==4.1.0" delvewheel
+
+          PREBUILT_WIN="$(cygpath -m "$PWD/prebuilt/GiNaC_static/install")"
+
+          export CIBW_BUILD="${{ steps.cibw.outputs.selector }}"
+          export CIBW_ARCHS="AMD64"
+          export CIBW_BUILD_FRONTEND="build"
+          export CIBW_ENVIRONMENT_WINDOWS="CC=gcc CXX=g++ CXXFLAGS='-static-libgcc -static-libstdc++' LDFLAGS='-static-libgcc -static-libstdc++' PYOOMPH_GINAC_INCLUDE_DIR=${PREBUILT_WIN}/include PYOOMPH_GINAC_LIB_DIR=${PREBUILT_WIN}/lib PYOOMPH_CLN_INCLUDE_DIR=${PREBUILT_WIN}/include PYOOMPH_CLN_LIB_DIR=${PREBUILT_WIN}/lib"
+          # The copy is appended to the repair command because that is the last moment the wheel
+          # exists in a known place: cibuildwheel puts it in --output-dir only after its tests pass,
+          # and deletes its own temp before the job's later steps run, so the rescue step downstream
+          # found nothing under RUNNER_TEMP on a failing job. %GITHUB_WORKSPACE% is expanded by cmd,
+          # which is what runs this.
+          mkdir -p wheelhouse
+          export CIBW_REPAIR_WHEEL_COMMAND_WINDOWS="delvewheel repair --add-path C:/msys64/ucrt64/bin -w {dest_dir} {wheel} && copy /Y \"{dest_dir}\\*.whl\" \"%GITHUB_WORKSPACE%\\wheelhouse\\\""
+          # See the Tk donor step above. Runs in the test venv, so the script copies into
+          # sys.base_prefix; it never fails, and without it the GUI test simply skips as before.
+          TK_DONOR="$(dirname "$(cygpath -m '${{ steps.tkdonor.outputs.python-path }}')")"
+          export CIBW_BEFORE_TEST_WINDOWS="python {project}/citools/windows_add_tkinter.py ${TK_DONOR} ${{ inputs.python_version }}"
+          # See the Linux/macOS step above.
+          export CIBW_TEST_ENVIRONMENT="PYOOMPH_EXPECT_OPENMP=1 PYOOMPH_EXPECT_SPECTRA=1"
+          export CIBW_CONFIG_SETTINGS="cmake.args=-GUnix\ Makefiles cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON cmake.define.PYOOMPH_USE_MPI=OFF cmake.define.PYOOMPH_PARANOID=OFF cmake.define.PYOOMPH_USE_OPENMP=ON cmake.define.PYOOMPH_HAS_SPECTRA=ON"
+
+          python -m cibuildwheel --output-dir wheelhouse
+
+      # Diagnostic, not a gate (continue-on-error): tests/test_math_functions.py's tccbox arm fails on
+      # Windows with LoadLibrary error 126, ERROR_MOD_NOT_FOUND - the JIT DLL was compiled and written,
+      # then a MODULE it depends on could not be found. Which module that is, is written in the DLL's
+      # own import table and nowhere else; guessing from Linux is hopeless, and one objdump settles it.
+      # Unlike the other platforms, Windows compiles the JIT code with tcc's own headers and runtime
+      # (no -nostdinc/-nostdlib, see pyoomph/generic/ccompiler.py), so the CRT it names is the suspect.
+      # cibuildwheel copies the wheel into --output-dir only AFTER its test command passes, so a job
+      # that fails its tests uploads nothing - precisely the run whose binary someone wants to poke at.
+      # The repaired wheel is sitting in cibuildwheel's own temp directory either way; this fetches it.
+      - name: Collect the built wheel even if the tests failed
+        if: always()
+        shell: bash
+        run: |
+          # Through python, not find: on Windows this step runs under Git bash, where RUNNER_TEMP is
+          # a native path ("D:\a\_temp") that find cannot traverse - it failed silently, with its
+          # complaint swallowed by 2>/dev/null, and reported no wheel on a job that had built one.
+          python - <<'PYEOF'
+          import glob, os, shutil
+          temp = os.environ.get("RUNNER_TEMP", "")
+          os.makedirs("wheelhouse", exist_ok=True)
+          if glob.glob(os.path.join("wheelhouse", "*.whl")):
+              print("cibuildwheel already placed a wheel in wheelhouse")
+          else:
+              found = sorted(glob.glob(os.path.join(temp, "**", "*repaired_wheel*", "pyoomph-*.whl"),
+                                       recursive=True))
+              if not found:
+                  found = sorted(glob.glob(os.path.join(temp, "**", "pyoomph-*.whl"), recursive=True))
+              if found:
+                  print("rescuing", found[0])
+                  shutil.copy(found[0], "wheelhouse")
+              else:
+                  # Windows copies its wheel out at repair time instead (see the build step): by the
+                  # time this runs, cibuildwheel has deleted the temp it was sitting in.
+                  print("no wheel found under", temp)
+          print(os.listdir("wheelhouse"))
+          PYEOF
+
+      - name: Diagnose the tcc JIT DLL's imports (Windows)
+        # A probe, not a gate: tests/test_math_functions.py's tccbox arm fails here with LoadLibrary
+        # error 126 (ERROR_MOD_NOT_FOUND), and which module is missing is written in the DLL's import
+        # table and nowhere else. citools/windows_tcc_diag.py holds the whole thing.
+        #
+        # Note the `|| true` on the ls below, and do not remove it: the msys2 action runs bash with
+        # -eo pipefail, so `ls wheelhouse/*.whl` finding no match returns 2 and kills the step before
+        # its own "nothing to diagnose" guard can say anything. That, not the heredoc it first
+        # blamed, is why this step twice produced no output at all.
+        if: always() && matrix.platform == 'windows'
+        continue-on-error: true
+        shell: msys2 {0}
+        run: |
+          set -x
+          cd "$(cygpath -u "$GITHUB_WORKSPACE")"
+          ls -la wheelhouse || true
+          WHEEL=$(ls wheelhouse/*.whl 2>/dev/null | head -n 1 || true)
+          if [ -z "$WHEEL" ]; then echo "no wheel was built, nothing to diagnose"; exit 0; fi
+          # The DONOR interpreter, not $pythonLocation: that one drives cibuildwheel and is 3.14,
+          # while the wheel is cp312 - "not a supported wheel on this platform" is as far as the
+          # probe got last time. The donor is set up as inputs.python_version for the Tk copy and is
+          # therefore the one interpreter here that can install what this job built.
+          PY="$(cygpath -u '${{ steps.tkdonor.outputs.python-path }}')"
+          "$PY" -m pip install --disable-pip-version-check "$WHEEL" tccbox || exit 0
+          # From outside the checkout: the source pyoomph/ has no compiled extension, so a child
+          # started with the workspace as its CWD dies with "No module named pyoomph._pyoomph_core"
+          # before reaching the JIT. windows_tcc_diag.py runs its own child with cwd=the output
+          # directory for the same reason; this is the outer half of it.
+          DIAG="$PWD/citools/windows_tcc_diag.py"
+          cd "$RUNNER_TEMP"
+          "$PY" "$DIAG" "$RUNNER_TEMP/tccdiag_out" || true
+
+      # Kept so a failing suite can be reproduced locally against the exact same binary.
+      - name: Upload the wheel
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-wheel-${{ matrix.label }}
+          path: wheelhouse/*.whl
+          if-no-files-found: warn

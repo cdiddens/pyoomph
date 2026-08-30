@@ -107,13 +107,15 @@ A `copy of the license <https://github.com/pyoomph/pyoomph/blob/main/COPYING>`__
 
    -  `CLN <https://www.ginac.de/CLN>`__, `[GPL v2 or later license] <https://www.ginac.de/CLN/cln.git/?p=cln.git;a=blob_plain;f=COPYING;hb=HEAD>`__, also statically linked in the distribution as python wheels
 
+   -  `TQMesh <https://github.com/FloSewn/TQMesh>`__, `[MIT license] <https://github.com/FloSewn/TQMesh/blob/main/LICENSE.md>`__, a two-dimensional mesh generator for triangular and quadrilateral elements. It is not part of the pyoomph repository, but downloaded at build time and statically linked in the distribution as python wheels. Minor modifications as mentioned in `src/thirdparty/INFO_tqmesh <https://github.com/pyoomph/pyoomph/blob/main/src/thirdparty/INFO_tqmesh>`__ are applied to the downloaded sources. It is optional, see the cmake option ``PYOOMPH_HAS_TQMESH``.
+
+   -  `Spectra <https://spectralib.org>`__, `[MPL v2.0 license] <https://github.com/yixuan/spectra/blob/master/LICENSE>`__, a header-only library for large-scale eigenvalue problems, providing the ``"spectra"`` eigensolver backend. It is built on `Eigen <https://eigen.tuxfamily.org>`__, `[MPL v2.0 license] <https://gitlab.com/libeigen/eigen/-/blob/master/COPYING.MPL2>`__. Neither is part of the pyoomph repository, but both are downloaded at build time and statically linked in the distribution as python wheels. Eigen is only *primarily* MPL2 - a few of its headers carry third-party BSD or LGPL code - so pyoomph compiles it with ``EIGEN_MPL2_ONLY``, which turns including any of those into a compile error. They are optional, see the cmake option ``PYOOMPH_HAS_SPECTRA``.
+
    -  MPI, depending on the system e.g. `OpenMPI <https://www.open-mpi.org>`__ `[3-clause BSD license] <https://www.open-mpi.org/community/license.php>`__, `MPICH <https://www.mpich.org/>`__ `[MPICH license] <https://github.com/pmodels/mpich/blob/main/COPYRIGHT>`__, `Microsoft MPI <https://github.com/Microsoft/Microsoft-MPI>`__ `[MIT license] <https://github.com/microsoft/Microsoft-MPI/blob/master/LICENSE.txt>`__, note that MPI support is experimental and deactivated in the python wheels
 
-   -  `python3.8\ + <https://www.python.org/>`__, `[PSF license] <https://docs.python.org/3/license.html>`__, also dynamically linked in the distribution as python wheels
+   -  `python3.10\ + <https://www.python.org/>`__, `[PSF license] <https://docs.python.org/3/license.html>`__, also dynamically linked in the distribution as python wheels
 
-   -  `pybind11 <https://github.com/pybind/pybind11>`__, `[BSD-style license] <https://github.com/pybind/pybind11/blob/master/LICENSE>`__, also statically linked in the distribution as python wheels
-
-   -  `pybind11-stubgen <https://github.com/pybind/pybind11-stubgen>`__, `[BSD 3-Clause license] <https://github.com/pybind/pybind11-stubgen/blob/main/LICENSE>`__, used to generate python stubs from the C++ core
+   -  `nanobind <https://github.com/wjakob/nanobind>`__, `[BSD-style license] <https://github.com/wjakob/nanobind/blob/master/LICENSE>`__, also statically linked in the distribution as python wheels; its bundled ``nanobind.stubgen`` is used to generate python stubs from the C++ core
 
    -  `pip <https://github.com/pypa/pip>`__, `[MIT license] <https://github.com/pypa/pip/blob/main/LICENSE.txt>`__
 
@@ -134,6 +136,8 @@ A `copy of the license <https://github.com/pyoomph/pyoomph/blob/main/COPYING>`__
    -  `more_itertools <https://github.com/more-itertools/more-itertools>`__, `[MIT license] <https://github.com/more-itertools/more-itertools/blob/master/LICENSE>`__
 
    -  `scipy <https://github.com/scipy/scipy>`__, `[BSD-3-Clause license] <https://github.com/scipy/scipy/blob/main/LICENSES_bundled.txt>`__
+
+   -  `shapely <https://github.com/shapely/shapely>`__, `[BSD 3-Clause license] <https://github.com/shapely/shapely/blob/main/LICENSE.txt>`__, only required by :py:mod:`pyoomph.meshes.axisymm_topology` to detect and plan axisymmetric pinch-off and coalescence. It is optional and can be installed with ``pip install pyoomph[topology]``
 
    -  `matplotlib <https://github.com/matplotlib/matplotlib>`__, `[PSF-based license] <https://matplotlib.org/stable/users/project/license.html>`__
 

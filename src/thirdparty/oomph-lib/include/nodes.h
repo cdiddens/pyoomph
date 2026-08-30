@@ -581,11 +581,11 @@ namespace oomph
     unsigned Copied_index;
 
     /// Reset the pointers to the copied data.
-    void reset_copied_pointers();
+    void reset_copied_pointers() override;
 
   public:
     /// Clear the pointers to the copied data
-    void clear_copied_pointers();
+    void clear_copied_pointers() override;
 
     /// Constructor
     HijackedData(const unsigned& copied_value, Data* const& data_pt);
@@ -598,7 +598,7 @@ namespace oomph
 
     /// Destructor informs original object that the copy is
     /// being deleted and clears its pointers to the stored values.
-    ~HijackedData()
+    ~HijackedData() override
     {
       // Inform the Copied data that this copy is being deleted
       // If the original has already been deleted
@@ -616,7 +616,7 @@ namespace oomph
 
     /// Return a boolean to indicate whether the data contains
     /// any copied values. Hijacked data is always a copy
-    bool is_a_copy() const
+    bool is_a_copy() const override
     {
       return true;
     }
@@ -624,14 +624,14 @@ namespace oomph
     /// Return a boolean to indicate whether
     /// the i-th value is a copied value.
     /// Hijacked data is always a copy
-    bool is_a_copy(const unsigned& i) const
+    bool is_a_copy(const unsigned& i) const override
     {
       return true;
     }
 
     /// HijackedData is always a copy, so no equation numbers
     /// should be allocated. This function just returns.
-    void assign_eqn_numbers(unsigned long& global_ndof, Vector<double*>& dof_pt)
+    void assign_eqn_numbers(unsigned long& global_ndof, Vector<double*>& dof_pt) override
     {
       return;
     }
@@ -639,7 +639,7 @@ namespace oomph
 
     /// We cannot resize HijackedData, so the resize function
     /// throws a warning.
-    void resize(const unsigned& n_value);
+    void resize(const unsigned& n_value) override;
   };
 
 
@@ -655,11 +655,11 @@ namespace oomph
     Data* Copied_data_pt;
 
     /// Reset the pointers to the copied data.
-    void reset_copied_pointers();
+    void reset_copied_pointers() override;
 
   public:
     /// Clear the pointers to the copied data
-    void clear_copied_pointers();
+    void clear_copied_pointers() override;
 
     /// Constructor
     CopiedData(Data* const& data_pt);
@@ -672,7 +672,7 @@ namespace oomph
 
     /// Destructor informs original object that the copy is
     /// being deleted and clears its pointers to the stored values.
-    ~CopiedData()
+    ~CopiedData() override
     {
       // Inform the Copied data that this copy is being deleted
       // If the original has already been deleted
@@ -690,7 +690,7 @@ namespace oomph
 
     /// Return a boolean to indicate whether the data contains
     /// any copied values. Copied data is always a copy
-    bool is_a_copy() const
+    bool is_a_copy() const override
     {
       return true;
     }
@@ -698,14 +698,14 @@ namespace oomph
     /// Return a boolean to indicate whether
     /// the i-th value is a copied value.
     /// All copied data is always a copy
-    bool is_a_copy(const unsigned& i) const
+    bool is_a_copy(const unsigned& i) const override
     {
       return true;
     }
 
     /// CopiedData is always a copy, so no equation numbers
     /// should be allocated. This function just returns.
-    void assign_eqn_numbers(unsigned long& global_ndof, Vector<double*>& dof_pt)
+    void assign_eqn_numbers(unsigned long& global_ndof, Vector<double*>& dof_pt) override
     {
       return;
     }
@@ -713,7 +713,7 @@ namespace oomph
 
     /// We cannot resize CopiedData, so the resize function
     /// throws a warning.
-    void resize(const unsigned& n_value);
+    void resize(const unsigned& n_value) override;
   };
 
 
@@ -999,7 +999,7 @@ namespace oomph
          const bool& allocate_x_position = true);
 
     /// Destructor: Clean up the memory allocated for nodal position.
-    virtual ~Node();
+    ~Node() override;
 
     /// Broken copy constructor
     Node(const Node& node) = delete;
@@ -1047,8 +1047,8 @@ namespace oomph
 
     /// Assign global equation numbers; increment global number
     /// of unknowns, global_ndof; and add any new dofs to the dof_pt.
-    virtual void assign_eqn_numbers(unsigned long& global_ndof,
-                                    Vector<double*>& dof_pt);
+    void assign_eqn_numbers(unsigned long& global_ndof,
+                                    Vector<double*>& dof_pt) override;
 
     /// Return (Eulerian) spatial dimension of the node.
     unsigned ndim() const
@@ -1338,7 +1338,7 @@ namespace oomph
     void set_nonhanging();
 
     /// Resize the number of equations
-    void resize(const unsigned& n_value);
+    void resize(const unsigned& n_value) override;
 
     /// Constrain the positions when the node is made hanging
     /// Empty virtual function that is overloaded in SolidNodes
@@ -1657,14 +1657,14 @@ namespace oomph
 
     /// Add all data and time history values to the vector.
     /// Overloaded to add the position information as well.
-    void add_values_to_vector(Vector<double>& vector_of_values);
+    void add_values_to_vector(Vector<double>& vector_of_values) override;
 
     /// Read all data and time history values from the vector
     /// starting from index. On return the index will be
     /// set the value at the end of the data that has been read in
     /// Overload to also read the position information.
     void read_values_from_vector(const Vector<double>& vector_of_values,
-                                 unsigned& index);
+                                 unsigned& index) override;
 
 #endif
   };
@@ -1735,7 +1735,7 @@ namespace oomph
               const unsigned& initial_n_value);
 
     /// Destructor that cleans up the additional memory allocated in SolidNodes
-    virtual ~SolidNode();
+    ~SolidNode() override;
 
     /// Broken copy constructor
     SolidNode(const SolidNode& solid_node) = delete;
@@ -1749,7 +1749,7 @@ namespace oomph
 
     /// Dump nodal positions (variable and fixed) and associated
     /// data to file for restart
-    void dump(std::ostream& dump_file) const;
+    void dump(std::ostream& dump_file) const override;
 
     /// Read nodal positions (variable and fixed) and associated
     /// data from file for restart
@@ -1774,20 +1774,20 @@ namespace oomph
     /// storage Overloaded from the basic implementation to take into account
     /// the fact that position is now Data
     void set_position_time_stepper(TimeStepper* const& position_time_stepper_pt,
-                                   const bool& preserve_existing_data);
+                                   const bool& preserve_existing_data) override;
 
     /// Overload the check whether the pointer parameter_pt addresses
     /// position data values
-    bool does_pointer_correspond_to_position_data(double* const& parameter_pt);
+    bool does_pointer_correspond_to_position_data(double* const& parameter_pt) override;
 
     /// Return whether any position component has been copied
-    bool position_is_a_copy() const
+    bool position_is_a_copy() const override
     {
       return Variable_position_pt->is_a_copy();
     }
 
     /// Return whether the position coordinate i has been copied
-    bool position_is_a_copy(const unsigned& i) const
+    bool position_is_a_copy(const unsigned& i) const override
     {
       return Variable_position_pt->is_a_copy(Nposition_type * i);
     }
@@ -1839,14 +1839,14 @@ namespace oomph
     }
 
     /// Pin all the stored variables (Overloaded)
-    void pin_all()
+    void pin_all() override
     {
       Node::pin_all();
       Variable_position_pt->pin_all();
     }
 
     /// Unpin all the stored variables (Overloaded)
-    void unpin_all()
+    void unpin_all() override
     {
       Node::unpin_all();
       Variable_position_pt->unpin_all();
@@ -1854,14 +1854,14 @@ namespace oomph
 
     /// Overload the constrain positions function to constrain all
     /// position values
-    inline void constrain_positions()
+    inline void constrain_positions() override
     {
       Variable_position_pt->constrain_all();
     }
 
     /// Overload the unconstrain positions function to unconstrain all
     /// position values
-    inline void unconstrain_positions()
+    inline void unconstrain_positions() override
     {
       Variable_position_pt->unconstrain_all();
     }
@@ -1927,7 +1927,7 @@ namespace oomph
 
     /// Overload the assign equation numbers routine
     void assign_eqn_numbers(unsigned long& global_number,
-                            Vector<double*>& dof_pt);
+                            Vector<double*>& dof_pt) override;
 
     /// Function to describe the dofs of the Node. The ostream
     /// specifies the output stream to which the description
@@ -1938,30 +1938,30 @@ namespace oomph
     /// call hierarchy of this function when called from
     /// Problem::describe_dofs(...)
     void describe_dofs(std::ostream& out,
-                       const std::string& current_string) const;
+                       const std::string& current_string) const override;
 
     /// Overload the function add_values_to_map so that it also adds
     /// the variable position data
-    void add_value_pt_to_map(std::map<unsigned, double*>& map_of_value_pt);
+    void add_value_pt_to_map(std::map<unsigned, double*>& map_of_value_pt) override;
 
 #ifdef OOMPH_HAS_MPI
 
     /// Add all data, position and time history values to the vector
     /// Overload to add the Lagrangian coordinates to the vector
-    void add_values_to_vector(Vector<double>& vector_of_values);
+    void add_values_to_vector(Vector<double>& vector_of_values) override;
 
     /// Read all data and time history values from the vector
     /// starting from index. On return the index will be
     /// set the value at the end of the data that has been read in
     /// Overload to add the position information and Lagrangian coordinates
     void read_values_from_vector(const Vector<double>& vector_of_values,
-                                 unsigned& index);
+                                 unsigned& index) override;
 
 
     /// Add all equation numbers to the vector in
     /// the internal storage order. Overload to add equation numbers
     /// associated with the positional dofs
-    void add_eqn_numbers_to_vector(Vector<long>& vector_of_eqn_numbers);
+    void add_eqn_numbers_to_vector(Vector<long>& vector_of_eqn_numbers) override;
 
     /// Read all equation numbers from the vector
     /// starting from index. On return the index will be
@@ -1969,7 +1969,7 @@ namespace oomph
     /// Overload to include the equation numbrs associated with the
     /// positional dofs
     void read_eqn_numbers_from_vector(const Vector<long>& vector_of_eqn_numbers,
-                                      unsigned& index);
+                                      unsigned& index) override;
 
 #endif
 
@@ -1978,7 +1978,7 @@ namespace oomph
     /// of SolidNodes is determined by unknowns, there's nothing
     /// to be done apart from performing the auxiliary node
     /// update function (if any)
-    void node_update(const bool& update_all_time_levels_for_new_node = false)
+    void node_update(const bool& update_all_time_levels_for_new_node = false) override
     {
       perform_auxiliary_node_update_fct();
     }
@@ -2242,7 +2242,7 @@ namespace oomph
   {
   private:
     /// Set pointers to the copied data used when we have periodic nodes
-    void reset_copied_pointers()
+    void reset_copied_pointers() override
     {
 #ifdef PARANOID
       if (Copied_node_pt == 0)
@@ -2329,7 +2329,7 @@ namespace oomph
     /// Clear pointers to the copied data used when we have periodic
     /// nodes. The shallow (pointer) copy is turned into a deep copy by
     /// allocating new data and copying the actual values across.
-    void clear_copied_pointers()
+    void clear_copied_pointers() override
     {
 #ifdef PARANOID
       if (Copied_node_pt == 0)
@@ -2459,7 +2459,7 @@ namespace oomph
     }
 
     /// Destructor resets pointers if
-    ~BoundaryNode()
+    ~BoundaryNode() override
     {
       // If there are any copies of this Node
       // then we need to clear their pointers to information stored in
@@ -2514,7 +2514,7 @@ namespace oomph
     void operator=(const BoundaryNode<NODE_TYPE>&) = delete;
 
     /// Have boundary coordinates been set up?
-    bool boundary_coordinates_have_been_set_up()
+    bool boundary_coordinates_have_been_set_up() override
     {
       return BoundaryNodeBase::boundary_coordinates_have_been_set_up();
     }
@@ -2522,40 +2522,40 @@ namespace oomph
     /// Access to pointer to set of mesh boundaries that this
     /// node occupies; NULL if the node is not on any boundary
     /// Final overload
-    void get_boundaries_pt(std::set<unsigned>*& boundaries_pt)
+    void get_boundaries_pt(std::set<unsigned>*& boundaries_pt) override
     {
       BoundaryNodeBase::get_boundaries_pt(boundaries_pt);
     }
 
     /// Test whether the node lies on a boundary
     /// Final overload
-    bool is_on_boundary() const
+    bool is_on_boundary() const override
     {
       return BoundaryNodeBase::is_on_boundary();
     }
 
     /// Test whether the node lies on mesh boundary b
     /// Final overload
-    bool is_on_boundary(const unsigned& b) const
+    bool is_on_boundary(const unsigned& b) const override
     {
       return BoundaryNodeBase::is_on_boundary(b);
     }
 
     /// Add the node to mesh boundary b, final overload
-    void add_to_boundary(const unsigned& b)
+    void add_to_boundary(const unsigned& b) override
     {
       BoundaryNodeBase::add_to_boundary(b);
     }
 
     /// Remover the node from mesh boundary b, final overload
-    void remove_from_boundary(const unsigned& b)
+    void remove_from_boundary(const unsigned& b) override
     {
       BoundaryNodeBase::remove_from_boundary(b);
     }
 
 
     /// Get the number of boundary coordinates on mesh boundary b.
-    unsigned ncoordinates_on_boundary(const unsigned& b)
+    unsigned ncoordinates_on_boundary(const unsigned& b) override
     {
       return BoundaryNodeBase::ncoordinates_on_boundary(b);
     }
@@ -2564,7 +2564,7 @@ namespace oomph
     /// Return the vector of coordinates on mesh boundary b
     /// Final overload
     void get_coordinates_on_boundary(const unsigned& b,
-                                     Vector<double>& boundary_zeta)
+                                     Vector<double>& boundary_zeta) override
     {
       BoundaryNodeBase::get_coordinates_on_boundary(b, boundary_zeta);
     }
@@ -2572,7 +2572,7 @@ namespace oomph
     /// Set the vector of coordinates on mesh boundary b
     /// Final overload
     void set_coordinates_on_boundary(const unsigned& b,
-                                     const Vector<double>& boundary_zeta)
+                                     const Vector<double>& boundary_zeta) override
     {
       BoundaryNodeBase::set_coordinates_on_boundary(b, boundary_zeta);
     }
@@ -2582,7 +2582,7 @@ namespace oomph
     /// on mesh boundary b Final overload
     void get_coordinates_on_boundary(const unsigned& b,
                                      const unsigned& k,
-                                     Vector<double>& boundary_zeta)
+                                     Vector<double>& boundary_zeta) override
     {
       BoundaryNodeBase::get_coordinates_on_boundary(b, k, boundary_zeta);
     }
@@ -2591,7 +2591,7 @@ namespace oomph
     /// on mesh boundary b. Final overload
     void set_coordinates_on_boundary(const unsigned& b,
                                      const unsigned& k,
-                                     const Vector<double>& boundary_zeta)
+                                     const Vector<double>& boundary_zeta) override
     {
       BoundaryNodeBase::set_coordinates_on_boundary(b, k, boundary_zeta);
     }
@@ -2607,7 +2607,7 @@ namespace oomph
     /// if a node has been resized by FaceElements) use alternative
     /// version (with leading bool arguments) that always checks and throws
     /// so exceptions can be caught gracefully. Returns UINT_MAX if error.
-    unsigned nvalue_assigned_by_face_element(const unsigned& face_id = 0) const
+    unsigned nvalue_assigned_by_face_element(const unsigned& face_id = 0) const override
     {
 #ifdef PARANOID
       if (Index_of_first_value_assigned_by_face_element_pt == 0)
@@ -2675,7 +2675,7 @@ namespace oomph
     /// available.
     //=====================================================================
     void assign_additional_values_with_face_id(
-      const unsigned& n_additional_value, const unsigned& face_id = 0)
+      const unsigned& n_additional_value, const unsigned& face_id = 0) override
     {
 #ifdef PARANOID
       // If nothing is being added warn the user
@@ -2775,21 +2775,21 @@ namespace oomph
 
 
     /// Make the node periodic
-    void make_periodic(Node* const& node_pt)
+    void make_periodic(Node* const& node_pt) override
     {
       BoundaryNodeBase::make_node_periodic(this, node_pt);
     }
 
     /// Make the nodes passed in periodic_nodes periodic from
     /// this node
-    void make_periodic_nodes(const Vector<Node*>& periodic_nodes_pt)
+    void make_periodic_nodes(const Vector<Node*>& periodic_nodes_pt) override
     {
       BoundaryNodeBase::make_nodes_periodic(this, periodic_nodes_pt);
     }
 
     /// Return a boolean to indicate whether the data contains
     /// any copied values. If the node is periodic all values are copied
-    bool is_a_copy() const
+    bool is_a_copy() const override
     {
       if (Copied_node_pt)
       {
@@ -2804,7 +2804,7 @@ namespace oomph
     /// Return a boolean to indicate whether
     /// the i-th value is a copied value.
     /// If the node is periodic all values are copies
-    bool is_a_copy(const unsigned& i) const
+    bool is_a_copy(const unsigned& i) const override
     {
       if (Copied_node_pt)
       {
@@ -2819,13 +2819,13 @@ namespace oomph
 
     /// Return pointer to copied node (null if the
     /// current node is not a copy)
-    Node* copied_node_pt() const
+    Node* copied_node_pt() const override
     {
       return Copied_node_pt;
     }
 
     /// Overload the equation assignment operation
-    void assign_eqn_numbers(unsigned long& global_ndof, Vector<double*>& dof_pt)
+    void assign_eqn_numbers(unsigned long& global_ndof, Vector<double*>& dof_pt) override
     {
       // If the boundary node is not periodic call the ususal
       // assign equation numbers
@@ -2851,7 +2851,7 @@ namespace oomph
 
 
     /// Resize the number of equations
-    void resize(const unsigned& n_value)
+    void resize(const unsigned& n_value) override
     {
       // If the node is periodic, warn, but do nothing
       if (Copied_node_pt)

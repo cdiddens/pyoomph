@@ -1,24 +1,25 @@
+#  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -199,10 +200,7 @@ if __name__=="__main__":
     with RisingBubbleProblem() as problem:
             
         # Make sure to get the most optimized code available
-        problem.set_c_compiler("system").optimize_for_max_speed()
-        # Use SLEPc for the eigenvalue problem, use MUMPS as linear solver, since we have constraints.
-        # These have a zero diagonal and give problems in the default LU decomposition of PETSc
-        problem.set_eigensolver("slepc").use_mumps()
+        problem.set_c_compiler("system").optimize_for_max_speed()        
         
         # Setup the problem for azimuthal stability analysis. We don't use the analytic Hessian, since we don't do any bifurcation tracking
         # This saves some code generation and compilations time
@@ -219,7 +217,7 @@ if __name__=="__main__":
         # Relax to the base state, then solve for the stationary solution
         problem.run(10,startstep=0.1,outstep=False,temporal_error=1)
         problem.solve(max_newton_iterations=20,spatial_adapt=4)
-        
+               
         # Now we can start the eigenanalysis        
         outfile=problem.create_text_file_output("m1_instability.txt",header=["Bo","ReLambda","ImLambda"])
             
@@ -234,7 +232,7 @@ if __name__=="__main__":
             # Store it to the text file
             outfile.add_row(problem.Bo,numpy.real(lambd),numpy.imag(lambd))                
             # Output the solution with eigenfunction
-            problem.output_at_increased_time()
+            problem.output(increase_time_for_PVD=True)
             # And continue in Bo
             problem.go_to_param(Bo=problem.Bo.value+dBond)
             

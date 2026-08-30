@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -144,8 +144,8 @@ namespace GiNaC
   public:
     ex series(const relational &r, int order, unsigned options = 0) const override { return inherited::series(r, order, options); }
 
-    ex real_part() const { return *this; }
-    ex imag_part() const { return 0; }
+    ex real_part() const override { return *this; }
+    ex imag_part() const override { return 0; }
     // rational functions
     ex normal(exmap &repl, exmap &rev_lookup, lst &modifier) const override { return inherited::normal(repl, rev_lookup, modifier); }
     ex to_rational(exmap &repl) const override { return inherited::to_rational(repl); }

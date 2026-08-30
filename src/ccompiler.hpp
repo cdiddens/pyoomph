@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -92,8 +92,8 @@ namespace pyoomph
   {
   protected:
   public:
-    virtual bool compile_to_memory() { return false; }
-    virtual bool compile(bool , bool , bool , const std::vector<std::string> &) { return false; }
+    bool compile_to_memory() override { return false; }
+    bool compile(bool , bool , bool , const std::vector<std::string> &) override { return false; }
   };
 
 }

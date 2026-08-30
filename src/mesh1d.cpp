@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -257,10 +257,21 @@ namespace pyoomph
       }
       else
       {
-       internal_elements.push_back(be);
-       internal_face_dir.push_back((ivn==0 ? -1 : 1));
-       opposite_elements.push_back(nodemap[npt].first);
-       opposite_face_dir.push_back(nodemap[npt].second);       
+       // 1d keeps the LATER of the two elements as the near side - the one the facet element is
+       // attached to, and whose outward normal the facet terms are written for. Which element that is
+       // must be decided the same way on every rank, since distributed the two can sit on different
+       // ranks and neither asks the other; "the second one this loop reached" would only agree because
+       // Mesh::distribute() happens to re-add the retained elements in their original order. Ordering
+       // by the structural index instead says so outright and coincides with it on a whole mesh.
+       // (Swapping the two sides here is not cosmetic: it flips the facet normal, hence the sign of
+       // every jump().)
+       BulkElementBase *nearel=be, *farel=nodemap[npt].first;
+       int neardir=(ivn==0 ? -1 : 1), fardir=nodemap[npt].second;
+       if (Mesh::compare_structural_order(nearel,farel)<0) { std::swap(nearel,farel); std::swap(neardir,fardir); }
+       internal_elements.push_back(nearel);
+       internal_face_dir.push_back(neardir);
+       opposite_elements.push_back(farel);
+       opposite_face_dir.push_back(fardir);
        opposite_already_at_index.push_back(-1);
        completed_nodes.insert(npt);
       }

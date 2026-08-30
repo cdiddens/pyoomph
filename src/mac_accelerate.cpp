@@ -27,6 +27,7 @@ The main author may be contacted at c.diddens@utwente.nl
 #include <stdexcept>
 #include <sstream>
 #include <cctype>
+#include <cstdlib>
 
 namespace pyoomph
 {
@@ -59,12 +60,27 @@ namespace pyoomph
             }
         }
 
+        // Passed to SparseFactor as SparseSymbolicFactorOptions::reportError. Its mere presence is the
+        // point: when this pointer is NULL (as with the 2-argument SparseFactor overload we used to
+        // call), Accelerate does not RETURN SparseMatrixIsSingular for a rank-deficient matrix - the QR
+        // path halts the whole process via __builtin_trap() (a SIGILL through libSparse's _SparseTrap),
+        // which no C++ catch and no Newton retry can survive. A singular Jacobian is routine mid-Newton
+        // (an injected abort, a diverging step, a fold), so a Mac defaulting to Accelerate would die on
+        // it. With a non-NULL reportError, Accelerate instead returns with .status set, letting
+        // checkStatus() raise the catchable MacAccelerateNumericalFailure the retry logic expects.
+        // The message is already conveyed by the status, so this callback only needs to exist.
+        void reportSparseError(const char * /*message*/) {}
+
         void checkStatus(SparseStatus_t status, const char *where)
         {
-            if (status != SparseStatusOK)
-            {
-                throw std::runtime_error(std::string(where) + " failed: " + statusToString(status));
-            }
+            if (status == SparseStatusOK) return;
+            const std::string msg = std::string(where) + " failed: " + statusToString(status);
+            // Only these two say something about the MATRIX, and only those are worth retrying with a
+            // smaller step; the rest say something about the call or about Accelerate itself, where a
+            // retry would only hide the message. See MacAccelerateNumericalFailure in the header.
+            if (status == SparseMatrixIsSingular || status == SparseFactorizationFailed)
+                throw MacAccelerateNumericalFailure(msg);
+            throw std::runtime_error(msg);
         }
 
         // Every symmetric method requires a square matrix and only ever looks at one stored
@@ -259,6 +275,9 @@ namespace pyoomph
         const long long kept_nnz = m_colStarts[n_cols];
         m_rowIndices.assign(kept_nnz, 0);
         m_values.assign(kept_nnz, 0.0);
+        // Remember where each stored value came from, so a later numeric-only refactorization can
+        // refill m_values by a gather instead of redoing this conversion.
+        m_csc_from_csr.assign(kept_nnz, 0);
         std::vector<long long> writeCursor(m_colStarts.begin(), m_colStarts.end());
 
         for (int row = 0; row < n_rows; ++row)
@@ -272,6 +291,7 @@ namespace pyoomph
                 const long long dest = writeCursor[col]++;
                 m_rowIndices[dest] = static_cast<int32_t>(row);
                 m_values[dest] = val;
+                m_csc_from_csr[dest] = k;
             }
         }
 
@@ -298,10 +318,77 @@ namespace pyoomph
         m_matrix.data = m_values.data();
 
         // ---- Factorize with the requested method ----
-        m_factorization = SparseFactor(toAccelerateType(method), m_matrix);
-        checkStatus(m_factorization.status, ("SparseFactor (" + mac_accelerate_method_to_string(method) + ")").c_str());
+        // The 4-argument overload is used solely to install reportError (see reportSparseError above);
+        // every other field is Accelerate's own default. malloc/free are passed explicitly because the
+        // struct annotates them _Nonnull - the system allocator is what the short overload uses anyway,
+        // and macOS malloc satisfies the documented 16-byte alignment requirement.
+        SparseSymbolicFactorOptions sfoptions{};
+        sfoptions.control = SparseDefaultControl;
+        sfoptions.orderMethod = SparseOrderDefault;
+        sfoptions.order = nullptr;
+        sfoptions.ignoreRowsAndColumns = nullptr;
+        sfoptions.malloc = &std::malloc;
+        sfoptions.free = &std::free;
+        sfoptions.reportError = &reportSparseError;
+
+        SparseNumericFactorOptions nfoptions{};
+        nfoptions.control = SparseDefaultControl;
+        nfoptions.scalingMethod = SparseScalingDefault;
+        nfoptions.scaling = nullptr;
+        nfoptions.pivotTolerance = 0.0;
+        nfoptions.zeroTolerance = 0.0;
+
+        m_factorization = SparseFactor(toAccelerateType(method), m_matrix, sfoptions, nfoptions);
+        const SparseStatus_t status = m_factorization.status;
+        if (status != SparseStatusOK)
+        {
+            // reportError kept SparseFactor from trapping, so the returned object is valid but may hold
+            // partial allocations; release them before reporting, or every singular Newton iterate would
+            // leak one factorization. m_hasFactorization stays false, so the destructor will not free it
+            // again. The status is read before the cleanup, since SparseCleanup invalidates the object.
+            SparseCleanup(m_factorization);
+            m_factorization = SparseOpaqueFactorization_Double{};
+            checkStatus(status, ("SparseFactor (" + mac_accelerate_method_to_string(method) + ")").c_str());
+        }
         m_hasFactorization = true;
         m_method = method;
+        m_n_symbolic++;
+    }
+
+    // See the declaration in mac_accelerate.hpp. SparseRefactor reuses the symbolic factorization held
+    // inside m_factorization and recomputes only the numbers, which is valid exactly while the pattern
+    // is unchanged -- so the pattern is checked here rather than trusted.
+    bool MacAccelerateSparseSolver::refactorize_values_only(const std::vector<long long> &indptr,
+                                                            const std::vector<long long> &indices,
+                                                            const std::vector<double> &data)
+    {
+        if (!m_hasFactorization) return false;
+        if (m_csr_indptr.size() != indptr.size()) return false;
+        if (m_csr_indices.size() != indices.size()) return false;
+        if (m_csr_data.size() != data.size()) return false;
+        if (m_csc_from_csr.size() != m_values.size()) return false; // Factorized before the map existed
+        if (!std::equal(m_csr_indptr.begin(), m_csr_indptr.end(), indptr.begin())) return false;
+        if (!std::equal(m_csr_indices.begin(), m_csr_indices.end(), indices.begin())) return false;
+
+        m_csr_data = data;
+        for (size_t dest = 0; dest < m_values.size(); ++dest)
+        {
+            m_values[dest] = data[static_cast<size_t>(m_csc_from_csr[dest])];
+        }
+        // m_matrix.data already points at m_values.data(); the assignment above wrote through it, and
+        // m_values has not been reallocated, so the pointer Accelerate holds is still valid.
+        SparseRefactor(m_matrix, &m_factorization);
+        if (m_factorization.status != SparseStatusOK)
+        {
+            // Deliberately not an error. Reusing the symbolic factorization fixes the pivoting, and the
+            // new values may not tolerate it where a fresh factorization would have chosen differently.
+            // Drop what we have and report failure so the caller does a full factorize; turning a
+            // recoverable situation into an exception would make the optimisation a liability.
+            releaseFactorization();
+            return false;
+        }
+        m_n_numeric_only++;
+        return true;
     }
 
     std::vector<double> MacAccelerateSparseSolver::solve(const std::vector<double> &b) const

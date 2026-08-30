@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -27,7 +28,7 @@
  
  
 from .cb import CustomMathExpression
-from .generic import vector,ExpressionOrNum,var
+from .generic import vector,ExpressionOrNum,var,Expression
 from ..typings import *
 import vtk
 
@@ -53,7 +54,7 @@ class _VTUInterpolatorBase:
         coord_suffix=["x","y","z"]
         return [(var("coordinate_"+suffix)+self.offset[index])/self.spatial_scale_factor for index,suffix in enumerate(coord_suffix) if index<self._dim]        
     
-    def _auto_strip_component(self,fieldname:str):
+    def _auto_strip_component(self,fieldname:str)->tuple[str,int]:
         if fieldname.endswith("_x"):
             return fieldname[:-2],0
         elif fieldname.endswith("_y"):
@@ -63,7 +64,7 @@ class _VTUInterpolatorBase:
         else:
             return fieldname,0
     
-    def get_field(self,fieldname:str,component_index:Union[int,Literal["auto"]]="auto",scale:ExpressionOrNum=1)->CustomMathExpression:
+    def get_field(self,fieldname:str,component_index:int | Literal["auto"]="auto",scale:ExpressionOrNum=1)->Expression:
         raise RuntimeError("Please override")
         
 
@@ -77,20 +78,23 @@ class _VTUFieldInterpolatorByVTK(CustomMathExpression):
             
         def eval(self, arg_array) -> float:
             x=list(arg_array)
-            if self.vtu._use_cache:
+            use_cache=self.vtu._use_cache
+            key=None
+            if use_cache:
                 key=tuple(arg_array)
                 if key in self.vtu._cache:
                     return self.vtu._cache[key][self._cache_index][self.component_index]
             while len(x)<3:
-                x.append(0.0)            
+                x.append(0.0)
             self.vtu.probe_pt.SetCenter(*x)
             self.vtu.probe_pt.Update()
             self.vtu.interpolator.Update()
-            if self.vtu._use_cache:
+            if use_cache:
+                assert key is not None
                 cache_res=[]
                 for f in self.vtu._fields_to_cache:
                     arr=self.vtu.interpolator.GetOutput().GetPointData().GetArray(f)
-                    
+
                     entry=[]
                     for e in range(arr.GetNumberOfComponents()):
                         res=arr.GetVariantValue(e)
@@ -132,17 +136,17 @@ class VTUInterpolatorByVTK(_VTUInterpolatorBase):
     
     # use_cache: If you interpolate for multiple fields, it is sometimes better to interpolate each point only once and store the results of all fields in a cache
     # This can be quite memory intensive, though
-    def __init__(self, vtufile: str,spatial_scale:ExpressionOrNum=1,resize_internally:bool=True,use_cache:Union[bool,Literal["auto"]]="auto"):
+    def __init__(self, vtufile: str,spatial_scale:ExpressionOrNum=1,resize_internally:bool=True,use_cache:bool | Literal["auto"]="auto"):
         super().__init__(vtufile,spatial_scale=0+spatial_scale,resize_internally=resize_internally)
         self.use_cache=use_cache
         self._use_cache=True if self.use_cache is True else False
         self._num_interpolators=0
-        self._cache={}
-        self._fields_to_cache=[]
+        self._cache:dict[tuple[float,...],list[list[float]]]={} # point -> the cached fields, each by component
+        self._fields_to_cache:list[str]=[]
         
         
         # Load the VTU
-        self.vtu_in=vtk.vtkXMLUnstructuredGridReader()
+        self.vtu_in=vtk.vtkXMLUnstructuredGridReader() #type:ignore
         self.vtu_in.SetFileName(self.vtufile)        
         self.vtu_in.Update()
         if self.vtu_in.GetOutput().GetNumberOfCells()==0:
@@ -167,9 +171,9 @@ class VTUInterpolatorByVTK(_VTUInterpolatorBase):
         self.vector_scale=1
         # Rescale it to fit in unity range
         if self.resize_internally:
-            transform=vtk.vtkTransform()
+            transform=vtk.vtkTransform() #type:ignore
             transform.Scale(1/scalef,1/scalef,1/scalef)
-            self.vtu=vtk.vtkTransformFilter()
+            self.vtu=vtk.vtkTransformFilter() #type:ignore
             self.vtu.SetTransformAllInputVectors(False)
             self.vtu.SetInputData(self.vtu_in.GetOutput())
             self.vtu.SetTransform(transform)            
@@ -182,26 +186,33 @@ class VTUInterpolatorByVTK(_VTUInterpolatorBase):
         
 
 
-        self.probe_pt=vtk.vtkPointSource()
+        self.probe_pt=vtk.vtkPointSource() #type:ignore
         self.probe_pt.SetNumberOfPoints(1)
         #eps=1e-6*(scalef if not self.resize_internally else 1)
         self.probe_pt.SetRadius(0.0)       
         # And the interpolator
-        self.interpolator=vtk.vtkProbeFilter()        
+        self.interpolator=vtk.vtkProbeFilter() #type:ignore
         self.interpolator.SetInputData(self.probe_pt.GetOutput())
         self.interpolator.SetSourceData(self.vtu.GetOutput())         
 
-    def get_field(self, fieldname: str,component_index:Union[int,Literal["auto"]]="auto",scale:ExpressionOrNum=1) -> CustomMathExpression:
+    def get_field(self, fieldname: str,component_index:int | Literal["auto"]="auto",scale:ExpressionOrNum=1) -> Expression:
+        component:int
         if component_index=="auto":
-            fieldname,component_index=self._auto_strip_component(fieldname)
+            fieldname,component=self._auto_strip_component(fieldname)
+        else:
+            component=component_index
         self._num_interpolators+=1
         if self.use_cache=="auto" and self._num_interpolators>1:
             self._use_cache=True
         if fieldname not in self._fields_to_cache:
             self._fields_to_cache.append(fieldname)            
-        interp=_VTUFieldInterpolatorByVTK(self,fieldname,component_index)
+        interp=_VTUFieldInterpolatorByVTK(self,fieldname,component)
         interp._cache_index=self._fields_to_cache.index(fieldname)
         return interp(*self._get_arg_list())*scale
         
         
         
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

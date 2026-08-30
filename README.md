@@ -43,10 +43,11 @@ During compilation, pyoomph includes/links against or makes use of the following
 
 - [`GiNaC`](https://www.ginac.de/) ([GPL v2 or later license](https://www.ginac.de/ginac.git/?p=ginac.git;a=blob_plain;f=COPYING;hb=HEAD)), GiNaC is statically included in the distribution as wheels.
 - [`CLN`](https://www.ginac.de/CLN) ([GPL v2 or later license](https://www.ginac.de/CLN/cln.git/?p=cln.git;a=blob_plain;f=COPYING;hb=HEAD)), CLN is statically included in the distribution as wheels.
+- [`TQMesh`](https://github.com/FloSewn/TQMesh) ([MIT license](https://github.com/FloSewn/TQMesh/blob/main/LICENSE.md)), a two-dimensional mesh generator, downloaded at build time and statically included in the distribution as wheels. Optional, see `PYOOMPH_HAS_TQMESH` and [src/thirdparty/INFO_tqmesh](https://github.com/pyoomph/pyoomph/blob/main/src/thirdparty/INFO_tqmesh).
+- [`Spectra`](https://spectralib.org) ([MPL v2.0 license](https://github.com/yixuan/spectra/blob/master/LICENSE)) and [`Eigen`](https://eigen.tuxfamily.org) ([MPL v2.0 license](https://gitlab.com/libeigen/eigen/-/blob/master/COPYING.MPL2)), the header-only eigensolver behind the `"spectra"` eigensolver backend and the linear algebra library it is built on. Both are downloaded at build time and statically included in the distribution as wheels. Optional, see `PYOOMPH_HAS_SPECTRA` and [cmake/ThirdPartySpectra.cmake](https://github.com/pyoomph/pyoomph/blob/main/cmake/ThirdPartySpectra.cmake). Eigen is only *primarily* MPL2 - a few of its headers carry third-party BSD or LGPL code - so pyoomph compiles it with `EIGEN_MPL2_ONLY`, which makes including any of those a compile error.
 - `MPI`, depending on the system e.g. [`OpenMPI`](https://www.open-mpi.org) ([3-clause BSD license](https://www.open-mpi.org/community/license.php)), [`MPICH`](https://www.mpich.org/) ([MPICH license](https://github.com/pmodels/mpich/blob/main/COPYRIGHT)), [`Microsoft MPI`](https://github.com/Microsoft/Microsoft-MPI) ([MIT license](https://github.com/microsoft/Microsoft-MPI/blob/master/LICENSE.txt)), the wheels distributions are compiled without MPI support.
-- [`python3.8 or higher`](https://www.python.org/), ([PSF license](https://docs.python.org/3/license.html)).
-- [`pybind11`](https://github.com/pybind/pybind11), ([BSD-style license](https://github.com/pybind/pybind11/blob/master/LICENSE)).
-- [`pybind11-stubgen`](https://github.com/pybind/pybind11-stubgen), ([BSD 3-Clause license](https://github.com/pybind/pybind11-stubgen/blob/main/LICENSE)), used to generate python stubs from the C++ core.
+- [`python3.10 or higher`](https://www.python.org/), ([PSF license](https://docs.python.org/3/license.html)).
+- [`nanobind`](https://github.com/wjakob/nanobind), ([BSD-style license](https://github.com/wjakob/nanobind/blob/master/LICENSE)), also used (via its bundled `nanobind.stubgen`) to generate python stubs from the C++ core.
 - [`pip`](https://github.com/pypa/pip), ([MIT license](https://github.com/pypa/pip/blob/main/LICENSE.txt)).
 
 Beyond that, pyoomph makes use of the following libraries at runtime. During installation with `pip`, many (but not all) of these libraries are automatically fetched as requirements.
@@ -59,6 +60,7 @@ Beyond that, pyoomph makes use of the following libraries at runtime. During ins
 - [`mpi4py`](https://github.com/mpi4py/mpi4py/), ([BSD 3-Clause license](https://github.com/mpi4py/mpi4py/blob/master/LICENSE.rst)).
 - [`more_itertools`](https://github.com/more-itertools/more-itertools), ([MIT license](https://github.com/more-itertools/more-itertools/blob/master/LICENSE)).
 - [`scipy`](https://github.com/scipy/scipy), ([BSD-3-Clause license](https://github.com/scipy/scipy/blob/main/LICENSES_bundled.txt)).
+- [`shapely`](https://github.com/shapely/shapely), ([BSD 3-Clause license](https://github.com/shapely/shapely/blob/main/LICENSE.txt)), only required by `pyoomph.meshes.axisymm_topology` to plan axisymmetric pinch-off/coalescence. Optional, install with `pip install pyoomph[topology]`.
 - [`matplotlib`](https://github.com/matplotlib/matplotlib), ([PSF-based license](https://matplotlib.org/stable/users/project/license.html)).
 - [`mkl`](https://pypi.org/project/mkl/), ([Intel Simplified Software license](https://www.intel.com/content/dam/develop/external/us/en/documents/pdf/intel-simplified-software-license.pdf)).
 - [`petsc`](https://petsc.org/release/) and [`petsc4py`](https://petsc.org/release/petsc4py/), ([BSD 2-Clause license](https://petsc.org/release/install/license/)).

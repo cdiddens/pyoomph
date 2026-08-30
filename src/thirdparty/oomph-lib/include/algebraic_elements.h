@@ -102,7 +102,7 @@ namespace oomph
     }
 
     /// Destructor (empty)
-    virtual ~AlgebraicNode()
+    ~AlgebraicNode() override
     {
 #ifdef LEAK_CHECK
       LeakCheckNames::AlgebraicNode_build -= 1;
@@ -129,7 +129,7 @@ namespace oomph
     /// of this flag, this should only be done for newly
     /// created nodes, when this function is called from
     /// AlgebraicElementBase::setup_algebraic_node_update(...)
-    void node_update(const bool& update_all_time_levels_for_new_node = false);
+    void node_update(const bool& update_all_time_levels_for_new_node = false) override;
 
 
     /// Number of node update fcts
@@ -189,7 +189,7 @@ namespace oomph
 
     /// Number of geometric objects involved in default (usually first)
     /// update function
-    unsigned ngeom_object() const
+    unsigned ngeom_object() const override
     {
       return Default_it_geom_object_pt->second.size();
     }
@@ -212,7 +212,7 @@ namespace oomph
 
 
     /// Return the vector of all geometric objects
-    GeomObject** all_geom_object_pt()
+    GeomObject** all_geom_object_pt() override
     {
       if (this->ngeom_object() == 0)
       {
@@ -613,7 +613,7 @@ namespace oomph
     /*void operator=(const AlgebraicMesh&) = delete;*/
 
     /// Surely a proper destructor is required... ?
-    ~AlgebraicMesh() {}
+    ~AlgebraicMesh() override {}
 
     /// Return a pointer to the n-th global AlgebraicNode
     // Can safely cast the nodes to AlgebraicNodes
@@ -650,7 +650,7 @@ namespace oomph
     /// [Doesn't make sense to use this mesh with SolidElements anyway,
     /// so we buffer the case if update_all_solid_nodes is set to
     /// true.]
-    void node_update(const bool& update_all_solid_nodes = false)
+    void node_update(const bool& update_all_solid_nodes = false) override
     {
 #ifdef PARANOID
       if (update_all_solid_nodes)
@@ -869,8 +869,8 @@ namespace oomph
 
     /// Update the nodal position posn at time level t (t=0: present;
     /// t>0: previous). Do nothing
-    virtual void algebraic_node_update(const unsigned& t,
-                                       AlgebraicNode*& node_pt)
+    void algebraic_node_update(const unsigned& t,
+                                       AlgebraicNode*& node_pt) override
     {
     }
 
@@ -879,7 +879,7 @@ namespace oomph
     /// mesh adaptation. Must be implemented for every specific algebraic
     /// mesh, though it may, of course, be left empty which is exactly
     /// what we do here
-    virtual void update_node_update(AlgebraicNode*& node_pt) {}
+    void update_node_update(AlgebraicNode*& node_pt) override {}
 
     /// Setup algebraic node update for specified node;
     /// do nothing in this dummy version

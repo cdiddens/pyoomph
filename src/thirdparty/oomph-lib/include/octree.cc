@@ -4872,7 +4872,9 @@ namespace oomph
   ///    (OcTreeRoot objects)
   ///
   //=================================================================
-  OcTreeForest::OcTreeForest(Vector<TreeRoot*>& trees_pt) : TreeForest(trees_pt)
+  //FOR PYOOMPH: skip_init_calls added, see the declaration in octree.h
+  OcTreeForest::OcTreeForest(Vector<TreeRoot*>& trees_pt, bool skip_init_calls)
+    : TreeForest(trees_pt)
   {
 #ifdef LEAK_CHECK
     LeakCheckNames::OcTreeForest_build += 1;
@@ -4885,6 +4887,8 @@ namespace oomph
     }
 
     using namespace OcTreeNames;
+
+    if (skip_init_calls) return; //FOR PYOOMPH: let a derived forest run its own init calls
 
     // Construct the neighbour and rotation scheme, note that all neighbour
     // pointers must be set before the constructor is called

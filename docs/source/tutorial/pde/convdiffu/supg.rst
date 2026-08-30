@@ -21,7 +21,9 @@ where :math:`h` is the size of the current element (e.g. the length of a one-dim
 
 The term in the brackets indeed is :math:`0` for :math:`\operatorname{Pe}_h=0` and goes to unity for large :math:`\operatorname{Pe}_h`. The factor :math:`\frac{h}{\|\vec{u}\|}` compensates for the :math:`\nabla` and the velocity appearing in the stabilization projection on :math:`\tau\vec{u}\cdot\nabla\phi`.
 
-To augment the advection-diffusion equations with the stabilization term, we can use the class :py:class:`~pyoomph.equations.SUPG.ElementSizeForSUPG` from :py:mod:`pyoomph.equations.SUPG`. It will calculate the Cartesian measure (i.e. length/area/volume) of each element and store it in a ``"D0"`` space. Since in moving mesh methods (cf. :numref:`secALE`) the elements can change in size, the element size becomes part of the degrees of freedom. One can access the typical element length scale by the method :py:meth:`~pyoomph.equations.SUPG.ElementSizeForSUPG.get_element_h` of the :py:class:`~pyoomph.equations.SUPG.ElementSizeForSUPG` object.
+To augment the advection-diffusion equations with the stabilization term, we need the typical element length scale :math:`h`. It is available as the keyword variable ``var("cartesian_element_length_h")``, which is the Cartesian measure of the element (i.e. length/area/volume) taken to the power :math:`1/d`. It is "Cartesian" in the sense that it ignores the coordinate system: in an axisymmetric problem ``var("element_length_h")`` would give the length scale of the *revolved* volume, which grows with the radius and hence does not describe the actual cell size. See :py:func:`~pyoomph.expressions.generic.var` for more on such keyword variables.
+
+Note that on a moving mesh (cf. :numref:`secALE`) this quantity depends on the nodal positions, so it is differentiated with respect to the mesh degrees of freedom and contributes additional Jacobian entries. That is the consistent choice, but if you prefer to freeze the element size instead, project it once onto a pinned ``"D0"`` field of your own and use that.
 
 The implementation of the augmented form :math:numref:`eqpdeconvdiffuweakSUPG` reads:
 
@@ -30,7 +32,7 @@ The implementation of the augmented form :math:numref:`eqpdeconvdiffuweakSUPG` r
    :start-at: from pyoomph import *
    :end-at: self.add_residual(time_scheme(self.scheme,weak(radv,self.get_supg_tau() * dot(self.u, grad(ctest)))))
 
-In the method ``get_supg_tau`` we check if the equation is combined with a single :py:class:`~pyoomph.equations.supg.ElementSizeForSUPG` object and bind the size :math:`h`. We calculate :math:`\operatorname{Pe}_h` and thereby :math:`\tau_h` according to the relations discussed above. Finally, this is used for the stabilization term, but only if ``with_SUPG`` is ``True``.
+In the method ``get_supg_tau`` we bind the element size :math:`h` and calculate :math:`\operatorname{Pe}_h` and thereby :math:`\tau_h` according to the relations discussed above. Finally, this is used for the stabilization term, but only if ``with_SUPG`` is ``True``.
 
 As a test class, we advect again a bump, but this time in one dimension:
 
@@ -39,7 +41,7 @@ As a test class, we advect again a bump, but this time in one dimension:
    :start-at: class OneDimAdvectionDiffusionProblem(Problem):
    :end-at: self.add_equations(eqs@"domain")
 
-It is necessary to add an :py:class:`~pyoomph.equations.SUPG.ElementSizeForSUPG` object to calculate the element size if SUPG is active. The rest is trivial, but note that we again use :py:class:`~pyoomph.meshes.bcs.DirichletBC` on both sides. Neumann conditions would have to be augmented by SUPG correction terms stemming from the consistent partial integration that leads to :math:numref:`eqpdeconvdiffuweakSUPG`.
+Nothing has to be added for the element size, since it is just a keyword variable. Note that we again use :py:class:`~pyoomph.equations.generic.DirichletBC` on both sides. Neumann conditions would have to be augmented by SUPG correction terms stemming from the consistent partial integration that leads to :math:numref:`eqpdeconvdiffuweakSUPG`.
 
 
 With a simple run code, we can compare the results with and without SUPG:
@@ -63,7 +65,17 @@ Results are depicted in :numref:`figpdesupg`.
 
 .. note::
 
-    An alternative way of getting the typical element size is just using ``var("cartesian_element_size_Eulerian")`` or ``var("element_size_Eulerian")`` instead of :py:class:`~pyoomph.equations.SUPG.ElementSizeForSUPG`. See :py:func:`~pyoomph.expressions.generic.var` for more information on such keyword variables.
+    If you want the element *measure* rather than its length scale, use ``var("cartesian_element_size_Eulerian")`` or ``var("element_size_Eulerian")`` directly.
+
+.. note::
+
+    For the (Navier-)Stokes equations there is no need to assemble the stabilization by hand: :py:class:`~pyoomph.equations.stabilized_ns.StabilizedNavierStokes` provides SUPG, PSPG, LSIC/grad-div, GLS, ASGS and VMS, together with the equal-order velocity/pressure pairs they make usable.
+
+.. note::
+
+    The same holds for the transport equations shipped with pyoomph. :py:class:`~pyoomph.equations.advection_diffusion.AdvectionDiffusionEquations`, :py:class:`~pyoomph.equations.multi_component.CompositionAdvectionDiffusionEquations` and the temperature equations all take a ``stabilization`` argument, e.g. ``AdvectionDiffusionEquations("c", diffusivity=D, stabilization="SUPG")``, and :py:func:`~pyoomph.equations.multi_component.CompositionFlowEquations` exposes ``ns_stabilization``, ``compo_stabilization`` and ``thermal_stabilization`` independently. See :py:class:`~pyoomph.equations.stabilization.ScalarTransportStabilization` for the options.
+
+    The :math:`\tau` derived below is the nodally exact one-dimensional choice, which is *not* among those options: :math:`\coth(\mathrm{Pe})-1/\mathrm{Pe}` is :math:`0/0` as :math:`\mathrm{Pe}\to0`. The built-in formulas regularize that limit instead. The derivation here is still the one worth reading to understand what :math:`\tau` is for.
 
 
 

@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -48,8 +49,11 @@ class CustomMathExpression(_pyoomph.CustomMathExpression):
 
     def __init__(self):
         super().__init__()
-        self._symbolic_derivative: Dict[int, CustomMathExpression] = {}
+        self._symbolic_derivative: dict[int, CustomMathExpression] = {}
         self.fd_epsilon = 1e-8
+        # Guard reference used in outer_derivative() to keep the parent CustomMathExpression
+        # alive on the Python side (see comment there for why this is required).
+        self._diff_parent_guard: Optional["CustomMathExpression"] = None
 
     def get_id_name(self) -> str:
         """
@@ -73,7 +77,7 @@ class CustomMathExpression(_pyoomph.CustomMathExpression):
         """
         return FiniteDifferenceDerivative(self, index, epsilon=self.fd_epsilon)
 
-    def __call__(self, *a: Union[_pyoomph.Expression, float, int]) -> _pyoomph.Expression:
+    def __call__(self, *a: _pyoomph.Expression | float | int) -> _pyoomph.Expression:
         """
         Evaluate the expression with the given arguments.
 
@@ -83,7 +87,7 @@ class CustomMathExpression(_pyoomph.CustomMathExpression):
         Returns:
             Expression: The evaluated expression.
         """
-        b: List[_pyoomph.Expression] = []
+        b: list[_pyoomph.Expression] = []
         for c in a:
             if isinstance(c, _pyoomph.Expression):
                 b.append(0+c)
@@ -149,19 +153,27 @@ class CustomMathExpression(_pyoomph.CustomMathExpression):
                 if dp._symbolic_derivative.get(index, None) is None:
                     dp._symbolic_derivative[index] = dp.derivative(index)
                     dp._symbolic_derivative[index].set_as_derivative(dp, index)
+                    # set_as_derivative() no longer keeps "dp" alive on the C++ side (that used an
+                    # nb::keep_alive edge invisible to Python's cyclic GC, which combined with the
+                    # ordinary self<->parent cycle these derivative helpers form made the whole thing
+                    # permanently uncollectible). Every built-in derivative helper already stores this
+                    # via a plain "parent" attribute, but a custom derivative() override might not -
+                    # guard unconditionally here so correctness never depends on that convention.
+                    dp._symbolic_derivative[index]._diff_parent_guard=dp
                 return dp._symbolic_derivative[index].outer_derivative(x, i)
 
         if self._symbolic_derivative.get(index, None) is None:
             self._symbolic_derivative[index] = self.derivative(index)
             self._symbolic_derivative[index].set_as_derivative(self, index)
+            self._symbolic_derivative[index]._diff_parent_guard=self
         xn = [x.op(i) for i in range(x.nops())]
         return self._symbolic_derivative[index](*xn)
 
-    def real_part(self,invokation:_pyoomph.Expression, arglst:List[_pyoomph.Expression]):          
+    def real_part(self,invokation:_pyoomph.Expression, arglst:Sequence[_pyoomph.Expression]):
         # Just assume everything is real here, i.e. replicate myself
-        return self(*arglst) 
-    
-    def imag_part(self,invokation:_pyoomph.Expression, arglst:List[_pyoomph.Expression]):
+        return self(*arglst)
+
+    def imag_part(self,invokation:_pyoomph.Expression, arglst:Sequence[_pyoomph.Expression]):
         # Just assume everything is real here, i.e. return 0
         return Expression(0)
 
@@ -260,7 +272,7 @@ class FiniteDifferenceDerivative2ndIJ(CustomMathExpression):
 class CustomMultiReturnExpression(_pyoomph.CustomMultiReturnExpression):
     def __init__(self) -> None:
         super().__init__()
-        self.use_c_code: Union[Literal["auto"], bool] = "auto"
+        self.use_c_code: Literal["auto"] | bool = "auto"
         self.return_tuple_for_single_return:bool=False
         self.set_debug_python_vs_c_epsilon(-1.0) # No C vs Python debugging by default
         pass
@@ -269,11 +281,11 @@ class CustomMultiReturnExpression(_pyoomph.CustomMultiReturnExpression):
         return self.__class__.__name__
 
     # Before calling eval, we can decompose our arguments. E.g. tensors split into scalars. The returning list may not have any phyiscal dimensions
-    def process_args_to_scalar_list(self, *args: "ExpressionOrNum") -> List["ExpressionOrNum"]:
+    def process_args_to_scalar_list(self, *args: "ExpressionOrNum") -> list["ExpressionOrNum"]:
         return [*args]
 
     # Before returning, we can assemble things back to e.g. tensors or multiple returnals
-    def process_result_list_to_results(self, result_list: List["Expression"]) -> Tuple["ExpressionOrNum", ...]:
+    def process_result_list_to_results(self, result_list: list["Expression"]) -> tuple["ExpressionOrNum", ...]:
         return tuple(result_list)
 
     # We must know how many scalars are returned by eval, i.e. the length of the return_list buffer
@@ -289,10 +301,10 @@ class CustomMultiReturnExpression(_pyoomph.CustomMultiReturnExpression):
 
     # Sometimes, we know that some derivative is e.g. a constant or even zero. In that case, we can return it here. It will be substituted in the derived expression
     # If it is e.g. 0, this simplifies the Jacobian term and requires less computation
-    def use_symbolic_derivative(self,arg_list: List[Expression],i_res:int,j_arg:int)->Optional[ExpressionOrNum]:
+    def use_symbolic_derivative(self,arg_list: Sequence[Expression],i_res:int,j_arg:int)->ExpressionOrNum | None:
         return None # By default, always do the numerical ones
 
-    def _get_symbolic_derivative(self,arg_list:List[Expression],i_res:int,j_arg:int)->Tuple[bool,Expression]:
+    def _get_symbolic_derivative(self,arg_list:Sequence[Expression],i_res:int,j_arg:int)->tuple[bool,Expression]:
         res=self.use_symbolic_derivative(arg_list,i_res,j_arg)
         zero=Expression(0)
         if res is None:
@@ -350,15 +362,15 @@ class CustomMultiReturnExpression(_pyoomph.CustomMultiReturnExpression):
                 return res
         
         else:
-            eargs:List[Expression]=[]
+            eargs:list[Expression]=[]
             for pa in pargs:
                 if not isinstance(pa,Expression):
                     eargs.append(Expression(pa))
                 else:
                     eargs.append((pa))
             funcexpr = _pyoomph.GiNaC_python_multi_cb_function(self, eargs, num_ret)
-            res = [_pyoomph.GiNaC_python_multi_cb_indexed_result(funcexpr, i) for i in range(num_ret)]
-            res=self.process_result_list_to_results(res)
+            indexed = [_pyoomph.GiNaC_python_multi_cb_indexed_result(funcexpr, i) for i in range(num_ret)]
+            res=self.process_result_list_to_results(indexed)
             if isinstance(res,(list,tuple)) and len(res)==1 and not self.return_tuple_for_single_return:
                 return res[0]
             else:
@@ -366,7 +378,7 @@ class CustomMultiReturnExpression(_pyoomph.CustomMultiReturnExpression):
 
 
     # Add this function after your derivative matrix calculation at the end of the eval function (if flag is set)
-    def debug_python_derivatives_with_FD(self, arg_list: NPFloatArray, result_list: NPFloatArray, derivative_matrix: NPFloatArray, fd_epsilion=1.0e-8, error_threshold=1e-5,stop_on_error=False,additional_float_information:Optional[Union[float,Tuple[float,...],List[float]]]=None):
+    def debug_python_derivatives_with_FD(self, arg_list: NPFloatArray, result_list: NPFloatArray, derivative_matrix: NPFloatArray, fd_epsilion=1.0e-8, error_threshold=1e-5,stop_on_error=False,additional_float_information:float | tuple[float, ...] | list[float] | None=None):
         derivative_matrix_p = derivative_matrix.copy()
         self.fill_python_derivatives_by_FD(arg_list,result_list,derivative_matrix_p,fd_epsilion)
         for iret in range(len(result_list)):
@@ -399,7 +411,7 @@ class CustomMultiReturnExpression(_pyoomph.CustomMultiReturnExpression):
 
 
     # Helper to generate the derivative code. It won't work out of the box, i.e. you might have to temporarily replace e.g. numpy.sqrt by sympy.sqrt etc in the eval function
-    def generate_derivative_code_by_sympy(self,arg_names:List[Optional[str]],fill_zero_before:bool=True):
+    def generate_derivative_code_by_sympy(self,arg_names:list[str | None],fill_zero_before:bool=True):
         arg_names=arg_names.copy()
         for i,a in enumerate(arg_names):
             if a is None or a=="":
@@ -410,23 +422,23 @@ class CustomMultiReturnExpression(_pyoomph.CustomMultiReturnExpression):
         nres=self.get_num_returned_scalars(nargs)
         res=numpy.array([sympy.zeros(1)[0] for _i in range(nres)])
         Jdummy=numpy.zeros((nres,nargs),dtype=object)
-        self.eval(0,arg_symbs,res,Jdummy)
+        self.eval(0,arg_symbs,res,Jdummy) #type:ignore
         for i,r in enumerate(res):
             if isinstance(r,(float,int)):
                 res[i]=sympy.Number(r)        
         diffmat=[[r.diff(a) for a in arg_symbs] for r in res]
         listed=[]
         for r in diffmat:
-	        for e in r:
-		        listed.append(e)
-        sub_exprs, simplified_exprs = sympy.cse(tuple(listed))
+            for e in r:
+                listed.append(e)
+        sub_exprs, simplified_exprs = cast("Tuple[List[Any], List[Any]]", sympy.cse(tuple(listed)))
         for s in sub_exprs:
-	        print(s[0],"=",s[1])
+            print(s[0],"=",s[1])
         print("#Jacobian entries:")
         if fill_zero_before:
             print("derivative_matrix.fill(0.0)")
         diffmat=[]
-        for i in range(len(res)):	    
+        for i in range(len(res)):
             for j in range(len(arg_symbs)):
                 if fill_zero_before:
                     if simplified_exprs[i*len(arg_symbs)+j].is_number:
@@ -436,3 +448,5 @@ class CustomMultiReturnExpression(_pyoomph.CustomMultiReturnExpression):
         exit()
 
 
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

@@ -44,4 +44,4 @@ We discuss a few examples of the Navier-Stokes equation in the following section
    navier/transientstokes.rst   
    navier/rtinstab.rst
    navier/marainstab.rst         
-
+   navier/viscoelastic.rst

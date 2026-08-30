@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -50,7 +51,7 @@ class KuramotoSivashinskyEquations(Equations):
 			swap_test_functions: Swap the test functions of height and curvature.
 	"""
 		
-	def __init__(self,*,a1:ExpressionOrNum=-1,a2:ExpressionOrNum=-1,a3:ExpressionOrNum=1,b:ExpressionOrNum=0,c:ExpressionOrNum=0,space:FiniteElementSpaceEnum="C2",curvspace:Optional[FiniteElementSpaceEnum]=None,swap_test_functions:bool=False,fieldname:str="height",curvfieldname:str="curvature"):
+	def __init__(self,*,a1:ExpressionOrNum=-1,a2:ExpressionOrNum=-1,a3:ExpressionOrNum=1,b:ExpressionOrNum=0,c:ExpressionOrNum=0,space:FiniteElementSpaceEnum="C2",curvspace:FiniteElementSpaceEnum | None=None,swap_test_functions:bool=False,fieldname:str="height",curvfieldname:str="curvature"):
 		super().__init__() #Really important, otherwise it will crash
 		self.a1=a1
 		self.a2=a2
@@ -83,11 +84,19 @@ class KuramotoSivashinskyBoundary(Equations):
 			dot(grad(h),n) = 0
 	"""
 	def define_residuals(self):
-		peqs=self.get_parent_domain().get_equations().get_equation_of_type(KuramotoSivashinskyEquations,always_as_list=True)
+		parent_domain=self.get_parent_domain()
+		assert parent_domain is not None
+		peqs=parent_domain.get_equations().get_equation_of_type(KuramotoSivashinskyEquations,always_as_list=True)
 		if len(peqs)!=1:
 			raise ValueError("KuramotoSivashinskyBoundary requires exactly one KuramotoSivashinskyEquations in the parent domain")
+		peq=peqs[0]
+		assert isinstance(peq,KuramotoSivashinskyEquations)
 
-		hbulk, _ = var_and_test(peqs[0].fieldname, domain=self.get_parent_domain())
-		_, curv_test = var_and_test(peqs[0].curvfieldname)
+		hbulk, _ = var_and_test(peq.fieldname, domain=parent_domain)
+		_, curv_test = var_and_test(peq.curvfieldname)
 		n = self.get_normal()
 		self.add_residual(-weak(dot(n,grad(hbulk)),curv_test))
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

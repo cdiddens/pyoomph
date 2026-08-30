@@ -81,7 +81,7 @@ namespace oomph
   public:
     EigenSolver() : Sigma_real(0.0) {}
     EigenSolver(const EigenSolver&) {}
-    virtual ~EigenSolver() {}
+    ~EigenSolver() override {}
 
     virtual void solve_eigenproblem_legacy(
       Problem* const& problem_pt,
@@ -143,13 +143,13 @@ namespace oomph
     LAPACK_QZ() : EigenSolver() {}
     LAPACK_QZ(const LAPACK_QZ&) = delete;
     void operator=(const LAPACK_QZ&) = delete;
-    virtual ~LAPACK_QZ() {}
+    ~LAPACK_QZ() override {}
 
     void solve_eigenproblem_legacy(Problem* const& problem_pt,
                                    const int& n_eval,
                                    Vector<std::complex<double>>& eigenvalue,
                                    Vector<DoubleVector>& eigenvector,
-                                   const bool& do_adjoint_problem = false)
+                                   const bool& do_adjoint_problem = false) override
     {
       throw OomphLibError("LAPACK_QZ is deactivated in pyoomph",
                           OOMPH_CURRENT_FUNCTION,
@@ -162,7 +162,7 @@ namespace oomph
                             Vector<double>& beta,
                             Vector<DoubleVector>& eigenvector_real,
                             Vector<DoubleVector>& eigenvector_imag,
-                            const bool& do_adjoint_problem = false)
+                            const bool& do_adjoint_problem = false) override
     {
       throw OomphLibError("LAPACK_QZ is deactivated in pyoomph",
                           OOMPH_CURRENT_FUNCTION,
@@ -194,10 +194,12 @@ namespace oomph
 #ifdef OOMPH_HAS_MPI
       Doc_imbalance_in_parallel_assembly(false),
       Use_default_partition_in_load_balance(false),
+#endif
       Must_recompute_load_balance_for_assembly(true),
+      Block_dof_arrangement_used(false),
+#ifdef OOMPH_HAS_MPI
       Halo_scheme_pt(0),
 #endif
-      Block_dof_arrangement_used(false),
       Relaxation_factor(1.0),
       Newton_solver_tolerance(1.0e-8),
       Max_newton_iterations(10),
@@ -221,6 +223,7 @@ namespace oomph
       Maximum_dt(1.0e12),
       DTSF_max_increase(4.0),
       DTSF_min_decrease(0.8),
+      Target_error_safety_factor(1.0), //FOR PYOOMPH: see problem.h
       Minimum_dt_but_still_proceed(-1.0),
       Scale_arc_length(true),
       Desired_proportion_of_arc_length(0.5),
@@ -418,6 +421,20 @@ namespace oomph
     const unsigned nrow = this->ndof();
 
 #ifdef OOMPH_HAS_MPI
+
+    // FOR PYOOMPH: let the problem name the row distribution it needs before any
+    // of the heuristics below get a say. See
+    // Problem::preferred_linear_solver_distribution(); null (the default) means
+    // "no preference" and everything continues unchanged.
+    {
+      LinearAlgebraDistribution* preferred_pt = 0;
+      this->preferred_linear_solver_distribution(preferred_pt);
+      if (preferred_pt != 0)
+      {
+        dist_pt = preferred_pt;
+        return;
+      }
+    }
 
     unsigned nproc = Communicator_pt->nproc();
 
@@ -854,7 +871,7 @@ namespace oomph
         // need to check here the type of mesh
         if (n_mesh == 0)
         {
-          // TriangleMeshBase support was removed from this build of
+          //FOR PYOOMPH: TriangleMeshBase support was removed from this build of
           // pyoomph, so the only mesh is always treated as structured.
           {
             const unsigned n_ele = global_mesh_pt->nelement();
@@ -878,7 +895,7 @@ namespace oomph
           std::vector<bool> is_structured_mesh(n_mesh);
           for (unsigned i_mesh = 0; i_mesh < n_mesh; i_mesh++)
           {
-            // TriangleMeshBase support was removed from this build of
+            //FOR PYOOMPH: TriangleMeshBase support was removed from this build of
             // pyoomph, so every submesh is always treated as structured.
             is_structured_mesh[i_mesh] = true;
             // Check if mesh is an structured mesh
@@ -1399,7 +1416,7 @@ namespace oomph
         nel = 0;
         for (unsigned i_mesh = 0; i_mesh < n_meshes; i_mesh++)
         {
-          // TriangleMeshBase support was removed from this build of
+          //FOR PYOOMPH: TriangleMeshBase support was removed from this build of
           // pyoomph, so every mesh is always treated as structured.
           is_structured_mesh[i_mesh] = true;
           nel += mesh_pt(i_mesh)->nelement();
@@ -2312,7 +2329,7 @@ namespace oomph
       // Call assign equation numbers on the global mesh
       n_dof = Mesh_pt->assign_global_eqn_numbers(Dof_pt,Block_dof_pt_start);
 
-      // SpineMesh support was removed from this build of pyoomph, so there
+      //FOR PYOOMPH: SpineMesh support was removed from this build of pyoomph, so there
       // is no additional spine equation numbering to deal with here.
 
       if (Global_timings::Doc_comprehensive_timings)
@@ -2326,6 +2343,20 @@ namespace oomph
 
 
       //Block_dof_pt_start.clear(); //FOR PYOOMPH - Deactivate this
+
+      //FOR PYOOMPH: let a derived Problem permute the numbering it has just been handed. This is
+      // deliberately the ONLY place it can happen, and it is here rather than after
+      // assign_eqn_numbers() returns because everything that consumes the numbering is built below:
+      // the local equation numbers and the elemental info, the interface equation remapping, the
+      // Dirichlet pinned-equation set, the dof distribution and the sparsity generation id. A
+      // permutation applied here is therefore simply what the numbering IS, and no cached dof index
+      // can survive it.
+      //
+      // It also serves both MPI modes with one implementation. Distributed, the equation numbers here
+      // are still rank-local 0..my_n-1 and synchronise_eqn_numbers() below shifts them by this rank's
+      // base afterwards, so a rank-local permutation leaves each rank's range contiguous, which is
+      // what the distributed assembly and the condensation row ownership rely on.
+      reorder_global_eqn_numbers(Dof_pt);
 
 #ifdef OOMPH_HAS_MPI
 
@@ -2582,7 +2613,7 @@ namespace oomph
       Mesh_pt->describe_dofs(out, in);
     }
 
-    // SpineMesh support was removed from this build of pyoomph, so there
+    //FOR PYOOMPH: SpineMesh support was removed from this build of pyoomph, so there
     // is no additional spine equation numbering to describe here.
 
     out << std::string(80, '\\') << std::endl;
@@ -2617,14 +2648,19 @@ namespace oomph
   //================================================================
   void Problem::get_dofs(DoubleVector& dofs) const
   {
-    // Find number of dofs
-    const unsigned long n_dof = ndof();
-
     // Resize the vector
     dofs.build(Dof_distribution_pt, 0.0);
 
+    // FOR PYOOMPH: loop over the LOCAL rows, not ndof().
+    // On a distributed problem ndof() is the GLOBAL dof count, while `dofs` holds only nrow_local()
+    // doubles and Dof_pt only this rank's dofs -- newton_solve() indexes Dof_pt by local index for
+    // exactly that reason. Looping to ndof() therefore ran off the end of both buffers and corrupted
+    // the heap on every call (silently: the abort typically came much later, in an unrelated malloc).
+    // Serially nrow_local() == ndof(), so this is unchanged there.
+    const unsigned long n_dof_local = Dof_distribution_pt->nrow_local();
+
     // Copy dofs into vector
-    for (unsigned long l = 0; l < n_dof; l++)
+    for (unsigned long l = 0; l < n_dof_local; l++)
     {
       dofs[l] = *Dof_pt[l];
     }
@@ -3562,9 +3598,14 @@ namespace oomph
         error_stream.str(), OOMPH_CURRENT_FUNCTION, OOMPH_EXCEPTION_LOCATION);
     }
 #endif
-    for (unsigned long l = 0; l < n_dof; l++)
+    // FOR PYOOMPH: loop over the LOCAL rows, for the same reason as in get_dofs() above -- n_dof is
+    // the GLOBAL count while Dof_pt holds only this rank's dofs. `dofs` may arrive either already
+    // distributed over the dof distribution or replicated on every rank, so index it accordingly.
+    const unsigned long n_dof_local = Dof_distribution_pt->nrow_local();
+    const unsigned long first = dofs.distributed() ? 0 : Dof_distribution_pt->first_row();
+    for (unsigned long l = 0; l < n_dof_local; l++)
     {
-      *Dof_pt[l] = dofs[l];
+      *Dof_pt[l] = dofs[first + l];
     }
   }
 
@@ -3740,7 +3781,7 @@ namespace oomph
     LinearAlgebraDistribution dist(this->communicator_pt(), n_dof, false);
     Mres.build(&dist, 0.0);
 
-    // Discontinuous Galerkin (DG) element formulation support was removed
+    //FOR PYOOMPH: Discontinuous Galerkin (DG) element formulation support was removed
     // from this build of pyoomph, so the discontinuous fast path is gone;
     // we always invert the full mass matrix via a global linear solve.
     if (Discontinuous_element_formulation)
@@ -3936,6 +3977,25 @@ namespace oomph
         dist_pt, column_index, row_start, value, nnz, res);
       // Fill in the residuals data
       residuals.set_external_values(res[0], true);
+
+      // FOR PYOOMPH: A NON-distributed target distribution comes back filled on rank 0 only.
+      // parallel_sparse_assemble() sends every contribution to
+      // target_dist_pt->rank_of_global_row(eqn), and for a replicated distribution first_row(p)==0
+      // and nrow_local(p)==nrow on every p, so that lookup always answers 0 -- the other ranks
+      // receive nothing and keep the zeros they were built with. Callers that hand in a replicated
+      // vector (Problem::get_derivative_wrt_global_parameter() does, whenever the caller's result
+      // vector is replicated) then silently get a zero right-hand side everywhere except rank 0.
+      // That is how the fold tracker's eigenvector guess, which is a solve against
+      // d(residual)/d(parameter), came out different under mpirun than serially and put the fold
+      // of kuramoto_sivanshinsky_bifurcation.py at a different parameter value.
+      if (!dist_pt->distributed())
+      {
+        MPI_Bcast(residuals.values_pt(),
+                  residuals.nrow(),
+                  MPI_DOUBLE,
+                  0,
+                  Communicator_pt->mpi_comm());
+      }
 
       // Delete new assembly handler
       delete Assembly_handler_pt;
@@ -4735,6 +4795,9 @@ namespace oomph
       // This means that the storage is only allocated (and deleted) once
       Vector<Vector<double>> el_residuals(n_vector);
       Vector<DenseMatrix<double>> el_jacobian(n_matrix);
+      //FOR PYOOMPH: per-element structural sparsity masks (see Problem::sparsity_mask_for_element).
+      //             Declared out here so the per-element fetch below allocates nothing.
+      Vector<const char*> sparsity_masks(n_matrix, 0);
 
       // Loop over the elements for this processor
       for (unsigned long e = el_lo; e <= el_hi; e++)
@@ -4773,6 +4836,12 @@ namespace oomph
           assembly_handler_pt->get_all_vectors_and_matrices(
             elem_pt, el_residuals, el_jacobian);
 
+          //FOR PYOOMPH: fetch the structural sparsity masks once per element, not per entry.
+          for (unsigned m = 0; m < n_matrix; m++)
+          {
+            sparsity_masks[m] = sparsity_mask_for_element(m, elem_pt, nvar);
+          }
+
           //---------------Insert the values into the maps--------------
 
           // Loop over the first index of local variables
@@ -4800,7 +4869,9 @@ namespace oomph
                 // Get the value of the matrix at this point
                 double value = el_jacobian[m](i, j);
                 // Only bother to add to the map if it's non-zero
-                if (std::fabs(value) > Numerical_zero_for_sparse_assembly)
+                //FOR PYOOMPH: the mask may only ADD entries, never remove them -- see problem.h
+                if ((sparsity_masks[m] && sparsity_masks[m][i * nvar + j]) ||
+                    std::fabs(value) > numerical_zero_for_sparse_assembly(m))
                 {
                   // If it's compressed row storage, then our vector of maps
                   // is indexed by row (equation number)
@@ -5078,6 +5149,9 @@ namespace oomph
       // This means that the stored is only allocated (and deleted) once
       Vector<Vector<double>> el_residuals(n_vector);
       Vector<DenseMatrix<double>> el_jacobian(n_matrix);
+      //FOR PYOOMPH: per-element structural sparsity masks (see Problem::sparsity_mask_for_element).
+      //             Declared out here so the per-element fetch below allocates nothing.
+      Vector<const char*> sparsity_masks(n_matrix, 0);
 
 
       // Pointer to a single list to be used during the assembly
@@ -5120,6 +5194,12 @@ namespace oomph
           assembly_handler_pt->get_all_vectors_and_matrices(
             elem_pt, el_residuals, el_jacobian);
 
+          //FOR PYOOMPH: fetch the structural sparsity masks once per element, not per entry.
+          for (unsigned m = 0; m < n_matrix; m++)
+          {
+            sparsity_masks[m] = sparsity_mask_for_element(m, elem_pt, nvar);
+          }
+
           //---------------- Insert the values into the lists -----------
 
           // Loop over the first index of local variables
@@ -5147,7 +5227,7 @@ namespace oomph
                 // Get the value of the matrix at this point
                 double value = el_jacobian[m](i, j);
                 // Only add to theif it's non-zero
-                if (std::fabs(value) > Numerical_zero_for_sparse_assembly)
+                if (std::fabs(value) > numerical_zero_for_sparse_assembly(m)) //FOR PYOOMPH: per-matrix threshold, see problem.h
                 {
                   // If it's compressed row storage, then our vector is indexed
                   // by row (the equation number)
@@ -5278,7 +5358,7 @@ namespace oomph
           // of the present entry to the value.
           // Additionally check that the entry is non-zero
           if ((it->first == current_index) &&
-              (std::fabs(it->second) > Numerical_zero_for_sparse_assembly))
+              (std::fabs(it->second) > numerical_zero_for_sparse_assembly(m))) //FOR PYOOMPH: per-matrix threshold, see problem.h
           {
             current_value += it->second;
           }
@@ -5482,6 +5562,9 @@ namespace oomph
       // This means that the storage is only allocated (and deleted) once
       Vector<Vector<double>> el_residuals(n_vector);
       Vector<DenseMatrix<double>> el_jacobian(n_matrix);
+      //FOR PYOOMPH: per-element structural sparsity masks (see Problem::sparsity_mask_for_element).
+      //             Declared out here so the per-element fetch below allocates nothing.
+      Vector<const char*> sparsity_masks(n_matrix, 0);
 
       // Loop over the elements
       for (unsigned long e = el_lo; e <= el_hi; e++)
@@ -5520,6 +5603,12 @@ namespace oomph
           assembly_handler_pt->get_all_vectors_and_matrices(
             elem_pt, el_residuals, el_jacobian);
 
+          //FOR PYOOMPH: fetch the structural sparsity masks once per element, not per entry.
+          for (unsigned m = 0; m < n_matrix; m++)
+          {
+            sparsity_masks[m] = sparsity_mask_for_element(m, elem_pt, nvar);
+          }
+
           //---------------Insert the values into the vectors--------------
 
           // Loop over the first index of local variables
@@ -5549,7 +5638,9 @@ namespace oomph
                 // Get the value of the matrix at this point
                 double value = el_jacobian[m](i, j);
                 // Only bother to add to the vector if it's non-zero
-                if (std::fabs(value) > Numerical_zero_for_sparse_assembly)
+                //FOR PYOOMPH: the mask may only ADD entries, never remove them -- see problem.h
+                if ((sparsity_masks[m] && sparsity_masks[m][i * nvar + j]) ||
+                    std::fabs(value) > numerical_zero_for_sparse_assembly(m))
                 {
                   // If it's compressed row storage, then our vector of maps
                   // is indexed by row (equation number)
@@ -5840,6 +5931,9 @@ namespace oomph
       // This means that the storage will only be allocated (and deleted) once
       Vector<Vector<double>> el_residuals(n_vector);
       Vector<DenseMatrix<double>> el_jacobian(n_matrix);
+      //FOR PYOOMPH: per-element structural sparsity masks (see Problem::sparsity_mask_for_element).
+      //             Declared out here so the per-element fetch below allocates nothing.
+      Vector<const char*> sparsity_masks(n_matrix, 0);
 
       // Loop over the elements
       for (unsigned long e = el_lo; e <= el_hi; e++)
@@ -5878,6 +5972,12 @@ namespace oomph
           assembly_handler_pt->get_all_vectors_and_matrices(
             elem_pt, el_residuals, el_jacobian);
 
+          //FOR PYOOMPH: fetch the structural sparsity masks once per element, not per entry.
+          for (unsigned m = 0; m < n_matrix; m++)
+          {
+            sparsity_masks[m] = sparsity_mask_for_element(m, elem_pt, nvar);
+          }
+
           //---------------Insert the values into the vectors--------------
 
           // Loop over the first index of local variables
@@ -5907,7 +6007,9 @@ namespace oomph
                 // Get the value of the matrix at this point
                 double value = el_jacobian[m](i, j);
                 // Only bother to add to the vector if it's non-zero
-                if (std::fabs(value) > Numerical_zero_for_sparse_assembly)
+                //FOR PYOOMPH: the mask may only ADD entries, never remove them -- see problem.h
+                if ((sparsity_masks[m] && sparsity_masks[m][i * nvar + j]) ||
+                    std::fabs(value) > numerical_zero_for_sparse_assembly(m))
                 {
                   // If it's compressed row storage, then our vector of maps
                   // is indexed by row (equation number)
@@ -6201,12 +6303,18 @@ namespace oomph
       ncoef[m].resize(ndof, 0);
     }
 
-    if (Sparse_assemble_with_arrays_previous_allocation.size() == 0)
+    //FOR PYOOMPH: same shape check as in parallel_sparse_assemble() - see the comment there. This
+    //serial variant is only reached when Sparse_assembly_method is set to the two-arrays scheme, but
+    //it holds the identical stale-n_matrix trap.
+    if (Sparse_assemble_with_arrays_previous_allocation.size() < n_matrix)
     {
       Sparse_assemble_with_arrays_previous_allocation.resize(n_matrix);
-      for (unsigned m = 0; m < n_matrix; m++)
+    }
+    for (unsigned m = 0; m < n_matrix; m++)
+    {
+      if (Sparse_assemble_with_arrays_previous_allocation[m].size() != ndof)
       {
-        Sparse_assemble_with_arrays_previous_allocation[m].resize(ndof, 0);
+        Sparse_assemble_with_arrays_previous_allocation[m].assign(ndof, 0);
       }
     }
 
@@ -6218,6 +6326,9 @@ namespace oomph
       // This means that the storage will only be allocated (and deleted) once
       Vector<Vector<double>> el_residuals(n_vector);
       Vector<DenseMatrix<double>> el_jacobian(n_matrix);
+      //FOR PYOOMPH: per-element structural sparsity masks (see Problem::sparsity_mask_for_element).
+      //             Declared out here so the per-element fetch below allocates nothing.
+      Vector<const char*> sparsity_masks(n_matrix, 0);
 
       // Loop over the elements
       for (unsigned long e = el_lo; e <= el_hi; e++)
@@ -6256,6 +6367,12 @@ namespace oomph
           assembly_handler_pt->get_all_vectors_and_matrices(
             elem_pt, el_residuals, el_jacobian);
 
+          //FOR PYOOMPH: fetch the structural sparsity masks once per element, not per entry.
+          for (unsigned m = 0; m < n_matrix; m++)
+          {
+            sparsity_masks[m] = sparsity_mask_for_element(m, elem_pt, nvar);
+          }
+
           //---------------Insert the values into the vectors--------------
 
           // Loop over the first index of local variables
@@ -6285,7 +6402,9 @@ namespace oomph
                 // Get the value of the matrix at this point
                 double value = el_jacobian[m](i, j);
                 // Only bother to add to the vector if it's non-zero
-                if (std::fabs(value) > Numerical_zero_for_sparse_assembly)
+                //FOR PYOOMPH: the mask may only ADD entries, never remove them -- see problem.h
+                if ((sparsity_masks[m] && sparsity_masks[m][i * nvar + j]) ||
+                    std::fabs(value) > numerical_zero_for_sparse_assembly(m))
                 {
                   // number of entrys in this row
                   const unsigned size = ncoef[m][eqn_number];
@@ -6674,7 +6793,11 @@ namespace oomph
     Vector<unsigned> my_eqns;
     if (n_elements != 0)
     {
-      if (el_hi_plus_one>0) // TODO: Patch to avoid underflow when el_hi_plus_one is unsigned and el_hi is 0, which somehow happens if you only have one element
+      //FOR PYOOMPH: guard against unsigned underflow. el_hi_plus_one is unsigned and
+      // get_my_eqns() takes the INCLUSIVE upper element index, so el_hi_plus_one - 1
+      // wraps to a huge number when the range is empty -- which happens on a rank that
+      // ends up with a single element. The original code had no guard.
+      if (el_hi_plus_one > 0)
       {
         this->get_my_eqns(assembly_handler_pt, el_lo, el_hi_plus_one - 1, my_eqns);
       }
@@ -6739,12 +6862,21 @@ namespace oomph
     // coefs in each row.
     // if a matrix of this size has not been assembled before then resize this
     // storage
-    if (Sparse_assemble_with_arrays_previous_allocation.size() == 0)
+    //FOR PYOOMPH: the guard used to be size()==0 alone, i.e. the record kept the SHAPE of whichever
+    //assembly filled it first. get_eigenproblem_matrices() assembles n_matrix=2 while an ordinary
+    //Newton step assembles n_matrix=1, so every MPI eigensolve after a solve indexed [1] on a
+    //one-entry vector -> segfault. Check the shape, not just emptiness.
+    if (Sparse_assemble_with_arrays_previous_allocation.size() < n_matrix)
     {
       Sparse_assemble_with_arrays_previous_allocation.resize(n_matrix);
-      for (unsigned m = 0; m < n_matrix; m++)
+    }
+    for (unsigned m = 0; m < n_matrix; m++)
+    {
+      // A different row count means the hints describe other equations, so they are reset rather
+      // than grown (they are only allocation hints, so losing them costs a reallocation at worst).
+      if (Sparse_assemble_with_arrays_previous_allocation[m].size() != my_n_eqn)
       {
-        Sparse_assemble_with_arrays_previous_allocation[m].resize(my_n_eqn, 0);
+        Sparse_assemble_with_arrays_previous_allocation[m].assign(my_n_eqn, 0);
       }
     }
 
@@ -6757,6 +6889,9 @@ namespace oomph
       // This means that the storage will only be allocated (and deleted) once
       Vector<Vector<double>> el_residuals(n_vector);
       Vector<DenseMatrix<double>> el_jacobian(n_matrix);
+      //FOR PYOOMPH: per-element structural sparsity masks (see Problem::sparsity_mask_for_element).
+      //             Declared out here so the per-element fetch below allocates nothing.
+      Vector<const char*> sparsity_masks(n_matrix, 0);
 
       // Loop over the elements
       for (unsigned long e = el_lo; e < el_hi_plus_one; e++)
@@ -6789,6 +6924,12 @@ namespace oomph
           // Now get the residuals and jacobian for the element
           assembly_handler_pt->get_all_vectors_and_matrices(
             elem_pt, el_residuals, el_jacobian);
+
+          //FOR PYOOMPH: fetch the structural sparsity masks once per element, not per entry.
+          for (unsigned m = 0; m < n_matrix; m++)
+          {
+            sparsity_masks[m] = sparsity_mask_for_element(m, elem_pt, nvar);
+          }
 
           //---------------Insert the values into the vectors--------------
 
@@ -6894,7 +7035,9 @@ namespace oomph
                 // Get the value of the matrix at this point
                 double value = el_jacobian[m](i, j);
                 // Only bother to add to the vector if it's non-zero
-                if (std::fabs(value) > Numerical_zero_for_sparse_assembly)
+                //FOR PYOOMPH: the mask may only ADD entries, never remove them -- see problem.h
+                if ((sparsity_masks[m] && sparsity_masks[m][i * nvar + j]) ||
+                    std::fabs(value) > numerical_zero_for_sparse_assembly(m))
                 {
                   // number of entrys in this row
                   const unsigned size = ncoef[m][eqn_number];
@@ -7038,12 +7181,8 @@ namespace oomph
     {
       unsigned max = 0;
       unsigned min = INT_MAX;
-      unsigned sum = 0;
-      unsigned sum_total = 0;
       for (unsigned e = 0; e < my_n_eqn; e++)
       {
-        sum += ncoef[m][e];
-        sum_total += Sparse_assemble_with_arrays_previous_allocation[m][e];
         if (ncoef[m][e] > max) max = ncoef[m][e];
         if (ncoef[m][e] < min) min = ncoef[m][e];
 
@@ -7954,7 +8093,12 @@ namespace oomph
       get_residuals(result);
 
       // Storage for the new residuals
-      DoubleVector newres;
+      // FOR PYOOMPH: built on the SAME distribution as result. Left unbuilt, get_residuals() picks
+      // create_new_linear_algebra_distribution(), which under mpirun is the uniform DISTRIBUTED
+      // layout even for an undistributed problem -- while result may well be replicated, as it is
+      // when it comes from the bifurcation handlers. The difference loop below indexes both by the
+      // same local row, so that combination read past the end of newres's buffer.
+      DoubleVector newres(result.distribution_pt(), 0.0);
 
       // Increase the global parameter
       const double FD_step = 1.0e-8;
@@ -9063,6 +9207,18 @@ namespace oomph
       // hence the size of the DoubleVector might have changed
       Linear_solver_pt->reset_gradient();
     }
+    //FOR PYOOMPH: and switch it off again otherwise. Without this the enable above is permanent:
+    // nothing else ever clears Compute_gradient, so every LATER solve keeps computing the gradient
+    // into Gradient_for_glob_conv_newton_solve -- and reset_gradient(), which is what would resize
+    // it, is only reached through the branch above. multiply_transpose() sizes its output only when
+    // it is not already built, so the first solve after the dof count grows (a spatial adaptation,
+    // say) writes past the end of a buffer still sized for the problem as it was. That is a heap
+    // overflow whose crash lands somewhere else entirely and much later -- in MKL's allocator, or as
+    // a null nodal position during the next assembly.
+    else
+    {
+      Linear_solver_pt->disable_computation_of_gradient();
+    }
 
     // Update anything that needs updating
     actions_before_newton_solve();
@@ -9269,6 +9425,12 @@ namespace oomph
       // Synchronise the solution on different processors (on each submesh)
       this->synchronise_all_dofs();
 #endif
+
+      //FOR PYOOMPH: the dofs now carry the update and the halos agree with them, but
+      // nothing has looked at the new state yet. This is the only point at which the raw
+      // increment dx is still available together with the updated dofs, which is what
+      // pyoomph's static condensation needs to reconstruct the dofs it eliminated.
+      actions_after_newton_dof_update(dx);
 
       // Do any updates that are required
       actions_after_newton_step();
@@ -9554,6 +9716,15 @@ namespace oomph
     // Catch any exceptions thrown in the Newton solver
     catch (NewtonSolverError& error)
     {
+      //FOR PYOOMPH: offer the failure to a recovery handler before it becomes fatal.
+      if (recover_from_failed_adaptive_resolve(error.linear_solver_error,
+                                               error.iterations))
+      {
+        throw AdaptiveResolveRecovered(
+          "The Newton solve after a spatial adaptation failed; a consistent state "
+          "was restored (see Problem::recover_from_failed_adaptive_resolve).");
+      }
+
       oomph_info << std::endl
                  << "USER-DEFINED ERROR IN NEWTON SOLVER " << std::endl;
       // Check whether it's the linear solver
@@ -10097,7 +10268,7 @@ namespace oomph
       return true;
     }
 
-    // SpineMesh support was removed from this build of pyoomph, so there
+    //FOR PYOOMPH: SpineMesh support was removed from this build of pyoomph, so there
     // is no spine data to check here.
 
     // If we have got here then the data is not stored in the problem, so return
@@ -10675,7 +10846,7 @@ namespace oomph
     Mesh_pt->set_consistent_pinned_values_for_continuation(
       &Continuation_time_stepper);
 
-    // SpineMesh support was removed from this build of pyoomph, so there
+    //FOR PYOOMPH: SpineMesh support was removed from this build of pyoomph, so there
     // is no additional spine numbering to deal with here.
 
     // Also set time stepper for global data
@@ -10869,7 +11040,16 @@ namespace oomph
         // Perform any actions...
         actions_after_parameter_increase(parameter_pt);
 
-        Ds_current = (*parameter_pt - Parameter_current) / Parameter_derivative;
+        //FOR PYOOMPH: guarded against Parameter_derivative == 0, which is the tangent AT a fold
+        // (the parameter turns around, so it does not move along the branch there). The line exists to
+        // re-derive the step actually taken in case actions_after_parameter_increase clamped the
+        // parameter; with dparameter/ds == 0 the parameter was never asked to move, so there is
+        // nothing to re-derive and Ds_current stands. Unguarded it computed 0/0, and the NaN went
+        // straight into the predicted dofs below and out into the Jacobian.
+        if (Parameter_derivative != 0.0)
+        {
+          Ds_current = (*parameter_pt - Parameter_current) / Parameter_derivative;
+        }
 
         // Loop over the (local) variables and set their initial values
         for (unsigned long l = 0; l < ndof_local; l++)
@@ -10905,6 +11085,16 @@ namespace oomph
             Ds_current *= (2.0 / 3.0);
             oomph_info << "STEP REJECTED --- TRYING AGAIN with Ds=" << Ds_current << std::endl;         //FOR PYOOMPH: Output current Ds
           }
+        }
+        //FOR PYOOMPH: backported from a later oomph-lib, counterpart of the catch
+        // in adaptive_unsteady_newton_solve (see INFO_oomph-lib).
+        catch (InvertedElementError& error)
+        {
+          STEP_REJECTED = true;
+          // Let's take a smaller step
+          Ds_current *= (2.0 / 3.0);
+          oomph_info << "STEP REJECTED DUE TO INVERTED ELEMENTS --- TRYING "
+                        "AGAIN with Ds=" << Ds_current << std::endl;
         }
       } while (STEP_REJECTED); // continue until a step is accepted
 
@@ -11188,6 +11378,17 @@ namespace oomph
     // Catch any exceptions thrown in the Newton solver
     catch (NewtonSolverError& error)
     {
+      //FOR PYOOMPH: offer the failure to a recovery handler before it becomes fatal. The enclosing
+      // adaptive loop (unsteady_newton_solve(dt,max_adapt,...)) has no catch of its own, so the
+      // marker exception unwinds straight out to the caller.
+      if (recover_from_failed_adaptive_resolve(error.linear_solver_error,
+                                               error.iterations))
+      {
+        throw AdaptiveResolveRecovered(
+          "The Newton solve after a spatial adaptation failed; a consistent state "
+          "was restored (see Problem::recover_from_failed_adaptive_resolve).");
+      }
+
       oomph_info << std::endl
                  << "USER-DEFINED ERROR IN NEWTON SOLVER " << std::endl;
       // Check whether it's the linear solver
@@ -11366,6 +11567,23 @@ namespace oomph
           dt_rescaling_factor = Timestep_reduction_factor_after_nonconvergence;
         }
       }
+      //FOR PYOOMPH: backported from a later oomph-lib (see INFO_oomph-lib).
+      // An element that inverts part-way through the step is a symptom of dt
+      // being too large, not of an ill-posed problem, so it is worth retrying
+      // with a smaller step rather than aborting. pyoomph raises this from
+      // BulkElementBase::fill_shape_buffer_for_integration_point() when the
+      // SIGNED determinant of the Eulerian mapping dx/ds turns non-positive;
+      // that detection is off by default and switched on with pyoomph's
+      // set_detect_inverted_elements(True), so nothing throws unless asked for.
+      catch (InvertedElementError& error)
+      {
+        // Reject the timestep, if we have an exception
+        oomph_info << "TIMESTEP REJECTED DUE TO INVERTED ELEMENTS" << std::endl;
+        reject_timestep = 1;
+
+        // Half the time step
+        dt_rescaling_factor = Timestep_reduction_factor_after_nonconvergence;
+      }
 
       // Run the individual timesteppers actions, these need to be before the
       // problem's actions_after_implicit_timestep so that the time step is
@@ -11396,9 +11614,14 @@ namespace oomph
         // but use absolute value just in case.
         double error = std::max(std::abs(global_temporal_error_norm()), 1e-12);
 
+        //FOR PYOOMPH: aim at Target_error_safety_factor * epsilon rather than at
+        // epsilon itself, backported from a later oomph-lib (see INFO_oomph-lib).
+        // The factor defaults to 1.0, which reproduces the previous line exactly.
+        double target_error = Target_error_safety_factor * epsilon;
+
         // Calculate the scaling  factor
         dt_rescaling_factor = std::pow(
-          (epsilon / error), (1.0 / (1.0 + time_stepper_pt()->order())));
+          (target_error / error), (1.0 / (1.0 + time_stepper_pt()->order())));
 
         oomph_info << "Timestep scaling factor is  " << dt_rescaling_factor
                    << std::endl;
@@ -11425,6 +11648,21 @@ namespace oomph
             << "boolean" << std::endl
             << std::endl
             << "    Problem::Keep_temporal_error_below_tolerance" << std::endl;
+          //FOR PYOOMPH: part of the Target_error_safety_factor backport.
+          if (Target_error_safety_factor >= 1.0)
+          {
+            oomph_info
+              << std::endl
+              << "If many of your timesteps are rejected this way, try aiming "
+              << "for a target" << std::endl
+              << "error below the tolerance by reducing" << std::endl
+              << std::endl
+              << "    Problem::Target_error_safety_factor" << std::endl
+              << std::endl
+              << "(currently " << Target_error_safety_factor
+              << "); values around 0.25-0.40 are often the most efficient."
+              << std::endl;
+          }
         }
 
 
@@ -11588,6 +11826,9 @@ namespace oomph
     // Adapt problem/mesh
     unsigned n_refined = 0;
     unsigned n_unrefined = 0;
+    //FOR PYOOMPH: the pre-adapt state -- the timestep just ACCEPTED above, on the mesh as it is --
+    // exists only until the next line. See dev_docs/adaptive_resolve_recovery.md.
+    adaptive_solve_checkpoint(0, false);
     adapt(n_refined, n_unrefined);
 
     // Check if mesh has been adapted on other processors
@@ -11657,6 +11898,10 @@ namespace oomph
             shift = true;
           }
         }
+
+        //FOR PYOOMPH: the exact state the re-solve below starts from (new mesh, interpolated
+        // field, time back at the start of the step).
+        adaptive_solve_checkpoint(0, true);
 
         // Now take the step again on the refined mesh, using the same
         // timestep as used before.
@@ -11992,7 +12237,7 @@ namespace oomph
     Mass_matrix_reuse_is_enabled = true;
     Mass_matrix_has_been_computed = false;
 
-    // Discontinuous Galerkin (DG) element formulation support was removed
+    //FOR PYOOMPH: Discontinuous Galerkin (DG) element formulation support was removed
     // from this build of pyoomph, so there is no element-level mass matrix
     // reuse to enable here.
   }
@@ -12006,7 +12251,7 @@ namespace oomph
     Mass_matrix_reuse_is_enabled = false;
     Mass_matrix_has_been_computed = false;
 
-    // Discontinuous Galerkin (DG) element formulation support was removed
+    //FOR PYOOMPH: Discontinuous Galerkin (DG) element formulation support was removed
     // from this build of pyoomph, so there is no element-level mass matrix
     // reuse to disable here.
   }
@@ -12461,9 +12706,8 @@ namespace oomph
       }
     }
 #else
-    // Suppress comiler warnings about non-used variable
-    n_submesh_read++;
-    n_submesh_read--;
+    // Suppress compiler warnings about non-used variable
+    (void)n_submesh_read;
 #endif
 
 
@@ -12651,9 +12895,8 @@ namespace oomph
     }
 
 #else
-    // Suppress comiler warnings about non-used variable
-    tmp++;
-    tmp--;
+    // Suppress compiler warnings about non-used variable
+    (void)tmp;
 #endif
 
 
@@ -13915,7 +14158,7 @@ namespace oomph
             }
             else
             {
-              // TriangleMeshBase support was removed from this build of
+              //FOR PYOOMPH: TriangleMeshBase support was removed from this build of
               // pyoomph, so there is no unstructured-mesh path here.
               oomph_info << "Info/Warning: Mesh cannot be adapted in copy."
                          << std::endl;
@@ -13965,7 +14208,7 @@ namespace oomph
               }
               else
               {
-                // TriangleMeshBase support was removed from this build of
+                //FOR PYOOMPH: TriangleMeshBase support was removed from this build of
                 // pyoomph, so there is no unstructured-mesh path here.
                 oomph_info << "Info/Warning: Mesh cannot be adapted in copy."
                            << std::endl;
@@ -16187,6 +16430,10 @@ namespace oomph
         unsigned n_refined;
         unsigned n_unrefined;
 
+        //FOR PYOOMPH: the pre-adapt state -- a COMPLETED timestep on the mesh as it is -- exists
+        // only until the next line. See dev_docs/adaptive_resolve_recovery.md.
+        adaptive_solve_checkpoint(isolve, false);
+
         // Adapt problem
         adapt(n_refined, n_unrefined);
 
@@ -16247,6 +16494,11 @@ namespace oomph
             shift_it = false;
           }
         }
+
+        //FOR PYOOMPH: the exact state the re-solve below starts from -- new mesh, interpolated
+        // field, time back at the start of the step -- so that a retry on this mesh has something
+        // to start from once the failed Newton has overwritten the dofs.
+        adaptive_solve_checkpoint(isolve, true);
       }
 
       // Now do the actual unsteady timestep
@@ -16307,6 +16559,10 @@ namespace oomph
         unsigned n_refined;
         unsigned n_unrefined;
 
+        //FOR PYOOMPH: the pre-adapt state -- the CONVERGED solution on the mesh as it is -- exists
+        // only until the next line. See dev_docs/adaptive_resolve_recovery.md.
+        adaptive_solve_checkpoint(isolve, false);
+
         // Adapt problem
         adapt(n_refined, n_unrefined);
 
@@ -16350,6 +16606,10 @@ namespace oomph
                      << "Problem::newton_solver(). \n \n ";
           break;
         }
+
+        //FOR PYOOMPH: the exact state the re-solve below starts from (new mesh, interpolated
+        // field), which the failed Newton would otherwise overwrite beyond recovery.
+        adaptive_solve_checkpoint(isolve, true);
       }
 
 
@@ -16368,6 +16628,16 @@ namespace oomph
         // Catch any exceptions thrown in the Newton solver
         catch (NewtonSolverError& error)
         {
+          //FOR PYOOMPH: offer the failure to a recovery handler before it becomes fatal.
+          if (recover_from_failed_adaptive_resolve(error.linear_solver_error,
+                                                   error.iterations))
+          {
+            throw AdaptiveResolveRecovered(
+              "The Newton solve after a spatial adaptation failed; a consistent "
+              "state was restored (see "
+              "Problem::recover_from_failed_adaptive_resolve).");
+          }
+
           oomph_info << std::endl
                      << "USER-DEFINED ERROR IN NEWTON SOLVER " << std::endl;
           // Check to see whether we have reached Max_iterations
@@ -16884,25 +17154,36 @@ namespace oomph
     {
       Node* nod_pt = mesh_pt()->node_pt(j);
 
-      // loop over ALL eqn numbers - variable number of values
-      unsigned nval = nod_pt->nvalue();
-
-      for (unsigned ival = 0; ival < nval; ival++)
+      //FOR PYOOMPH: a periodic ("copy") node does not own its equation numbers - make_periodic()
+      // points its Eqn_number array at the master's, and eqn_number(i) hands out a reference into
+      // that shared array. Master and copy are both in Node_pt, so bumping both adds
+      // my_eqn_num_base twice to the same long. That is invisible on rank 0 (base 0) and silently
+      // renumbers every periodic dof out of range on every other rank.
+      if (!nod_pt->is_a_copy())
       {
-        int old_eqn_number = nod_pt->eqn_number(ival);
-        // Include all eqn numbers
-        if (old_eqn_number >= 0)
+        // loop over ALL eqn numbers - variable number of values
+        unsigned nval = nod_pt->nvalue();
+
+        for (unsigned ival = 0; ival < nval; ival++)
         {
-          // Bump up eqn number
-          int new_eqn_number = old_eqn_number + my_eqn_num_base;
-          nod_pt->eqn_number(ival) = new_eqn_number;
+          int old_eqn_number = nod_pt->eqn_number(ival);
+          // Include all eqn numbers
+          if (old_eqn_number >= 0)
+          {
+            // Bump up eqn number
+            int new_eqn_number = old_eqn_number + my_eqn_num_base;
+            nod_pt->eqn_number(ival) = new_eqn_number;
+          }
         }
       }
 
       // Is this a solid node? If so, need to bump up its equation number(s)
       SolidNode* solid_nod_pt = dynamic_cast<SolidNode*>(nod_pt);
 
-      if (solid_nod_pt != 0)
+      //FOR PYOOMPH: same reasoning for the position data. make_periodic() does not alias positions
+      // (see the warning in BoundaryNode<SolidNode>::make_periodic), so this is never true today,
+      // but hijacked or copied position data would hit exactly the same double bump.
+      if (solid_nod_pt != 0 && !solid_nod_pt->position_is_a_copy())
       {
         // Find equation numbers
         unsigned nval = solid_nod_pt->variable_position_pt()->nvalue();
@@ -17511,7 +17792,7 @@ namespace oomph
       // The load balancing strategy acts in the structured meshes and
       // then acts in the unstructured meshes
 
-      // TriangleMeshBase support was removed from this build of pyoomph,
+      //FOR PYOOMPH: TriangleMeshBase support was removed from this build of pyoomph,
       // so every mesh/submesh is always treated as structured here.
       std::vector<bool> is_unstructured_mesh(std::max(n_mesh, 1u), false);
 
@@ -18184,7 +18465,7 @@ namespace oomph
       send_data_to_be_sent_during_load_balancing(
         send_n, send_data, send_displacement);
 
-      // TriangleMeshBase support was removed from this build of pyoomph,
+      //FOR PYOOMPH: TriangleMeshBase support was removed from this build of pyoomph,
       // so there are never any unstructured meshes to load-balance here.
 
       if (report_stats)
@@ -18287,7 +18568,7 @@ namespace oomph
         my_mesh_pt = mesh_pt(i_mesh);
       }
 
-      // TriangleMeshBase support was removed from this build of pyoomph,
+      //FOR PYOOMPH: TriangleMeshBase support was removed from this build of pyoomph,
       // so every mesh here is always treated as structured.
       {
         // Loop over processors to find haloed elements -- need to
@@ -18923,8 +19204,6 @@ namespace oomph
                   MPI_DOUBLE,
                   this->communicator_pt()->mpi_comm());
 
-    unsigned el_count = 0;
-
     // Only do each node once
     Vector<std::map<Node*, bool>> node_done(n_proc);
 
@@ -19019,7 +19298,6 @@ namespace oomph
           for (unsigned e = 0; e < nel; e++)
           {
             GeneralisedElement* el_pt = batch_el_pt[e];
-            el_count++;
 
             // FE?
             FiniteElement* fe_pt = dynamic_cast<FiniteElement*>(el_pt);
@@ -19283,7 +19561,7 @@ namespace oomph
     // Go for the nonhalo elements only in the TreeBaseMeshes
     for (unsigned i_mesh = 0; i_mesh < n_mesh; i_mesh++)
     {
-      // TriangleMeshBase support was removed from this build of pyoomph,
+      //FOR PYOOMPH: TriangleMeshBase support was removed from this build of pyoomph,
       // so every mesh here is always treated as structured.
       {
         const unsigned nele = mesh_pt(i_mesh)->nelement();
@@ -19769,7 +20047,7 @@ namespace oomph
     // Go for the nonhalo elements only in the TreeBaseMeshes
     for (unsigned i_mesh = 0; i_mesh < n_mesh; i_mesh++)
     {
-      // TriangleMeshBase support was removed from this build of pyoomph,
+      //FOR PYOOMPH: TriangleMeshBase support was removed from this build of pyoomph,
       // so every mesh here is always treated as structured.
       {
         const unsigned nele_submesh = mesh_pt(i_mesh)->nelement();
@@ -20036,7 +20314,7 @@ namespace oomph
         my_mesh_pt = mesh_pt(i_mesh);
       }
 
-      // TriangleMeshBase support was removed from this build of pyoomph,
+      //FOR PYOOMPH: TriangleMeshBase support was removed from this build of pyoomph,
       // so every mesh here is always treated as structured.
       {
         // Storage for number of data to be sent to each processor

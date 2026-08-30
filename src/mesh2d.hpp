@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -54,6 +54,12 @@ namespace pyoomph
     // Recompute neighbour (edge-adjacency) information across the forest's quadtrees, needed after
     // topology changes (refinement/coarsening) so hanging-node/halo logic can find adjacent elements.
     void find_neighbours() override;
+
+    // Self-test of the neighbour-finding scheme. oomph's version drives the quad coordinate
+    // descent (gteq_edge_neighbour), which is geometrically wrong for triangle forests (their
+    // node-sharing/hanging is done geometrically instead), so it is skipped when the forest holds
+    // triangles; for quad forests it falls through to the base check.
+    void check_all_neighbours(oomph::DocInfo &doc_info) override;
   };
 
   // DynamicTree specialization for 2d quad-refined (QuadTree) elements.
@@ -72,7 +78,7 @@ namespace pyoomph
 
     // Factory used by oomph-lib's tree-refinement code to create a son tree of the correct dynamic type.
     Tree *construct_son(oomph::RefineableElement *const &object_pt,
-                        Tree *const &father_pt, const int &son_type)
+                        Tree *const &father_pt, const int &son_type) override
     {
       DynamicQuadTree *temp_Quad_pt = new DynamicQuadTree(object_pt, father_pt, son_type);
       return temp_Quad_pt;
@@ -103,7 +109,7 @@ namespace pyoomph
     // Split a C1TB (linear + bubble/edge) triangle defined by n1..n4 analogously to add_tri_C1.
     virtual unsigned add_tri_C1TB( Node* & n1, Node* & n2, Node* & n3, Node* & n4);
 
-    virtual void setup_interior_boundary_elements(unsigned bindex);
+    void setup_interior_boundary_elements(unsigned bindex) override;
     // Whether this mesh's element type actually supports tree-based h-refinement (true for quads,
     // false for plain triangles, which cannot be refined via a QuadTree forest).
     bool refinement_possible() override;
@@ -145,10 +151,22 @@ namespace pyoomph
     }
 
     /// Destructor:
-    virtual ~TemplatedMeshBase2d() {}
+    ~TemplatedMeshBase2d() override {}
 
-    virtual void setup_tree_forest();
+    void setup_tree_forest() override;
 
+    // Enforce 2:1 balancing across a MIXED quad+tri interface only: the cross-shape hanging
+    // (BulkElementBase::mixed_hang_edge_node) is implemented for a single-level (2:1) jump, so keep every
+    // quad<->tri interface at most 2:1 by refining the coarser side (iterated to a fixed point). No-op for
+    // pure-quad meshes (oomph's own tree adapt balances them) and pure-tri meshes (the tri hang descends
+    // through multi-level jumps, so they must NOT be over-refined). See mesh2d.cpp.
+    void enforce_refinement_balance() override;
+
+    // Triangle hanging is now done per-element inside adapt_mesh (RefineableTElement<2>::
+    // setup_hanging_nodes / BulkElementTri2dC2::further_setup_hanging_nodes -> tri_hang_helper),
+    // exactly as oomph does for quads, so no mesh-level post-adapt pass is needed (the base no-op
+    // is used for 2d). The legacy geometric facet-adjacency pass was removed. 3d tets still use
+    // TemplatedMeshBase3d::post_adapt_setup_hanging_nodes.
 
     // (Re)build the QuadTreeForest. If a forest already exists, this "flattens" it down to the
     // globally coarsest common refinement level (min_ref, reduced via MPI_Allreduce under MPI) by
@@ -207,10 +225,11 @@ namespace pyoomph
             else if (level == min_ref)
             {
               unsigned n_sons = tree_pt->nsons();
-              oomph::Vector<oomph::Tree *> backed_up_sons(n_sons);
+              oomph::Vector<oomph::Tree *> backed_up_sons;
+              backed_up_sons.reserve(n_sons);
               for (unsigned i_son = 0; i_son < n_sons; i_son++)
               {
-                backed_up_sons[i_son] = tree_pt->son_pt(i_son);
+                backed_up_sons.push_back(tree_pt->son_pt(i_son));
               }
               DynamicQuadTreeRoot *tree_root_pt = new DynamicQuadTreeRoot(el_pt);
 
@@ -264,7 +283,7 @@ namespace pyoomph
 
     // Populate this mesh's elements, nodes and boundaries from a MeshTemplateElementCollection; see
     // TemplatedMeshBase1d::generate_from_template for the (identical) algorithm description.
-    void generate_from_template(MeshTemplateElementCollection *coll)
+    void generate_from_template(MeshTemplateElementCollection *coll) override
     {
       //      std::cout << "GEN FROM TEMPLATE " << std::endl;
       MeshTemplate *templ = coll->get_template();
@@ -313,6 +332,9 @@ namespace pyoomph
 
 
       setup_facets_from_template(templ,bound_map);
+      // Turn the template's facet records into per-element face boundary tags right away; from here
+      // on the tags are carried (and inherited on refinement) by the elements themselves.
+      seed_face_boundaries_from_facets();
       
       
 
@@ -320,7 +342,7 @@ namespace pyoomph
 
     void setup_boundary_element_info_quads(std::ostream &outfile);
     void setup_boundary_element_info_tris(std::ostream &outfile);
-    void setup_boundary_element_info(std::ostream &outfile);
+    void setup_boundary_element_info(std::ostream &outfile) override;
     void setup_boundary_element_info() override;
 	 void fill_internal_facet_buffers(std::vector<BulkElementBase*> & internal_elements, std::vector<int> & internal_face_dir,std::vector<BulkElementBase*> & opposite_elements,std::vector<int> & opposite_face_dir,std::vector<int> & opposite_already_at_index) override;        
   };

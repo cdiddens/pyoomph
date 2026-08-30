@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -29,6 +30,7 @@ from .generic import *
 from ..expressions import *
 from ..expressions.units import *
 from .UNIFAC import *
+from ..typings import *
 
 
 @MaterialProperties.register()
@@ -46,6 +48,18 @@ class PureLiquidWater(PureLiquidProperties):
         self.dynamic_viscosity = subexpression(
             2.414e-5 * (10 ** (247.8 / (TKelvin - 140))) * pascal * second
         )
+
+        # Malmberg & Maryott, J. Res. Natl. Bur. Stand. 56 (1956) 1, valid 0-100 C. 78.36 at 25 C.
+        TCelsius = TKelvin - 273.15
+        self.relative_permittivity = subexpression(
+            87.740 - 0.40008 * TCelsius + 9.398e-4 * TCelsius ** 2 - 1.410e-6 * TCelsius ** 3
+        )
+
+        # Pure water is not an insulator but very nearly one: this is the self-dissociation
+        # conductivity of ultrapure water at 25 C. Any real electrolyte overwhelms it by orders of
+        # magnitude, so set it from the dissolved ions (see
+        # BaseLiquidProperties.set_electric_conductivity_from_ions) rather than relying on this.
+        self.electric_conductivity = 5.5e-6 * siemens / meter
 
         # https://www.thecalculator.co/others/Water-Density-Calculator-629.html
         self.mass_density = subexpression(
@@ -97,6 +111,11 @@ class PureLiquidGlycerol(PureLiquidProperties):
         super().__init__()
         # https://en.wikipedia.org/wiki/Glycerol
         self.molar_mass = 92.094 * gram / mol
+
+        # Malmberg & Maryott, J. Res. Natl. Bur. Stand. 56 (1956) 1: 42.5 at 25 C. Not set as a
+        # correlation because the temperature dependence is not needed here; a mixture does not
+        # average this automatically, see get_absolute_permittivity.
+        self.relative_permittivity = 42.5
 
         self.dynamic_viscosity = 1 * pascal * second  ##TODO Correct ones here
 
@@ -206,7 +225,7 @@ class MixtureLiquidGlycerolWater(MixtureLiquidProperties):
     components = {"water", "glycerol"}
     passive_field = "water"
 
-    def __init__(self, pure_properties: Dict[str, MaterialProperties]):
+    def __init__(self, pure_properties: dict[str, MaterialProperties]):
         super().__init__(pure_properties)
 
         # Just assumptions, for mass density reasonable according to the data from https://doi.org/10.1016/j.petrol.2012.09.003
@@ -285,7 +304,7 @@ class MixtureLiquidEthanolWater(MixtureLiquidProperties):
     components = {"water", "ethanol"}
     passive_field = "water"
 
-    def __init__(self, pure_properties: Dict[str, MaterialProperties]):
+    def __init__(self, pure_properties: dict[str, MaterialProperties]):
         super().__init__(pure_properties)
         TKelvin = var("temperature") / kelvin
         yE = self.get_mass_fraction_field("ethanol")
@@ -360,7 +379,7 @@ class MixtureLiquid12HexanediolWater(MixtureLiquidProperties):
     components = {"12hexanediol", "water"}
     passive_field = "water"
 
-    def __init__(self, pure_properties: Dict[str, MaterialProperties]):
+    def __init__(self, pure_properties: dict[str, MaterialProperties]):
         super().__init__(pure_properties)
         yH = self.get_mass_fraction_field("12hexanediol")
 
@@ -428,6 +447,11 @@ class PureGasAir(PureGasProperties):
 
         self.set_mass_density_from_ideal_gas_law()
 
+        # Dry air at ambient conditions. It is 1.00059, and the difference from vacuum matters for
+        # essentially nothing -- but having it set means a gas domain can be handed to the
+        # electrostatics as a fluid_props like any other phase.
+        self.relative_permittivity = 1.00059
+
         # Fit from data at https://www.engineeringtoolbox.com/dry-air-properties-d_973.html
         self.dynamic_viscosity = (
             (0.0409424 + 0.00725803 * TKelvin - 4.12727e-06 * (TKelvin) ** 2)
@@ -487,7 +511,7 @@ class MixtureGasAirWater(MixtureGasProperties):
     components = {"water", "air"}
     passive_field = "air"
 
-    def __init__(self, pure_properties: Dict[str, MaterialProperties]):
+    def __init__(self, pure_properties: dict[str, MaterialProperties]):
         super().__init__(pure_properties)
         TKelvin = var("temperature") / kelvin
 
@@ -529,7 +553,7 @@ class MixtureGasAirEthanolWater(MixtureGasProperties):
     components = {"ethanol", "water", "air"}
     passive_field = "air"
 
-    def __init__(self, pure_properties: Dict[str, MaterialProperties]):
+    def __init__(self, pure_properties: dict[str, MaterialProperties]):
         super().__init__(pure_properties)
         TKelvin = var("temperature") / kelvin
         pAtm = var("absolute_pressure") / atm
@@ -558,7 +582,7 @@ class MixtureGasAirEthanol(MixtureGasProperties):
     components = {"ethanol", "air"}
     passive_field = "air"
 
-    def __init__(self, pure_properties: Dict[str, MaterialProperties]):
+    def __init__(self, pure_properties: dict[str, MaterialProperties]):
         super().__init__(pure_properties)        
 
         # TODO: Improve: This is the one for air only
@@ -625,3 +649,7 @@ class PureSolidStainlessSteel(PureSolidProperties):
         self.mass_density = 7.8 * gram / (centi*meter)**3
         self.thermal_conductivity=16.3*watt/(meter*kelvin)
         self.specific_heat_capacity=0.5*kilo*joule/(kilogram*kelvin)
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

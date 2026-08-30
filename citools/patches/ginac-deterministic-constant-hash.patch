@@ -1,0 +1,41 @@
+Make GiNaC::constant::calchash() deterministic across process runs, same bug as
+ginac-deterministic-hash-seed.patch but in a different spot.
+
+constant::calchash() does NOT go through make_hash_seed() (already fixed by the
+sibling patch) - it has its own, independent, inline copy of the exact same
+buggy computation: it hashes the *address* of the RTTI type-name string
+(typeid(*this).name()), which moves every process run under ASLR. Since every
+built-in GiNaC constant (Pi, Catalan, Euler, ...) is the SAME C++ type
+(GiNaC::constant), this address is shared by all of them, and it is XORed with
+each constant's own `serial` to tell them apart - but the ASLR-dependent
+address still makes every constant's hash (and hence its sort position
+relative to every other GiNaC type inside a sum/product) non-deterministic
+across runs. This was found via citools/test_all_tutorial_scripts.py: run it
+twice with --keep-outdirs and diff the generated _ccode/*.c files - several
+tutorial scripts using axisymmetric coordinates (which introduce a factor of
+Pi into the weak form) showed a "2*(...)" vs "-2*-(...)" sign-convention flip
+between runs, always traced back to Pi. See branch deterministic_codegen.
+
+--- a/ginac/constant.cpp
++++ b/ginac/constant.cpp
+@@ -20,6 +20,7 @@
+  */
+
+ #include "constant.h"
++#include "hash_seed.h"
+ #include "numeric.h"
+ #include "ex.h"
+ #include "archive.h"
+@@ -211,8 +212,10 @@ bool constant::is_equal_same_type(const basic & other) const
+
+ unsigned constant::calchash() const
+ {
+-	const void* typeid_this = (const void*)typeid(*this).name();
+-	hashvalue = golden_ratio_hash((uintptr_t)typeid_this ^ serial);
++	// pyoomph: use the same deterministic (mangled-name-based) type hash seed as
++	// basic::calchash() and friends, instead of the ASLR-dependent RTTI pointer
++	// this used to hash directly - see ginac-deterministic-hash-seed.patch.
++	hashvalue = golden_ratio_hash(make_hash_seed(typeid(*this)) ^ serial);
+
+ 	setflag(status_flags::hash_calculated);
+

@@ -1,36 +1,51 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
 import os
-from pathlib import Path,PurePath
+import weakref
+from pathlib import Path
 from ..expressions.generic import Expression,  ExpressionOrNum, GlobalParameter
 from ..expressions.units import unit_to_string
 
 from ..meshes.mesh import ODEStorageMesh
+
+#: What an outputter accepts as its file extension(s): one, several, or None for the problem's default
+FileExtensionType:TypeAlias = "str | list[str] | None"
+
+
+def _default_file_extension(problem:"Problem")->"str | list[str]":
+    """The problem's default 1d extension as plain strings.
+
+    Its own type is a Literal (or a list of them), which a list of plain strings is not compatible
+    with, so the list is rebuilt rather than shared."""
+    dflt=problem.default_1d_file_extension
+    return dflt if isinstance(dflt,str) else [str(e) for e in dflt]
+from ..meshes.ordering import SortAlongAxis, check_sorting_arguments, sort_line_segments, sort_point_indices
 
 
 from ..generic.codegen import BaseEquations
@@ -52,16 +67,30 @@ if TYPE_CHECKING:
 
 class _BaseOutputter:
     def __init__(self):
-        self._stages:Optional[Set[str]]=None
+        self._stages:set[str] | None=None
         self._eqtree:"EquationTree"
         self._mpi_rank:int
-        self.problem:"Problem"
         pass
+
+    @property
+    def problem(self)->"Problem":
+        # Stored as a weakref, not a strong reference: this outputter is owned (via
+        # GenericOutput._outputter) by an Equations object that survives as long as the
+        # Problem's meshes do (themselves pinned alive by the Problem's own nb::keep_alive) -
+        # a strong back-reference here would form the same kind of uncollectible cycle fixed
+        # for meshes/codegens/solvers elsewhere in this codebase.
+        p=self._problem_wr()
+        assert p is not None, "The Problem this outputter belonged to has already been destroyed"
+        return p
+
+    @problem.setter
+    def problem(self,p:"Problem | None"):
+        self._problem_wr=weakref.ref(p) if p is not None else (lambda:None)
 
     def after_remeshing(self,eqtree:"EquationTree"):
         pass
 
-    def init(self,eqtree:"EquationTree",continue_info:Optional[Dict[str,Any]]=None,rank:int=0):
+    def init(self,eqtree:"EquationTree",continue_info:dict[str, Any] | None=None,rank:int=0):
         self._eqtree=eqtree
         self._mpi_rank=rank
         pass
@@ -78,6 +107,12 @@ class _BaseOutputter:
     def clean_up(self)->None:
         pass
 
+    def change_output_directory(self,newdir:str,eqtree:"EquationTree")->None:
+        # Default no-op: not all outputter kinds support relocating their output
+        # (e.g. those without a persistent file handle); subclasses that do
+        # (e.g. _TextOutput, _ODEFileOutput, _IntegralObservableOutput) override this.
+        pass
+
     def close(self)->None:
         # Close any open output file handle(s). Unlike clean_up() (called after every
         # single output() step for transient per-step state), this is only called once,
@@ -86,7 +121,7 @@ class _BaseOutputter:
         # instead of leaving them for eventual garbage collection.
         pass
 
-    def set_active_on_stages(self,stages:Optional[Union[str,Set[str]]]):
+    def set_active_on_stages(self,stages:str | set[str] | None):
         if stages is not None:
             if isinstance(stages,str):
                 stages={stages}
@@ -97,7 +132,7 @@ class _BaseOutputter:
                     stages=set({stages}) #type:ignore
         self._stages=stages #type:ignore
 
-    def get_active_on_stages(self) -> Optional[Set[str]]:
+    def get_active_on_stages(self) -> set[str] | None:
         return self._stages
 
 
@@ -115,9 +150,21 @@ class _BaseNumpyOutput(_BaseOutputter):
         assert not isinstance(m,ODEStorageMesh)
         self.mesh=m
 
-    def get_cached_mesh_data(self,mesh:"AnySpatialMesh",nondimensional:bool=False,tesselate_tri:bool=False,eigenvector:Optional[Union[int,Sequence[int]]]=None,eigenmode:"MeshDataEigenModes"="abs",history_index:int=0,with_halos:bool=False,operator:Optional["MeshDataCacheOperatorBase"]=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True)->"MeshDataCacheEntry":
+    # Overloaded like Problem.get_cached_mesh_data itself: only a global request can come back empty,
+    # so a local one does not force every caller to rule None out.
+    @overload
+    def get_cached_mesh_data(self,mesh:"AnySpatialMesh",nondimensional:bool=...,tesselate_tri:bool=...,eigenvector:int | Sequence[int] | None=...,eigenmode:"MeshDataEigenModes"=...,history_index:int=...,with_halos:bool=...,operator:"MeshDataCacheOperatorBase | None"=...,discontinuous:bool=...,add_eigen_to_mesh_positions:bool=...,global_mesh:Literal[False]=...)->"MeshDataCacheEntry": ...
+
+    @overload
+    def get_cached_mesh_data(self,mesh:"AnySpatialMesh",nondimensional:bool=...,tesselate_tri:bool=...,eigenvector:int | Sequence[int] | None=...,eigenmode:"MeshDataEigenModes"=...,history_index:int=...,with_halos:bool=...,operator:"MeshDataCacheOperatorBase | None"=...,discontinuous:bool=...,add_eigen_to_mesh_positions:bool=...,global_mesh:bool=...)->"MeshDataCacheEntry | None": ...
+
+    def get_cached_mesh_data(self,mesh:"AnySpatialMesh",nondimensional:bool=False,tesselate_tri:bool=False,eigenvector:int | Sequence[int] | None=None,eigenmode:"MeshDataEigenModes"="abs",history_index:int=0,with_halos:bool=False,operator:"MeshDataCacheOperatorBase | None"=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True,global_mesh:bool=False)->"MeshDataCacheEntry | None":
+        """The mesh data this outputter writes.
+
+        With ``global_mesh`` this is **collective** on a distributed mesh and returns ``None`` off
+        rank 0 - every rank has to reach it, and only rank 0 has anything to write."""
         pr = self.mesh.get_problem()
-        cache = pr.get_cached_mesh_data(mesh, tesselate_tri=tesselate_tri, nondimensional=nondimensional,eigenvector=eigenvector,eigenmode=eigenmode,history_index=history_index,with_halos=with_halos,operator=operator,discontinuous=discontinuous,add_eigen_to_mesh_positions=add_eigen_to_mesh_positions)
+        cache = pr.get_cached_mesh_data(mesh, tesselate_tri=tesselate_tri, nondimensional=nondimensional,eigenvector=eigenvector,eigenmode=eigenmode,history_index=history_index,with_halos=with_halos,operator=operator,discontinuous=discontinuous,add_eigen_to_mesh_positions=add_eigen_to_mesh_positions,global_mesh=global_mesh)
         return cache
 
 
@@ -126,14 +173,23 @@ class _BaseNumpyOutput(_BaseOutputter):
 ####################
 
 
+def _check_output_sorting_arguments(sort_along_axis:"SortAlongAxis | None",start_near_point:Sequence[ExpressionOrNum] | ExpressionOrNum | None,reverse_segment_if:Callable[[list[int], NPFloatArray], bool] | None,sort_segments_by:Callable[[list[int], NPFloatArray], float] | None)->None:
+    # Checked both in TextFileOutput, so that the user hears about it where the argument was typed,
+    # and in _TextOutput, which can be constructed on its own.
+    check_sorting_arguments(sort_along_axis,start_near_point,whom="TextFileOutput")
+    if (sort_along_axis is not None or start_near_point is not None) and (reverse_segment_if is not None or sort_segments_by is not None):
+        raise RuntimeError("TextFileOutput: Cannot combine sort_along_axis/start_near_point with reverse_segment_if/sort_segments_by - each of them determines the very same ordering, so one would just silently overrule the other")
+
+
 class _TextOutput(_BaseNumpyOutput):
-    def __init__(self,mesh:"AnySpatialMesh",*fields:str,ftrunk:str="txtout",in_subdir:bool=True,file_ext:Optional[Union[str,List[str]]]=None,eigenvector:Optional[int]=None,eigenmode:"MeshDataEigenModes"="abs",nondimensional:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True,reverse_segment_if:Optional[Callable[[List[int],NPFloatArray],bool]]=None,sort_segments_by:Optional[Callable[[List[int],NPFloatArray],float]]=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True,operator:Optional["MeshDataCacheOperatorBase"]=None,tesselate_tri:bool=True):
+    def __init__(self,mesh:"AnySpatialMesh",*fields:str,ftrunk:str="txtout",in_subdir:bool=True,file_ext:FileExtensionType=None,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs",nondimensional:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True,reverse_segment_if:Callable[[list[int], NPFloatArray], bool] | None=None,sort_segments_by:Callable[[list[int], NPFloatArray], float] | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True,operator:"MeshDataCacheOperatorBase | None"=None,tesselate_tri:bool=True,sort_along_axis:"SortAlongAxis | None"=None,start_near_point:Sequence[ExpressionOrNum] | ExpressionOrNum | None=None,global_mesh:bool=True):
         super().__init__(mesh)
+        self.global_mesh=global_mesh
         self.fname_trunk=ftrunk
-        self._orbit_subdir=None
+        self._orbit_subdir:str | None=None
         self.in_subdir=in_subdir
-        self.file_ext=file_ext
-        self.fields:List[str]=[*fields]
+        self.file_ext:FileExtensionType=file_ext
+        self.fields:list[str]=[*fields]
         #self._additional_outs=[]
         self.eigenvector=eigenvector
         self.eigenvector_mode:"MeshDataEigenModes"=eigenmode
@@ -146,22 +202,44 @@ class _TextOutput(_BaseNumpyOutput):
         self.add_eigen_to_mesh_positions=add_eigen_to_mesh_positions
         self.operator=operator
         self.tesselate_tri=tesselate_tri
+        self.sort_along_axis:"SortAlongAxis | None"=sort_along_axis
+        self.start_near_point=start_near_point
+        _check_output_sorting_arguments(sort_along_axis,start_near_point,reverse_segment_if,sort_segments_by)
 
+    def _sorts_output(self)->bool:
+        return self.sort_along_axis is not None or self.start_near_point is not None
 
+    def _spatial_unit_of_output(self,cache:"MeshDataCacheEntry")->ExpressionOrNum:
+        # What a start_near_point must be divided by to land on the coordinates we write. In
+        # nondimensional mode the cache reports a unit of 1, so ask the domain for its actual
+        # spatial scale instead - otherwise a point given with units could not be used at all there.
+        if self.nondimensional:
+            assert not isinstance(self.mesh,str)
+            return self.mesh.get_code_gen().get_scaling("spatial")
+        return cache.get_unit("spatial")
 
-    def init(self,eqtree:"EquationTree",continue_info:Optional[Dict[str,Any]]=None,rank:int=0):
+    def init(self,eqtree:"EquationTree",continue_info:dict[str, Any] | None=None,rank:int=0):
         super().init(eqtree,continue_info,rank)
         if isinstance(self.mesh,str):
             self.mesh=self.problem.get_mesh(self.mesh)
+        if self._sorts_output():
+            # Refuse early rather than at the first output: on a 2d or 3d domain there is no curve to
+            # order along, and in discontinuous mode a node occurs once per element, so neither the
+            # line segments nor a unique point order exist.
+            elemdim=self.mesh.get_element_dimension()
+            if elemdim>1:
+                raise RuntimeError("TextFileOutput: sort_along_axis/start_near_point only work on 0d and 1d domains (points and lines, including curved interfaces of 2d or 3d meshes), but '"+self.mesh.get_full_name()+"' has elements of dimension "+str(elemdim))
+            if self.discontinuous:
+                raise RuntimeError("TextFileOutput: sort_along_axis/start_near_point cannot be combined with discontinuous=True")
         if self.in_subdir and rank==0:
                 Path(os.path.join(self.problem.get_output_directory()),self.fname_trunk).mkdir(parents=True, exist_ok=True) 
         if self.file_ext is None:
-            self.file_ext=self.problem.default_1d_file_extension
+            self.file_ext=_default_file_extension(self.problem)
 
     def get_filename(self, step:int):
         assert self.file_ext is not None
         if isinstance(self.file_ext, (list,set)):
-            res:List[str] = []
+            res:list[str] = []
             for e in self.file_ext:
                 fname = self.fname_trunk + "_{:06d}".format(step) + "." + e
                 if self.in_subdir:
@@ -183,8 +261,8 @@ class _TextOutput(_BaseNumpyOutput):
         if Path(basedir).samefile(newdir):
             self._orbit_subdir=None
         else:
-            self._orbit_subdir=Path.relative_to(Path(newdir),Path(basedir))
-            Path(os.path.join(self.problem.get_output_directory(self._orbit_subdir)),self.fname_trunk).mkdir(parents=True, exist_ok=True) 
+            self._orbit_subdir=str(Path.relative_to(Path(newdir),Path(basedir)))
+            Path(os.path.join(self.problem.get_output_directory(self._orbit_subdir)),self.fname_trunk).mkdir(parents=True, exist_ok=True)
         
 
     def output(self,step:int):        
@@ -194,13 +272,18 @@ class _TextOutput(_BaseNumpyOutput):
         if self.eigenvector is not None:
             if self.eigenvector >= len(self.mesh.get_problem()._last_eigenvectors): #type:ignore
                 return  # No output hrere
-        cache=self.get_cached_mesh_data(self.mesh,nondimensional=self.nondimensional,tesselate_tri=self.tesselate_tri,eigenvector=self.eigenvector,eigenmode=self.eigenvector_mode,discontinuous=self.discontinuous,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions,operator=self.operator)
+        # Collective when the mesh is distributed and global_mesh is set, so every rank has to get
+        # here - which is why the early return above only lets a rank out when there is nothing to
+        # merge in the first place.
+        cache=self.get_cached_mesh_data(self.mesh,nondimensional=self.nondimensional,tesselate_tri=self.tesselate_tri,eigenvector=self.eigenvector,eigenmode=self.eigenvector_mode,discontinuous=self.discontinuous,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions,operator=self.operator,global_mesh=self.global_mesh)
+        if cache is None:
+            return  # a rank that contributed to the merge; rank 0 writes the file
         if len(self.fields)==0:
             self.fields=cache.get_default_output_fields(rem_lagrangian=self.hide_lagrangian,rem_underscore=self.hide_underscore)
-        header:List[str] = []
+        header:list[str] = []
         timeinfo = self.get_time(nondimensional=self.nondimensional)
         fname = self.get_filename(step)
-        datag:List[NPFloatArray]=[]
+        datag:list[NPFloatArray]=[]
         for i,f in enumerate(self.fields):
             d=cache.get_data(f)
             if d is not None:
@@ -220,7 +303,7 @@ class _TextOutput(_BaseNumpyOutput):
         if mesh.get_element_dimension()==1 and not self.discontinuous:
             lsegs_in,_=cache.get_interface_line_segments() 
             lsegs=lsegs_in.copy()
-            coords:List[NPFloatArray]=[]
+            coords:list[NPFloatArray]=[]
             for c in ["x","y","z"]:
                 if "coordinate_"+c in self.fields:
                     coords.append(data[:,self.fields.index("coordinate_"+c)])                        
@@ -230,26 +313,32 @@ class _TextOutput(_BaseNumpyOutput):
                     if self.reverse_segment_if(l,coordsA):
                         lsegs[i]=list(reversed(l))
             if self.sort_segments_by is not None:
-                lsegs=list(sorted(lsegs,key=lambda k : self.sort_segments_by(k,coordsA)))
+                sort_fn=self.sort_segments_by
+                lsegs=list(sorted(lsegs,key=lambda k : sort_fn(k,coordsA)))
+            if self._sorts_output():
+                lsegs=sort_line_segments(cache.get_coordinates(),lsegs,sort_along_axis=self.sort_along_axis,start_near_point=self.start_near_point,spatial_unit=self._spatial_unit_of_output(cache),whom="TextFileOutput")
 
-
-
-            sortdata:List[NPFloatArray]=[] 
+            sortdata:list[NPFloatArray]=[]
             for i,ls in enumerate(lsegs): 
                 sortdata.append(data[ls]) 
-                if i+1<len(lsegs): 
+                if i+1<len(lsegs):
                     sortdata.append([[numpy.nan]*len(data[0,:])])  #type:ignore
             data:NPFloatArray=numpy.vstack(sortdata) #type:ignore
+        elif mesh.get_element_dimension()==0 and self._sorts_output():
+            # Point domains have no connectivity to follow, so the nodes are just reordered. No NaN
+            # separators are written in between: each row is a separate point anyhow.
+            order=sort_point_indices(cache.get_coordinates(),sort_along_axis=self.sort_along_axis,start_near_point=self.start_near_point,spatial_unit=self._spatial_unit_of_output(cache),whom="TextFileOutput")
+            data:NPFloatArray=data[order] #type:ignore
 
 
-        params:Dict[str,str] = {}
+        params:dict[str,float] = {}
         for n in self.mesh.get_problem().get_global_parameter_names():
-            params[n] =str(self.mesh.get_problem().get_global_parameter(n).value)
+            params[n] =self.mesh.get_problem().get_global_parameter(n).value
         if self.eigenvector is not None:
             eigeninfostr="OUTPUT_IS_"+str(self.eigenvector_mode)+"_OF_EIGENVALUE_"+str(self.eigenvector)
             if self.mesh.get_problem()._last_eigenvalues_m is not None and self.eigenvector<len(self.mesh.get_problem()._last_eigenvalues_m): #type:ignore
                 eigeninfostr+="_AND_ANGULAR_MODE_"+str(self.mesh.get_problem()._last_eigenvalues_m[self.eigenvector]) #type:ignore
-            params[eigeninfostr]=str(self.mesh.get_problem()._last_eigenvalues[self.eigenvector]) #type:ignore
+            params[eigeninfostr]=self.mesh.get_problem()._last_eigenvalues[self.eigenvector] #type:ignore
         if isinstance(fname, list):
             for f in fname:
                 save_by_extension(f, data, header, timeinfo,params,cache.elem_indices if cache.discontinuous else None)
@@ -277,10 +366,10 @@ class _TextOutput(_BaseNumpyOutput):
 
 ####################
 
-def save_by_extension(fname:str,data:NPFloatArray,header:List[str],timeinfo:float,params:Dict[str,str],discontinuous_elem_indices:Optional[NPInt32Array]=None):
+def save_by_extension(fname:str,data:NPFloatArray,header:list[str],timeinfo:float,params:dict[str,float],discontinuous_elem_indices:NPAnyIntArray | None=None):
     _,ext=os.path.splitext(fname)
     if ext in [".mat",".MAT"]:
-        mdict={}
+        mdict:dict[str,Any]={}
         for i,fn in enumerate(header):
             if "[" in fn:
                 fn=fn[0:fn.find("[")]
@@ -314,7 +403,7 @@ def save_by_extension(fname:str,data:NPFloatArray,header:List[str],timeinfo:floa
 
 
 class _OutputTxtAlongLine(_BaseOutputter):
-    def __init__(self,*fields:str,coords:Optional[Union[NPFloatArray,List[Sequence[ExpressionOrNum]]]]=None,start:Optional[List[ExpressionOrNum]]=None,end:Optional[List[ExpressionOrNum]]=None,N:Optional[int]=None,isovalue:Optional[Tuple[str,ExpressionOrNum]]=None,mesh:Optional["AnySpatialMesh"]=None,ftrunk:str="along_line",in_subdir:bool=True,file_ext:Optional[Union[str,List[str]]]=None,hide_lagrangian:bool=True,hide_underscore:bool=True,eigenvector:Optional[int]=None,eigenmode:"MeshDataEigenModes"="abs",NaN_outside:bool=False):
+    def __init__(self,*fields:str,coords:NPFloatArray | list[Sequence[ExpressionOrNum]] | None=None,start:list[ExpressionOrNum] | None=None,end:list[ExpressionOrNum] | None=None,N:int | None=None,isovalue:tuple[str, ExpressionOrNum] | None=None,mesh:"AnySpatialMesh | None"=None,ftrunk:str="along_line",in_subdir:bool=True,file_ext:FileExtensionType=None,hide_lagrangian:bool=True,hide_underscore:bool=True,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs",NaN_outside:bool=False):
         super().__init__()
         if mesh is None:
             raise ValueError("Need to supply at least a mesh")
@@ -323,8 +412,8 @@ class _OutputTxtAlongLine(_BaseOutputter):
         assert mesh is not None
         self.mesh=mesh
         self.problem=mesh.get_problem()
-        self.file_ext=file_ext
-        self.fields:List[str]=[*fields]
+        self.file_ext:FileExtensionType=file_ext
+        self.fields:list[str]=[*fields]
         self.use_tri_interpolator=True
         self.hide_lagrangian=hide_lagrangian
         self.hide_underscore = hide_underscore
@@ -332,6 +421,8 @@ class _OutputTxtAlongLine(_BaseOutputter):
         self.eigenmode:"MeshDataEigenModes"=eigenmode
         self.NaN_outside=NaN_outside
         
+        self.isovalue:"tuple[str,ExpressionOrNum] | None"
+        self.coords:NPFloatArray
         if isovalue is not None:
             if coords is not None or start is not None or end is not None:
                 raise RuntimeError("Cannot specify coords, start or end if isovalue is set")
@@ -347,33 +438,31 @@ class _OutputTxtAlongLine(_BaseOutputter):
             s:NPFloatArray=numpy.array([float(x/ss) for x in start]) #type:ignore
             e:NPFloatArray = numpy.array([float(x/ss) for x in end]) #type:ignore
             l:NPFloatArray=numpy.linspace(0,1,N,endpoint=True) #type:ignore
-            self.coords:NPFloatArray=numpy.tensordot(1-l,s,axes=0)+numpy.tensordot(l,e,axes=0)
+            self.coords=numpy.tensordot(1-l,s,axes=0)+numpy.tensordot(l,e,axes=0)
             self.isovalue=None
         else:
             if (start is not None) or (end is not None) or (N is not None):
                 raise RuntimeError("Cannot specify start, end or N if coords are given")
             meshdata = self.mesh.get_problem().get_cached_mesh_data(self.mesh, tesselate_tri=True, nondimensional=False)
             ss=meshdata.get_unit("spatial")
-            coords=numpy.array(coords/ss,dtype=numpy.float64)
-            self.coords:NPFloatArray=numpy.array(coords) #type:ignore
+            coords_arr=numpy.array(coords,dtype=object)/ss # Convert first: coords may be a plain (nested) list, which does not support "/"
+            self.coords=numpy.array(coords_arr,dtype=numpy.float64)
             self.isovalue=None
 
-    def init(self, eqtree:"EquationTree", continue_info:Optional[Dict[str,Any]]=None, rank:int=0):
+    def init(self, eqtree:"EquationTree", continue_info:dict[str, Any] | None=None, rank:int=0):
         super().init(eqtree, continue_info, rank)
         if isinstance(self.mesh, str):
             self.mesh = self.problem.get_mesh(self.mesh)
         if self.in_subdir and rank == 0:
             Path(os.path.join(self.problem.get_output_directory()), self.fname_trunk).mkdir(parents=True, exist_ok=True)
         if self.file_ext is None:
-            self.file_ext=self.problem.default_1d_file_extension
+            self.file_ext=_default_file_extension(self.problem)
 
 
-
-
-    def get_filename(self,step:int) -> Union[List[str] ,str]:
+    def get_filename(self,step:int) -> list[str] | str:
         assert self.file_ext is not None
         if isinstance(self.file_ext,list):
-            res:List[str]=[]
+            res:list[str]=[]
             for e in self.file_ext:
                 fname = self.fname_trunk + "_{:06d}".format(step) + "." + e
                 if self.in_subdir:
@@ -396,7 +485,7 @@ class _OutputTxtAlongLine(_BaseOutputter):
         self.mesh=m
 
 
-    def get_data_and_descs(self)->Tuple[NPFloatArray,List[str]]:
+    def get_data_and_descs(self)->tuple[NPFloatArray,list[str]]:
 
         if self.use_tri_interpolator:
             meshdata = self.mesh.get_problem().get_cached_mesh_data(self.mesh, tesselate_tri=True, nondimensional=False,eigenmode=self.eigenmode,eigenvector=self.eigenvector)
@@ -407,25 +496,29 @@ class _OutputTxtAlongLine(_BaseOutputter):
             triang = tri.Triangulation(coordinates[0,:], coordinates[1,:], meshdata.elem_indices)
             if self.isovalue is not None:
                 import matplotlib.pyplot as plt
-                isodata=meshdata.get_data(self.isovalue[0])-float(self.isovalue[1]) # TODO: Nondimensionalize cast to float
+                isofield_data=meshdata.get_data(self.isovalue[0])
+                assert isofield_data is not None, "Field '"+self.isovalue[0]+"' used for the isovalue is not present in the mesh data"
+                isodata=isofield_data-float(self.isovalue[1]) # TODO: Nondimensionalize cast to float
                 isol=plt.tricontour(triang,isodata,[0.0])
-                self.coords=[]
+                coords_list:list[NPFloatArray]=[]
                 for path in isol.allsegs[0]:
                     for p in path:
-                        self.coords.append(p)
-                self.coords=numpy.array(self.coords)
+                        coords_list.append(p)
+                self.coords=numpy.array(coords_list)
                 plt.close()
                 del isol
 
             fields=meshdata.get_default_output_fields(rem_lagrangian=self.hide_lagrangian,rem_underscore=self.hide_underscore)
             fields=[f for f in fields if f not in meshdata.elemental_field_inds.keys()] # Does not work for elemental fields
-            dataL:List[NPFloatArray]=[]
+            dataL:list[NPFloatArray]=[]
             for f in fields:
-                inter=tri.LinearTriInterpolator(triang, meshdata.get_data(f))
-                inter=inter(self.coords[:,0],self.coords[:,1]) #type:ignore
+                fdata=meshdata.get_data(f)
+                assert fdata is not None, "Field '"+f+"' is not present in the mesh data"
+                interpolated=tri.LinearTriInterpolator(triang, fdata)(self.coords[:,0],self.coords[:,1]) #type:ignore
+                inter:NPFloatArray=interpolated #type:ignore # a masked array, which numpy hands back as its data below
                 if self.NaN_outside:                    
                     if f not in {"coordinate_x","coordinate_y","coordinate_z"}:                        
-                        inter[inter.mask] = numpy.nan
+                        inter[interpolated.mask] = numpy.nan #type:ignore
                     elif f=="coordinate_x":
                         inter=self.coords[:,0]
                     elif f=="coordinate_y":
@@ -462,9 +555,9 @@ class _OutputTxtAlongLine(_BaseOutputter):
             params[n] = self.mesh.get_problem().get_global_parameter(n).value
         if isinstance(fname,list):
             for fn in fname:
-                save_by_extension(fn, data, header=header,timeinfo=mesh.get_problem().get_current_time(as_float=True),params=params)
-        else:            
-            save_by_extension(fname,data,header=header,timeinfo=mesh.get_problem().get_current_time(as_float=True),params=params)
+                save_by_extension(fn, data, header=header,timeinfo=mesh.get_problem().get_current_time(dimensional=True,as_float=True),params=params)
+        else:
+            save_by_extension(fname,data,header=header,timeinfo=mesh.get_problem().get_current_time(dimensional=True,as_float=True),params=params)
         self.clean_up()
 
     def delete_files_from_previous_simulation(self):
@@ -486,7 +579,7 @@ class _OutputTxtAlongLine(_BaseOutputter):
 
 
 class _GridFileOutput(_BaseOutputter):
-    def __init__(self,*fields:str,lower:List[Sequence[ExpressionOrNum]],upper:List[ExpressionOrNum],N:Optional[List[int]]=None,dx:Optional[List[ExpressionOrNum]],mesh:Optional["AnySpatialMesh"]=None,ftrunk:str="grid_out",in_subdir:bool=True,file_ext:Optional[Union[str,List[str]]]=None,hide_lagrangian:bool=True,hide_underscore:bool=True,eigenvector:Optional[int]=None,eigenmode:"MeshDataEigenModes"="abs"):
+    def __init__(self,*fields:str,lower:NPFloatArray | list[ExpressionOrNum],upper:list[ExpressionOrNum],N:list[int] | None=None,dx:list[ExpressionOrNum] | None,mesh:"AnySpatialMesh | None"=None,ftrunk:str="grid_out",in_subdir:bool=True,file_ext:FileExtensionType=None,hide_lagrangian:bool=True,hide_underscore:bool=True,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs"):
         super().__init__()
         if mesh is None:
             raise ValueError("Need to supply at least a mesh")
@@ -495,8 +588,8 @@ class _GridFileOutput(_BaseOutputter):
         assert mesh is not None
         self.mesh=mesh
         self.problem=mesh.get_problem()
-        self.file_ext=file_ext
-        self.fields:List[str]=[*fields]
+        self.file_ext:FileExtensionType=file_ext
+        self.fields:list[str]=[*fields]
         self.use_tri_interpolator=True
         self.hide_lagrangian=hide_lagrangian
         self.hide_underscore = hide_underscore
@@ -509,18 +602,19 @@ class _GridFileOutput(_BaseOutputter):
         pr=self.mesh.get_problem()
         meshdata = pr.get_cached_mesh_data(self.mesh, tesselate_tri=True, nondimensional=False)
         ss=meshdata.get_unit("spatial")
-        self.coords_per_dir=[]
+        self.coords_per_dir:list[NPFloatArray]=[]
         if self.dx is not None:
             for ll,uu,step in zip(self.lower,self.upper,self.dx):
                 ll_nd=float(ll/ss)
                 uu_nd=float(uu/ss)
-                step_nd=float(dx/ss)
+                step_nd=float(step/ss)
                 self.coords_per_dir.append(numpy.arange(ll_nd,uu_nd,step_nd))
         else:
-            for ll,uu,N in zip(self.lower,self.upper,self.N):
+            assert self.N is not None, "Must either set dx or N"
+            for ll,uu,n in zip(self.lower,self.upper,self.N):
                 ll_nd=float(ll/ss)
                 uu_nd=float(uu/ss)
-                self.coords_per_dir.append(numpy.linspace(ll_nd,uu_nd,num=N,endpoint=True))
+                self.coords_per_dir.append(numpy.linspace(ll_nd,uu_nd,num=n,endpoint=True))
         if len(self.coords_per_dir)!=2:
             raise RuntimeError("Only works for 2d")
         self.coords_x,self.coords_y=numpy.meshgrid(numpy.array(self.coords_per_dir[0]),numpy.array(self.coords_per_dir[1]))
@@ -530,20 +624,20 @@ class _GridFileOutput(_BaseOutputter):
 
         
 
-    def init(self, eqtree:"EquationTree", continue_info:Optional[Dict[str,Any]]=None, rank:int=0):
+    def init(self, eqtree:"EquationTree", continue_info:dict[str, Any] | None=None, rank:int=0):
         super().init(eqtree, continue_info, rank)
         if isinstance(self.mesh, str):
             self.mesh = self.problem.get_mesh(self.mesh)
         if self.in_subdir and rank == 0:
             Path(os.path.join(self.problem.get_output_directory()), self.fname_trunk).mkdir(parents=True, exist_ok=True)
         if self.file_ext is None:
-            self.file_ext=self.problem.default_1d_file_extension
+            self.file_ext=_default_file_extension(self.problem)
 
 
-    def get_filename(self,step:int) -> Union[List[str] ,str]:
+    def get_filename(self,step:int) -> list[str] | str:
         assert self.file_ext is not None
         if isinstance(self.file_ext,list):
-            res:List[str]=[]
+            res:list[str]=[]
             for e in self.file_ext:
                 fname = self.fname_trunk + "_{:06d}".format(step) + "." + e
                 if self.in_subdir:
@@ -566,7 +660,7 @@ class _GridFileOutput(_BaseOutputter):
         self.mesh=m
 
 
-    def get_data_and_descs(self)->Tuple[NPFloatArray,List[str]]:
+    def get_data_and_descs(self)->tuple[NPFloatArray,list[str]]:
 
         if self.use_tri_interpolator:
             meshdata = self.mesh.get_problem().get_cached_mesh_data(self.mesh, tesselate_tri=True, nondimensional=False,eigenmode=self.eigenmode,eigenvector=self.eigenvector)
@@ -577,13 +671,15 @@ class _GridFileOutput(_BaseOutputter):
             triang = tri.Triangulation(coordinates[0,:], coordinates[1,:], meshdata.elem_indices)
             
             fields=meshdata.get_default_output_fields(rem_lagrangian=self.hide_lagrangian,rem_underscore=self.hide_underscore)
-            dataL:List[NPFloatArray]=[]
+            dataL:list[NPFloatArray]=[]
             for f in fields:
-                inter=tri.LinearTriInterpolator(triang, meshdata.get_data(f))                
-                inter=inter(self.coords_x,self.coords_y) #type:ignore
+                fdata=meshdata.get_data(f)
+                assert fdata is not None, "Field '"+f+"' is not present in the mesh data"
+                interpolated=tri.LinearTriInterpolator(triang, fdata)(self.coords_x,self.coords_y) #type:ignore
+                inter:NPFloatArray=interpolated #type:ignore # a masked array, which numpy hands back as its data below
                 if True:                    
                     if f not in {"coordinate_x","coordinate_y","coordinate_z"}:                        
-                        inter[inter.mask] = numpy.nan
+                        inter[interpolated.mask] = numpy.nan #type:ignore
                     elif f=="coordinate_x":
                         inter=self.coords_x
                     elif f=="coordinate_y":
@@ -620,9 +716,9 @@ class _GridFileOutput(_BaseOutputter):
             params[n] = self.mesh.get_problem().get_global_parameter(n).value
         if isinstance(fname,list):
             for fn in fname:
-                save_by_extension(fn, data, header=header,timeinfo=mesh.get_problem().get_current_time(as_float=True),params=params)
-        else:            
-            save_by_extension(fname,data,header=header,timeinfo=mesh.get_problem().get_current_time(as_float=True),params=params)
+                save_by_extension(fn, data, header=header,timeinfo=mesh.get_problem().get_current_time(dimensional=True,as_float=True),params=params)
+        else:
+            save_by_extension(fname,data,header=header,timeinfo=mesh.get_problem().get_current_time(dimensional=True,as_float=True),params=params)
         self.clean_up()
 
     def delete_files_from_previous_simulation(self):
@@ -647,16 +743,17 @@ class _GridFileOutput(_BaseOutputter):
 class _BaseODEOutput(_BaseOutputter):
     def __init__(self):
         super().__init__()
-        self._element:_pyoomph.BulkElementODE0d
         self._odemesh:ODEStorageMesh
 
-    def init(self,eqtree:"EquationTree",continue_info:Optional[Dict[str,Any]]=None,rank:int=0):
+    def init(self,eqtree:"EquationTree",continue_info:dict[str, Any] | None=None,rank:int=0):
         self._eqtree=eqtree
-        self._mpi_rank=rank        
+        self._mpi_rank=rank
         pass
 
-    def get_ODE_values(self)->Tuple[NPFloatArray,Dict[str,int]]:
-        values,fieldinds=self._eqtree._mesh._element._ode_elem_to_numpy()
+    def get_ODE_values(self)->tuple[NPFloatArray,dict[str,int]]:
+        elem=self._odemesh._element
+        assert elem is not None
+        values,fieldinds=elem._ode_elem_to_numpy()
         return values,fieldinds
 
     def output(self,step:int)->None:
@@ -669,7 +766,7 @@ class _BaseODEOutput(_BaseOutputter):
 #######################
 
 class _ODEFileOutput(_BaseODEOutput):
-    def __init__(self,odemesh:ODEStorageMesh,eqtree:"EquationTree",fname:Optional[str]=None,first_column:List[Union[str,GlobalParameter]]=["time"],continue_info:Optional[Dict[str,Any]]=None,in_units:Dict[str,ExpressionOrNum]={},hide_underscore:bool=False):
+    def __init__(self,odemesh:ODEStorageMesh,eqtree:"EquationTree",fname:str | None=None,first_column:list[str | GlobalParameter]=["time"],continue_info:dict[str, Any] | None=None,in_units:dict[str,ExpressionOrNum]={},hide_underscore:bool=False):
         super().__init__()
         self.fname=fname
         self._odemesh=odemesh
@@ -689,15 +786,21 @@ class _ODEFileOutput(_BaseODEOutput):
 
     def change_output_directory(self,newdir:str,eqtree:"EquationTree"):
         oldname=self.fname
-        self.fname = os.path.join(newdir, os.path.basename(self.fname))        
+        assert self.fname is not None
+        self.fname = os.path.join(newdir, os.path.basename(self.fname))
         if self.fname!=oldname:
-            self.file.close()
+            # close() rather than self.file.close(): init() only opens the file on rank 0, so on every
+            # other rank self.file is None. Under mpirun those ranks raised an AttributeError here
+            # while rank 0 carried on, i.e. the run hung in rank 0's next collective rather than
+            # failing. PeriodicOrbitHandler.output_orbit() switches the output directory on every
+            # continuation step, so docs/.../orbit/manual_orbit.py hit it immediately.
+            self.close()
             if os.path.exists(self.fname):  
                 self.init(eqtree,{"TODO":"Fill further information here"},self._mpi_rank)
             else:
                 self.init(eqtree,None,self._mpi_rank)
 
-    def init(self,eqtree:"EquationTree",continue_info:Optional[Dict[str,Any]]=None,rank:int=0):
+    def init(self,eqtree:"EquationTree",continue_info:dict[str, Any] | None=None,rank:int=0):
         super().init(eqtree,continue_info,rank)
         assert self.fname is not None
         if get_mpi_rank()==0:
@@ -718,8 +821,10 @@ class _ODEFileOutput(_BaseODEOutput):
         #for i,n in enumerate(locs,start=len(values)+len(obs)):
          #   descs[i]=n
         
-        _, indices = self._odemesh._element._ode_elem_to_numpy()
-        scales:List[ExpressionOrNum] = [1.0] * (len(indices)+len(obs)) #+len(locs)
+        odeelem=self._odemesh._element
+        assert odeelem is not None
+        _, indices = odeelem._ode_elem_to_numpy()
+        scales:list[ExpressionOrNum] = [1.0] * (len(indices)+len(obs)) #+len(locs)
         for k, i in indices.items():            
             s = self._eqtree.get_equations().get_scaling(k)
             if not isinstance(s,Expression):
@@ -760,9 +865,9 @@ class _ODEFileOutput(_BaseODEOutput):
                     
         
 
-        self._scales = scales
+        self._scales:list[ExpressionOrNum] = scales
 
-        firstcols:List[str]=[]
+        firstcols:list[str]=[]
         for fc in self.first_column:
             if fc=="time":
                 tscale=self._eqtree.get_equations().get_scaling("temporal")
@@ -771,10 +876,10 @@ class _ODEFileOutput(_BaseODEOutput):
                 factor, unit, rest, success = _pyoomph.GiNaC_collect_units(tscale)
                 try:
                     float(unit)
-                    tscale=""
+                    tunit=""
                 except:
-                    tscale= "[" + unit_to_string(unit,estimate_prefix=False) + "]"
-                firstcols.append("time"+tscale)
+                    tunit= "[" + unit_to_string(unit,estimate_prefix=False) + "]"
+                firstcols.append("time"+tunit)
             elif isinstance(fc,GlobalParameter):
                 firstcols.append(fc.get_name())
             else:
@@ -790,8 +895,10 @@ class _ODEFileOutput(_BaseODEOutput):
         values,_=self.get_ODE_values()
         obs=self._eqtree.get_mesh().evaluate_all_observables()
         
-        _, indices = self._odemesh._element._ode_elem_to_numpy()
-        self._scales:List[ExpressionOrNum] = [1.0] * (len(indices)+len(obs))
+        odeelem=self._odemesh._element
+        assert odeelem is not None
+        _, indices = odeelem._ode_elem_to_numpy()
+        self._scales = [1.0] * (len(indices)+len(obs))
         for k, i in indices.items():
             s = self._eqtree.get_equations().get_scaling(k)
             if not isinstance(s,Expression):
@@ -818,7 +925,7 @@ class _ODEFileOutput(_BaseODEOutput):
         else:
             addstr=""
 
-        firstcols:List[str]=[]
+        firstcols:list[str]=[]
         for fc in self.first_column:
             if fc=="time":
                 firstcols.append(str(self.get_time()))
@@ -833,9 +940,15 @@ class _ODEFileOutput(_BaseODEOutput):
 ######################
 
 class GenericOutput(BaseEquations):
+    # Whether this output also writes on every successful transient step, not only at the output times
+    # of Problem.run. Only cheap line-per-call outputs (ODE and integral observable files) set it; for
+    # a full mesh output it would mean one file per time step. Declared at class level, not only in
+    # __init__, so that a subclass which does not chain up still answers the question.
+    output_every_step:bool=False
+
     def __init__(self):
         super(GenericOutput, self).__init__()
-        self._outputter:Dict["EquationTree",_BaseOutputter]={} #Map from eqtree node to an outputter object
+        self._outputter:dict["EquationTree",_BaseOutputter]={} #Map from eqtree node to an outputter object
 
     def after_remeshing(self,eqtree:"EquationTree"):
         for _,out in self._outputter.items():
@@ -845,10 +958,10 @@ class GenericOutput(BaseEquations):
         for out in self._outputter.values():
             out.close()
 
-    def _construct_outputter_for_eq_tree(self,eqtree:"EquationTree",continue_info:Optional[Dict[str,Any]],mpirank:int)->_BaseOutputter:
+    def _construct_outputter_for_eq_tree(self,eqtree:"EquationTree",continue_info:dict[str, Any] | None,mpirank:int)->_BaseOutputter:
         raise NotImplementedError("Implement this")
 
-    def _expand_filename(self,eqtree:"EquationTree",filename:Optional[str]=None,extension:str="",add_problem_outdir:bool=True):
+    def _expand_filename(self,eqtree:"EquationTree",filename:str | None=None,extension:str="",add_problem_outdir:bool=True):
         outdir = eqtree.get_mesh().get_problem().get_output_directory()
         if filename is None:
             if add_problem_outdir:
@@ -865,18 +978,25 @@ class GenericOutput(BaseEquations):
             else:
                 return filename
 
-    def _init_output(self,eqtree:"EquationTree",continue_info:Optional[Dict[str,Any]]=None,rank:int=0):
+    def _init_output(self,eqtree:"EquationTree",continue_info:dict[str, Any] | None=None,rank:int=0):
         super()._init_output(eqtree,continue_info,rank)
         self._outputter[eqtree]=self._construct_outputter_for_eq_tree(eqtree,continue_info,rank)
         self._outputter[eqtree].problem = eqtree.get_mesh().get_problem()
         self._outputter[eqtree].init(eqtree,continue_info,rank)
 
 
-    def _do_output(self, eqtree:"EquationTree", step:int,stage:str):
+    def _do_output(self, eqtree:"EquationTree", step:int,stage:str,only_every_step:bool=False):
+        if only_every_step and not self.output_every_step:
+            return
         self._outputter[eqtree].output(step)
-        
-    def change_output_directory(self, dir:str,eqtree:"EquationTree"):
-        self._outputter[eqtree].change_output_directory(dir,eqtree)
+
+    # This is the BaseEquations hook, which is underscored (ec1f960); the _BaseOutputter method it
+    # forwards to deliberately is not. Naming this one after the outputter's silently unhooked the
+    # whole relocation: EquationTree._change_output_directory dispatches "_change_output_directory",
+    # hit BaseEquations' no-op instead, and PeriodicOrbit.output_orbit() created its subdirectory and
+    # then wrote nothing into it.
+    def _change_output_directory(self, newdir:str,eqtree:"EquationTree"):
+        self._outputter[eqtree].change_output_directory(newdir,eqtree)
 
 
 class ODEFileOutput(GenericOutput):
@@ -888,11 +1008,13 @@ class ODEFileOutput(GenericOutput):
         first_column: The value(s) to be written in the first column of the output file. Default is "time".
         in_units: A dictionary specifying the units of the variables to be written in the output file. Default is an empty dictionary, i.e. base SI units.
         hide_underscore: A flag indicating whether to hide variable names starting with an underscore in the output file. Default is False.
+        output_every_step: Write a line after every successful transient step of :py:meth:`~pyoomph.generic.problem.Problem.run`, not only at the output times. Default is True. Has no effect when ``outstep=False`` was passed to ``run``, i.e. when no output at all was requested.
     """
-    
-    def __init__(self,filename:Optional[str]=None,first_column:Optional[Union[str,GlobalParameter,List[Union[str,GlobalParameter]]]]="time",in_units:Dict[str,ExpressionOrNum]={},hide_underscore:bool=False):
+
+    def __init__(self,filename:str | None=None,first_column:str | GlobalParameter | list[str | GlobalParameter] | None="time",in_units:dict[str,ExpressionOrNum]={},hide_underscore:bool=False,output_every_step:bool=True):
         super(ODEFileOutput, self).__init__()
-        self.filename=filename        
+        self.filename=filename
+        self.output_every_step=output_every_step
         self.in_units=in_units
         self.hide_underscore=hide_underscore
         if not isinstance(first_column,list):
@@ -903,7 +1025,7 @@ class ODEFileOutput(GenericOutput):
         else:
             self.first_column=first_column
 
-    def _construct_outputter_for_eq_tree(self,eqtree:"EquationTree",continue_info:Optional[Dict[str,Any]],mpirank:int) -> _ODEFileOutput:
+    def _construct_outputter_for_eq_tree(self,eqtree:"EquationTree",continue_info:dict[str, Any] | None,mpirank:int) -> _ODEFileOutput:
         fn=self._expand_filename(eqtree,self.filename,".txt")
         mesh=eqtree.get_mesh()
         assert isinstance(mesh,ODEStorageMesh)
@@ -927,18 +1049,22 @@ class TextFileOutput(GenericOutput):
         eigenmode (MeshDataEigenModes): The eigenmode type ("abs","real","imag"). Default is "abs".
         reverse_segment_if (Optional[Callable[[List[int], NPFloatArray], bool]]): A function to reverse individual segments of a segregated 1d line embedded in higher spaces. Default is None.
         sort_segments_by (Optional[Callable[[List[int], NPFloatArray], float]]): A function to sort such segments based on a condition. Otherwise, the ordering is more or less random. Default is None.
+        sort_along_axis (Optional[SortAlongAxis]): Write the points ordered along a Cartesian direction, i.e. "x+","x-","y+","y-","z+" or "z-". Only for 0d and 1d domains, e.g. an arbitrarily curved 1d interface of a 2d mesh or a 1d co-dimension 2 interface of a 3d mesh. On a 1d domain, only the segment end points decide the orientation and the order of the segments, so the point order follows the curve even where it overhangs. Cannot be combined with start_near_point or with reverse_segment_if/sort_segments_by. Default is None.
+        start_near_point (Optional[Union[Sequence[ExpressionOrNum],ExpressionOrNum]]): Same as sort_along_axis, but ordering by the distance to this point, closest first. May carry units. Default is None.
         discontinuous (bool): Flag indicating whether discontinuous output should be written. In that case, each node can be written multiple times, potential with different values. Default is False.
         add_eigen_to_mesh_positions (bool): When outputting an eigenvector on a moving mesh, do we want to add the original mesh coordinates to the eigensolution or not. Default is True.
+        global_mesh (bool): On a mesh distributed with ``--distribute``, write the whole mesh into one file instead of each rank writing its own partition. Default is True, which is what this output almost always means: the file name carries no rank, so with False the ranks write over each other, and a rank holding no element of the domain has nothing to write at all. Set it to False only if you want this rank's partition, and then give each rank its own file name. Not available together with ``operator``, which has to be applied to the merged data and is not supported there yet.
     """
 
 
 
-    def __init__(self,filetrunk:Optional[str]=None,filename:Optional[str]=None, nondimensional:bool=False,hide_underscore:bool=True,hide_lagrangian:bool=True,eigenvector:Optional[int]=None,eigenmode:"MeshDataEigenModes"="abs",reverse_segment_if:Optional[Callable[[List[int],NPFloatArray],bool]]=None,sort_segments_by:Optional[Callable[[List[int],NPFloatArray],float]]=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True,operator:Optional["MeshDataCacheOperatorBase"]=None,tesselate_tri:bool=True):
+    def __init__(self,filetrunk:str | None=None,filename:str | None=None, nondimensional:bool=False,hide_underscore:bool=True,hide_lagrangian:bool=True,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs",reverse_segment_if:Callable[[list[int], NPFloatArray], bool] | None=None,sort_segments_by:Callable[[list[int], NPFloatArray], float] | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True,operator:"MeshDataCacheOperatorBase | None"=None,tesselate_tri:bool=True,sort_along_axis:"SortAlongAxis | None"=None,start_near_point:Sequence[ExpressionOrNum] | ExpressionOrNum | None=None,global_mesh:bool=True):
         super(TextFileOutput, self).__init__()
+        _check_output_sorting_arguments(sort_along_axis,start_near_point,reverse_segment_if,sort_segments_by)
         if filetrunk is not None and filename is not None:
             raise RuntimeError("Please set either filename or filetrunk - both are the same, just for backwards compatibility")
         elif filetrunk is not None:
-            self.filename=filetrunk
+            self.filename:str | None=filetrunk
         else:
             self.filename=filename
         self.nondimensional=nondimensional
@@ -952,12 +1078,15 @@ class TextFileOutput(GenericOutput):
         self.add_eigen_to_mesh_positions=add_eigen_to_mesh_positions
         self.operator=operator
         self.tesselate_tri=tesselate_tri
+        self.sort_along_axis:"SortAlongAxis | None"=sort_along_axis
+        self.start_near_point=start_near_point
+        self.global_mesh=global_mesh
 
-    def _construct_outputter_for_eq_tree(self,eqtree:"EquationTree",continue_info:Optional[Dict[str,Any]],mpirank:int) -> _TextOutput:
+    def _construct_outputter_for_eq_tree(self,eqtree:"EquationTree",continue_info:dict[str, Any] | None,mpirank:int) -> _TextOutput:
         fn=self._expand_filename(eqtree,self.filename,"",add_problem_outdir=False)
         mesh=eqtree.get_mesh()
         assert not isinstance(mesh,ODEStorageMesh)
-        return _TextOutput(mesh,ftrunk=fn,nondimensional=self.nondimensional,hide_underscore=self.hide_underscore,hide_lagrangian=self.hide_lagrangian,eigenvector=self.eigenvector,eigenmode=self.eigenmode,sort_segments_by=self.sort_segments_by,reverse_segment_if=self.reverse_segment_if,discontinuous=self.discontinuous,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions,operator=self.operator,tesselate_tri=self.tesselate_tri)
+        return _TextOutput(mesh,ftrunk=fn,nondimensional=self.nondimensional,hide_underscore=self.hide_underscore,hide_lagrangian=self.hide_lagrangian,eigenvector=self.eigenvector,eigenmode=self.eigenmode,sort_segments_by=self.sort_segments_by,reverse_segment_if=self.reverse_segment_if,discontinuous=self.discontinuous,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions,operator=self.operator,tesselate_tri=self.tesselate_tri,sort_along_axis=self.sort_along_axis,start_near_point=self.start_near_point,global_mesh=self.global_mesh)
 
     def _is_ode(self):
         return False
@@ -965,10 +1094,10 @@ class TextFileOutput(GenericOutput):
 
 
 class TextFileOutputAlongLine(GenericOutput):
-    def __init__(self,filename:Optional[str]=None,coords:Optional[Union[NPFloatArray,List[Sequence[ExpressionOrNum]]]]=None,start:Optional[List[ExpressionOrNum]]=None,end:Optional[List[ExpressionOrNum]]=None,N:Optional[int]=None,isovalue:Optional[Tuple[str,ExpressionOrNum]]=None,file_ext:Optional[Union[str,List[str]]]=None,eigenvector:Optional[int]=None,eigenmode:"MeshDataEigenModes"="abs",NaN_outside:bool=False):
+    def __init__(self,filename:str | None=None,coords:NPFloatArray | list[Sequence[ExpressionOrNum]] | None=None,start:list[ExpressionOrNum] | None=None,end:list[ExpressionOrNum] | None=None,N:int | None=None,isovalue:tuple[str, ExpressionOrNum] | None=None,file_ext:FileExtensionType=None,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs",NaN_outside:bool=False):
         super(TextFileOutputAlongLine, self).__init__()
         self.filename=filename
-        self.file_ext=file_ext
+        self.file_ext:FileExtensionType=file_ext
         self.start=start
         self.end=end
         self.N=N
@@ -978,7 +1107,7 @@ class TextFileOutputAlongLine(GenericOutput):
         self.isovalue=isovalue
         self.NaN_outside=NaN_outside
 
-    def _construct_outputter_for_eq_tree(self,eqtree:"EquationTree",continue_info:Optional[Dict[str,Any]],mpirank:int) -> _OutputTxtAlongLine:
+    def _construct_outputter_for_eq_tree(self,eqtree:"EquationTree",continue_info:dict[str, Any] | None,mpirank:int) -> _OutputTxtAlongLine:
         fn=self._expand_filename(eqtree,self.filename,"",add_problem_outdir=False)
         mesh=eqtree.get_mesh()
         assert not isinstance(mesh,ODEStorageMesh)        
@@ -990,12 +1119,12 @@ class TextFileOutputAlongLine(GenericOutput):
 
 
 class GridFileOutput(GenericOutput):
-    def __init__(self,lower:Union[NPFloatArray,List[Sequence[ExpressionOrNum]]],upper:Optional[List[ExpressionOrNum]],N:Union[int,List[int]]=None,dx:Union[ExpressionOrNum,List[ExpressionOrNum]]=None,filename:Optional[str]=None,file_ext:Optional[Union[str,List[str]]]=None,eigenvector:Optional[int]=None,eigenmode:"MeshDataEigenModes"="abs"):
+    def __init__(self,lower:NPFloatArray | list[ExpressionOrNum],upper:list[ExpressionOrNum],N:int | list[int] | None=None,dx:ExpressionOrNum | list[ExpressionOrNum] | None=None,filename:str | None=None,file_ext:FileExtensionType=None,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs"):
         super(GridFileOutput, self).__init__()
         self.lower=lower
         self.upper=upper
         if len(self.lower)!=len(self.upper):
-            raise RuntimeError("Start coordinate vector 'lower' must have the same length as the end coordinate vector 'upper'")        
+            raise RuntimeError("Start coordinate vector 'lower' must have the same length as the end coordinate vector 'upper'")
         if N is None and dx is None:
             raise RuntimeError("Must either set dx or N")
         elif N is not None and dx is not None:
@@ -1003,24 +1132,24 @@ class GridFileOutput(GenericOutput):
         elif N is not None:
             if not isinstance(N,(list,tuple)):
                 N=[N]*len(self.lower)
-            self.N=N
-            self.dx=None
+            self.N:list[int] | None=N
+            self.dx:list[ExpressionOrNum] | None=None
         else:
+            assert dx is not None
             if not isinstance(dx,(list,tuple)):
                 dx=[dx]*len(self.lower)
             self.dx=dx
             self.N=None
         self.filename=filename
-        self.file_ext=file_ext            
-        self.N=N
+        self.file_ext:FileExtensionType=file_ext
         self.eigenvector=eigenvector
         self.eigenmode:"MeshDataEigenModes"=eigenmode
 
 
-    def _construct_outputter_for_eq_tree(self,eqtree:"EquationTree",continue_info:Optional[Dict[str,Any]],mpirank:int) -> _OutputTxtAlongLine:
+    def _construct_outputter_for_eq_tree(self,eqtree:"EquationTree",continue_info:dict[str, Any] | None,mpirank:int) -> _GridFileOutput:
         fn=self._expand_filename(eqtree,self.filename,"",add_problem_outdir=False)
         mesh=eqtree.get_mesh()
-        assert not isinstance(mesh,ODEStorageMesh)        
+        assert not isinstance(mesh,ODEStorageMesh)
         return _GridFileOutput(mesh=mesh,ftrunk=fn,lower=self.lower,upper=self.upper,N=self.N,dx=self.dx,file_ext=self.file_ext,eigenvector=self.eigenvector,eigenmode=self.eigenmode)
 
     def _is_ode(self):
@@ -1030,14 +1159,14 @@ class GridFileOutput(GenericOutput):
 
 
 class _IntegralObservableOutput(_BaseOutputter):
-    def __init__(self, mesh:"AnySpatialMesh", ftrunk:str,continue_info:Optional[Dict[str,Any]],file_ext:Optional[Union[str,List[str]]]=None,first_column:List[str]=["time"]):
+    def __init__(self, mesh:"AnySpatialMesh", ftrunk:str,continue_info:dict[str, Any] | None,file_ext:FileExtensionType=None,first_column:list[str]=["time"]):
         super(_IntegralObservableOutput, self).__init__()
-        self._mesh=mesh
+        self._mesh:"AnySpatialMesh"=mesh
         self._filetrunk=ftrunk
-        self._file_ext=file_ext
-        self._units:Dict[str,Expression]={}
-        self._iexprs:Optional[List[str]]=None
-        self._files:Dict[str,Any]={}
+        self._file_ext:FileExtensionType=file_ext
+        self._units:dict[str,Expression]={}
+        self._iexprs:list[str] | None=None
+        self._files:dict[str,Any]={}
         self._continue_info=continue_info
         self.first_column=first_column
 
@@ -1047,10 +1176,12 @@ class _IntegralObservableOutput(_BaseOutputter):
         self._files={}
 
     def after_remeshing(self,eqtree:"EquationTree"):
-        self._mesh=eqtree.get_mesh()
+        newmesh=eqtree.get_mesh()
+        assert not isinstance(newmesh,ODEStorageMesh) # integral observables of an ODE go through the ODE outputter
+        self._mesh=newmesh
 
-    def _eval_all_integral_funcs(self)->Dict[str,Expression]:
-        res:Dict[str,Expression]={}
+    def _eval_all_integral_funcs(self)->dict[str,Expression]:
+        res:dict[str,Expression]={}
         if self._iexprs is None:
             return res
         for n in self._iexprs:
@@ -1068,15 +1199,19 @@ class _IntegralObservableOutput(_BaseOutputter):
         print("TODO: Change output path in IntegralObservables")
         
 
-    def _eval_dependent_funcs(self,intres:Dict[str,Expression]) -> Dict[str, float]:
+    def _eval_dependent_funcs(self,intres:dict[str,Expression]) -> dict[str, float]:
         from ..equations.generic import DependentIntegralObservable
         deps=self._mesh.get_code_gen()._dependent_integral_funcs #type:ignore
-        args:Dict[str,Expression]={k:v for k,v in intres.items()}
-        res:Dict[str,Expression] = {k: v for k, v in intres.items()}
+        args:dict[str,Expression]={k:v for k,v in intres.items()}
+        res:dict[str,Expression] = {k: v for k, v in intres.items()}
         args["time"]=self._mesh.get_problem().get_current_time(dimensional=True,as_float=False)
-        remaining=set(deps.keys())
+        # A list in the order the observables were declared, not a set: res is written out column by
+        # column below in its insertion order, and resolving the dependencies in the order of a set
+        # of names - randomized per process by PYTHONHASHSEED - reshuffled the columns of the output
+        # file from one run to the next.
+        remaining=list(deps.keys())
         while len(remaining)>0:
-            torem:Set[str]=set()
+            torem:set[str]=set()
             for r in remaining:
                 #Check if we can evaluate
                 l=deps[r]
@@ -1086,9 +1221,9 @@ class _IntegralObservableOutput(_BaseOutputter):
                     reqargs=l.argnames
                     func_to_call=l.func
                 else:
-                    reqargs=inspect.signature(l).parameters
+                    reqargs=list(inspect.signature(l).parameters)
                     func_to_call=l
-                arglist:List[ExpressionOrNum]=[]
+                arglist:list[ExpressionOrNum]=[]
 
                 for a in reqargs:
                     if not a in args.keys():
@@ -1103,8 +1238,8 @@ class _IntegralObservableOutput(_BaseOutputter):
                     args[r]=depres
                     res[r]=depres
             if len(torem)==0:
-                raise RuntimeError("Cannot evaluate the dependent integral functions, probably due to unknown or circular arguments : "+str(remaining))
-            remaining = remaining-torem
+                raise RuntimeError("Cannot evaluate the dependent integral functions, probably due to unknown or circular arguments : "+str(sorted(remaining)))
+            remaining = [r for r in remaining if r not in torem]
 
 
         for n,v in res.items():
@@ -1166,7 +1301,7 @@ class _IntegralObservableOutput(_BaseOutputter):
                         pass #TODO: Further ways to get the unit??
 
 
-        nondim_res:Dict[str,float]={}
+        nondim_res:dict[str,float]={}
         for n,v in res.items():
             if n in self._mesh.get_code_gen()._dependent_integral_funcs_is_vector_helper.keys(): 
                 continue
@@ -1200,7 +1335,7 @@ class _IntegralObservableOutput(_BaseOutputter):
 
         return nondim_res
 
-    def _eval_all(self) -> Dict[str, float]:
+    def _eval_all(self) -> dict[str, float]:
         intres=self._eval_all_integral_funcs()
         all=self._eval_dependent_funcs(intres)
         #self._eqtree.get_mesh().evaluate_all_observables()
@@ -1231,7 +1366,7 @@ class _IntegralObservableOutput(_BaseOutputter):
             self._iexprs=self._mesh.list_integral_functions()
             all=self._eval_all()
 
-            firstcols:List[str]=[]
+            firstcols:list[str]=[]
             for fc in self.first_column:
                 if fc == "time":
                     tscale = self._eqtree.get_equations().get_scaling("temporal")
@@ -1240,10 +1375,10 @@ class _IntegralObservableOutput(_BaseOutputter):
                     _, unit, _, _ = _pyoomph.GiNaC_collect_units(tscale)
                     try:
                         float(unit)
-                        tscale = ""
+                        tunit = ""
                     except:
-                        tscale = "[" + unit_to_string(unit, estimate_prefix=False) + "]"
-                    firstcols.append("time" + tscale)
+                        tunit = "[" + unit_to_string(unit, estimate_prefix=False) + "]"
+                    firstcols.append("time" + tunit)
                 elif isinstance(fc, _pyoomph.GiNaC_GlobalParam):
                     firstcols.append(fc.get_name())
                 elif isinstance(fc,str) and (fc in self._mesh.get_problem().get_global_parameter_names()): #type:ignore
@@ -1265,7 +1400,7 @@ class _IntegralObservableOutput(_BaseOutputter):
         else:
             all = self._eval_all()
 
-        line:List[str]=[]
+        line:list[str]=[]
         for fc in self.first_column:
             if fc=="time":
                 line.append(str(self.get_time()))
@@ -1309,10 +1444,10 @@ class _IntegralObservableOutput(_BaseOutputter):
                         mdict[d]=numpy.array([line[i]],dtype="float64") #type:ignore
                 savemat(_filename,mdict,appendmat=True)
 
-    def init(self,eqtree:"EquationTree",continue_info:Optional[Dict[str,Any]]=None,rank:int=0):
+    def init(self,eqtree:"EquationTree",continue_info:dict[str, Any] | None=None,rank:int=0):
         super().init(eqtree,continue_info,rank)
         if self._file_ext is None:
-            self._file_ext=self.problem.default_1d_file_extension
+            self._file_ext=_default_file_extension(self.problem)
 
 
 class IntegralObservableOutput(GenericOutput):
@@ -1322,15 +1457,17 @@ class IntegralObservableOutput(GenericOutput):
     Args:
         filename: The name of the output file (without extension). Default is None, meaning that the output file will be named after the domain.
         file_ext: The file extension. Default is None, meaning that the default file extension from the problem will be used.
-        first_column: The value(s) to be written in the first column of the output file. Default is ``"time"``.        
+        first_column: The value(s) to be written in the first column of the output file. Default is ``"time"``.
+        output_every_step: Write a line after every successful transient step of :py:meth:`~pyoomph.generic.problem.Problem.run`, not only at the output times. Default is True. Has no effect when ``outstep=False`` was passed to ``run``, i.e. when no output at all was requested.
     """
-    def __init__(self, filename:Optional[str]=None, file_ext:Optional[Union[str,List[str]]]=None,first_column:List[str]=["time"]):
+    def __init__(self, filename:str | None=None, file_ext:FileExtensionType=None,first_column:list[str]=["time"],output_every_step:bool=True):
         super(IntegralObservableOutput, self).__init__()
         self.filename = filename
         self.file_ext = file_ext
         self.first_column=first_column
+        self.output_every_step=output_every_step
 
-    def _construct_outputter_for_eq_tree(self, eqtree:"EquationTree", continue_info:Optional[Dict[str,Any]], mpirank:int) -> _IntegralObservableOutput:
+    def _construct_outputter_for_eq_tree(self, eqtree:"EquationTree", continue_info:dict[str, Any] | None, mpirank:int) -> _IntegralObservableOutput:
         fn = self._expand_filename(eqtree, self.filename,  "_IntObsv")
         mesh=eqtree.get_mesh()
         assert not isinstance(mesh,ODEStorageMesh)
@@ -1340,3 +1477,7 @@ class IntegralObservableOutput(GenericOutput):
         return None
 
 #ODEObservableOutput=IntegralObservableOutput
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

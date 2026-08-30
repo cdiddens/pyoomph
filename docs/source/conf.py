@@ -1,3 +1,30 @@
+#  @file
+#  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
+#
+#  @section LICENSE
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+#  The main author may be contacted at c.diddens@utwente.nl
+#
+# ========================================================================
+
 # Configuration file for the Sphinx documentation builder.
 #
 # For the full list of built-in configuration values, see the documentation:
@@ -5,6 +32,7 @@
 import os 
 import sys
 sys.path.insert(0, os.path.abspath('../../pyoomph'))
+sys.path.insert(0, os.path.abspath('_ext'))
 
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
@@ -39,7 +67,8 @@ extensions = [
     "sphinx.ext.autosectionlabel",
     'sphinxcontrib.bibtex',
     'sphinx_favicon',
-    'sphinxcontrib.images'
+    'sphinxcontrib.images',
+    'vidtime',   # the :vidtime: role, see _ext/vidtime.py
     # 'sphinx.ext.imgmath',
     ]
 
@@ -75,6 +104,28 @@ modindex_common_prefix = ['pyoomph.']
 
 # Do not inherit e.g. the define_residuals or something for InitialCondition, etc
 autodoc_inherit_docstrings=False
+
+# Every pyoomph module now sets __all__ (via typings._set_public_api) so that "from module import *"
+# does not hand the user the typing helpers. autodoc, however, stops filtering by __module__ as soon
+# as __all__ exists, which would document each module's re-exported names all over again - e.g. every
+# name pyoomph.equations.navier_stokes pulls in from pyoomph.expressions. Keep the previous behaviour.
+autodoc_default_options = {"ignore-module-all": True}
+
+# sphinx_autodoc_typehints resolves "if TYPE_CHECKING:" blocks by actually executing them, to
+# make forward-referenced types resolvable. pyoomph/meshes/mesh.py deliberately has TYPE_CHECKING-
+# only classes (_MeshFromTemplate1dTypingBase, _InterfaceMeshTypingBase, ...) that combine a
+# nanobind-bound C++ base with a plain Python base purely for static type checkers - nanobind
+# itself does not support that combination at runtime (see the comments above those classes), so
+# executing them for real raises a "metaclass conflict" TypeError. This is caught and only
+# reported as a warning by sphinx_autodoc_typehints, but the warning is spurious: the code is
+# working exactly as intended and never meant to actually run. Filter it out.
+import logging as _logging
+class _SuppressSpuriousGuardedImportWarning(_logging.Filter):
+    def filter(self, record: _logging.LogRecord) -> bool:
+        return "Failed guarded type import" not in record.getMessage()
+# Sphinx re-registers extension loggers under a "sphinx.<module name>" prefix (see
+# sphinx.util.logging), so the actual logger name at runtime is not the plain module name.
+_logging.getLogger("sphinx.sphinx_autodoc_typehints").addFilter(_SuppressSpuriousGuardedImportWarning())
 
 
 # -- Options for HTML output -------------------------------------------------
@@ -132,6 +183,23 @@ latex_toplevel_sectioning = 'chapter'
 #bibtex_reference_style = 'author_year_round'
 
 
+# tutorial_example_scripts.zip is offered as a ":download:" in nearly every tutorial chapter. It
+# is not kept in git: it is assembled from the tutorial sources here, before the sources are read,
+# so it can never be out of date with respect to the scripts the text explains. This runs on Read
+# the Docs as well - it only needs conf.py to be executed on a repository checkout, and uses no
+# external tools (the former generate_tutorial_zip.sh needed a shell, find and zip).
+def build_tutorial_zip(app):
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "tutorial")))
+    import tutorial_bundle
+    from sphinx.util import logging as sphinx_logging
+    logger = sphinx_logging.getLogger(__name__)
+    for problem in tutorial_bundle.check_consistency():
+        logger.warning("tutorial example scripts: %s", problem)
+    changed = tutorial_bundle.build_zip()
+    logger.info("tutorial example scripts: %s tutorial_example_scripts.zip",
+                "regenerated" if changed else "up to date")
+
+
 def set_master_doc(app):
     if app.tags.has("latex"):
         app.config.master_doc = "latex_tutorial"
@@ -141,6 +209,7 @@ def set_master_doc(app):
 
 def setup(app):
     app.connect('builder-inited', set_master_doc)
+    app.connect('builder-inited', build_tutorial_zip)
 
 
 from sphinx.builders.html import StandaloneHTMLBuilder

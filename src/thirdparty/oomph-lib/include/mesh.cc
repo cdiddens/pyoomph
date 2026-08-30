@@ -751,10 +751,11 @@ namespace oomph
     for (unsigned long i = 0; i < nel; i++)
     {
       std::stringstream conversion;
-      conversion << " in Element " << i << " [" << typeid(*Element_pt[i]).name()
+      GeneralisedElement* el_pt = Element_pt[i];
+      conversion << " in Element " << i << " [" << typeid(*el_pt).name()
                  << "] " << current_string;
       std::string in(conversion.str());
-      Element_pt[i]->describe_dofs(out, in);
+      el_pt->describe_dofs(out, in);
     }
   }
 
@@ -776,10 +777,11 @@ namespace oomph
     for (unsigned long i = 0; i < nel; i++)
     {
       std::stringstream conversion;
-      conversion << " in Element" << i << " [" << typeid(*Element_pt[i]).name()
+      GeneralisedElement* el_pt = Element_pt[i];
+      conversion << " in Element" << i << " [" << typeid(*el_pt).name()
                  << "] " << current_string;
       std::string in(conversion.str());
-      Element_pt[i]->describe_local_dofs(out, in);
+      el_pt->describe_local_dofs(out, in);
     }
   }
 
@@ -2783,6 +2785,17 @@ namespace oomph
             {
               Node* nod_pt = el_pt->node_pt(j);
 
+              //FOR PYOOMPH: a periodic ("copy") node owns no data at all - make_periodic() points
+              // its Value/Eqn_number arrays at its master's and its assign_eqn_numbers() is a no-op.
+              // Keeping it out of the shared/halo/haloed schemes entirely is therefore both safe and
+              // necessary: safe because whatever the master receives IS the copy's data, and
+              // necessary because master and copy sit at opposite ends of the domain, so no
+              // partitioning puts them in the same halo layer and the schemes cannot pair them up.
+              // is_a_copy() is a local property of the node and identical on every rank, so both
+              // sides of every scheme skip exactly the same nodes and the orderings still match.
+              // See dev_docs/distributed_periodic_bc.md.
+              if (nod_pt->is_a_copy()) continue;
+
               // Add it as a shared node from current domain
               if (!node_shared[nod_pt])
               {
@@ -2811,6 +2824,9 @@ namespace oomph
             for (unsigned j = 0; j < nnod; j++)
             {
               Node* nod_pt = el_pt->node_pt(j);
+
+              //FOR PYOOMPH: periodic copies stay out of the schemes; see above.
+              if (nod_pt->is_a_copy()) continue;
 
               // Add it as a shared node from current domain
               if (!node_shared[nod_pt])
@@ -2846,6 +2862,9 @@ namespace oomph
             {
               Node* nod_pt = el_pt->node_pt(j);
 
+              //FOR PYOOMPH: periodic copies stay out of the schemes; see above.
+              if (nod_pt->is_a_copy()) continue;
+
               // Add it as a shared node from current domain
               if (!node_shared[nod_pt])
               {
@@ -2872,6 +2891,9 @@ namespace oomph
             for (unsigned j = 0; j < nnod; j++)
             {
               Node* nod_pt = el_pt->node_pt(j);
+
+              //FOR PYOOMPH: periodic copies stay out of the schemes; see above.
+              if (nod_pt->is_a_copy()) continue;
 
               // Add it as a shared node from current domain
               if (!node_shared[nod_pt])
@@ -3354,6 +3376,11 @@ namespace oomph
           for (unsigned j = 0; j < nnod; j++)
           {
             Node* nod_pt = finite_el_pt->node_pt(j);
+
+            //FOR PYOOMPH: periodic copies own no data and stay out of the halo(ed) schemes; see
+            // the note in setup_shared_node_scheme().
+            if (nod_pt->is_a_copy()) continue;
+
             // Associate node with this domain
             processors_associated_with_data[nod_pt].insert(domain);
 
@@ -3387,6 +3414,10 @@ namespace oomph
         for (unsigned j = 0; j < nnod; j++)
         {
           Node* nod_pt = finite_el_pt->node_pt(j);
+
+          //FOR PYOOMPH: periodic copies own no data and stay out of the halo(ed) schemes; see
+          // the note in setup_shared_node_scheme().
+          if (nod_pt->is_a_copy()) continue;
 
           // Associate this node with current processor
           processors_associated_with_data[nod_pt].insert(my_rank);
@@ -3588,6 +3619,10 @@ namespace oomph
     {
       Node* nod_pt = this->node_pt(j);
 
+      //FOR PYOOMPH: a periodic copy is given its master's halo status at the end of this function
+      // instead of getting a verdict of its own; see the note in setup_shared_node_scheme().
+      if (nod_pt->is_a_copy()) continue;
+
       // Reset halo status of node to false
       nod_pt->set_nonhalo();
 
@@ -3659,6 +3694,10 @@ namespace oomph
           for (unsigned j = 0; j < nnod; j++)
           {
             Node* nod_pt = finite_el_pt->node_pt(j);
+
+            //FOR PYOOMPH: periodic copies own no data and stay out of the halo(ed) schemes; see
+            // the note in setup_shared_node_scheme().
+            if (nod_pt->is_a_copy()) continue;
 
             // Have we done this node already?
             if (!done[nod_pt])
@@ -3738,6 +3777,10 @@ namespace oomph
           for (unsigned j = 0; j < nnod; j++)
           {
             Node* nod_pt = finite_el_pt->node_pt(j);
+
+            //FOR PYOOMPH: periodic copies own no data and stay out of the halo(ed) schemes; see
+            // the note in setup_shared_node_scheme().
+            if (nod_pt->is_a_copy()) continue;
 
             // Have we done this node already?
             if (!node_done[nod_pt])
@@ -4412,6 +4455,28 @@ namespace oomph
     }
 
 
+    //FOR PYOOMPH: the periodic copies were left out of the classification above, so give them
+    // their master's halo status now. Nothing in the halo exchange reads it -- the copy is in no
+    // halo(ed) list -- but plenty of code asks a node whether it is a halo, and a copy that claimed
+    // to be non-halo on every rank would look like a node several processors own.
+    {
+      unsigned nnod_all = this->nnode();
+      for (unsigned j = 0; j < nnod_all; j++)
+      {
+        Node* nod_pt = this->node_pt(j);
+        if (!nod_pt->is_a_copy()) continue;
+        Node* master_pt = nod_pt->copied_node_pt();
+        if (master_pt->is_halo())
+        {
+          nod_pt->set_halo(master_pt->non_halo_proc_ID());
+        }
+        else
+        {
+          nod_pt->set_nonhalo();
+        }
+      }
+    }
+
     // MemoryUsage::doc_memory_usage("before resize halo nodes");
 
     // Now resize halo nodes if required (can be over-ruled from the outside
@@ -4806,6 +4871,21 @@ namespace oomph
         RefineableElement* ref_el_pt = dynamic_cast<RefineableElement*>(el_pt);
         if (ref_el_pt != 0)
         {
+          // FOR PYOOMPH
+          // Upstream takes "casts to RefineableElement" to imply "has a tree" and dereferences
+          // tree_pt() unconditionally. In pyoomph the cast says nothing: EVERY element derives from
+          // RefineableSolidElement (pyoomph::FiniteElementBase), and a halo element can still have
+          // no tree -- measured on docs/source/tutorial/advstab/eigenbranch_continuation.py, where
+          // the null one is a bulk pyoomph::BulkElementQuad2dC2 in the halo layer of the bulk mesh.
+          // A tree-less element is its own only leaf, so it belongs in the non-refineable branch
+          // below. Reached from every bifurcation-tracking handler, which builds the dof halo
+          // scheme in its constructor: without this, activating tracking on such a distributed
+          // problem segfaults here.
+          if (!ref_el_pt->tree_pt())
+          {
+            el_pt->add_internal_value_pt_to_map(map_of_halo_data);
+            continue;
+          }
           // Vector of pointers to leaves in tree emanating from
           // current root halo element
           Vector<Tree*> leaf_pt;
@@ -5158,7 +5238,7 @@ namespace oomph
     // up
     Vector<FiniteElement*> backed_up_f_el_pt(nelem);
 
-    // TriangleMeshBase support was removed from this build of pyoomph, so
+    //FOR PYOOMPH: TriangleMeshBase support was removed from this build of pyoomph, so
     // this mesh is never treated as an unstructured triangle/tet mesh here.
     bool is_a_triangle_mesh_base_mesh = false;
 
@@ -5186,7 +5266,6 @@ namespace oomph
 
     // Determine which elements are going to end up on which processor
     //----------------------------------------------------------------
-    unsigned number_of_retained_elements = 0;
 
     // Loop over all backed up elements
     nelem = backed_up_el_pt.size();
@@ -5202,7 +5281,6 @@ namespace oomph
       {
         // Add element to current processor
         element_retained[e] = true;
-        number_of_retained_elements++;
       }
       // Otherwise we may still need it if it's a halo element:
       else
@@ -5222,7 +5300,6 @@ namespace oomph
             {
               root_halo_element[el_domain].push_back(e);
               element_retained[e] = true;
-              number_of_retained_elements++;
             }
           }
         }
@@ -5262,7 +5339,6 @@ namespace oomph
                 {
                   root_halo_element[el_domain].push_back(e);
                   element_retained[e] = true;
-                  number_of_retained_elements++;
                 }
                 // Now break out of loop over nodes
                 break;
@@ -8452,7 +8528,6 @@ namespace oomph
             // Storage for hang information
             Vector<int> nodal_hangings;
 
-            unsigned count = 0;
             for (unsigned e = 0; e < nelem_halo; e++)
             {
               FiniteElement* finite_el_pt =
@@ -8469,7 +8544,6 @@ namespace oomph
                   for (unsigned i = 0; i < nod_dim; i++)
                   {
                     nodal_positions.push_back(nod_pt->position(i));
-                    count++;
                   }
 
                   unsigned nval = nod_pt->nvalue();

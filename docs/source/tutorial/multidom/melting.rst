@@ -39,7 +39,7 @@ The :py:meth:`~pyoomph.generic.problem.Problem.define_problem` method starts aga
    :start-at: def define_problem(self):
    :end-at: self.set_scaling(pressure=self.mu_liq*scale_factor("velocity")/scale_factor("spatial"))
 
-Next, the ice equations are assembled. They are essentially the same, except that we must add a few extra :py:class:`~pyoomph.meshes.bcs.DirichletBC` terms to fix the mesh at the top and bottom boundary. Furthermore, there is no :py:class:`~pyoomph.meshes.bcs.DirichletBC` for the temperature here, except the equilibrium temperature at the ``"interface"``. The ice cylinder will just warm up to :math:`0\:\mathrm{^\circ C}` over the course of the simulation:
+Next, the ice equations are assembled. They are essentially the same, except that we must add a few extra :py:class:`~pyoomph.equations.generic.DirichletBC` terms to fix the mesh at the top and bottom boundary. Furthermore, there is no :py:class:`~pyoomph.equations.generic.DirichletBC` for the temperature here, except the equilibrium temperature at the ``"interface"``. The ice cylinder will just warm up to :math:`0\:\mathrm{^\circ C}` over the course of the simulation:
 
 .. literalinclude:: melting_ice_convection.py
    :language: python
@@ -74,7 +74,7 @@ Thereby, we have fewer degrees of freedom in our system and the computation will
 
 Also, note the additional feature we are using here, namely the classes :py:class:`~pyoomph.equations.ALE.ConstrainPositionsToC1Space` and :py:class:`~pyoomph.equations.ALE.UnconstrainPositionsFromC1Space`. The former enforces that the moving mesh is solved on first order elements everywhere inside both domains, i.e. while still having 9 nodes per second-order quadrilateral elements, the mesh dynamics is only solved on the 4 vertex nodes (``"C1"`` space). However, at the interface, we want to include the possibility of having a curved boundary. Therefore, it is unconstrained there, i.e. the free surface can still deform as second-order elements. 
 
-In principle, we could have done the same with the temperature field using the classes :py:class:`~pyoomph.generic.codegen.ConstrainFieldsToC1Space` and  :py:class:`~pyoomph.generic.codegen.UnconstrainFieldsFromC1Space`, respectively. However, since we pin the temperature at the interface, it would be equivalent to entirely degrade the temperature field to ``"C1"``, since the unconstraining would only act directly on the interface to resolve tangential gradients. Nevertheless, since the mesh motion usually does not matter for the physics, the reduction in the moving mesh order reduces the degrees of freedom and the computation time by about 25% without any notable downsides regarding the physics.
+In principle, we could have done the same with the temperature field using the classes :py:class:`~pyoomph.equations.generic.ConstrainFieldsToC1Space` and  :py:class:`~pyoomph.equations.generic.UnconstrainFieldsFromC1Space`, respectively. However, since we pin the temperature at the interface, it would be equivalent to entirely degrade the temperature field to ``"C1"``, since the unconstraining would only act directly on the interface to resolve tangential gradients. Nevertheless, since the mesh motion usually does not matter for the physics, the reduction in the moving mesh order reduces the degrees of freedom and the computation time by about 25% without any notable downsides regarding the physics.
 
 .. warning:
 

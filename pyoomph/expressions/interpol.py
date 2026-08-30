@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -42,7 +43,7 @@ import numpy
 
 
 class Interpolate1d(CustomMathExpression):
-	def __init__(self,arr_or_fname:Union[str,NPFloatArray],kind:str='linear',axis:int=-1,bounds_error:bool=True,fill_value:Optional[float]=None):
+	def __init__(self,arr_or_fname:str | NPFloatArray,kind:str='linear',axis:int=-1,bounds_error:bool=True,fill_value:float | None=None):
 		super().__init__()
 		if isinstance(arr_or_fname,str):	
 			arr_or_fname=numpy.loadtxt(arr_or_fname) #type:ignore
@@ -57,7 +58,7 @@ class Interpolate1d(CustomMathExpression):
 
 
 class InterpolateSpline1d(CustomMathExpression):
-	def __init__(self,arr_or_fname:Union[str,NPFloatArray],k:int=3,w:Any=None,xaxis:int=0,yaxis:int=-1,ext:int=0,check_finite:bool=False):
+	def __init__(self,arr_or_fname:str | NPFloatArray,k:int=3,w:Any=None,xaxis:int=0,yaxis:int=-1,ext:int=0,check_finite:bool=False):
 		super().__init__()
 		if isinstance(arr_or_fname,str):	
 			arr_or_fname=numpy.loadtxt(arr_or_fname) #type:ignore
@@ -87,7 +88,7 @@ class InterpolateSpline1dDerivative(CustomMathExpression):
 
 
 class InterpolateSmoothBivariateSpline2d(CustomMathExpression):
-	def __init__(self,arr_or_fname:Union[str,NPFloatArray],kind:str='linear',xaxis:int=0,yaxis:int=1,zaxis:int=-1,w:Any=None,bbox:List[Optional[float]]=[None,None,None,None],kx:int=3,ky:int=3,s:Any=None,eps:float=1e-16):
+	def __init__(self,arr_or_fname:str | NPFloatArray,kind:str='linear',xaxis:int=0,yaxis:int=1,zaxis:int=-1,w:Any=None,bbox:list[float | None]=[None,None,None,None],kx:int=3,ky:int=3,s:Any=None,eps:float=1e-16):
 		super().__init__()
 		if isinstance(arr_or_fname,str):	
 			arr_or_fname=numpy.loadtxt(arr_or_fname) #type:ignore
@@ -101,12 +102,16 @@ class InterpolateSmoothBivariateSpline2d(CustomMathExpression):
 		return self.interp(arg_array[0],arg_array[1]) #type:ignore
 
 	def derivative(self,index:int) -> CustomMathExpression:
-		dx=[0,0]
-		dx[index]=1
-		return InterpolateSmoothBivariateSpline2dDerivative(self,tuple(dx))
+		if index==0:
+			dx:tuple[int,int]=(1,0)
+		elif index==1:
+			dx=(0,1)
+		else:
+			raise ValueError("Index must be 0 or 1")
+		return InterpolateSmoothBivariateSpline2dDerivative(self,dx)
 
 class InterpolateSmoothBivariateSpline2dDerivative(CustomMathExpression):
-	def __init__(self,parent:InterpolateSmoothBivariateSpline2d,dx:Tuple[int,int]):
+	def __init__(self,parent:InterpolateSmoothBivariateSpline2d,dx:tuple[int,int]):
 		super().__init__()
 		self.parent=parent
 		self.interp=self.parent.interp
@@ -116,9 +121,14 @@ class InterpolateSmoothBivariateSpline2dDerivative(CustomMathExpression):
 		return self.interp(arg_array[0],arg_array[1],dx=self.dx[0],dy=self.dx[1]) #type:ignore
 
 	def derivative(self,index:int) -> CustomMathExpression:
-		dx=[i for i in self.dx]
-		dx[index]=dx[index]+1
-		return InterpolateSmoothBivariateSpline2dDerivative(self.parent,tuple(dx))		
+		d0,d1=self.dx
+		if index==0:
+			d0=d0+1
+		elif index==1:
+			d1=d1+1
+		else:
+			raise ValueError("Index must be 0 or 1")
+		return InterpolateSmoothBivariateSpline2dDerivative(self.parent,(d0,d1))
 
 	def get_id_name(self)->str:
 		return  "D"+str(self.dx)+self.parent.get_id_name()
@@ -127,7 +137,7 @@ class InterpolateSmoothBivariateSpline2dDerivative(CustomMathExpression):
 
 
 class InterpolateRectBivariateSpline2d(CustomMathExpression):
-	def __init__(self,x:NPFloatArray,y:NPFloatArray,z:NPFloatArray,bbox:List[Optional[float]]=[None,None,None,None],kx:int=3,ky:int=3,s:Any=None):
+	def __init__(self,x:NPFloatArray,y:NPFloatArray,z:NPFloatArray,bbox:list[float | None]=[None,None,None,None],kx:int=3,ky:int=3,s:Any=None):
 		super().__init__()
 		self.interp=RectBivariateSpline(x,y,z,s=s,kx=kx,ky=ky,bbox=bbox)
 
@@ -180,13 +190,13 @@ class MeshFileInterpolation2d(CustomMathExpression):
 
 	def eval(self, arg_array: NPFloatArray) -> float:
 		x,y=arg_array[0],arg_array[1]
-		return self.interp(x,y)
+		return self.interp(x,y) #type:ignore
 
 
 
 
 class CSplineInterpolator(CustomMultiReturnExpression):
-    def __init__(self,arr_or_fname:Union[NPFloatArray,str],xcol:int=0,ycol:int=1,k:int=3) -> None:
+    def __init__(self,arr_or_fname:NPFloatArray | str,xcol:int=0,ycol:int=1,k:int=3) -> None:
         super().__init__()
         if isinstance(arr_or_fname,str):
             data=numpy.loadtxt(arr_or_fname,ndmin=2)
@@ -248,3 +258,7 @@ class CSplineInterpolator(CustomMultiReturnExpression):
         if nargs!=1:
             raise ValueError("Expected 1 argument")
         return 1
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

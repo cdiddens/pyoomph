@@ -15,4 +15,5 @@ Spatio-temporal differential equations are partial differential equations involv
    pde/lubric.rst         
    pde/continue.rst      
    pde/patterns.rst
+   pde/adapt.rst
 

@@ -33,7 +33,7 @@ Here, :math:`U` is the velocity of the bubble, which is determined by enforcing 
    :start-at: def define_problem(self):
    :end-at: eqs+=WeakContribution(-dot(var("coordinate"),var("normal"))/3,Ptest)@"interface"
 
-We still have to add moving mesh equations and some missing boundary conditions. The :py:class:`~pyoomph.meshes.bcs.AxisymmetryBC` ensures again the toggling of the :math:`m`-dependent boundary conditions for the eigenfunction at :math:`r=0`. It automatically transfers to e.g. the intersection ``"interface/axis"``, where we have to modify e.g. the Lagrange multiplier for the kinematic boundary condition.
+We still have to add moving mesh equations and some missing boundary conditions. The :py:class:`~pyoomph.equations.generic.AxisymmetryBC` ensures again the toggling of the :math:`m`-dependent boundary conditions for the eigenfunction at :math:`r=0`. It automatically transfers to e.g. the intersection ``"interface/axis"``, where we have to modify e.g. the Lagrange multiplier for the kinematic boundary condition.
 
 
 .. literalinclude:: rising_bubble.py
@@ -48,7 +48,7 @@ Optionally, we can process all calculated eigenvectors. Here, we make sure that 
    :start-at: def process_eigenvectors(self, eigenvectors):
    :end-at: return self.rotate_eigenvectors(eigenvectors,"domain/interface/mesh_x",normalize_amplitude=0.2,normalize_dofs=True)
 
-The driver code now mainly sets up the problem. In particular, we have to activate again the azimuthal stability analysis. We need a robust complex eigensolver. For that, you have to install a complex variant of the package SLEPc (see :numref:`petscslepc`).
+The driver code now mainly sets up the problem. In particular, we have to activate again the azimuthal stability analysis. We need a robust eigensolver that can target a complex eigenvalue. No eigensolver is selected explicitly: pyoomph takes the best one available, i.e. SLEPc together with the MUMPS linear solver whenever a complex variant of PETSc/SLEPc is installed (see :numref:`petscslepc`; MUMPS matters here because the constraints have a zero diagonal, which the default LU decomposition of PETSc cannot handle), and the built-in ``spectra`` eigensolver otherwise. The latter requires no PETSc at all, so this example also runs on Windows; only SLEPc, however, can solve the eigenproblem distributed over several MPI processes.
 
 
 We then start at some Bond number, relax to the initial state by some transient steps followed by a stationary solve. Then, we create an output file to write the eigenvalues and scan over the Bond number. We solve the eigenproblem using first an initial guess for the eigenvalue (using the ``shift`` and ``target`` kwargs of :py:meth:`~pyoomph.generic.problem.Problem.solve_eigenproblem`). After the first step, we just use the previously calculated eigenvalue as guess for the next Bond number. We can adapt the mesh based on the eigenfunction using :py:meth:`~pyoomph.generic.problem.Problem.refine_eigenfunction`. It will use the :py:class:`~pyoomph.equations.generic.SpatialErrorEstimator` added to the problem to refine with respect to jumps in velocity gradients across the elements. Thereby, strong changes in the eigenfunction are better captured:
@@ -75,7 +75,7 @@ We can also generate a movie of the instability. Please refer to :numref:`secplo
 
 	.. raw:: html 
 
-		<figure class="align-center" id="vidrisingbubble"><video autoplay="True" preload="auto" width="60%" loop=""><source src="../../../_static/rising_bubble.mp4" type="video/mp4"></video><figcaption><p><span class="caption-text">Eigendynamics at <span class="math notranslate nohighlight">\(Bo=4\)</span> </span></p></figcaption></figure>
+		<figure class="align-center" id="vidrisingbubble"><video autoplay="True" muted="" playsinline="" controls="" preload="auto" width="60%" loop=""><source src="../../../_static/rising_bubble.mp4" type="video/mp4"></video><figcaption><p><span class="caption-text">Eigendynamics at <span class="math notranslate nohighlight">\(Bo=4\)</span> </span></p></figcaption></figure>
 	
 	
 .. only:: html

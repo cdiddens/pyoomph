@@ -1,0 +1,331 @@
+name: Debug one case against a built wheel
+
+# The fast lane. test_wheel_suite.yml builds a wheel and runs 1869 tests on four platforms, which is
+# fifty minutes per attempt - far too slow to iterate on the two failures that are left, both of which
+# need several tries by their nature (an intermittent crash, and a DLL that has to be inspected on the
+# machine that cannot load it). This one BUILDS NOTHING: it downloads a wheel that a previous run
+# already produced, installs it, and runs exactly the tests asked for, as many times as asked.
+#
+# Since 8838c208/6ae8c4c7 every job uploads its wheel even when its tests fail, so there is always one
+# of these to take - including from the very run whose failure is being chased, which is the point:
+# the binary under the debugger is the binary that failed.
+#
+# What it adds beyond running pytest:
+#   * repeat, for the floquet worker crashes, which fire on a different two to four cases each run;
+#   * the macOS crash reports (~/Library/Logs/DiagnosticReports), which carry a backtrace for a
+#     process that died - and the deaths are in WORKER subprocesses, so a debugger attached to pytest
+#     would not see them;
+#   * the tcc import-table probe on Windows, which is the whole of that investigation.
+#
+# NOTE: workflow_dispatch resolves the workflow by name from the DEFAULT branch, so this file has to
+# be on main to be dispatchable at all; the ref input then decides which branch's tests run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Which platform's wheel to test
+        required: true
+        type: choice
+        default: macos-intel-x86_64
+        options:
+          - linux-x86_64
+          - macos-intel-x86_64
+          - macos-arm64
+          - windows-msys2-ucrt64
+      wheels_run_id:
+        description: Run id of "Build one wheel per OS and run the test suite" to take the wheel from (defaults to its latest run, failed or not)
+        required: false
+        type: string
+      ref:
+        description: Branch, tag or SHA whose tests/ to run (the WHEEL comes from the run above, not from here)
+        required: false
+        type: string
+        default: ""
+      pytest_args:
+        description: What to run, as pytest arguments
+        required: false
+        type: string
+        default: tests/test_floquet_multipliers.py -q
+      repeat:
+        description: How many times to run it (for intermittent failures; stops at the first failure)
+        required: false
+        type: string
+        default: "1"
+      python_version:
+        description: Interpreter to install the wheel on (must match the wheel's tag)
+        required: false
+        type: string
+        default: "3.12"
+      run_tcc_probe:
+        description: Also run citools/windows_tcc_diag.py (Windows only)
+        required: false
+        type: boolean
+        default: false
+      command:
+        description: Run this shell command instead of pytest (e.g. a worker script directly)
+        required: false
+        type: string
+        default: ""
+      overlay_python:
+        description: Copy the checkout's pyoomph/**.py over the installed wheel (verify a Python-only fix without rebuilding)
+        required: false
+        type: boolean
+        default: false
+      use_lldb:
+        description: Run the command under lldb and print a native backtrace when it dies (macOS)
+        required: false
+        type: boolean
+        default: false
+      with_petsc:
+        description: Install the prebuilt complex PETSc/SLEPc first (macOS arm64 only, where the suite runs against it)
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  debug:
+    name: ${{ inputs.platform }}
+    runs-on: ${{ fromJSON('{"linux-x86_64":"ubuntu-latest","macos-intel-x86_64":"macos-15-intel","macos-arm64":"macos-14","windows-msys2-ucrt64":"windows-latest"}')[inputs.platform] }}
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Resolve which run to take the wheel from
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANUAL: ${{ inputs.wheels_run_id }}
+        shell: bash
+        run: |
+          if [ -n "${MANUAL}" ]; then
+            RUN_ID="${MANUAL}"
+          else
+            # Deliberately NOT --status success: the interesting wheels come from red runs.
+            RUN_ID="$(gh run list --workflow test_wheel_suite.yml --repo "${GITHUB_REPOSITORY}" \
+                        --limit 1 --json databaseId --jq '.[0].databaseId')"
+          fi
+          if [ -z "${RUN_ID}" ] || [ "${RUN_ID}" = "null" ]; then
+            echo "Could not resolve a run to take a wheel from" >&2; exit 1
+          fi
+          echo "Using wheel from run ${RUN_ID}"
+          echo "run_id=${RUN_ID}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download the wheel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          rm -rf wheelhouse && mkdir -p wheelhouse
+          gh run download "${{ steps.resolve.outputs.run_id }}" --repo "${GITHUB_REPOSITORY}" \
+            --name "test-wheel-${{ inputs.platform }}" --dir wheelhouse
+          ls -la wheelhouse
+
+      - name: Install runtime dependencies (Linux)
+        if: inputs.platform == 'linux-x86_64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglu1-mesa libxcursor1 libopengl0 libxinerama1
+
+      - name: Install the wheel
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+          python -m pip install wheelhouse/*.whl
+          # From outside the checkout, since the repo's own pyoomph/ would shadow the installed one.
+          cd "${RUNNER_TEMP}" && python -c "import pyoomph; print('pyoomph', pyoomph.__file__)"
+
+      - name: Overlay the checkout's Python over the installed wheel
+        if: inputs.overlay_python
+        shell: bash
+        run: |
+          # For a fix that lives in .py only - a solver backend, a hook, a guard - this makes the
+          # five-minute lane able to test it, instead of waiting fifty minutes for a wheel that
+          # differs from the last one by a few lines of Python. The compiled extension stays exactly
+          # as built. It is NOT a substitute for a real wheel run: nothing here rebuilds C++, and a
+          # .py that disagrees with the extension it is copied next to would be a fiction.
+          # -P, like everywhere else in this file: without it "import pyoomph" here resolves to the
+          # SOURCE tree this step is standing in, which has no compiled extension, and the overlay
+          # dies with "No module named pyoomph._pyoomph_core" before copying anything. Third time
+          # this trap has been sprung in this workflow; every python invocation that imports pyoomph
+          # from the checkout needs it.
+          python -P - <<'PYEOF'
+          import os, pathlib, shutil, sys
+          import pyoomph
+          installed = pathlib.Path(pyoomph.__file__).parent
+          source = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "pyoomph"
+          n = 0
+          # .h as well as .py: the wheel ships pyoomph/jitbridge/jitbridge.h and hands it to tcc as
+          # the include dir (-nostdinc, so it is the ONLY declaration tcc gets), which makes a missing
+          # prototype there a Windows-only compile failure - and one this lane could not otherwise
+          # test without a fifty-minute rebuild.
+          skipped = []
+          for src in list(source.rglob("*.py")) + list(source.rglob("*.h")):
+              dst = installed / src.relative_to(source)
+              if not dst.parent.exists():
+                  continue
+              # Never overwrite a file delvewheel has patched. On Windows it injects a DLL-preload
+              # prelude into pyoomph/__init__.py, and the source copy does not have it: overwriting
+              # left the extension unable to find its bundled dependencies - "DLL load failed while
+              # importing _pyoomph_core" - which looks exactly like the JIT failure this lane is here
+              # to investigate.
+              if dst.exists():
+                  try:
+                      if "_delvewheel_" in dst.read_text(encoding="utf-8", errors="ignore"):
+                          skipped.append(str(dst.relative_to(installed)))
+                          continue
+                  except OSError:
+                      pass
+              shutil.copy2(src, dst)
+              n += 1
+          # src/jitbridge.h is the ORIGINAL; pyoomph/jitbridge/jitbridge.h is a build-time copy of it
+          # and is gitignored, so it is not in the checkout and the loop above cannot find it. Without
+          # this the lane silently tests the wheel's old header - which is exactly how a strcpy fix
+          # appeared not to work, the probe still reporting the implicit declaration it was meant to
+          # remove.
+          bridge = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "src" / "jitbridge.h"
+          bridge_dst = installed / "jitbridge" / "jitbridge.h"
+          if bridge.exists() and bridge_dst.parent.exists():
+              shutil.copy2(bridge, bridge_dst)
+              n += 1
+              print(f"overlaid the jit header from {bridge}")
+          print(f"overlaid {n} files (.py and .h) onto {installed}")
+          if skipped:
+              print("left alone because delvewheel patched them:", ", ".join(skipped))
+          PYEOF
+
+      # The arm64 suite (test_wheel_suite.yml) runs against the prebuilt complex PETSc/SLEPc, so a
+      # debug run without it reproduces a different configuration - a SLEPc failure would come back
+      # as a pass on spectra. Only arm64: no other platform's suite has PETSc either.
+      - name: Install the PETSc/SLEPc prebuild (macOS arm64)
+        if: inputs.with_petsc && inputs.platform == 'macos-arm64'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYVER: ${{ inputs.python_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_ID="$(gh run list --workflow prebuild_petsc_slepc.yml --repo "${GITHUB_REPOSITORY}" \
+                      --status success --limit 1 --json databaseId --jq '.[0].databaseId')"
+          [[ -n "${RUN_ID}" && "${RUN_ID}" != "null" ]] || {
+            echo "No successful 'Prebuild PETSc/SLEPc' run to take the artifact from" >&2; exit 1; }
+          # petsc4py's extension dlopens Homebrew's libgfortran - MUMPS and ScaLAPACK are Fortran, and
+          # the prebuild runner had it only because it installed gcc to compile them. The image this
+          # job runs on provides no unversioned `gcc` prefix, so the import died with "Library not
+          # loaded: /opt/homebrew/opt/gcc/lib/gcc/current/libgfortran.5.dylib" - and, since every
+          # SLEPc test only asks whether petsc4py imports, as a wall of failures half an hour into
+          # the suite rather than here. Checked, not assumed, for the same reason.
+          brew install gcc || brew link --overwrite gcc
+          test -e "$(brew --prefix gcc)/lib/gcc/current/libgfortran.5.dylib"
+          rm -rf petsc-prebuilt && mkdir -p petsc-prebuilt
+          gh run download "${RUN_ID}" --repo "${GITHUB_REPOSITORY}" \
+            --name "petsc-slepc-macos-arm64-cp${PYVER//./}" --dir petsc-prebuilt
+          # Unpacked at the absolute path it was configured with: PETSc bakes the prefix into
+          # petscvariables, the RPATHs and the macOS install_names.
+          sudo mkdir -p /opt
+          sudo tar xzf petsc-prebuilt/pyoomph-petsc.tar.gz -C /opt
+          set -a; source /opt/pyoomph-petsc/env.sh; set +a
+          # The COMPLEX arch, as the suite does: a real petsc4py is picked by the autodetection just
+          # as happily and then truncates every complex target to its real part.
+          PYTHONPATH="${PETSC_DIR}/${PETSC_ARCH_COMPLEX}/lib"
+          DYLD_LIBRARY_PATH="${PETSC_DIR}/mpi/lib:${PYTHONPATH}"
+          for v in PETSC_DIR PETSC_ARCH_REAL PETSC_ARCH_COMPLEX PYTHONPATH DYLD_LIBRARY_PATH; do
+            echo "${v}=${!v}" >> "${GITHUB_ENV}"
+          done
+          echo "PYOOMPH_EXPECT_COMPLEX_SLEPC=1" >> "${GITHUB_ENV}"
+
+      - name: Run the case
+        id: run
+        continue-on-error: true
+        shell: bash
+        env:
+          # A crash then prints a Python traceback before it dies, which is the difference between
+          # "the worker vanished" and "it vanished in this function".
+          PYTHONFAULTHANDLER: "1"
+        run: |
+          set -o pipefail
+          # A worker script run DIRECTLY is worth more than the same crash seen through pytest: the
+          # deaths are in worker subprocesses, so lldb attached to pytest would watch the wrong
+          # process, while lldb on the worker itself gives the C++ frames - which is the difference
+          # between "it aborts in _unload_all_dlls" and knowing what inside it aborts.
+          CMD='${{ inputs.command }}'
+          if [ -z "$CMD" ]; then
+            # -P: do not put the CWD on sys.path. Without it "python -m pytest" from the checkout
+            # imports the SOURCE pyoomph/, which has no compiled extension - "No module named
+            # pyoomph._pyoomph_core" - and the wheel under test is never loaded at all. (A worker run
+            # as "python tests/foo.py" escapes this, since that puts tests/ on the path instead,
+            # which is why the macOS case worked and the pytest one did not.)
+            CMD="python -P -m pytest ${{ inputs.pytest_args }}"
+          fi
+          if [ "${{ inputs.use_lldb }}" = "true" ]; then
+            # stop-on-exec false FIRST, and do not drop it: a Python launched through a shim
+            # re-execs, lldb stops there by default, and --batch then quits having run nothing at all
+            # - "stop reason = exec", exit 0, no output, which is exactly how the first attempt at
+            # this looked like a pass. -k runs only if the target dies, so the backtrace is printed
+            # for a crash and not for a clean exit.
+            CMD="lldb --batch -o 'settings set target.process.stop-on-exec false' -o run -k 'thread backtrace all' -k 'quit 1' -- $CMD"
+          fi
+          echo "command: $CMD"
+          rc=0
+          for i in $(seq 1 ${{ inputs.repeat }}); do
+            echo "=============== attempt $i of ${{ inputs.repeat }} ==============="
+            eval "$CMD" 2>&1 | tee -a run.log || { rc=$?; break; }
+          done
+          echo "exit_code=$rc" >> "${GITHUB_OUTPUT}"
+          exit 0
+
+      - name: Collect macOS crash reports
+        if: always() && startsWith(inputs.platform, 'macos')
+        shell: bash
+        run: |
+          # The deaths are in worker SUBPROCESSES, so a debugger on pytest would not see them; the OS
+          # writes a report for each one, with the backtrace this investigation actually needs.
+          dir=~/Library/Logs/DiagnosticReports
+          if [ ! -d "$dir" ]; then echo "no DiagnosticReports directory"; exit 0; fi
+          found=$(find "$dir" -name "*.ips" -newermt "-2 hours" 2>/dev/null | head -n 20 || true)
+          if [ -z "$found" ]; then echo "no crash reports written in the last two hours"; exit 0; fi
+          mkdir -p crashreports
+          for f in $found; do
+            echo "---------------- $f ----------------"
+            # The first 120 lines carry the faulting thread's backtrace; the rest is binary images.
+            head -n 120 "$f"
+            cp "$f" crashreports/ || true
+          done
+
+      - name: Run the tcc import-table probe (Windows)
+        if: always() && inputs.run_tcc_probe && inputs.platform == 'windows-msys2-ucrt64'
+        shell: bash
+        run: |
+          python -m pip install tccbox || exit 0
+          # From outside the checkout, for the same reason as -P above.
+          cd "${RUNNER_TEMP}"
+          python "${GITHUB_WORKSPACE}/citools/windows_tcc_diag.py" "${RUNNER_TEMP}/tccdiag_out" || true
+
+      - name: Upload the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-${{ inputs.platform }}
+          path: |
+            run.log
+            crashreports/
+          if-no-files-found: warn
+
+      - name: Report the outcome
+        shell: bash
+        run: |
+          echo "pytest exit code: ${{ steps.run.outputs.exit_code }}"
+          # Fails the job when the case failed, so the run's own status says what happened.
+          test "${{ steps.run.outputs.exit_code }}" = "0"

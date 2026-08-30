@@ -35,9 +35,9 @@ As an example how to use this mesh, we solve again a Poisson equation on this me
 .. literalinclude:: mesh_Lshape_by_hand.py
    :language: python
    :start-at: class MeshTestProblem(Problem):
-   :end-at: problem.output_at_increased_time()
+   :end-at: problem.output(increase_time_for_PVD=True)
 
-The predefined :py:class:`~pyoomph.equations.poisson.PoissonEquation` works as the one developed in :numref:`secspatialpoisson`. Note how we initially suppress the mesh adaption by setting :py:attr:`~pyoomph.generic.problem.Problem.initial_adaption_steps` to zero. Otherwise, we would get redundant adaption near the ``"top"`` boundary due to the non-zero :py:class:`~pyoomph.meshes.bcs.DirichletBC`. The custom mesh and the problem class in action can be seen in :numref:`figspatialmeshtemplate1`.
+The predefined :py:class:`~pyoomph.equations.poisson.PoissonEquation` works as the one developed in :numref:`secspatialpoisson`. Note how we initially suppress the mesh adaption by setting :py:attr:`~pyoomph.generic.problem.Problem.initial_adaption_steps` to zero. Otherwise, we would get redundant adaption near the ``"top"`` boundary due to the non-zero :py:class:`~pyoomph.equations.generic.DirichletBC`. The custom mesh and the problem class in action can be seen in :numref:`figspatialmeshtemplate1`.
 
 
 .. warning::

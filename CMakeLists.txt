@@ -43,16 +43,55 @@ endif()
 # ----------------------------------------------------------------------------
 # Build options
 #
-# These mirror the old PYOOMPH_* environment variables read by setup.py, and
-# are what the `configure` wrapper script (see ./configure) sets via
-# `-DPYOOMPH_...=...` / `pip install --config-settings=cmake.define.X=Y`.
+# These mirror the old PYOOMPH_* environment variables read by setup.py. They are set either
+# straight on the cmake command line (`-DPYOOMPH_...=...`) or, when building through pip/
+# scikit-build-core as ./build_for_develop.sh does, via
+# `pip install --config-settings=cmake.define.PYOOMPH_...=...`.
 # ----------------------------------------------------------------------------
 option(PYOOMPH_USE_MPI       "Build with MPI support (defines OOMPH_HAS_MPI)"        OFF)
 option(PYOOMPH_PARANOID      "Build with extra runtime sanity checks (defines PARANOID)" OFF)
 option(PYOOMPH_DOWNLOAD_CLN  "Download and build CLN from source via its own autotools ./configure" ON)
 option(PYOOMPH_DOWNLOAD_GINAC "Download and build GiNaC from source via its own autotools ./configure" ON)
-option(PYOOMPH_GENERATE_STUBS "Generate .pyi stubs for the _core extension via pybind11-stubgen (best effort, non-fatal)"  ON)
+# AUTO (the default) links OpenMP if the toolchain has it and builds without it
+# if not; ON makes a missing OpenMP a hard error, OFF never looks for it. The
+# tri-state exists because AUTO alone means the capability of a wheel is decided
+# silently by whatever the build machine happened to have: manylinux always has
+# libgomp, AppleClang usually has no libomp at all, so the same release would
+# ship --omp on Linux/Windows and not on macOS without anyone noticing. A CI job
+# that means to ship threaded assembly says ON and finds out at configure time.
+set(PYOOMPH_USE_OPENMP "AUTO" CACHE STRING "OpenMP for the parallel element assembly (--omp N): AUTO=use if found, ON=require, OFF=never")
+set_property(CACHE PYOOMPH_USE_OPENMP PROPERTY STRINGS AUTO ON OFF)
+option(PYOOMPH_GENERATE_STUBS "Generate .pyi stubs for the _core extension via nanobind.stubgen (best effort, non-fatal)"  ON)
 option(PYOOMPH_COPY_STUBS_TO_SOURCE_TREE "Also mirror the generated .pyi stub into the source-tree pyoomph/ directory, so Pylance/Pyright/mypy can resolve pyoomph._core while editing without a full pip install" ON)
+# Only meaningful together with -DPYOOMPH_DOWNLOAD_GINAC=OFF (a system-supplied
+# GiNaC, never touched by citools/patches/apply_ginac_patch.sh): asserts that
+# said GiNaC was patched by other means to make its term/hash ordering
+# deterministic (see PYOOMPH_GINAC_HASH_PATCHED below). Leave OFF unless you
+# have actually verified this yourself - the JIT code cache (pyoomph/generic/
+# jit_cache.py) disables itself entirely whenever it can't be sure the
+# generated code is reproducible across process runs, and a wrong ON here
+# would silently defeat that safeguard.
+option(PYOOMPH_ASSUME_GINAC_HASH_PATCHED "Assert that a system-supplied GiNaC (PYOOMPH_DOWNLOAD_GINAC=OFF) already has deterministic term/hash ordering" OFF)
+# Build-time kill switch for the JIT code cache (pyoomph/generic/jit_cache.py): if OFF, the
+# cache is permanently disabled for this build, regardless of runtime flags/env vars
+# (--no-cache, PYOOMPH_JIT_CACHE, ...) - those can only ever narrow ON down to OFF, never
+# override an OFF set here. Independent of PYOOMPH_GINAC_HASH_PATCHED below: that one governs
+# whether caching is *safe*; this one governs whether it exists at all in this build.
+option(PYOOMPH_ENABLE_JIT_CACHE "Enable the JIT code cache at build time" ON)
+# TQMesh is a header-only 2d triangle/quad mesh generator, downloaded by
+# cmake/ThirdPartyTQMesh.cmake and exposed to python by src/nanobind/tqmesh/*.cpp. Switching this
+# OFF skips the download and drops those sources from the build; the extension module then reports
+# has_tqmesh == False and none of the TQMesh* classes exist.
+option(PYOOMPH_HAS_TQMESH "Build with the TQMesh two-dimensional mesh generator" ON)
+
+# Spectra (https://spectralib.org) is a header-only Arnoldi eigensolver on top of Eigen, both
+# downloaded by cmake/ThirdPartySpectra.cmake and exposed to python by src/nanobind/spectra/*.cpp as
+# the eigensolver named "spectra". It exists for the platforms that have no PETSc/SLEPc at all -
+# Windows above all - where it is the only backend that can target an eigenvalue. Switching this OFF
+# skips the download and drops those sources; the extension module then reports has_spectra == False,
+# pyoomph.solvers.spectra refuses to import, and the eigensolver autodetection falls back to the
+# ARPACK-based "pardiso"/"scipy" backends, which cannot handle a target at all.
+option(PYOOMPH_HAS_SPECTRA "Build with the Spectra/Eigen serial eigensolver backend" ON)
 
 # Left empty by default: ginac.de only ever hosts the *current* release
 # tarball, so a version pinned here goes dead as soon as a new release is
@@ -95,25 +134,37 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 include(cmake/ThirdPartyGiNaC.cmake)
+if(PYOOMPH_HAS_TQMESH)
+  include(cmake/ThirdPartyTQMesh.cmake)
+endif()
+if(PYOOMPH_HAS_SPECTRA)
+  include(cmake/ThirdPartySpectra.cmake)
+endif()
 
 # ----------------------------------------------------------------------------
-# pybind11, via CMake.
+# nanobind, via CMake.
 #
-# NOTE: pybind11 itself (headers/CMake package) is looked up here, but is
+# NOTE: nanobind itself (headers/CMake package) is looked up here, but is
 # only actually *used* by the _pyoomph target further down, whose sources
-# are restricted to src/pybind/*.cpp. Everything else in this project
+# are restricted to src/nanobind/*.cpp. Everything else in this project
 # (libgeneric.a and the pyoomph_core static library) is fully Python-version
-# independent and never sees pybind11 or the Python headers/flags.
+# independent and never sees nanobind or the Python headers/flags.
 # ----------------------------------------------------------------------------
-find_package(Python 3.9 COMPONENTS Interpreter Development.Module REQUIRED)
+# Development.SABIModule is optional (only exists from 3.12 onwards, where
+# nanobind's STABLE_ABI build below actually activates - see the comment
+# there); listing it as an OPTIONAL_COMPONENTS means configuring under an
+# older interpreter (3.10-3.11) just silently doesn't find it instead of
+# failing CMake configuration.
+find_package(Python 3.10 COMPONENTS Interpreter Development.Module REQUIRED
+                        OPTIONAL_COMPONENTS Development.SABIModule)
 
 execute_process(
-  COMMAND "${Python_EXECUTABLE}" -c "import pybind11; print(pybind11.get_cmake_dir())"
+  COMMAND "${Python_EXECUTABLE}" -c "import nanobind; print(nanobind.cmake_dir())"
   OUTPUT_STRIP_TRAILING_WHITESPACE
-  OUTPUT_VARIABLE pybind11_ROOT
+  OUTPUT_VARIABLE nanobind_ROOT
   COMMAND_ERROR_IS_FATAL ANY)
 
-find_package(pybind11 CONFIG REQUIRED)
+find_package(nanobind CONFIG REQUIRED)
 
 # ----------------------------------------------------------------------------
 # libgeneric.a: all .cc files from oomph-lib's include/ directory. This must
@@ -122,7 +173,7 @@ find_package(pybind11 CONFIG REQUIRED)
 # care of the ordering automatically, no manual sequencing needed).
 #
 # Python-independent: built once, reused unchanged across every Python
-# version when iterating with `./configure && make` for multiple wheels.
+# version when iterating with `cmake --build` for multiple wheels.
 # ----------------------------------------------------------------------------
 file(GLOB_RECURSE OOMPH_GENERIC_SOURCES CONFIGURE_DEPENDS
      "${CMAKE_SOURCE_DIR}/src/thirdparty/oomph-lib/include/*.cc")
@@ -154,8 +205,8 @@ target_compile_definitions(generic PUBLIC
 )
 
 # ----------------------------------------------------------------------------
-# pyoomph_core: all of src/*.cpp EXCEPT src/pybind/*.cpp. This is the bulk of
-# pyoomph's own C++ code, and it does not depend on pybind11 or the Python
+# pyoomph_core: all of src/*.cpp EXCEPT src/nanobind/*.cpp. This is the bulk of
+# pyoomph's own C++ code, and it does not depend on nanobind or the Python
 # headers at all - it only needs to be recompiled when the sources
 # themselves change, not when switching Python versions.
 # ----------------------------------------------------------------------------
@@ -175,6 +226,8 @@ target_link_libraries(pyoomph_core PUBLIC generic)
 target_compile_definitions(pyoomph_core PUBLIC
   $<$<BOOL:${PYOOMPH_USE_MPI}>:OOMPH_HAS_MPI>
   $<$<BOOL:${PYOOMPH_PARANOID}>:PARANOID>
+  $<$<BOOL:${PYOOMPH_GINAC_HASH_PATCHED}>:PYOOMPH_GINAC_HASH_PATCHED>
+  $<$<BOOL:${PYOOMPH_ENABLE_JIT_CACHE}>:PYOOMPH_ENABLE_JIT_CACHE>
 )
 
 if(PYOOMPH_DOWNLOAD_GINAC)
@@ -190,25 +243,132 @@ if(PYOOMPH_USE_MPI)
 endif()
 
 # ----------------------------------------------------------------------------
-# The actual Python extension module: ONLY src/pybind/*.cpp. This is the
-# only target that pulls in pybind11/Python compile flags and include
+# OpenMP: only for pyoomph's own element loop (see
+# dev_docs/openmp_assembly.md). Not REQUIRED under the default AUTO - the
+# parallel assembly is opt-in at runtime (--omp N / problem.set_num_threads),
+# so a toolchain without OpenMP (AppleClang without libomp being the usual one)
+# must still produce a working build; everything threaded is behind
+# PYOOMPH_HAS_OPENMP and set_num_threads(N>1) then says so once. Only
+# PYOOMPH_USE_OPENMP=ON turns a missing OpenMP into a configure error.
+#
+# PUBLIC on pyoomph_core so that the flag reaches the nanobind translation
+# units too: they include problem.hpp, which has inline members guarded by
+# PYOOMPH_HAS_OPENMP, and a definition mismatch across TUs would be an ODR
+# violation that only shows up as a corrupted object at runtime.
+#
+# The JIT compiler flags (pyoomph/generic/ccompiler.py) are NOT given -fopenmp:
+# generated code is called from INSIDE the parallel region and only has to be
+# reentrant, which it is since commit 25b24ea retired its file-scope globals.
+# ----------------------------------------------------------------------------
+# Two backends provide the identical, bit-identical threaded loop; exactly one is compiled in.
+#
+#   * macOS defaults to GCD/libdispatch. It ships NO OpenMP runtime, so nothing collides with the
+#     Intel libiomp5 that MKL's Pardiso pulls in - that collision is "OMP: Error #15" and crashed an
+#     Intel-mac test run (see dev_docs/openmp_assembly.md). libdispatch is in libSystem, so nothing
+#     extra is linked. OpenMP is still selectable on macOS with -DPYOOMPH_USE_OPENMP=ON, in which
+#     case it wins and GCD steps aside (the old static-libomp wheel path).
+#   * Linux and Windows always use OpenMP (libgomp comes with GCC/MinGW); GCD is macOS-only.
+#
+# So the AUTO default is: GCD on macOS, OpenMP everywhere else - and never both, because the code in
+# parallel_assembly.cpp would pick OpenMP when both are defined and the second runtime is exactly
+# what we are avoiding here.
+set(_pyoomph_use_gcd FALSE)
+if(APPLE)
+  set(PYOOMPH_USE_GCD "AUTO" CACHE STRING "GCD/libdispatch backend for --omp N on macOS: AUTO=the macOS default unless PYOOMPH_USE_OPENMP=ON, ON=require, OFF=never (fall back to OpenMP)")
+  set_property(CACHE PYOOMPH_USE_GCD PROPERTY STRINGS AUTO ON OFF)
+  if(PYOOMPH_USE_GCD STREQUAL "ON" OR (PYOOMPH_USE_GCD STREQUAL "AUTO" AND NOT PYOOMPH_USE_OPENMP STREQUAL "ON"))
+    set(_pyoomph_use_gcd TRUE)
+  endif()
+endif()
+
+if(_pyoomph_use_gcd)
+  target_compile_definitions(pyoomph_core PUBLIC PYOOMPH_HAS_GCD)
+  message(STATUS "Threaded element assembly (--omp N): GCD/libdispatch backend (no OpenMP runtime linked)")
+else()
+  if(PYOOMPH_USE_OPENMP)
+    if(PYOOMPH_USE_OPENMP STREQUAL "AUTO")
+      find_package(OpenMP COMPONENTS CXX)
+    else()
+      find_package(OpenMP REQUIRED COMPONENTS CXX)
+    endif()
+  endif()
+  if(OpenMP_CXX_FOUND AND PYOOMPH_USE_OPENMP)
+    target_link_libraries(pyoomph_core PUBLIC OpenMP::OpenMP_CXX)
+    target_compile_definitions(pyoomph_core PUBLIC PYOOMPH_HAS_OPENMP)
+    message(STATUS "Threaded element assembly (--omp N): OpenMP")
+  elseif(PYOOMPH_USE_OPENMP)
+    message(STATUS "OpenMP NOT found - building without parallel element assembly (pass -DPYOOMPH_USE_OPENMP=ON to make this an error instead)")
+  else()
+    message(STATUS "OpenMP disabled by PYOOMPH_USE_OPENMP=OFF - building without parallel element assembly")
+  endif()
+endif()
+
+# ----------------------------------------------------------------------------
+# The actual Python extension module: ONLY src/nanobind/*.cpp. This is the
+# only target that pulls in nanobind/Python compile flags and include
 # directories, and hence the only target that needs rebuilding when
 # iterating over multiple Python versions - pyoomph_core and generic above
 # are reused as-is.
 #
 # Built/installed as the "_core" submodule of the "pyoomph" package, i.e.
-# importable as `pyoomph._core` (see PYBIND11_MODULE(_core, ...) in
-# src/pybind - the module name there must match this target name).
+# importable as `pyoomph._core` (see NB_MODULE(_core, ...) in
+# src/nanobind - the module name there must match this target name).
 # ----------------------------------------------------------------------------
-file(GLOB PYOOMPH_PYBIND_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/pybind/*.cpp")
+file(GLOB PYOOMPH_NANOBIND_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/nanobind/*.cpp")
 
-if(NOT PYOOMPH_PYBIND_SOURCES)
-  message(FATAL_ERROR "No .cpp sources found under src/pybind - "
+# The TQMesh bindings live in their own subdirectory rather than next to the other binding
+# sources, since they are the only translation units that may include TQMesh's headers - and the
+# only ones that must not be compiled at all when PYOOMPH_HAS_TQMESH is off.
+if(PYOOMPH_HAS_TQMESH)
+  file(GLOB PYOOMPH_TQMESH_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/nanobind/tqmesh/*.cpp")
+  if(NOT PYOOMPH_TQMESH_SOURCES)
+    message(FATAL_ERROR "PYOOMPH_HAS_TQMESH is ON, but no .cpp sources were found under "
+                        "src/nanobind/tqmesh - pass -DPYOOMPH_HAS_TQMESH=OFF to build without TQMesh.")
+  endif()
+  list(APPEND PYOOMPH_NANOBIND_SOURCES ${PYOOMPH_TQMESH_SOURCES})
+endif()
+
+# Same arrangement for the Spectra bindings: their own subdirectory, because they are the only
+# translation units that may include Eigen's and Spectra's headers (see the include scoping further
+# down for why that matters here in particular), and the only ones that must not be compiled when
+# PYOOMPH_HAS_SPECTRA is off.
+if(PYOOMPH_HAS_SPECTRA)
+  file(GLOB PYOOMPH_SPECTRA_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/nanobind/spectra/*.cpp")
+  if(NOT PYOOMPH_SPECTRA_SOURCES)
+    message(FATAL_ERROR "PYOOMPH_HAS_SPECTRA is ON, but no .cpp sources were found under "
+                        "src/nanobind/spectra - pass -DPYOOMPH_HAS_SPECTRA=OFF to build without Spectra.")
+  endif()
+  list(APPEND PYOOMPH_NANOBIND_SOURCES ${PYOOMPH_SPECTRA_SOURCES})
+endif()
+
+if(NOT PYOOMPH_NANOBIND_SOURCES)
+  message(FATAL_ERROR "No .cpp sources found under src/nanobind - "
                        "cannot build the Python extension module.")
 endif()
 
-pybind11_add_module(_pyoomph_core
-  ${PYOOMPH_PYBIND_SOURCES}
+# STABLE_ABI: build against Python's Limited API (Py_LIMITED_API=0x030C0000,
+# i.e. the 3.12 baseline - see nanobind-config.cmake's nanobind_add_module())
+# so the resulting extension is ABI-compatible with every CPython >= 3.12,
+# not just the one it was compiled against - one wheel instead of one per
+# minor version (see .github/workflows/wheels.yml's PYTHON_STABLE_ABI_BASE /
+# pyproject.toml's [[tool.cibuildwheel.overrides]] wheel.py-api=cp312).
+# nanobind itself silently disables this (falls back to a classic,
+# version-specific build) when configuring under CPython < 3.12 or when
+# Python::SABIModule isn't available, so this flag is safe to pass
+# unconditionally - no separate toggle is needed for the 3.10/3.11 builds.
+#
+# NB_DOMAIN pyoomph: nanobind shares its internal type/function registry
+# across every nanobind extension loaded into the same domain (the default
+# domain, if unspecified) - intentionally, so a binding project split across
+# several compiled modules can still interoperate. _pyoomph_core is the only
+# nanobind extension in this project, so it doesn't need or want that
+# sharing; scoping it to its own domain instead means it can never collide
+# ("type 'X' was already registered!") with some unrelated nanobind-based
+# package a user happens to have installed alongside pyoomph.
+nanobind_add_module(_pyoomph_core
+  NB_DOMAIN pyoomph
+  STABLE_ABI
+  ${PYOOMPH_NANOBIND_SOURCES}
 )
 
 target_link_libraries(_pyoomph_core PRIVATE
@@ -232,7 +392,35 @@ endif()
 target_compile_definitions(_pyoomph_core PRIVATE
   $<$<BOOL:${PYOOMPH_USE_MPI}>:OOMPH_HAS_MPI>
   $<$<BOOL:${PYOOMPH_PARANOID}>:PARANOID>
+  $<$<BOOL:${PYOOMPH_HAS_TQMESH}>:PYOOMPH_HAS_TQMESH>
+  $<$<BOOL:${PYOOMPH_HAS_SPECTRA}>:PYOOMPH_HAS_SPECTRA>
 )
+
+if(PYOOMPH_HAS_TQMESH)
+  # Kept off pyoomph_core AND off the rest of _pyoomph_core's TUs: nothing outside
+  # src/nanobind/tqmesh sees TQMesh. Scoping the include dir to just the TQMesh sources (rather than
+  # the whole target) matters because TQMesh's src/algorithm/ carries a Mesh.h that collides
+  # case-insensitively with oomph-lib's mesh.h - on macOS a target-wide include dir made every other
+  # TU's #include "mesh.h" (via oomph_lib.hpp) resolve to TQMesh's Mesh.h instead
+  # (-Wnonportable-include-path, and the wrong header). The sources are only there once
+  # tqmesh_external has run, hence the dependency.
+  set_source_files_properties(${PYOOMPH_TQMESH_SOURCES}
+    PROPERTIES INCLUDE_DIRECTORIES "${PYOOMPH_TQMESH_INCLUDE_DIRS}")
+  add_dependencies(_pyoomph_core tqmesh_external)
+endif()
+
+if(PYOOMPH_HAS_SPECTRA)
+  # Scoped to the Spectra sources for the same reason as TQMesh above, and here it is not a
+  # hypothetical: Eigen's include root contains extensionless headers named Core, Dense,
+  # Eigenvalues, LU, SVD and Householder. A target-wide include directory would put those in front
+  # of every other TU in _pyoomph_core, and on a case-insensitive filesystem they collide with
+  # pyoomph's own core.h. PYOOMPH_SPECTRA_DEPENDS is empty when the user supplied both source trees.
+  set_source_files_properties(${PYOOMPH_SPECTRA_SOURCES}
+    PROPERTIES INCLUDE_DIRECTORIES "${PYOOMPH_SPECTRA_INCLUDE_DIRS}")
+  if(PYOOMPH_SPECTRA_DEPENDS)
+    add_dependencies(_pyoomph_core ${PYOOMPH_SPECTRA_DEPENDS})
+  endif()
+endif()
 
 if(PYOOMPH_USE_MPI)
   target_link_libraries(_pyoomph_core PRIVATE MPI::MPI_CXX)
@@ -254,7 +442,7 @@ if(PYOOMPH_GENERATE_STUBS)
             --module-dir "$<TARGET_FILE_DIR:_pyoomph_core>"
             --module-name "_pyoomph_core"
             --stage-dir "${PYOOMPH_STUB_STAGE_DIR}"
-            --patch-script "${CMAKE_SOURCE_DIR}/src/pybind/patch_stubs.py"
+            --patch-script "${CMAKE_SOURCE_DIR}/src/nanobind/patch_stubs.py"
             --python "${Python_EXECUTABLE}"
             ${PYOOMPH_STUB_EXTRA_COPY_ARGS}
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
@@ -268,6 +456,31 @@ if(PYOOMPH_GENERATE_STUBS)
   # skipped/failed) is silently ignored rather than breaking `make install`.
   install(DIRECTORY "${PYOOMPH_STUB_STAGE_DIR}/" DESTINATION pyoomph OPTIONAL)
 endif()
+
+
+# ----------------------------------------------------------------------------
+# jitbridge.h defines the ABI the JIT-compiled element code is built against;
+# pyoomph/__init__.py points the JIT include dir at the pyoomph/jitbridge/
+# package directory, so a copy has to live there. It used to be a checked-in
+# symlink to src/jitbridge.h, which degrades to a 21-byte text file holding the
+# link path on a Windows clone (git needs core.symlinks plus the privilege to
+# create one) - the build still succeeds and only tcc fails, much later, on an
+# include it cannot resolve. Copy at configure time instead; configure_file
+# re-runs configure whenever the source header changes.
+#
+# Both a source-tree copy and an install(FILES ...) are needed, for two
+# different consumers. The source-tree copy serves editable installs, where
+# get_jit_include_dir() derives from pyoomph.__file__ and therefore points at
+# the source tree, not at the CMake install prefix. The install rule serves
+# wheels: scikit-build-core copies wheel.packages = ["pyoomph"] with the
+# repository's .gitignore applied, and this generated header is (rightly)
+# ignored there, so the package copy alone would leave it out of the wheel.
+# The two do not collide - packages_to_file_mapping() skips any source file
+# whose target the CMake install already produced.
+# ----------------------------------------------------------------------------
+configure_file("${CMAKE_SOURCE_DIR}/src/jitbridge.h"
+               "${CMAKE_SOURCE_DIR}/pyoomph/jitbridge/jitbridge.h" COPYONLY)
+install(FILES "${CMAKE_SOURCE_DIR}/src/jitbridge.h" DESTINATION pyoomph/jitbridge)
 
 
 # ----------------------------------------------------------------------------

@@ -1,5 +1,33 @@
+from __future__ import annotations
+#  @file
+#  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
+#
+#  @section LICENSE
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+#  The main author may be contacted at c.diddens@utwente.nl
+#
+# ========================================================================
 from .. import *
 from ..expressions import *
+from ..typings import *
 from .ALE import BaseMovingMeshEquations
 
 class BaseSolidConstitutiveLaw:
@@ -9,10 +37,12 @@ class BaseSolidConstitutiveLaw:
         Args:
             use_subexpressions: Use subexpressions for the tensor entries. Defaults to True.
             use_inverse_routine: Use a specific routine for the inversion of the metric tensor. It cannot be used when requiring Hessians, e.g. for bifurcation tracking. Defaults to True.
+            active_deformation: Optional active deformation gradient F_a (multiplicative Kroener-Lee/growth split). The rest metric becomes F_a^T*g*F_a, i.e. strains are measured relative to an intrinsically deformed state - muscle-like actuation, anisotropic growth, swelling. May depend on the Lagrangian coordinates, time or other fields. Only F_a^T*F_a enters, so rotational parts of F_a are irrelevant. Since it only modifies the constitutive law, it exerts no net force or torque on a free body. See also active_fiber_deformation. Defaults to None.
     """
-    def __init__(self,use_subexpressions=True,use_inverse_routine:bool=True):        
+    def __init__(self,use_subexpressions=True,use_inverse_routine:bool=True,active_deformation:Expression | None=None):
         self.use_subexpressions=use_subexpressions
         self.use_inverse_routine=use_inverse_routine
+        self.active_deformation=active_deformation
         
     def _subexpression(self,expr):
         if self.use_subexpressions:
@@ -20,7 +50,7 @@ class BaseSolidConstitutiveLaw:
         else:
             return expr
         
-    def is_incompressible(self):
+    def is_incompressible(self)->bool:
         """
         If this returns True, the constitutive law is incompressible. This means that the determinant of the deformation gradient is equal to the determinant of the undeformed configuration. The solid equations will then introduce a pressure variable that is used to enforce this condition.
         """
@@ -47,11 +77,18 @@ class BaseSolidConstitutiveLaw:
     
     def get_gij(self,dim:int,isotropic_growth_factor:ExpressionOrNum=1):
         """
-        Returns the covariant metric tensor of the undeformed configuration. This is the identity matrix in Cartesian coordinates.
+        Returns the covariant metric tensor of the undeformed configuration. Without growth and active deformation, this is the identity matrix in Cartesian coordinates. An active deformation gradient F_a turns it into the pulled-back rest metric F_a^T*g*F_a.
         """
         X=var("lagrangian")
         grf=pow(isotropic_growth_factor,rational_num(2,dim))
-        return self._subexpression(grf*matproduct(transpose(grad(X,lagrangian=True)),grad(X,lagrangian=True)))
+        g=grf*matproduct(transpose(grad(X,lagrangian=True)),grad(X,lagrangian=True))
+        if self.active_deformation is not None:
+            # Entries of F_a beyond the element dimension cannot enter: the corresponding rows
+            # and columns of g are zero, so a 2d problem may use e.g. active_fiber_deformation
+            # (which fills the full 3x3) without contaminating the metric.
+            Fa=self.active_deformation
+            g=matproduct(transpose(Fa),matproduct(g,Fa))
+        return self._subexpression(g)
         
     
     def get_gammaij(self,dim:int,isotropic_growth_factor:ExpressionOrNum=1):
@@ -60,23 +97,42 @@ class BaseSolidConstitutiveLaw:
         """
         return self._subexpression((self.get_Gij(dim)-self.get_gij(dim,isotropic_growth_factor))/2)
     
-    def get_sigma(self,dim:int,isotropic_growth_factor:ExpressionNumOrNone=1,pressure_var:Optional[Expression]=None):
+    def get_sigma(self,dim:int,isotropic_growth_factor:ExpressionNumOrNone=1,pressure_var:Expression | None=None)->Expression:
         """
         Returns the second Piola-Kirchhoff stress tensor. The method must be implemented in derived classes.
 
         Args:
-            dim: Element dimension. 
+            dim: Element dimension.
             isotropic_growth_factor: Expression or numerical value representing the isotropic growth factor. Defaults to 1.
             pressure_var (Optional[Expression], optional): Pressure variable for incompressible cases. Defaults to None.
-        
+
         """
         raise RuntimeError("get_sigma must be implemented in the derived class")
     
+def active_fiber_deformation(direction:Expression,stretch:ExpressionOrNum,isochoric_dim:int | None=None)->Expression:
+    """Active deformation gradient for a single fiber family: F_a = stretch*(d⊗d) + t*(1-d⊗d) with the normalized fiber direction d, i.e. an intrinsic stretch along the (possibly spatially varying) direction. With isochoric_dim set to the problem dimension, the transverse factor t=stretch^(-1/(dim-1)) compensates the volume (muscle-like, det F_a=1 within the element dimension); otherwise t=1 and det F_a=stretch (growth along the fiber).
+
+    Args:
+        direction: Fiber direction (any nonzero vector expression, normalized internally). May vary in space, e.g. follow a midline.
+        stretch: Intrinsic stretch factor along the fiber, e.g. 1+kappa*Y for a bending actuation.
+        isochoric_dim: If set, compensate transversally so the activation is volume-preserving in this dimension. Defaults to None.
+    """
+    d=direction/square_root(dot(direction,direction))
+    P=dyadic(d,d)
+    if isochoric_dim is None:
+        transverse:ExpressionOrNum=1
+    else:
+        if isochoric_dim<2:
+            raise ValueError("isochoric_dim must be at least 2, since a one-dimensional fiber stretch cannot be volume-compensated")
+        transverse=pow(stretch,rational_num(-1,isochoric_dim-1))
+    return transverse*(identity_matrix()-P)+stretch*P
+
+
 class IncompressibleSolidConstitutiveLaw(BaseSolidConstitutiveLaw):
     """
     Base class for incompressible solid constitutive laws. The method get_sigma must be implemented in derived classes.     
     """
-    def is_incompressible(self):
+    def is_incompressible(self)->bool:
         """
         Returns True, indicating that this is an incompressible solid constitutive law.
         """
@@ -91,23 +147,25 @@ class GeneralizedHookeanSolidConstitutiveLaw(BaseSolidConstitutiveLaw):
             nu: Poisson's ratio
             use_subexpressions (bool, optional): Use subexpressions for the tensor entries. Defaults to True.
             use_inverse_routine (bool, optional): Use a specific routine for the inversion of the metric tensor. It cannot be used when requiring Hessians, e.g. for bifurcation tracking. Defaults to True.
+            active_deformation (Optional[Expression], optional): Active deformation gradient F_a, see BaseSolidConstitutiveLaw. Defaults to None.
     """
-    def __init__(self, E:ExpressionOrNum=1, nu:ExpressionOrNum=0.4,use_subexpressions=True,use_inverse_routine:bool=True):
-        
-        super().__init__(use_subexpressions=use_subexpressions,use_inverse_routine=use_inverse_routine)
+    def __init__(self, E:ExpressionOrNum=1, nu:ExpressionOrNum=0.4,use_subexpressions=True,use_inverse_routine:bool=True,active_deformation:Expression | None=None):
+
+        super().__init__(use_subexpressions=use_subexpressions,use_inverse_routine=use_inverse_routine,active_deformation=active_deformation)
         self.E=E
         self.nu=nu
         
         
         
 
-    def get_sigma(self,dim:int,isotropic_growth_factor:ExpressionOrNum=1,pressure_var:Optional[Expression]=None):
+    def get_sigma(self,dim:int,isotropic_growth_factor:ExpressionNumOrNone=1,pressure_var:Expression | None=None):
         se=lambda x : self._subexpression(x)
         Gup=self.get_G_up_ij(dim)
-        gammakl=self.get_gammaij(dim,isotropic_growth_factor)
+        igf=isotropic_growth_factor if isotropic_growth_factor is not None else 1
+        gammakl=self.get_gammaij(dim,igf)
         if dim is None:
             raise RuntimeError("dim must be specified")
-        
+
         E=lambda i,j,k,l : se(self.E/(1+self.nu))*(se(self.nu/(1-2*self.nu))*Gup[i,j]*Gup[k,l]+(Gup[i,k]*Gup[j,l]+Gup[i,l]*Gup[j,k])/2)
         sigma_up_ij=lambda i,j : sum(E(i,j,k,l)*gammakl[k,l] for k in range(3) for l in range(3))
         sigma=matrix([[sigma_up_ij(i,j) for j in range(3)] for i in range(3)])
@@ -119,16 +177,18 @@ class IncompressibleHookeanSolidConstitutiveLaw(IncompressibleSolidConstitutiveL
         Args:
             E: Young's modulus
             use_subexpressions (bool, optional): Use subexpressions for the tensor entries. Defaults to True.
-            use_inverse_routine (bool, optional): Use a specific routine for the inversion of the metric tensor. It cannot be used when requiring Hessians, e.g. for bif
+            use_inverse_routine (bool, optional): Use a specific routine for the inversion of the metric tensor. It cannot be used when requiring Hessians, e.g. for bifurcation tracking. Defaults to True.
+            active_deformation (Optional[Expression], optional): Active deformation gradient F_a, see BaseSolidConstitutiveLaw. Note that the incompressibility constraint det G = det g then enforces the actual volume to follow det F_a - use a volume-preserving F_a (e.g. active_fiber_deformation with isochoric_dim) for pure actuation. Defaults to None.
     """
-    def __init__(self,E:ExpressionOrNum=1,use_subexpressions=True,use_inverse_routine:bool=True):
-        super().__init__(use_subexpressions=use_subexpressions,use_inverse_routine=use_inverse_routine)
+    def __init__(self,E:ExpressionOrNum=1,use_subexpressions=True,use_inverse_routine:bool=True,active_deformation:Expression | None=None):
+        super().__init__(use_subexpressions=use_subexpressions,use_inverse_routine=use_inverse_routine,active_deformation=active_deformation)
         self.E=E
 
-    def get_sigma(self,dim:int,isotropic_growth_factor:ExpressionNumOrNone=1,pressure_var:Optional[Expression]=None):
+    def get_sigma(self,dim:int,isotropic_growth_factor:ExpressionNumOrNone=1,pressure_var:Expression | None=None):
         se=lambda x : self._subexpression(x)
-        Gup=self.get_G_up_ij()
-        gammakl=self.get_gammaij(dim,isotropic_growth_factor)
+        Gup=self.get_G_up_ij(dim)
+        igf=isotropic_growth_factor if isotropic_growth_factor is not None else 1
+        gammakl=self.get_gammaij(dim,igf)
         if dim is None:
             raise RuntimeError("dim must be specified")
         bar_sigma_up_ij=lambda i,j : se(sum((Gup[i,k]*Gup[j,l]+Gup[i,l]*Gup[j,k])*gammakl[k,l] for k in range(3) for l in range(3)))
@@ -138,33 +198,57 @@ class IncompressibleHookeanSolidConstitutiveLaw(IncompressibleSolidConstitutiveL
     
 
 class BaseDeformableSolidEquations(BaseMovingMeshEquations):
-    def __init__(self, mass_density:ExpressionOrNum=0,bulkforce:ExpressionOrNum=0,coordinate_space = None,first_order_time_derivative=False,scale_for_FSI:bool=False,modulus_for_scaling:ExpressionOrNum=None,isotropic_growth_factor:ExpressionOrNum=1,pressure_space:FiniteElementSpaceEnum="DL",with_error_estimator=False,overdamped:bool=False):        
-        super().__init__(coordinate_space,  None)
+    """
+    Base class of the deformable solid equations, providing the inertia and bulk force terms and the
+    scaling of the mesh (displacement) test function.
+
+    .. note::
+        **Scaling to set on problem level.** By default the mesh test function is scaled with
+        ``scale_factor("temporal")**2/(scale_factor("mass_density")*scale_factor("spatial"))``, so
+        ``mass_density`` -- no field of the system -- must be set by
+        ``problem.set_scaling(mass_density=...)``. Passing ``modulus_for_scaling`` replaces it by an
+        elastic modulus, and ``scale_for_FSI`` replaces it by ``scale_factor("pressure")``, which
+        then likewise has to be set on problem level unless the solid solves for a pressure field of
+        its own (incompressible constitutive law).
+    """
+    def __init__(self, mass_density:ExpressionOrNum=0,bulkforce:ExpressionOrNum=0,coordinate_space = None,first_order_time_derivative=False,scale_for_FSI:bool=False,modulus_for_scaling:ExpressionNumOrNone=None,isotropic_growth_factor:ExpressionOrNum=1,pressure_space:FiniteElementSpaceEnum="DL",with_error_estimator=False,overdamped:bool=False):
+        super().__init__(None)
+        # Kept here although the moving-mesh base class no longer takes one: a solid usually defines
+        # no other continuous field, so there is nothing for the space to be inferred from, and
+        # first_order_time_derivative needs a space to put "dt_mesh" on. Applied below with the same
+        # "raise to at least this" rule as ElementSpace, not by assignment.
+        self.coordinate_space=coordinate_space
         self.scale_for_FSI=scale_for_FSI
         self.mass_density=mass_density
         self.modulus_for_scaling=modulus_for_scaling
         self.bulkforce=bulkforce
         self.first_order_time_derivative=first_order_time_derivative
         self.isotropic_growth_factor=isotropic_growth_factor
-        self.pressure_space=pressure_space
-        self.pressure_name="pressure" 
+        self.pressure_space:FiniteElementSpaceEnum=pressure_space
+        self.pressure_name="pressure"
         self.with_error_estimator=with_error_estimator
         self.overdamped=overdamped
-        
-    def is_incompressible(self):
+
+    def is_incompressible(self)->bool:
         return False
-        
-        
+
+
     def define_fields(self):
-        super().define_fields()                
+        if self.coordinate_space is not None:
+            if self.coordinate_space not in {"C2TB","C2","C1TB","C1"}:
+                raise ValueError("Can only set the coordinate space to either C2TB, C2, C1TB or C1")
+            cg=self.get_current_code_generator()
+            cg._coordinate_space=find_dominant_element_space(cast("FiniteElementSpaceEnum",cg._coordinate_space),self.coordinate_space)
+        super().define_fields()
         if self.is_incompressible():
             self.define_scalar_field(self.pressure_name,self.pressure_space)
         if self.first_order_time_derivative:
-            if self.coordinate_space is None:
+            coordinate_space=self.coordinate_space
+            if coordinate_space is None:
                 raise RuntimeError("coordinate_space must be specified for first order time derivative")
             if self.overdamped:
                 raise RuntimeError("overdamped=True is not compatible with first_order_time_derivative=True, since overdamped already reduces the time derivative order to one.")
-            self.define_vector_field("dt_mesh",self.coordinate_space,scale=scale_factor("spatial")/scale_factor("temporal"),testscale=scale_factor("temporal")/scale_factor("spatial"))
+            self.define_vector_field("dt_mesh",assert_valid_finite_element_space(coordinate_space),scale=scale_factor("spatial")/scale_factor("temporal"),testscale=scale_factor("temporal")/scale_factor("spatial"))
                     
     def define_scaling(self):        
         self.set_scaling(mesh= scale_factor("spatial"))
@@ -177,7 +261,7 @@ class BaseDeformableSolidEquations(BaseMovingMeshEquations):
                 self.set_test_scaling(mesh=1/self.modulus_for_scaling*scale_factor("spatial"))    
                 
 
-    def before_mesh_to_mesh_interpolation(self, eqtree, interpolator):
+    def _before_mesh_to_mesh_interpolation(self, eqtree, interpolator):
         pass
 
 
@@ -195,11 +279,34 @@ class BaseDeformableSolidEquations(BaseMovingMeshEquations):
         self.add_weak(self.mass_density*accel-self.bulkforce,self.isotropic_growth_factor* xtest,lagrangian=True )
 
 class LinearElasticitySolidEquations(BaseDeformableSolidEquations):
+    """
+    Linear elasticity, i.e. the Cauchy stress ``E/(1+nu)*(nu/(1-2*nu)*trace(eps)+eps)`` of the
+    linearized strain ``eps=sym(grad(u,lagrangian=True))``. For ``nu=None`` or ``nu=1/2``, the
+    incompressible limit is solved with a pressure Lagrange multiplier instead.
+
+    See :py:class:`BaseDeformableSolidEquations` for the scalings that must be set on problem level.
+
+    Args:
+        E: Young's modulus.
+        nu: Poisson's ratio. ``None`` or ``1/2`` selects the incompressible formulation.
+        mass_density: Mass density, relevant for the inertia term. Defaults to 0.
+        bulkforce: Bulk force density (in the undeformed frame!). Defaults to 0.
+        coordinate_space: Space to use for the mesh. Defaults to None.
+        first_order_time_derivative: If set, a velocity is explicitly introduced, reducing the
+            maximum time derivative order to unity (good for eigenanalysis). Defaults to False.
+        scale_for_FSI: Scale the mesh test function as the velocity test function ([X]/[P]), which
+            balances the tractions of a coupled fluid correctly. Defaults to False.
+        modulus_for_scaling: Reference modulus to nondimensionalize with, instead of the mass
+            density. Defaults to None.
+        isotropic_growth_factor: Factor of growing with respect to the undeformed configuration.
+        pressure_space: Space of the pressure field in the incompressible case. Defaults to "DL".
+        with_error_estimator: If set, error estimators based on the strain are introduced.
+    """
     def __init__(self, E:ExpressionOrNum,nu:ExpressionNumOrNone, mass_density = 0, bulkforce = 0, coordinate_space=None, first_order_time_derivative=False, scale_for_FSI = False, modulus_for_scaling = None,isotropic_growth_factor:ExpressionOrNum=1,pressure_space:FiniteElementSpaceEnum="DL",with_error_estimator=False):
         super().__init__(mass_density, bulkforce, coordinate_space, first_order_time_derivative, scale_for_FSI, modulus_for_scaling,isotropic_growth_factor=isotropic_growth_factor,pressure_space=pressure_space,with_error_estimator=with_error_estimator)
         self.E,self.nu=E,nu
         
-    def is_incompressible(self):
+    def is_incompressible(self)->bool:
         return self.nu is None or is_zero(self.nu-0.5) or is_zero(self.nu-rational_num(1,2))
         
     def define_residuals(self):
@@ -212,9 +319,14 @@ class LinearElasticitySolidEquations(BaseDeformableSolidEquations):
         eps=sym(grad(u,lagrangian=True))
         
         if self.is_incompressible():
-            tau=self.E/(1+self.nu)*(eps)-var(self.pressure_name)*identity_matrix()  # Pressure is introduced as a Lagrange multiplier
+            # self.nu may be None here (used as a shorthand for "incompressible, nu unspecified"), in which
+            # case the incompressible limit nu->1/2 is used for the (non-singular) shear part of the stress.
+            nu_eff=self.nu if self.nu is not None else rational_num(1,2)
+            tau=self.E/(1+nu_eff)*(eps)-var(self.pressure_name)*identity_matrix()  # Pressure is introduced as a Lagrange multiplier
             self.add_weak(div(u,lagrangian=True),testfunction(self.pressure_name),lagrangian=True)
         else:
+            # is_incompressible() being False here guarantees self.nu is not None (see is_incompressible above)
+            assert self.nu is not None
             tau=self.E/(1+self.nu)*(self.nu/(1-2*self.nu)*trace(eps)*identity_matrix()+eps)
         
         super().define_residuals()  # Call the base class method to define the residuals for the inertia and bulk force terms
@@ -246,13 +358,19 @@ class DeformableSolidEquations(BaseDeformableSolidEquations):
             isotropic_growth_factor: Factor of growing with respect to the undeformed configuration. Defaults to 1.
             modulus_for_scaling: By default, nondimensionalization is made with respect to the scales ``mass_density``, ``spatial`` and ``temporal``. Here, you can set a reference Young's modulus to nondimensionalize with respect to this instead. Defaults to None.
             scale_for_FSI: If set, the scaling of the test function agrees with the scaling of the velocity test function ([X]/[P]). This is important to balance the tractions correctly
+
+    .. note::
+        **Scaling to set on problem level.** Unless ``modulus_for_scaling`` or ``scale_for_FSI`` is
+        given, the mesh test function is scaled with the non-field scale ``mass_density``, i.e.
+        ``problem.set_scaling(mass_density=...)`` is required. See
+        :py:class:`BaseDeformableSolidEquations`.
     """
     # TODO: Bulk force density in Lagrangian or Eulerian coordinates? Make two or a flag?
-    def __init__(self, constitutive_law:BaseSolidConstitutiveLaw, mass_density:ExpressionOrNum=0,bulkforce:ExpressionOrNum=0,coordinate_space = None,first_order_time_derivative=False,pressure_space:FiniteElementSpaceEnum="DL",with_error_estimator=False,isotropic_growth_factor:ExpressionOrNum=1,modulus_for_scaling:ExpressionOrNum=None,scale_for_FSI:bool=False,overdamped:bool=False):        
+    def __init__(self, constitutive_law:BaseSolidConstitutiveLaw, mass_density:ExpressionOrNum=0,bulkforce:ExpressionOrNum=0,coordinate_space = None,first_order_time_derivative=False,pressure_space:FiniteElementSpaceEnum="DL",with_error_estimator=False,isotropic_growth_factor:ExpressionOrNum=1,modulus_for_scaling:ExpressionNumOrNone=None,scale_for_FSI:bool=False,overdamped:bool=False):
         super().__init__(mass_density=mass_density,bulkforce=bulkforce,coordinate_space=coordinate_space, first_order_time_derivative=first_order_time_derivative,scale_for_FSI=scale_for_FSI,modulus_for_scaling=modulus_for_scaling,isotropic_growth_factor=isotropic_growth_factor,pressure_space=pressure_space,with_error_estimator=with_error_estimator,overdamped=overdamped)
-        self.constitutive_law=constitutive_law        
-                
-    def is_incompressible(self):
+        self.constitutive_law=constitutive_law
+
+    def is_incompressible(self)->bool:
         return self.constitutive_law.is_incompressible()
         
     def define_fields(self):
@@ -337,8 +455,15 @@ class FSIConnection(InterfaceEquations):
         self.velocity_offset=velocity_offset
         
     def define_fields(self):
-        self.define_vector_field("_mesh_connection","C2",testscale=1/scale_factor("spatial"),scale=scale_factor("spatial")**2)
-        self.define_vector_field("_velo_connection","C2",testscale=scale_factor("temporal")/scale_factor("spatial"),scale=scale_factor("pressure"))
+        pdom=self.get_parent_domain()
+        coordspace=cast(FiniteElementSpaceEnum, pdom._coordinate_space)
+        assert coordspace is not None and coordspace!="", "FSIConnection requires the parent domain to have a coordinate space"        
+        if coordspace=="C1TB":
+            coordspace="C1"
+        elif coordspace=="C2TB":
+            coordspace="C2"
+        self.define_vector_field("_mesh_connection",coordspace,testscale=1/scale_factor("spatial"),scale=scale_factor("spatial")**2)
+        self.define_vector_field("_velo_connection",coordspace,testscale=scale_factor("temporal")/scale_factor("spatial"),scale=scale_factor("pressure"))
         
     def define_residuals(self):
         from .navier_stokes import StokesEquations
@@ -360,8 +485,13 @@ class FSIConnection(InterfaceEquations):
         self.add_weak(lu,utest)
         self.add_weak(-lu,xsoltest)
         
-    def before_assigning_equations_postorder(self, mesh):
-        comps=[ x[-1] for x in self.get_combined_equations()._vectorfields["_mesh_connection"] ]
+    def before_assigning_equations_postorder(self, mesh:"AnyMesh"):
+        comps=[ x[-1] for x in cast(Equations,self.get_combined_equations())._vectorfields["_mesh_connection"] ]
+        assert isinstance(mesh,InterfaceMesh)  # FSIConnection is an InterfaceEquations, so the mesh is always an InterfaceMesh here
         for direct in comps:
             self.pin_redundant_lagrange_multipliers(mesh,"_mesh_connection_"+direct,["mesh_"+direct])
             self.pin_redundant_lagrange_multipliers(mesh,"_velo_connection_"+direct,["velocity_"+direct])
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

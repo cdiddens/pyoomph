@@ -1,3 +1,30 @@
+from __future__ import annotations
+#  @file
+#  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
+#
+#  @section LICENSE
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+#  The main author may be contacted at c.diddens@utwente.nl
+#
+# ========================================================================
 from ..generic.problem import Problem
 from ..typings import *
 from ..generic.bifurcation_tools import MultiAssembleRequest
@@ -9,7 +36,7 @@ class HalleySolver:
         self.problem=problem
              
                 
-    def solve(self,*,max_iterations:Optional[int]=None,accuracy:Optional[float]=None):
+    def solve(self,*,max_iterations:int | None=None,accuracy:float | None=None):
         
         # Currently, only stationary solves supported
         if not self.problem.is_initialised():
@@ -35,6 +62,11 @@ class HalleySolver:
         while True:
             Rorig=R.copy()
             J=self.problem.assemble_jacobian(with_residual=False,which_one="")
+            # Tell the solver its factorisation slot is being reused for a system pyoomph built here, not
+            # for the one solve_distributed() gathered. Under mpirun the gathered Newton solve keeps
+            # rank 0's factors in that same slot, and a back-substitution landing on these ones instead
+            # would be silently wrong on every rank at once.
+            self.problem.get_la_solver()._note_external_serial_solve()
             self.problem.get_la_solver().solve_serial(1,J.shape[0],J.nnz,1,J.data,J.indices,J.indptr,R,0,0) #type:ignore[attr-defined] # scipy.sparse.csr_matrix attrs unresolved without scipy-stubs (blocked on numpy<2 pin)
             self.problem.get_la_solver().solve_serial(2,J.shape[0],J.nnz,1,J.data,J.indices,J.indptr,R,0,0) #type:ignore[attr-defined]
             
@@ -68,3 +100,7 @@ class HalleySolver:
         for i in range(ntstep):
             if not was_steady[i]:
                 self.problem.time_stepper_pt(i).undo_make_steady()     
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

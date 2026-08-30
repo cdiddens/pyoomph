@@ -1,24 +1,25 @@
+#  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -26,7 +27,7 @@
 
 
 from pyoomph import *
-from pyoomph.equations.SUPG import * # To calculate the element size
+from pyoomph.expressions import *
 
 
 class ConvectionDiffusionEquationWithSUPG(Equations):
@@ -41,12 +42,8 @@ class ConvectionDiffusionEquationWithSUPG(Equations):
         self.define_scalar_field("c", "C1") # Take the coarse space C1
 
     def get_supg_tau(self):
-        # We must find an equation of the type ElementSizeForSUPG, which calculates the element size
-        elsize_eqs = self.get_combined_equations().get_equation_of_type(ElementSizeForSUPG, always_as_list=True)
-        if len(elsize_eqs)!=1: # User must combine it with a single ElementSizeForSUPG instance
-            raise RuntimeError("SUPG only works if combined with a single ElementSizeForSUPG equation")
-        elsize_eqs=elsize_eqs[0] # get the ElementSizeForSUPG object, which is combined with this equation
-        h = elsize_eqs.get_element_h() + 1e-15 # element size, add a tiny offset to prevent errors
+        # Typical element length scale, i.e. (length/area/volume)**(1/dim) measured in Cartesian space
+        h = var("cartesian_element_length_h") + 1e-15 # add a tiny offset to prevent errors
         u_mag=square_root(dot(self.u,self.u))+1e-15 # velocity magnitude , add a tiny offset to prevent errors
         Pe_h=u_mag*h/(2*self.D) # Mesh Peclet number
         beta=1/tanh(Pe_h)-1/Pe_h # coefficient activating SUPG if Pe becomes large
@@ -75,8 +72,6 @@ class OneDimAdvectionDiffusionProblem(Problem):
 
         eqs=TextFileOutput()
         eqs+=ConvectionDiffusionEquationWithSUPG(u=self.u,D=self.D,with_SUPG=self.with_SUPG)
-        if self.with_SUPG:
-            eqs+=ElementSizeForSUPG() # We must add the element size
 
         x=var("coordinate_x")
         cinit=exp(-x**2*0.25)

@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -40,8 +40,8 @@ namespace pyoomph
   class PeriodicBSplineBasis
   {
   protected:
-    static std::vector<std::vector<double>> GL_x; // Gauss-Lengendre quadrature points, indexed by [order-1][point index]
-    static std::vector<std::vector<double>> GL_w; // Gauss-Lengendre quadrature weights, indexed by [order-1][point index]
+    static const std::vector<std::vector<double>> GL_x; // Gauss-Lengendre quadrature points, indexed by [order-1][point index]
+    static const std::vector<std::vector<double>> GL_w; // Gauss-Lengendre quadrature weights, indexed by [order-1][point index]
     std::vector<double> knots;                     // knots including the periodic knot at the end
     std::vector<double> augknots;                  // augmented knots (including the periodic knots at the beginning and the end and the shifted knots for even order)
     unsigned zero_offset;                          // index within augknots corresponding to the start of the "real" (non-augmented) knot range
@@ -51,6 +51,7 @@ namespace pyoomph
     double get_dbspline(unsigned int i, unsigned int k, double x) const; // Derivative of get_bspline w.r.t. x
     //std::vector<double> integral_psi; // integral of the B-splines over the periodic range [indices 0,1,...,N-1]
     std::vector<std::vector<double>> gl_weights;                  // Gauss-Legendre weights (same in each element, must be multiplied by the knot step)
+    std::vector<std::vector<double>> gl_positions;                // Gauss-Legendre abscissae, in the (unwrapped) augknots coordinate of the owning element
     std::vector<std::vector<unsigned>> shape_indices;             // Shape indices (for each Gauss-Legendre point)
     std::vector<std::vector<std::vector<double>>> shape_values;   // Shape values (for each Gauss-Legendre point)
     std::vector<std::vector<std::vector<double>>> dshape_values;  // Shape values of the first derivative (for each Gauss-Legendre point)
@@ -59,6 +60,11 @@ namespace pyoomph
   public:
     unsigned get_num_elements() const { return knots.size() - 1; }
     unsigned get_integration_info(unsigned int i, std::vector<double> &w, std::vector<unsigned> &indices, std::vector<std::vector<double>> &psi, std::vector<std::vector<double>> &dpsi) const; // Precomputed GL weights/indices/shape+dshape values for element i
+    // The GL abscissae of element i, in the unwrapped augknots coordinate. Cannot be recovered from
+    // get_integration_info(): its `indices` are the PERIODICALLY WRAPPED basis indices, so a
+    // psi-weighted sum of the corresponding knot values is off by up to half a period on the
+    // elements straddling the seam.
+    const std::vector<double> &get_gl_positions(unsigned int i) const { return gl_positions[i]; }
 
     unsigned get_interpolation_info(double s, std::vector<unsigned> &indices, std::vector<double> &psi) const; // Shape function indices/values at an arbitrary (not necessarily on-grid) point s, wrapped into the periodic range
 

@@ -510,7 +510,7 @@ namespace oomph
     void operator=(const StraightLine&) = delete;
 
     /// Destructor:  Clean up if necessary
-    ~StraightLine()
+    ~StraightLine() override
     {
       // Do I need to clean up?
       if (Must_clean_up)
@@ -522,7 +522,7 @@ namespace oomph
 
 
     /// Position Vector at Lagrangian coordinate zeta
-    void position(const Vector<double>& zeta, Vector<double>& r) const
+    void position(const Vector<double>& zeta, Vector<double>& r) const override
     {
       // Position Vector
       r[0] = zeta[0];
@@ -535,7 +535,7 @@ namespace oomph
     /// timestep.
     void position(const unsigned& t,
                   const Vector<double>& zeta,
-                  Vector<double>& r) const
+                  Vector<double>& r) const override
     {
 #ifdef PARANOID
       if (t > Geom_data_pt[0]->time_stepper_pt()->nprev_values())
@@ -560,8 +560,8 @@ namespace oomph
     /// Derivative of position Vector w.r.t. to coordinates:
     /// \f$ \frac{dR_i}{d \zeta_\alpha}\f$ = drdzeta(alpha,i).
     /// Evaluated at current time.
-    virtual void dposition(const Vector<double>& zeta,
-                           DenseMatrix<double>& drdzeta) const
+    void dposition(const Vector<double>& zeta,
+                           DenseMatrix<double>& drdzeta) const override
     {
       // Tangent vector
       drdzeta(0, 0) = 1.0;
@@ -572,8 +572,8 @@ namespace oomph
     /// 2nd derivative of position Vector w.r.t. to coordinates:
     /// \f$ \frac{d^2R_i}{d \zeta_\alpha d \zeta_\beta}\f$ =
     /// ddrdzeta(alpha,beta,i). Evaluated at current time.
-    virtual void d2position(const Vector<double>& zeta,
-                            RankThreeTensor<double>& ddrdzeta) const
+    void d2position(const Vector<double>& zeta,
+                            RankThreeTensor<double>& ddrdzeta) const override
     {
       // Derivative of tangent vector
       ddrdzeta(0, 0, 0) = 0.0;
@@ -587,10 +587,10 @@ namespace oomph
     /// \f$ \frac{d^2R_i}{d \zeta_\alpha d \zeta_\beta}\f$ =
     /// ddrdzeta(alpha,beta,i).
     /// Evaluated at current time.
-    virtual void d2position(const Vector<double>& zeta,
+    void d2position(const Vector<double>& zeta,
                             Vector<double>& r,
                             DenseMatrix<double>& drdzeta,
-                            RankThreeTensor<double>& ddrdzeta) const
+                            RankThreeTensor<double>& ddrdzeta) const override
     {
       // Position Vector
       r[0] = zeta[0];
@@ -607,14 +607,14 @@ namespace oomph
 
 
     /// How many items of Data does the shape of the object depend on?
-    unsigned ngeom_data() const
+    unsigned ngeom_data() const override
     {
       return Geom_data_pt.size();
     }
 
     /// Return pointer to the j-th Data item that the object's
     /// shape depends on
-    Data* geom_data_pt(const unsigned& j)
+    Data* geom_data_pt(const unsigned& j) override
     {
       return Geom_data_pt[j];
     }
@@ -706,7 +706,7 @@ namespace oomph
     void operator=(const Ellipse&) = delete;
 
     /// Destructor:  Clean up if necessary
-    ~Ellipse()
+    ~Ellipse() override
     {
       // Do I need to clean up?
       if (Must_clean_up)
@@ -742,7 +742,7 @@ namespace oomph
 
 
     /// Position Vector at Lagrangian coordinate zeta
-    void position(const Vector<double>& zeta, Vector<double>& r) const
+    void position(const Vector<double>& zeta, Vector<double>& r) const override
     {
       // Position Vector
       r[0] = Geom_data_pt[0]->value(0) * cos(zeta[0]);
@@ -755,7 +755,7 @@ namespace oomph
     /// timestep.
     void position(const unsigned& t,
                   const Vector<double>& zeta,
-                  Vector<double>& r) const
+                  Vector<double>& r) const override
     {
       // If we have done the construction, it's a Steady Ellipse,
       // so all time-history values of the position are equal to the position
@@ -789,7 +789,7 @@ namespace oomph
     /// Derivative of position Vector w.r.t. to coordinates:
     /// \f$ \frac{dR_i}{d \zeta_\alpha}\f$ = drdzeta(alpha,i).
     void dposition(const Vector<double>& zeta,
-                   DenseMatrix<double>& drdzeta) const
+                   DenseMatrix<double>& drdzeta) const override
     {
       // Components of the single tangent Vector
       drdzeta(0, 0) = -Geom_data_pt[0]->value(0) * sin(zeta[0]);
@@ -802,7 +802,7 @@ namespace oomph
     /// ddrdzeta(alpha,beta,i).
     /// Evaluated at current time.
     void d2position(const Vector<double>& zeta,
-                    RankThreeTensor<double>& ddrdzeta) const
+                    RankThreeTensor<double>& ddrdzeta) const override
     {
       // Components of the derivative of the tangent Vector
       ddrdzeta(0, 0, 0) = -Geom_data_pt[0]->value(0) * cos(zeta[0]);
@@ -817,7 +817,7 @@ namespace oomph
     void d2position(const Vector<double>& zeta,
                     Vector<double>& r,
                     DenseMatrix<double>& drdzeta,
-                    RankThreeTensor<double>& ddrdzeta) const
+                    RankThreeTensor<double>& ddrdzeta) const override
     {
       double a = Geom_data_pt[0]->value(0);
       double b = Geom_data_pt[0]->value(1);
@@ -836,14 +836,14 @@ namespace oomph
 
 
     /// How many items of Data does the shape of the object depend on?
-    unsigned ngeom_data() const
+    unsigned ngeom_data() const override
     {
       return Geom_data_pt.size();
     }
 
     /// Return pointer to the j-th Data item that the object's
     /// shape depends on
-    Data* geom_data_pt(const unsigned& j)
+    Data* geom_data_pt(const unsigned& j) override
     {
       return Geom_data_pt[j];
     }
@@ -1006,7 +1006,7 @@ namespace oomph
     void operator=(const Circle&) = delete;
 
     /// Destructor:  Clean up if necessary
-    virtual ~Circle()
+    ~Circle() override
     {
       // Do I need to clean up?
       if (Must_clean_up)
@@ -1021,7 +1021,7 @@ namespace oomph
     }
 
     /// Position Vector at Lagrangian coordinate zeta
-    void position(const Vector<double>& zeta, Vector<double>& r) const
+    void position(const Vector<double>& zeta, Vector<double>& r) const override
     {
       // Extract data
       double X_c = Geom_data_pt[0]->value(0);
@@ -1039,7 +1039,7 @@ namespace oomph
     /// timestep.
     void position(const unsigned& t,
                   const Vector<double>& zeta,
-                  Vector<double>& r) const
+                  Vector<double>& r) const override
     {
       // Genuine time-dependence?
       if (!Is_time_dependent)
@@ -1092,14 +1092,14 @@ namespace oomph
     }
 
     /// How many items of Data does the shape of the object depend on?
-    unsigned ngeom_data() const
+    unsigned ngeom_data() const override
     {
       return Geom_data_pt.size();
     }
 
     /// Return pointer to the j-th Data item that the object's
     /// shape depends on
-    Data* geom_data_pt(const unsigned& j)
+    Data* geom_data_pt(const unsigned& j) override
     {
       return Geom_data_pt[j];
     }
@@ -1155,7 +1155,7 @@ namespace oomph
     }
 
     /// Position vector
-    void position(const Vector<double>& zeta, Vector<double>& r) const
+    void position(const Vector<double>& zeta, Vector<double>& r) const override
     {
       r[0] = A * cos(zeta[1]);
       r[1] = B * sin(zeta[1]);
@@ -1166,20 +1166,20 @@ namespace oomph
     /// Position vector (dummy unsteady version returns steady version)
     void position(const unsigned& t,
                   const Vector<double>& zeta,
-                  Vector<double>& r) const
+                  Vector<double>& r) const override
     {
       position(zeta, r);
     }
 
     /// How many items of Data does the shape of the object depend on?
-    virtual unsigned ngeom_data() const
+    unsigned ngeom_data() const override
     {
       return 0;
     }
 
     /// Position Vector and 1st and 2nd derivs w.r.t. zeta.
     void d2position(const Vector<double>& zeta,
-                    RankThreeTensor<double>& ddrdzeta) const
+                    RankThreeTensor<double>& ddrdzeta) const override
     {
       ddrdzeta(0, 0, 0) = 0.0;
       ddrdzeta(0, 0, 1) = 0.0;
@@ -1198,7 +1198,7 @@ namespace oomph
     void d2position(const Vector<double>& zeta,
                     Vector<double>& r,
                     DenseMatrix<double>& drdzeta,
-                    RankThreeTensor<double>& ddrdzeta) const
+                    RankThreeTensor<double>& ddrdzeta) const override
     {
       // Let's just do a simple tube
       r[0] = A * cos(zeta[1]);

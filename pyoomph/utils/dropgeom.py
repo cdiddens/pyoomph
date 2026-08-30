@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -28,8 +29,7 @@
 from .._pyoomph_core import Expression
 import numpy
 from ..output.meshio import IntegralObservableOutput
-from ..typings import List
-from ..expressions import square_root,pi,asin,sin,cos,absolute,rational_num,weak,dot,testfunction,scale_factor,div,grad,vector,acos,ExpressionNumOrNone,ExpressionOrNum,cartesian,Expression,CustomMathExpression,subexpression,log,is_zero,atan2
+from ..expressions import square_root,pi,asin,sin,cos,absolute,rational_num,weak,dot,testfunction,scale_factor,div,grad,vector,acos,ExpressionNumOrNone,ExpressionOrNum,cartesian,CustomMathExpression,subexpression,log,is_zero,atan2
 from ..expressions.interpol import InterpolateSpline1d
 from ..expressions.units import meter,milli,newton,kilogram,second,degree
 from .. import Equations,Problem,var,var_and_test,GlobalLagrangeMultiplier,WeakContribution,LineMesh,InitialCondition,TestScaling,Scaling,DirichletBC,IntegralObservables,TextFileOutput
@@ -37,8 +37,8 @@ from ..typings import *
 from scipy import integrate
 
 
-YoungLaplaceFixationEnum=Literal["contact_angle","volume","base_radius","apex_height"]
-YoungLaplaceFixationsType=Union[Set[YoungLaplaceFixationEnum],Dict[YoungLaplaceFixationEnum,ExpressionOrNum]]
+YoungLaplaceFixationEnum:TypeAlias=Literal["contact_angle","volume","base_radius","apex_height"]
+YoungLaplaceFixationsType:TypeAlias=set[YoungLaplaceFixationEnum]|dict[YoungLaplaceFixationEnum,ExpressionOrNum]
 
 class DropletGeometry:
     """
@@ -54,21 +54,23 @@ class DropletGeometry:
         evalf: If True, the result will be evaluated to a float. If False, the result will be kept as an expression
         rivulet_instead: If True, the droplet is assumed to be a rivulet, i.e. it is just a 2d cross section of a 3d droplet. The volume is then the area of this cross section.
     """
-    def __init__(self,*,volume:ExpressionNumOrNone=None,base_radius:ExpressionNumOrNone=None,contact_angle:ExpressionNumOrNone=None,apex_height:ExpressionNumOrNone=None,curv_radius:ExpressionNumOrNone=None,ambiguous_low_contact_angle:Optional[bool]=None,evalf:bool=True,rivulet_instead:bool=False):
+    def __init__(self,*,volume:ExpressionNumOrNone=None,base_radius:ExpressionNumOrNone=None,contact_angle:ExpressionNumOrNone=None,apex_height:ExpressionNumOrNone=None,curv_radius:ExpressionNumOrNone=None,ambiguous_low_contact_angle:bool | None=None,evalf:bool=True,rivulet_instead:bool=False):
+        # All five are resolved from the two that were given before the constructor returns, so they
+        # are declared as the non-optional quantities they are from then on.
         #: The contact angle of the droplet
-        self.contact_angle:ExpressionNumOrNone=None #type:ignore
+        self.contact_angle:ExpressionOrNum=None #type:ignore
         #: The volume of the droplet
-        self.volume:ExpressionNumOrNone=None #type:ignore
+        self.volume:ExpressionOrNum=None #type:ignore
         #: The apex height of the droplet
-        self.apex_height:ExpressionNumOrNone=None #type:ignore
+        self.apex_height:ExpressionOrNum=None #type:ignore
         #: The base radius of the droplet
-        self.base_radius:ExpressionNumOrNone=None #type:ignore
+        self.base_radius:ExpressionOrNum=None #type:ignore
         #: The curvature radius of the droplet
-        self.curv_radius:ExpressionNumOrNone=None #type:ignore
+        self.curv_radius:ExpressionOrNum=None #type:ignore
         numgiven=0
-        settings:Dict[str,ExpressionNumOrNone]= {}
-        self._sampled_gravity_shape:Optional[Tuple[NPFloatArray,ExpressionOrNum]]=None
-        self._sampled_gravity_shape_reference_pressure:ExpressionOrNum=None
+        settings:dict[str,ExpressionNumOrNone]= {}
+        self._sampled_gravity_shape:tuple[NPFloatArray, ExpressionOrNum] | None=None
+        self._sampled_gravity_shape_reference_pressure:ExpressionNumOrNone=None
         
         self.rivulet_instead=rivulet_instead
 
@@ -99,6 +101,7 @@ class DropletGeometry:
         r0=self.base_radius
         h0=self.apex_height
         v0=self.volume
+        ca:ExpressionNumOrNone
         if evalf:
             ca=float(self.contact_angle) if self.contact_angle is not None else None
         else:
@@ -197,20 +200,17 @@ class DropletGeometry:
                 self.curv_radius=self.curv_radius.evalf()
 
         #print(self.contact_angle)
-        self.volume:ExpressionOrNum=self.volume
-        self.base_radius:ExpressionOrNum=self.base_radius
-        self.apex_height:ExpressionOrNum=self.apex_height
-        self.contact_angle:ExpressionOrNum=self.contact_angle
-        self.curv_radius:ExpressionOrNum=self.curv_radius
+        assert self.volume is not None and self.base_radius is not None and self.apex_height is not None
+        assert self.contact_angle is not None and self.curv_radius is not None
         self.surface_area:ExpressionOrNum=2*pi*self.curv_radius*self.apex_height
 
     @overload
-    def get_point_at_interface_by_slerp(self,rel_apex_dist:float)-> List[ExpressionOrNum]: ...
+    def get_point_at_interface_by_slerp(self,rel_apex_dist:float)-> list[ExpressionOrNum]: ...
 
     @overload
-    def get_point_at_interface_by_slerp(self,rel_apex_dist:NPFloatArray)-> List[List[ExpressionOrNum]]: ...
+    def get_point_at_interface_by_slerp(self,rel_apex_dist:NPFloatArray)-> list[list[ExpressionOrNum]]: ...
 
-    def get_point_at_interface_by_slerp(self,rel_apex_dist:Union[float,NPFloatArray])-> Union[List[List[ExpressionOrNum]],List[ExpressionOrNum]]:
+    def get_point_at_interface_by_slerp(self,rel_apex_dist:float | NPFloatArray)-> list[list[ExpressionOrNum]] | list[ExpressionOrNum]:
         import scipy.spatial 
         start=numpy.array([0,float(self.apex_height/self.curv_radius)]) #type:ignore
         end = numpy.array([float(self.base_radius/self.curv_radius),0]) #type:ignore
@@ -224,7 +224,7 @@ class DropletGeometry:
             slerps=[slerps]
         res=[]
         for s in slerps:
-            res.append(list((r*s+center)*self.curv_radius))
+            res.append(list((r*s+center)*self.curv_radius)) #type:ignore
         if isinstance(rel_apex_dist,float):
             return res[0]
         else:
@@ -233,23 +233,60 @@ class DropletGeometry:
 
     # Relaxes the shape by gravity
     # returns an array of r and z positions and a scale factor to multiply the results with to get the right scaling
-    def sample_gravity_shape(self,surface_tension:ExpressionOrNum,delta_rho_times_g:ExpressionOrNum,output_dir:str,fixations:Optional[YoungLaplaceFixationsType]=None,update_params:bool=True,N:int=200,output_text:bool=True,compiler:Any=None,ignore_command_line:bool=False,globally_convergent_newton:bool=False)->Tuple[NPFloatArray,ExpressionOrNum]:
+    def sample_gravity_shape(self,surface_tension:ExpressionOrNum,delta_rho_times_g:ExpressionOrNum,output_dir:str,fixations:YoungLaplaceFixationsType | None=None,update_params:bool=True,N:int=200,output_text:bool=True,compiler:Any=None,ignore_command_line:bool=False,globally_convergent_newton:bool=False)->tuple[NPFloatArray,ExpressionOrNum]:
+        """Solve the Young-Laplace shape under gravity and return it as sampled interface points.
+
+        Returns ``(points, spatial_scale)`` with ``points`` an (N+1, 2) array of nondimensional
+        (r, z), and also stores it for :py:meth:`get_sampled_gravity_shape`. With ``update_params``
+        the geometry's own volume/contact angle/apex height/base radius are replaced by the relaxed
+        ones.
+
+        ``output_text`` writes the relaxed shape as a text file into ``output_dir``. It used to be
+        accepted and then ignored - ``relax_by_gravity`` was called with a hardcoded ``True`` - so
+        the output could not be switched off at all.
+
+        This builds and solves a SECOND Problem (:py:class:`YoungLaplaceDropletShape`) while the
+        caller's own Problem usually exists already: the typical use is from a
+        ``GmshTemplate.define_geometry()``, i.e. from inside the outer problem's ``initialise()``.
+        Two things follow.
+
+        Give it an ``output_dir`` of its own, as every in-tree caller does (a ``_initial_shape``
+        subdirectory of the outer problem's). Both problems generate a code called ``domain``, so a
+        shared directory means one ``.so`` path for both; that is now caught and worked around, but
+        it is a collision worth not having.
+
+        Under mpirun EVERY rank builds and solves this, and that is deliberate rather than an
+        oversight. An oomph Problem is collective on its communicator whether or not it is
+        distributed - oomph's ``Problem::get_residuals`` broadcasts the assembled residual across the
+        communicator in its NON-distributed branch, i.e. on every Newton step - and a sub-problem
+        always inherits
+        ``MPI_COMM_WORLD``, with no way to give it one of its own. Solving it on rank 0 alone
+        therefore deadlocks the other ranks in the first collective inside the Newton solve, which is
+        exactly what happens if you try. The duplicated work is small (about 0.4 s at ``N=200``, 1.2 s
+        at ``N=800``) and concurrent, so it costs no wall-clock time, and the output is not
+        duplicated: the writers on ranks > 0 drop out on their own for a non-distributed problem.
+
+        The compiler is the process default (``system``), NOT the calling problem's choice - a fresh
+        Problem always starts from ``get_default_c_compiler()``. Pass ``compiler="tcc"`` if the
+        codegen of these four small element codes costs more than their execution saves, which for a
+        one-shot shape it usually does.
+        """
         if self.rivulet_instead:
             raise RuntimeError("Not yet implemented")
         if isinstance((0+surface_tension),(Expression)):
             surface_tension=(0+surface_tension).parameters_to_current_values() #type:ignore
         if isinstance((0+delta_rho_times_g),(Expression)):
-            delta_rho_times_g=(0+delta_rho_times_g).parameters_to_current_values()        
+            delta_rho_times_g=(0+delta_rho_times_g).parameters_to_current_values() #type:ignore
         with YoungLaplaceDropletShape(self,sigma=surface_tension,rho_g_ez=delta_rho_times_g,fixations=fixations,N=N) as problem:
             problem.logfile_name=None # Do not change the log file here
             problem.set_output_directory(output_dir)
             problem.ignore_command_line=ignore_command_line
             if compiler is not None:
                 problem.set_c_compiler(compiler)
-            problem.relax_by_gravity(output_text=True,globally_convergent_newton=globally_convergent_newton)
+            problem.relax_by_gravity(output_text=output_text,globally_convergent_newton=globally_convergent_newton)
             dom=problem.get_mesh("domain")
-            rs:List[float]=[]
-            zs:List[float]=[]
+            rs:list[float]=[]
+            zs:list[float]=[]
             for n in dom.nodes():
                 rs.append(n.x(0))
                 zs.append(n.x(1))
@@ -265,7 +302,7 @@ class DropletGeometry:
             self._sampled_gravity_shape_reference_pressure=problem.get_ode("globals").get_value("p0")
 
         # Store it. You might require it some day...
-        self._sampled_gravity_shape=cast(Tuple[NPFloatArray,ExpressionOrNum],(numpy.transpose(numpy.array([rs, zs])), spatscal)) # type:ignore
+        self._sampled_gravity_shape=cast(tuple[NPFloatArray,ExpressionOrNum],(numpy.transpose(numpy.array([rs, zs])), spatscal)) # type:ignore
         
         return self._sampled_gravity_shape
 
@@ -292,7 +329,7 @@ class DropletEvaporationHelper:
             return res
 
         thetas:NPFloatArray=numpy.linspace(0,numpy.pi,numsamples,endpoint=False) #type:ignore
-        f_thetas:List[List[float]]=[]
+        f_thetas:list[list[float]]=[]
         for theta in thetas:
             add_term=numpy.sin(theta)/(1+numpy.cos(theta))
             integral = integrate.quad(lambda tau : integrant(tau,theta), 0, 30) #type:ignore
@@ -333,17 +370,17 @@ class YoungLaplaceEquations(Equations):
         real_n=var("normal")
         norm,norm_test=var_and_test("_norm")
         curv,curv_test=var_and_test("_curv")
-        self.add_residual(weak(norm-real_n,norm_test,coordinate_system=cartesian)) # project normal, so that we can derive it
+        self.add_residual(weak(norm-real_n,norm_test,coordsys=cartesian)) # project normal, so that we can derive it
 
         self.add_residual(weak(curv-div(norm),curv_test)) # get curvature
 
         # In normal direction, we must make sure that sigma*curv+additional_pressure=p_ref
         _,xtest=var_and_test("mesh")
-        self.add_residual(weak(self.sigma*curv+self.additional_pressure-self.p_ref,self.blend_factor*dot(real_n,xtest),coordinate_system=cartesian))
+        self.add_residual(weak(self.sigma*curv+self.additional_pressure-self.p_ref,self.blend_factor*dot(real_n,xtest),coordsys=cartesian))
 
         # We solve the normalized arclength (Dirichlet _s=0 and _s=smax at boundaries required)
         s,stest=var_and_test("_s")
-        self.add_residual(weak(grad(s,coordsys=cartesian,nondim=True),grad(stest,coordsys=cartesian,nondim=True),coordinate_system=cartesian))
+        self.add_residual(weak(grad(s,coordsys=cartesian,nondim=True),grad(stest,coordsys=cartesian,nondim=True),coordsys=cartesian))
 
         # And we shift the nodes tangentially so that they keep an equidistance arclength distance. Otherwise, they would be free to move tangentially
         sdest=var("lagrangian_x") # desired position is given by the initial arclength
@@ -354,7 +391,7 @@ class YoungLaplaceEquations(Equations):
 
 # Problem to solve the equilibrium droplet shape with gravity
 class YoungLaplaceDropletShape(Problem):
-    def __init__(self,drop_geom:DropletGeometry,*,sigma:ExpressionOrNum=72 * milli * newton / meter,rho_g_ez:ExpressionOrNum=-9.81 * meter / second ** 2 * 1000 * kilogram / meter ** 3,fixations:Optional[YoungLaplaceFixationsType]=None,N:int=200):
+    def __init__(self,drop_geom:DropletGeometry,*,sigma:ExpressionOrNum=72 * milli * newton / meter,rho_g_ez:ExpressionOrNum=-9.81 * meter / second ** 2 * 1000 * kilogram / meter ** 3,fixations:YoungLaplaceFixationsType | None=None,N:int=200):
         super(YoungLaplaceDropletShape, self).__init__()
         self.N=N
         self.drop_geom=drop_geom
@@ -364,10 +401,11 @@ class YoungLaplaceDropletShape(Problem):
 
         # Fixations are the two parameters (base_radius, apex_height, volume, (microscopic) contact_angle) that are kept constant
         # if not explicitly set, it will take over the ones you set in the constructor if the DropletGeometry object passed to drop_geom
+        self.fixations:set[str]
         if fixations is None:
             self.fixations=set(k for k,v in drop_geom._settings.items() if v is not None) #type:ignore
         else:
-            self.fixations=fixations
+            self.fixations=set(fixations)
 
         # To find the equilibirum shape, we will blend in the gravitational force by a parameter from 0 to 1
         self.force_factor = self.get_global_parameter("force_factor")
@@ -466,10 +504,10 @@ class YoungLaplaceDropletShape(Problem):
             # P_ref will enforce h(r=0)=h_apex
             peq = GlobalLagrangeMultiplier(p0=-dest_apex_height) # select p0 so that h=h0
             peq += TestScaling(p0=1 / scale_factor("spatial")) # nondimensionalize h-h0=0 by the spatial dimension
-            eqs += WeakContribution(var("mesh_y"),testfunction(p0),coordinate_system=cartesian)@"left" # and add h to the constraint equation
+            eqs += WeakContribution(var("mesh_y"),testfunction(p0),coordsys=cartesian)@"left" # and add h to the constraint equation
         else: # contact_angle
             peq = GlobalLagrangeMultiplier(p0=-cos(dest_contact_angle)) # we adjust p0 so that n_z-cos(theta)=0 holds
-            eqs += WeakContribution(var("_norm_y"), testfunction(p0), coordinate_system=cartesian) @ "right"
+            eqs += WeakContribution(var("_norm_y"), testfunction(p0), coordsys=cartesian) @ "right"
 
         # Setting reference pressure without gravity as initial condition
         peq+=Scaling(p0=scale_factor("pressure"))
@@ -493,9 +531,9 @@ class YoungLaplaceDropletShape(Problem):
         elif enforce_theta_via_base_radius:
             # Or, if volume is enforced by p0, the contact angle must be enforced by adjusting the base radius accordingly
             teq = GlobalLagrangeMultiplier(ca_by_r=-cos(dest_contact_angle)) # solve n_z-cos(theta)=0 by adjusting mesh_x(z=0)
-            eqs += WeakContribution(var("_norm_y"), testfunction("ca_by_r",domain="globals"), coordinate_system=cartesian) @ "right"
+            eqs += WeakContribution(var("_norm_y"), testfunction("ca_by_r",domain="globals"), coordsys=cartesian) @ "right"
             # Add the feedback of this Lagrange multiplier
-            eqs += WeakContribution(var("ca_by_r", domain="globals"),testfunction("mesh_x"),coordinate_system=cartesian) @ "right"
+            eqs += WeakContribution(var("ca_by_r", domain="globals"),testfunction("mesh_x"),coordsys=cartesian) @ "right"
             self.add_equations(teq @ "globals")
 
         # Fix the arclength calculation boundaries for the tangential shifting of the nodes
@@ -526,7 +564,7 @@ class YoungLaplaceDropletShape(Problem):
         self.go_to_param(force_factor=1, final_adaptive_solve=False)
         print("DROPLET SHAPE RELAXED BY GRAVITY","REFERENCE PRESSURE:",self.get_ode("globals").get_value("p0"))        
         if output_text:
-            self.output_at_increased_time()
+            self.output(increase_time_for_PVD=True)
         #self.quiet(False)
 
 
@@ -566,7 +604,7 @@ class _PrecachedPopovEvaporationRateByTau(InterpolateSpline1d):
         ev_array=0*tau_array
         print("Precaching evaporation rate")
         for i,t in enumerate(tau_array):
-            ev_array[i]=popov.eval([t])
+            ev_array[i]=popov.eval(numpy.array([t]))
         print("Done")
         data=numpy.transpose(numpy.vstack([tau_array,ev_array]))
         super(_PrecachedPopovEvaporationRateByTau, self).__init__(data)
@@ -604,7 +642,7 @@ class _PrecachedLebedevEvaporationRateByPhi(InterpolateSpline1d):
         ev_array=0*phi_array
         print("Precaching evaporation rate")
         for i,t in enumerate(phi_array):
-            ev_array[i]=lebedev.eval([t])
+            ev_array[i]=lebedev.eval(numpy.array([t]))
         print("Done")
         data=numpy.transpose(numpy.vstack([phi_array,ev_array]))
         super(_PrecachedLebedevEvaporationRateByPhi, self).__init__(data)
@@ -641,7 +679,7 @@ def _get_j_lebedev(contact_angle,base_radius,with_subexpressions:bool=True,preca
 # Works only for a constant numerical contact angle
 # For 90°, 135° and 150°, there are other expressions without using torodial integrations. These were developed by Peter Lebedev-Stepanov and Olga Savenko
 # These cases can be activated by passing prefer_lebedev=True
-def get_analytical_popov_evaporation_rate(contact_angle:ExpressionOrNum,base_radius:ExpressionOrNum,c_sat:ExpressionOrNum=1,c_far:ExpressionOrNum=0,Dvap:ExpressionOrNum=1, precached:bool=True,precache_points:int=1000,precache_max_tau:int=100,axisymmetric:bool=True,with_subexpressions:bool=True,prefer_lebedev:Union[bool,Literal["only_special"]]=False)->Expression:
+def get_analytical_popov_evaporation_rate(contact_angle:ExpressionOrNum,base_radius:ExpressionOrNum,c_sat:ExpressionOrNum=1,c_far:ExpressionOrNum=0,Dvap:ExpressionOrNum=1, precached:bool=True,precache_points:int=1000,precache_max_tau:int=100,axisymmetric:bool=True,with_subexpressions:bool=True,prefer_lebedev:bool | Literal["only_special"]=False)->Expression:
     if not axisymmetric:
         raise RuntimeError("Can only do axisymmetric right now")
     lebedev_factor=None
@@ -651,6 +689,7 @@ def get_analytical_popov_evaporation_rate(contact_angle:ExpressionOrNum,base_rad
     if lebedev_factor is not None:
         return se(lebedev_factor/base_radius*(c_sat-c_far)*Dvap)  
     else:
+        evap_by_tau:"_PrecachedPopovEvaporationRateByTau | _PopovEvaporationRateByTau"
         if precached:
             evap_by_tau=_PrecachedPopovEvaporationRateByTau(contact_angle,precache_points,precache_max_tau)
         else:
@@ -660,3 +699,7 @@ def get_analytical_popov_evaporation_rate(contact_angle:ExpressionOrNum,base_rad
         d2_sqr = (r - base_radius) ** 2 + z ** 2
         tau_toro = se(log(square_root(d1_sqr / d2_sqr)))        
         return se(evap_by_tau(tau_toro)/base_radius*(c_sat-c_far)*Dvap)    
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

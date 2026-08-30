@@ -299,11 +299,11 @@ namespace oomph
     void operator=(const QMacroElement&) = delete;
 
     /// Empty destructor
-    virtual ~QMacroElement(){};
+    ~QMacroElement() override{};
 
     /// Plot: x,y in tecplot format at time level t (t=0: current;
     /// t>0: previous)
-    void output(const unsigned& t, std::ostream& outfile, const unsigned& nplot)
+    void output(const unsigned& t, std::ostream& outfile, const unsigned& nplot) override
     {
       Vector<double> x(2), f(2);
       outfile << "ZONE I=" << nplot << ", J=" << nplot << std::endl;
@@ -322,33 +322,33 @@ namespace oomph
 
     /// Output all macro element boundaries as tecplot zones
     void output_macro_element_boundaries(std::ostream& outfile,
-                                         const unsigned& nplot);
+                                         const unsigned& nplot) override;
 
     /// Get global position r(S) at discrete time level t.
     /// t=0: Present time; t>0: previous timestep.
     void macro_map(const unsigned& t,
                    const Vector<double>& S,
-                   Vector<double>& r);
+                   Vector<double>& r) override;
 
 
     /// Get global position r(s) at continuous time value, t.
-    void macro_map(const double& t, const Vector<double>& s, Vector<double>& r);
+    void macro_map(const double& t, const Vector<double>& s, Vector<double>& r) override;
 
 
     /// assemble the jacobian of the mapping from the macro coordinates to
     /// the global coordinates
-    virtual void assemble_macro_to_eulerian_jacobian(
+    void assemble_macro_to_eulerian_jacobian(
       const unsigned& t,
       const Vector<double>& s,
-      DenseMatrix<double>& jacobian);
+      DenseMatrix<double>& jacobian) override;
 
 
     /// Assembles the second derivative jacobian of the mapping from the
     /// macro coordinates to global coordinates x
-    virtual void assemble_macro_to_eulerian_jacobian2(
+    void assemble_macro_to_eulerian_jacobian2(
       const unsigned& t,
       const Vector<double>& s,
-      DenseMatrix<double>& jacobian2);
+      DenseMatrix<double>& jacobian2) override;
   };
 
 
@@ -392,12 +392,12 @@ namespace oomph
     void operator=(const QMacroElement&) = delete;
 
     /// Empty destructor
-    virtual ~QMacroElement(){};
+    ~QMacroElement() override{};
 
 
     /// Plot: x,y in tecplot format at time level t (t=0: current;
     /// t>0: previous)
-    void output(const unsigned& t, std::ostream& outfile, const unsigned& nplot)
+    void output(const unsigned& t, std::ostream& outfile, const unsigned& nplot) override
     {
       Vector<double> x(3), f(3);
 
@@ -426,13 +426,13 @@ namespace oomph
 
     /// Output all macro element boundaries as tecplot zones
     void output_macro_element_boundaries(std::ostream& outfile,
-                                         const unsigned& nplot);
+                                         const unsigned& nplot) override;
 
     /// Get global position r(S) at discrete time level t.
     /// t=0: Present time; t>0: previous timestep.
     void macro_map(const unsigned& t,
                    const Vector<double>& S,
-                   Vector<double>& r);
+                   Vector<double>& r) override;
   };
 
 } // namespace oomph

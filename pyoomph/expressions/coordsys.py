@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -30,7 +31,6 @@ from .. import _pyoomph_core as _pyoomph
 from .generic import *
 
 from ..typings import *
-from ..expressions import *
 
 
 if TYPE_CHECKING:
@@ -52,26 +52,34 @@ class BaseCoordinateSystem(_pyoomph.CustomCoordinateSystem):
         self.y_rel_scale=1
         self.z_rel_scale=1
 
-    def map_to_zero_epsilon(self,input):
+    @overload
+    def map_to_zero_epsilon(self,input:Expression)->Expression: ...
+    @overload
+    def map_to_zero_epsilon(self,input:list[Expression])->list[Expression]: ...
+    def map_to_zero_epsilon(self,input:Expression | list[Expression])->Expression | list[Expression]:
         if isinstance(input,list):
             return [self.map_to_zero_epsilon(i) for i in input]
         else:
             return  _pyoomph.GiNaC_SymSubs(input,self.expansion_eps,Expression(0))
-        
-    def map_to_first_order_epsilon(self,input,with_epsilon:bool=True):
+
+    @overload
+    def map_to_first_order_epsilon(self,input:Expression,with_epsilon:bool=True)->Expression: ...
+    @overload
+    def map_to_first_order_epsilon(self,input:list[Expression],with_epsilon:bool=True)->list[Expression]: ...
+    def map_to_first_order_epsilon(self,input:Expression | list[Expression],with_epsilon:bool=True)->Expression | list[Expression]:
         if isinstance(input,list):
             return [self.map_to_first_order_epsilon(i,with_epsilon) for i in input]
         else:
             return _pyoomph.GiNaC_SymSubs(diff(_pyoomph.GiNaC_expand(input), self.expansion_eps), self.expansion_eps, Expression(0))*(self.expansion_eps if with_epsilon else 1)            
 
 
-    def define_scalar_field(self, name:str, space:"FiniteElementSpaceEnum", element:"Equations", scale:Optional[ExpressionOrNum]=None, testscale:Optional[ExpressionOrNum]=None, discontinuous_refinement_exponent:Optional[ExpressionOrNum]=None,allow_scales_with_fields:bool=False):
+    def define_scalar_field(self, name:str, space:"FiniteElementSpaceEnum", element:"Equations", scale:ExpressionOrNum | None=None, testscale:ExpressionOrNum | None=None, discontinuous_refinement_exponent:float | None=None,allow_scales_with_fields:bool=False):
         element._internal_define_scalar_field(name, space, scale=scale, testscale=testscale, discontinuous_refinement_exponent=discontinuous_refinement_exponent,allow_scales_with_fields=allow_scales_with_fields)
 
-    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations")->Tuple[List[Expression],List[Expression],List[str]]:
+    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations")->tuple[list[Expression],list[Expression],list[str]]:
         raise RuntimeError("Implement the define_vector_field function for this coordinate system")
 
-    def define_tensor_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations",symmetric:bool)->Tuple[List[List[Expression]],List[List[Expression]],List[List[str]]]:
+    def define_tensor_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations",symmetric:bool)->tuple[list[list[Expression]],list[list[Expression]],list[list[str]]]:
         raise RuntimeError("Implement the define_tensor_field function for this coordinate system")
 
 
@@ -128,7 +136,7 @@ class BaseCoordinateSystem(_pyoomph.CustomCoordinateSystem):
 
 
 
-    def get_normal_vector_or_component(self,cg:"FiniteElementCodeGenerator",component:Optional[int]=None,only_base_mode:bool=False,only_perturbation_mode:bool=False,where:str="Residual"):
+    def get_normal_vector_or_component(self,cg:"FiniteElementCodeGenerator",component:int | None=None,only_base_mode:bool=False,only_perturbation_mode:bool=False,where:str="Residual"):
         dim = cg.get_nodal_dimension()
         if component is None:
             posscompos=[nondim("normal_"+d,domain=cg,only_base_mode=only_base_mode,only_perturbation_mode=only_perturbation_mode) for d in ["x","y","z"]]
@@ -139,7 +147,7 @@ class BaseCoordinateSystem(_pyoomph.CustomCoordinateSystem):
         
         
 
-    def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int)->Expression:
+    def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int,with_scales:bool)->Expression:
         raise RuntimeError("Implement the directional tensor derivative for this coordinate system")
 
 
@@ -165,6 +173,9 @@ class BaseCoordinateSystem(_pyoomph.CustomCoordinateSystem):
         #		is_vector=(flags//2)	#TODO
 
         if tensorial:
+            # (div T)_i = d_j T_ij, contracting the second index, which is what makes div the adjoint of grad
+            # (grad(u)_ij = d u_i/d x_j), hence div(grad(u)) the vector Laplacian, and the integration-by-parts partner
+            # of the weak(T,grad(v)) + matproduct(T,n) traction pair. Each tensor_divergence implements that directly.
             return self.tensor_divergence(arg.evalm(),ndim,edim,with_scales,lagrangian)
         elif edim == ndim:
             return self.vector_divergence(arg.evalm(), ndim, edim, with_scales, lagrangian)
@@ -188,7 +199,7 @@ class BaseCoordinateSystem(_pyoomph.CustomCoordinateSystem):
             else:
                 return nondim("dx")
 
-    def get_coords(self, ndim:int, with_scales:bool, lagrangian:bool,mesh_coords:bool=False,only_base_mode:bool=False) -> List[Expression]:
+    def get_coords(self, ndim:int, with_scales:bool, lagrangian:bool,mesh_coords:bool=False,only_base_mode:bool=False) -> list[Expression]:
         rel_scales = [self.x_rel_scale, self.y_rel_scale, self.z_rel_scale]
         if lagrangian:
             if with_scales:
@@ -263,56 +274,56 @@ class CartesianCoordinateSystem(BaseCoordinateSystem):
         self.y_rel_scale:ExpressionOrNum=y_rel_scale
         self.z_rel_scale:ExpressionOrNum=z_rel_scale
 
-    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations")->Tuple[List[Expression],List[Expression],List[str]]:
+    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations")->tuple[list[Expression],list[Expression],list[str]]:
         inds = ["x", "y", "z"]
-        namelist:List[str] = []
+        namelist:list[str] = []
         for i in range(ndim):
             namelist.append(name + "_" + inds[i])
-        v:List[Expression] = []
-        vtest:List[Expression] = []
+        v:list[Expression] = []
+        vtest:list[Expression] = []
         s = scale_factor(name)
         S = test_scale_factor(name)
         for i, f in enumerate(namelist):
             if i >= ndim: break
-            element.set_scaling(**{f: name})
+            element.set_scaling({f: name})
             vc = element.define_scalar_field(f, space)
             vc = var(f)
             v.append(vc / s)
-            element.set_test_scaling(**{f: name})
+            element.set_test_scaling({f: name})
             vtest.append(testfunction(f) / S)
         return v, vtest, namelist
 
 
-    def define_tensor_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations", symmetric:bool)->Tuple[List[List[Expression]],List[List[Expression]],List[List[str]]]:
+    def define_tensor_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations", symmetric:bool)->tuple[list[list[Expression]],list[list[Expression]],list[list[str]]]:
         inds = ["x", "y", "z"]
-        namelist:List[List[str]] = []
+        namelist:list[list[str]] = []
         for i in range(ndim):
-            nlst:List[str]=[]
+            nlst:list[str]=[]
             for j in range(ndim):
                 if symmetric and j<i:
                     nlst.append(name + "_" + inds[j]+ inds[i])
                 else:
                     nlst.append(name + "_" + inds[i]+ inds[j])
             namelist.append(nlst)
-        v:List[List[Expression]] = []
-        vtest:List[List[Expression]] = []
+        v:list[list[Expression]] = []
+        vtest:list[list[Expression]] = []
         s = scale_factor(name)
         S = test_scale_factor(name)
         for i, fl in enumerate(namelist):
             if i >= ndim: break
-            vl:List[Expression]=[]
-            vtl:List[Expression]=[]
+            vl:list[Expression]=[]
+            vtl:list[Expression]=[]
             for j, f in enumerate(fl):
                 if j >= ndim: break
                 if symmetric and j<i:
                     vl.append(v[j][i])
                     vtl.append(vtest[j][i])
                 else:
-                    element.set_scaling(**{f: name})
+                    element.set_scaling({f: name})
                     vc = element.define_scalar_field(f, space)
                     vc = var(f)
                     vl.append(vc / s)
-                    element.set_test_scaling(**{f: name})
+                    element.set_test_scaling({f: name})
                     vtl.append(testfunction(f) / S)
             v.append(vl)
             vtest.append(vtl)
@@ -333,7 +344,7 @@ class CartesianCoordinateSystem(BaseCoordinateSystem):
         return "Cartesian"
 
     def scalar_gradient(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
-        res:List[ExpressionOrNum] = []
+        res:list[ExpressionOrNum] = []
         for a in self.get_coords(ndim, with_scales, lagrangian):
             res.append(diff(arg, a))
         if len(res) == 0:
@@ -342,15 +353,19 @@ class CartesianCoordinateSystem(BaseCoordinateSystem):
 
     def vector_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
         res:Expression = Expression(0)
-        coords = self.get_coords(arg.nops(), with_scales, lagrangian)
-        for i in range(arg.nops()):
+        # Sum over the coordinates the mesh actually has, not over the vector's three padded slots. On a
+        # two-dimensional mesh d/dz of an out-of-plane component is zero, but asking for it is not free:
+        # coordinate_z is not a field of the element, so div(vector(a,b,c)) with a nonzero c died with
+        # "Cannot expand the field 'coordinate_z'" rather than dropping the term.
+        coords = self.get_coords(ndim, with_scales, lagrangian)
+        for i in range(min(arg.nops(), len(coords))):
             res += diff(arg[i], coords[i])
         return res
-    
+
     def vector_gradient(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:        
-        res:List[List[ExpressionOrNum]] = []
+        res:list[list[ExpressionOrNum]] = []
         for b in range(arg.nops()):
-            line:List[ExpressionOrNum] = []
+            line:list[ExpressionOrNum] = []
             entry = arg[b]
             for a in self.get_coords(ndim, with_scales, lagrangian):
                 line.append(diff(entry, a))
@@ -358,18 +373,24 @@ class CartesianCoordinateSystem(BaseCoordinateSystem):
         return matrix(res)
     
     def tensor_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
-        res:List[Expression] = []
-        coords = self.get_coords(arg.nops(), with_scales, lagrangian)
+        """Divergence of a second order tensor, ``(div T)_i = d_j T_ij``, contracting the second index."""
+        res:list[Expression] = []
+        # Sum over the coordinates the mesh actually has. This used to pass arg.nops(), which is 9 for the padded 3x3
+        # tensor rather than a dimension, and get_coords clamps that to all three coordinates - so on a two-dimensional
+        # mesh the sum reached for d/dz. That derivative is zero, but asking for it is not free: coordinate_z is not a
+        # field of the element, so div(f*identity_matrix()) - the pressure part of any stress divergence - died with
+        # "Cannot expand the field 'coordinate_z'". The out-of-plane row is still returned, it just has no z-derivative
+        # in it.
+        coords = self.get_coords(ndim, with_scales, lagrangian)
         for i in range(3):
-            div_line = 0 
+            div_line:Expression = Expression(0)
             for j,coord in enumerate(coords):
-                entry=arg[j,i]
-                div_line+=diff(entry, coord)
+                div_line+=diff(arg[i,j], coord)
             res.append(div_line)
         return vector(res)
 
     def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int,with_scales:bool)->Expression:
-        res:List[List[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
+        res:list[list[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
         coords=self.get_coords(ndim, with_scales, lagrangian)
         for i in range(3):
             for j in range(3):
@@ -414,7 +435,7 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
                 return 2 * pi * nondim("coordinate_y" if self.use_x_as_symmetry_axis else "coordinate_x") * nondim("dx")
 
     def scalar_gradient(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
-        res:List[ExpressionOrNum] = []
+        res:list[ExpressionOrNum] = []
         for i, a in enumerate(self.get_coords(3, with_scales, lagrangian)):
             res.append(diff(arg, a) if i < ndim else 0)
         return vector(res)
@@ -436,7 +457,7 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
             if self.use_x_as_symmetry_axis:
                 raise RuntimeError("Cannot have use_x_as_symmetry_axis in an axisymmetric coordinate system in 1d")
             r, = self.get_coords(ndim, with_scales, lagrangian)
-            res:List[List[ExpressionOrNum]] = [[diff(arg[0], r), 0, 0], [0, arg[0] / r, 0], [0, 0, 0]]
+            res:list[list[ExpressionOrNum]] = [[diff(arg[0], r), 0, 0], [0, arg[0] / r, 0], [0, 0, 0]]
         else:
             if arg.nops() != 3:
                 raise RuntimeError(
@@ -444,12 +465,12 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
             x, y = self.get_coords(ndim, with_scales, lagrangian)
             r= y if self.use_x_as_symmetry_axis else x
             ri = 1 if self.use_x_as_symmetry_axis else 0
-            res:List[List[ExpressionOrNum]] = [[diff(arg[0], x), diff(arg[0], y), 0],
+            res = [[diff(arg[0], x), diff(arg[0], y), 0],
                    [diff(arg[1], x), diff(arg[1], y), 0], [0, 0, arg[ri] / r]]
         return matrix(res)
     
 
-    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations")->Tuple[List[Expression],List[Expression],List[str]]:
+    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations")->tuple[list[Expression],list[Expression],list[str]]:
         zero=Expression(0)
         s = scale_factor(name)
         S = test_scale_factor(name)          
@@ -458,29 +479,36 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
             vy = element.define_scalar_field(name + "_y", space)
             vx = var(name + "_x")
             vy = var(name + "_y")
-            element.set_scaling(**{name + "_x": name, name + "_y": name})
-            element.set_test_scaling(**{name + "_x": name, name + "_y": name})          
+            element.set_scaling({name + "_x": name, name + "_y": name})
+            element.set_test_scaling({name + "_x": name, name + "_y": name})          
             return [vx / s, vy / s, zero], [testfunction(name + "_x") / S,testfunction(name + "_y") / S, zero], [name + "_x",name + "_y"]
         elif ndim == 1:
             vx = element.define_scalar_field(name + "_x", space)
             vx = var(name + "_x")
-            element.set_scaling(**{name + "_x": name})
-            element.set_test_scaling(**{name + "_x": name})
+            element.set_scaling({name + "_x": name})
+            element.set_test_scaling({name + "_x": name})
             return [vx / s, zero], [testfunction(name + "_x") / S], [name + "_x"]
         else:
             raise RuntimeError("Axisymmetric vector fields do not work for dimension " + str(ndim))
 
     def vector_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
-        res = Expression(0)
-        coords = self.get_coords(arg.nops(), with_scales, lagrangian)
-        nops = arg.nops()
-        if nops >= 1:
-            res += diff(arg[0], coords[0]) + (arg[1] / coords[1] if self.use_x_as_symmetry_axis  else arg[0] / coords[0])
-        if nops >= 2:
-            res += diff(arg[1], coords[1])
-        return res
+        # Gated on ndim, not on arg.nops(). nops() is 3 for every padded vector, so on a one-dimensional radial mesh
+        # the axial term below was added unconditionally - harmless while the azimuthal slot happened to be zero, but
+        # div(vector(u_r,u_phi,0)) then died with "Cannot expand the field 'coordinate_y'", since a radial mesh has no
+        # second coordinate. The azimuthal slot contributes (1/r)*d_phi(u_phi), which axisymmetry makes zero, so it is
+        # correctly absent either way.
+        coords = self.get_coords(ndim, with_scales, lagrangian)
+        if ndim == 1:
+            if self.use_x_as_symmetry_axis:
+                raise RuntimeError("Cannot have use_x_as_symmetry_axis in an axisymmetric coordinate system in 1d")
+            # Components are ordered [r, phi] here: (1/r)*d_r(r*u_r)
+            return diff(arg[0], coords[0]) + arg[0] / coords[0]
+        # Components are ordered [r, z, phi] (or [z, r, phi] when x is the symmetry axis), so the radial slot - the one
+        # carrying the 1/r term - is 1 rather than 0 in the flipped case.
+        radial = 1 if self.use_x_as_symmetry_axis else 0
+        return diff(arg[0], coords[0]) + diff(arg[1], coords[1]) + arg[radial] / coords[radial]
     
-    def define_tensor_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations", symmetric:bool)->Tuple[List[List[Expression]],List[List[Expression]],List[List[str]]]:
+    def define_tensor_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations", symmetric:bool)->tuple[list[list[Expression]],list[list[Expression]],list[list[str]]]:
         s = scale_factor(name)
         S = test_scale_factor(name)
         if ndim==1:
@@ -488,9 +516,10 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
             txx = var(name + "_xx")
             taa = element.define_scalar_field(name + "_aa", space)
             taa = var(name + "_aa")
-            element.set_scaling(**{name + "_xx": name,name+"_aa":name})
-            element.set_test_scaling(**{name + "_xx": name, name + "_aa": name})
-            return [[txx / s, 0, 0], [0, taa/s, 0], [0, 0, 0]], [[testfunction(name + "_xx") / S, 0, 0], [0, testfunction(name + "_aa") / S, 0], [0, 0, 0]], [[name + "_xx", 0,0], [0,name + "_aa", 0], [0, 0, 0]] 
+            element.set_scaling({name + "_xx": name,name+"_aa":name})
+            element.set_test_scaling({name + "_xx": name, name + "_aa": name})
+            zero=Expression(0)
+            return [[txx / s, zero, zero], [zero, taa/s, zero], [zero, zero, zero]], [[testfunction(name + "_xx") / S, zero, zero], [zero, testfunction(name + "_aa") / S, zero], [zero, zero, zero]], [[name + "_xx", "",""], ["",name + "_aa", ""], ["", "", ""]]
         elif ndim==2:
             txx = element.define_scalar_field(name + "_xx", space)
             txx = var(name + "_xx")
@@ -498,73 +527,149 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
             tyy = var(name + "_yy")
             txy = element.define_scalar_field(name + "_xy", space)
             txy = var(name + "_xy")
-            element.set_scaling(**{name + "_xx": name, name + "_yy": name, name + "_xy": name})
-            element.set_test_scaling(**{name + "_xx": name, name + "_yy": name, name + "_aa": name, name + "_xy": name})
+            element.set_scaling({name + "_xx": name, name + "_yy": name, name + "_xy": name})
+            element.set_test_scaling({name + "_xx": name, name + "_yy": name, name + "_aa": name, name + "_xy": name})
             taa = element.define_scalar_field(name + "_aa", space)
             taa = var(name + "_aa")
-            element.set_scaling(**{name + "_aa": name})
-            element.set_test_scaling(**{name + "_aa": name})
+            element.set_scaling({name + "_aa": name})
+            element.set_test_scaling({name + "_aa": name})
+        else:
+            # Axisymmetric coordinates only have two in-plane dimensions (r,z) plus the
+            # always-present azimuthal component (folded into "_aa" above) - there is no
+            # meaningful ndim=3 (or higher) case here, unlike the generic Cartesian
+            # implementation. Without this check, falling through with txx/tyy/txy/taa
+            # never assigned would raise a confusing NameError below instead.
+            raise RuntimeError("define_tensor_field: ndim="+str(ndim)+" is not supported for AxisymmetricCoordinateSystem (only ndim=1 or ndim=2)")
         if not symmetric:
             tyx = element.define_scalar_field(name + "_yx", space)
             tyx = var(name + "_yx")
-            element.set_scaling(**{name + "_yx": name})
-            element.set_test_scaling(**{name + "_yx": name})
-            return [[txx / s, txy / s, 0], [tyx / s, tyy / s, 0], [0, 0, taa / s]], [[testfunction(name + "_xx") / S, testfunction(name + "_xy") / S, 0], [testfunction(name + "_yx") / S, testfunction(name + "_yy") / S, 0], [0, 0, testfunction(name + "_aa") / S]], [[name + "_xx", name + "_xy", 0], [name + "_yx", name + "_yy", 0], [0, 0, name + "_aa"]] 
+            element.set_scaling({name + "_yx": name})
+            element.set_test_scaling({name + "_yx": name})
+            zero=Expression(0)
+            return [[txx / s, txy / s, zero], [tyx / s, tyy / s, zero], [zero, zero, taa / s]], [[testfunction(name + "_xx") / S, testfunction(name + "_xy") / S, zero], [testfunction(name + "_yx") / S, testfunction(name + "_yy") / S, zero], [zero, zero, testfunction(name + "_aa") / S]], [[name + "_xx", name + "_xy", ""], [name + "_yx", name + "_yy", ""], ["", "", name + "_aa"]]
         else:
-            return [[txx / s, txy / s, 0], [txy / s, tyy / s, 0], [0, 0, taa / s]], [[testfunction(name + "_xx") / S, testfunction(name + "_xy") / S, 0], [testfunction(name + "_xy") / S, testfunction(name + "_yy") / S, 0], [0, 0, testfunction(name + "_aa") / S]], [[name + "_xx", name + "_xy", 0], [name + "_xy", name + "_yy", 0], [0, 0, name + "_aa"]] 
+            zero=Expression(0)
+            return [[txx / s, txy / s, zero], [txy / s, tyy / s, zero], [zero, zero, taa / s]], [[testfunction(name + "_xx") / S, testfunction(name + "_xy") / S, zero], [testfunction(name + "_xy") / S, testfunction(name + "_yy") / S, zero], [zero, zero, testfunction(name + "_aa") / S]], [[name + "_xx", name + "_xy", ""], [name + "_xy", name + "_yy", ""], ["", "", name + "_aa"]] 
 
 
-    def tensor_divergence(self, T:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
+    def tensor_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
+        """
+        Divergence of a second order tensor, ``(div T)_i = d_j T_ij``, contracting the second index, plus the
+        cylindrical connection terms.
+
+        In the orthonormal cylindrical frame, with d_phi = 0 for axisymmetry, those are
+
+            (div T)_r   = d_r T_rr + d_z T_rz + (T_rr - T_phiphi)/r
+            (div T)_z   = d_r T_zr + d_z T_zz + T_zr/r
+            (div T)_phi = d_r T_phir + d_z T_phiz + (T_rphi + T_phir)/r
+
+        each checkable against div(dyadic(a,b)) = div(b)*a + (b.grad)a on the basis dyads: e_phi (x) e_r, for
+        instance, gives (b.grad)a = (e_r.grad)e_phi = 0 and div(e_r) = 1/r, hence (div T)_phi = 1/r, which is what
+        the T_phir/r half of the last line produces.
+
+        The azimuthal row cannot be reached from any tensor THIS class can build: define_tensor_field
+        puts the azimuthal component on the diagonal only ("_aa" at [2][2]) and vector_gradient hard-zeros the
+        azimuthal off-diagonals, since there is no azimuthal velocity component in plain axisymmetry at all.
+        AxisymmetryBreakingCoordinateSystem overrides both, so a tensor unknown there does have T_rphi and
+        T_zphi - and its own tensor_divergence, not this one, is what acts on it. It is
+        reachable from a hand-assembled tensor, e.g. dyadic(vector(h,0,0),vector(0,0,k)), which is how it is tested.
+        Both the two-dimensional and the radial form of that row used to be wrong: the 2d one had
+        (T_phir - T_rphi)/r, which is zero for the symmetric tensors that matter and has the wrong sign otherwise,
+        and the radial one had (2*T_phir - T_rphi)/r, wrong even when symmetric.
+        """
+        T=arg
         coords = self.get_coords(T.nops(), with_scales, lagrangian)
         if self.use_x_as_symmetry_axis:
             if ndim==1:
                 raise RuntimeError("Cannot have use_x_as_symmetry_axis in an axisymmetric coordinate system in 1d")
             else:
-                div_x=diff(T[0,0],coords[0])+diff(T[1,0],coords[1])+T[1,0] / coords[1] 
-                div_y=diff(T[0,1],coords[0])+diff(T[1,1],coords[1])+(T[1,1]-T[2,2]) / coords[1]
-                div_theta=diff(T[0,2],coords[0])+diff(T[1,2],coords[1])+(T[1,2] - T[2,1]) / coords[1]
+                # Here x is the symmetry axis, so slot 0 is the axial direction and slot 1 the radial one:
+                # r = coords[1] and z = coords[0], which swaps the roles of the first two rows above.
+                div_x=diff(T[0,0],coords[0])+diff(T[0,1],coords[1])+T[0,1] / coords[1]
+                div_y=diff(T[1,0],coords[0])+diff(T[1,1],coords[1])+(T[1,1]-T[2,2]) / coords[1]
+                div_theta=diff(T[2,0],coords[0])+diff(T[2,1],coords[1])+(T[1,2] + T[2,1]) / coords[1]
             return vector(div_x,div_y,div_theta)
         elif ndim==1:
-            div_x=diff(T[0,0],coords[0])+(T[0,0] - T[2,2]) / coords[0]
-            div_theta=diff(T[0,1],coords[0])+(2*T[0,1] - T[1,0]) / coords[0]            
+            # On a radial mesh the components are ordered [r, phi], not [r, z, phi]: define_tensor_field
+            # puts the azimuthal "aa" entry at [1][1] and define_vector_field/vector_gradient likewise use
+            # index 1 for the azimuthal slot, while index 2 is unused and therefore identically zero.
+            # Reading the azimuthal diagonal from T[2,2] consequently dropped the hoop term -T_phiphi/r
+            # from the radial row altogether. Checked against the same expression evaluated on a
+            # two-dimensional axisymmetric mesh, where the azimuthal diagonal is T[2,2].
+            div_x=diff(T[0,0],coords[0])+(T[0,0] - T[1,1]) / coords[0]
+            div_theta=diff(T[1,0],coords[0])+(T[0,1] + T[1,0]) / coords[0]
             return vector(div_x,  div_theta,0)
         else:
-            div_x=diff(T[0,0],coords[0])+ diff(T[1,0],coords[1]) + (T[0,0] - T[2,2]) / coords[0]
-            div_y=diff(T[0,1],coords[0])+diff(T[1,1],coords[1])+(T[0,1] / coords[0])
-            div_theta=diff(T[0,2],coords[0])+(T[0,2] - T[2,0]) / coords[0]+diff(T[1,2],coords[1])                                    
+            div_x=diff(T[0,0],coords[0])+ diff(T[0,1],coords[1]) + (T[0,0] - T[2,2]) / coords[0]
+            div_y=diff(T[1,0],coords[0])+diff(T[1,1],coords[1])+(T[1,0] / coords[0])
+            div_theta=diff(T[2,0],coords[0])+diff(T[2,1],coords[1])+(T[0,2] + T[2,0]) / coords[0]
             return vector(div_x, div_y, div_theta)
 
-    def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int,with_scales:bool,)->Expression:        
+    @staticmethod
+    def azimuthal_frame_rotation_of_tensor(T:Expression,rad:int,azi:int)->list[list[ExpressionOrNum]]:
+        """
+        The part of ``d/dphi`` of a second order tensor that comes from the frame turning, not from the
+        components changing, i.e. ``C`` in ``(d_phi T)_ij = d_phi(T_ij) + C_ij``.
+
+        With ``d_phi(e_r) = e_phi``, ``d_phi(e_phi) = -e_r`` and ``d_phi(e_z) = 0``, expanding
+        ``d_phi(T_ij e_i e_j)`` puts the rotation on each index in turn, which in matrix form is
+        ``C = R.T + T.R^T`` for the generator ``R[azi][rad] = 1``, ``R[rad][azi] = -1``:
+
+            row rule:     C_[rad][j] -= T_[azi][j]      C_[azi][j] += T_[rad][j]
+            column rule:  C_[i][rad] -= T_[i][azi]      C_[i][azi] += T_[i][rad]
+
+        ``rad`` and ``azi`` are the slots of the radial and azimuthal directions, which differ between
+        the layouts this class supports: (r,z,phi) normally, (z,r,phi) with use_x_as_symmetry_axis, and
+        (r,phi) on a radial mesh.
+
+        Written out in one place because all four branches of directional_tensor_derivative below need
+        it and each used to spell it out separately. Three of those spellings were wrong, each in a
+        single off-diagonal slot: ``+T_zphi`` instead of ``-T_zphi`` in the (r,z,phi) layout, the
+        transposed ``T_zr`` instead of ``T_rz`` in the use_x_as_symmetry_axis one, and the whole
+        diagonal contribution missing on a radial mesh. All three are unreachable from any tensor plain
+        axisymmetry can build -- define_tensor_field and vector_gradient leave every azimuthal
+        off-diagonal a hard zero, so T_rphi = T_phir = T_zphi = T_phiz = 0 always -- which is the same
+        way the analogous errors in tensor_divergence survived. The cheap check that catches all of
+        them: C must satisfy C(T^transpose) == C(T)^transpose, which none of the three did.
+
+        Note that the corresponding group in tensor_divergence looks different -- (T_rr-T_phiphi)/r,
+        T_zr/r, (T_rphi+T_phir)/r -- because there the second index is contracted away, which folds the
+        two rotations together; here both survive.
+        """
+        C:list[list[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
+        for j in range(3):
+            C[rad][j] -= T[azi,j]
+            C[azi][j] += T[rad,j]
+        for i in range(3):
+            C[i][rad] -= T[i,azi]
+            C[i][azi] += T[i,rad]
+        return C
+
+    def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int,with_scales:bool,)->Expression:
+        res:list[list[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
         if ndim==1:
             if self.use_x_as_symmetry_axis:
                 raise RuntimeError("Cannot have use_x_as_symmetry_axis in an axisymmetric coordinate system in 1d")
-            res:List[List[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
+            # A radial mesh orders the components [r, phi], so slot 1 is azimuthal and slot 2 unused.
             coords = self.get_coords(1, with_scales, lagrangian)
-            res[0][0]=diff(T[0,0],coords[0])*direct[0]
-            res[0][1]=1/coords[0]*(T[0,0]-T[1,1])*direct[1]
-            res[1][0]=res[0][1]
-            res[1][1]=diff(T[1,1],coords[0])*direct[0]
-
+            r=coords[0]
+            C=self.azimuthal_frame_rotation_of_tensor(T,0,1)
+            for i in range(2):
+                for j in range(2):
+                    res[i][j]=direct[0]*diff(T[i,j],r)+direct[1]/r*C[i][j]
             return matrix(res)
         elif ndim==2:
+            coords = self.get_coords(T.nops(), with_scales, lagrangian)
             if self.use_x_as_symmetry_axis:
-                #raise RuntimeError("TODO")
-                res:List[List[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
-                coords = self.get_coords(T.nops(), with_scales, lagrangian)
-                #diff_tensor_theta=[[-T[2,0]-T[0,2], T[2,1], T[0,0]-T[2,2]], [-T[1,2], 0, T[1,0]], [T[0,0]-T[2,2], T[0,1], T[0,2]+T[2,0]]]
-                diff_tensor_theta=[[0, -T[0,2], T[1,0]], [-T[2,0], -T[2,1]-T[1,2], T[1,1]-T[2,2]], [T[1,0], T[1,1]-T[2,2], T[1,2]+T[2,1]]]
-                for i in range(3):
-                    for j in range(3):
-                        res[i][j]=direct[0]*diff(T[i,j],coords[0])+direct[1]*diff(T[i,j],coords[1])+direct[2]/coords[1]*diff_tensor_theta[i][j]
-                return matrix(res)
+                # x is the symmetry axis here, so the slots are (z,r,phi) and r is coords[1]
+                rad,r=1,coords[1]
             else:
-                res:List[List[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
-                coords = self.get_coords(T.nops(), with_scales, lagrangian)
-                diff_tensor_theta=[[-T[2,0]-T[0,2], T[2,1], T[0,0]-T[2,2]], [-T[1,2], 0, T[1,0]], [T[0,0]-T[2,2], T[0,1], T[0,2]+T[2,0]]]
-                for i in range(3):
-                    for j in range(3):
-                        res[i][j]=direct[0]*diff(T[i,j],coords[0])+direct[1]*diff(T[i,j],coords[1])+direct[2]/coords[0]*diff_tensor_theta[i][j]
-                return matrix(res)
+                rad,r=0,coords[0]
+            C=self.azimuthal_frame_rotation_of_tensor(T,rad,2)
+            for i in range(3):
+                for j in range(3):
+                    res[i][j]=direct[0]*diff(T[i,j],coords[0])+direct[1]*diff(T[i,j],coords[1])+direct[2]/r*C[i][j]
+            return matrix(res)
         else:
             raise RuntimeError("Not possible")
 
@@ -656,7 +761,7 @@ class CartesianCoordinateSystemWithAdditionalNormalMode(CartesianCoordinateSyste
         return "Cartesian"    
 
     def scalar_gradient(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
-        res:List[ExpressionOrNum] = []
+        res:list[ExpressionOrNum] = []
         dcoords=self.map_to_zero_epsilon(self.get_coords(3, with_scales, lagrangian))
         pcoords=self.map_to_first_order_epsilon(self.get_coords(3, with_scales, lagrangian,mesh_coords=True))
         xadd=self.get_additional_coordinate(with_scales)
@@ -744,7 +849,6 @@ class CartesianCoordinateSystemWithAdditionalNormalMode(CartesianCoordinateSyste
             else:
                 return nondim("dX")
         else:
-            from ..expressions import square_root
             mm=_pyoomph.GiNaC_EvalFlag("moving_mesh")
             
             dcoords=self.map_to_zero_epsilon(self.get_coords(nodal_dim, with_scale, lagrangian))
@@ -756,20 +860,16 @@ class CartesianCoordinateSystemWithAdditionalNormalMode(CartesianCoordinateSyste
                 return spatial_scale ** (edim) * (nondim("dx") + mm*dx_eps )
             else:
                 return nondim("dx")+ mm*dx_eps
-    
-    
-    def tensor_divergence(self, arg: _pyoomph.Expression, ndim: int, edim: int, with_scales: bool, lagrangian: bool) -> _pyoomph.Expression:
-        raise RuntimeError("Not implemented")
-    
+
     def vector_gradient(self, arg: _pyoomph.Expression, ndim: int, edim: int, with_scales: bool, lagrangian: bool) -> _pyoomph.Expression:
-        res:List[List[ExpressionOrNum]] = []
+        res:list[list[ExpressionOrNum]] = []
         # TODO MOVING COORDINATES
         dcoords=self.map_to_zero_epsilon(self.get_coords(ndim, with_scales, lagrangian))
         pcoords=self.map_to_first_order_epsilon(self.get_coords(ndim, with_scales, lagrangian,mesh_coords=True))
         k=self.get_wavenumber_k(dimensional=with_scales)
         xadd=self.get_additional_coordinate(with_scales)
         for b in range(ndim):
-            line:List[ExpressionOrNum] = []
+            line:list[ExpressionOrNum] = []
             entry = arg[b]
             for a in range(ndim):
                 line.append(diff(entry, dcoords[a]))                
@@ -778,7 +878,7 @@ class CartesianCoordinateSystemWithAdditionalNormalMode(CartesianCoordinateSyste
             else:
                 line.append(0)
             res.append(line)
-        line:List[ExpressionOrNum] = []
+        line = []
         if not lagrangian:
             for a in range(ndim):
                 line.append(diff(arg[ndim], dcoords[a]))
@@ -826,13 +926,125 @@ class CartesianCoordinateSystemWithAdditionalNormalMode(CartesianCoordinateSyste
         
         return matrix(res)
 
+    def _first_order_derivative_operators(self,ndim:int,with_scales:bool,lagrangian:bool)->list[Callable[[Expression],Expression]]:
+        """
+        The first-order derivative operators of this coordinate system, expressed in mesh coordinates.
+
+        Fields are expanded as ``U = U_base + eps*U_k*exp(I*k*z)`` and the mesh accordingly as
+        ``x_phys = x + eps*Xk*exp(I*k*z)``, ``y_phys = y + eps*Yk*exp(I*k*z)``, with the additional
+        direction z itself unperturbed (``with_normal_component_in_mesh_coordinates`` is False, so
+        expand_coordinate_or_mesh_vector zeroes the third mesh component). Unlike the cylindrical frame
+        of AxisymmetryBreakingCoordinateSystem, the Cartesian frame does not rotate with anything, so
+        there is not a single connection term and no 1/r factor: the entire content of this coordinate
+        system is what the derivative operators mean once written in the mesh coordinates. Inverting the
+        mapping to first order in eps gives, for any scalar q,
+
+            d/dx|_(y,z) q  =  q_x - (Xk_x*q_x + Yk_x*q_y)
+            d/dy|_(x,z) q  =  q_y - (Xk_y*q_x + Yk_y*q_y)
+            d/dz|_(x,y) q  =  q_z - I*k*(Xk*q_x + Yk*q_y)
+
+        The I*k in the last one is the counterpart of the I*m in the azimuthal d_dphi_over_r; the
+        -Xp*q_phi/x**2 term that sits beside it there comes from the 1/r factor and has no analogue.
+        Note that the z-derivative must be written diff(q,xadd) rather than I*k*q: exp(I*k*z) is a
+        FakeExponentialMode that prints as 1 but differentiates by the chain rule, so the I*k appears by
+        itself on exactly those terms that carry the mode. The explicit I*k in the correction is right
+        because that term always multiplies Xk or Yk, which carry the mode by construction.
+
+        These three reproduce, term for term, scalar_gradient (the ndim==2 branch above and the ndim==1
+        one), vector_gradient (both branches, all nine entries in 2d) and the ndim==edim branches of
+        vector_divergence. That is what makes the tensor operations below checkable against them - and
+        it is why those three are deliberately left written out rather than rerouted through here: the
+        identities div(a (x) b) = div(b)*a + (b.grad)a and trace(grad(u)) = div(u) that test the tensor
+        code would degrade from "two implementations agree" to "the assembly loop contracts the right
+        index" if both sides came out of the same closures.
+
+        Returns ndim+1 operators in the component order define_vector_field uses: [d_dx, d_dy, d_dz] for
+        ndim==2 and [d_dx, d_dz] for ndim==1, where the additional direction takes slot 1.
+        """
+        dcoords=self.map_to_zero_epsilon(self.get_coords(3, with_scales, lagrangian))
+        pcoords=self.map_to_first_order_epsilon(self.get_coords(3, with_scales, lagrangian,mesh_coords=True))
+        xadd=self.get_additional_coordinate(with_scales)
+        k=self.get_wavenumber_k(dimensional=with_scales)
+        I=self.imaginary_i
+        mm=_pyoomph.GiNaC_EvalFlag("moving_mesh")
+        x,Xk=dcoords[0],pcoords[0]
+        if ndim==2:
+            y,Yk=dcoords[1],pcoords[1]
+        else:
+            # A one-dimensional mesh has no second in-plane direction, so nothing is perturbed along y
+            y,Yk=None,None
+
+        # y and Yk are absent together, but each test below has to name the one it dereferences: a
+        # guard on y alone leaves Yk optional for a type checker.
+        def d_dx(q:Expression)->Expression:  # d/dx at fixed y and z
+            corr=diff(Xk, x)*diff(q, x) + (diff(Yk, x)*diff(q, y) if y is not None and Yk is not None else 0)
+            return diff(q, x) - mm*corr
+
+        def d_dy(q:Expression)->Expression:  # d/dy at fixed x and z, only returned for ndim==2
+            assert y is not None and Yk is not None
+            return diff(q, y) - mm*(diff(Xk, y)*diff(q, x) + diff(Yk, y)*diff(q, y))
+
+        def d_dz(q:Expression)->Expression:  # d/dz at fixed x and y, i.e. along the additional direction
+            conv=Xk*diff(q, x) + (Yk*diff(q, y) if y is not None and Yk is not None else 0)
+            return diff(q, xadd) - mm*I*k*conv
+
+        return [d_dx,d_dy,d_dz] if ndim==2 else [d_dx,d_dz]
+
     def tensor_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
-        raise RuntimeError("Implement the tensor_divergence for this coordinate system. Occured upon taking the div of " + str(arg))
+        """
+        Divergence of a second order tensor, i.e. ``(div T)_i = d_j T_ij``, contracting the second index,
+        as in the Cartesian and the axisymmetry-breaking coordinate system.
 
-    def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int)->Expression:
-        raise RuntimeError("Implement the directional tensor derivative for this coordinate system")
+        There is nothing to it beyond applying the three operators of _first_order_derivative_operators
+        row by row: a Cartesian frame does not rotate, so no connection term and no 1/r factor appears,
+        and the whole mesh-perturbation content sits inside the operators. Mind the component order for
+        ndim==1, which is [x, x_add] rather than [x, y] - the additional direction occupies slot 1 there,
+        as in define_vector_field, scalar_gradient and vector_divergence - so index 2 is unused.
 
-    def expand_coordinate_or_mesh_vector(self,cg:"FiniteElementCodeGenerator", name:str,dimensional:bool,no_jacobian:bool,no_hessian:bool):        
+        Bulk only. The edim!=ndim branches of vector_divergence above are of an entirely different shape
+        (the ndim==2/edim==1 one is a thirty-product expression in local_coordinate_1, and the edim==0
+        ones do not follow the operator form at all and carry a TODO), so the surface and point cases are
+        refused rather than guessed at, exactly as the azimuthal counterpart does.
+        """
+        if lagrangian:
+            return super().tensor_divergence(arg, ndim, edim, with_scales, lagrangian)
+        if ndim!=edim or ndim not in (1,2):
+            raise RuntimeError("Tensor divergence in the Cartesian normal mode coordinate system is only implemented on a bulk mesh, not for ndim="+str(ndim)+", edim="+str(edim))
+        T=arg
+        ops=self._first_order_derivative_operators(ndim, with_scales, lagrangian)
+        res:list[ExpressionOrNum]=[]
+        for i in range(ndim+1):
+            div_line:ExpressionOrNum=0
+            for j,d_dj in enumerate(ops):
+                div_line+=d_dj(T[i,j])
+            res.append(div_line)
+        while len(res)<3:
+            res.append(0)
+        return vector(res)
+
+    def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int,with_scales:bool)->Expression:
+        """
+        ``((d.grad)T)_ij = d_c * d_c(T_ij)``, i.e. the same three operators contracted with the direction.
+
+        Identical in structure to CartesianCoordinateSystem.directional_tensor_derivative, except that
+        the sum reaches the additional direction and each operator carries the mesh perturbation. There
+        are no frame-rotation terms, again because the Cartesian basis vectors are constant. ``direct``
+        is given in the same component order as any other vector of this system, so its slot ndim is the
+        additional direction. Bulk only, for the reason given in tensor_divergence.
+        """
+        if lagrangian:
+            return super().directional_tensor_derivative(T,direct,lagrangian,dimensional,ndim,edim,with_scales)
+        if ndim!=edim or ndim not in (1,2):
+            raise RuntimeError("Directional tensor derivative in the Cartesian normal mode coordinate system is only implemented on a bulk mesh, not for ndim="+str(ndim)+", edim="+str(edim))
+        ops=self._first_order_derivative_operators(ndim, with_scales, lagrangian)
+        res:list[list[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
+        for i in range(ndim+1):
+            for j in range(ndim+1):
+                for c,d_dc in enumerate(ops):
+                    res[i][j]+=d_dc(T[i,j])*direct[c]
+        return matrix(res)
+
+    def expand_coordinate_or_mesh_vector(self,cg:"FiniteElementCodeGenerator", name:str,dimensional:bool,no_jacobian:bool,no_hessian:bool):
         if not cg._coordinates_as_dofs:
             dim=cg.get_nodal_dimension()
             if dim==0:
@@ -864,30 +1076,30 @@ class CartesianCoordinateSystemWithAdditionalNormalMode(CartesianCoordinateSyste
                 elif dim == 3:
                     raise RuntimeError("Cannot use normal mode expansion coordinate system in 3d")
         
-    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations") -> Tuple[List[Expression], List[Expression], List[str]]:
+    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations") -> tuple[list[Expression], list[Expression], list[str]]:
         inds = ["x", "y", "z"]
-        namelist:List[str] = []
+        namelist:list[str] = []
         if ndim==3:
             raise RuntimeError("Cannot use a normal mode in 3D")
         for i in range(ndim):
             namelist.append(name + "_" + inds[i])
         namelist.append(name + "_normal")
         
-        v:List[Expression] = []
-        vtest:List[Expression] = []
+        v:list[Expression] = []
+        vtest:list[Expression] = []
         s = scale_factor(name)
         S = test_scale_factor(name)
         for i, f in enumerate(namelist):
             if i >= ndim+1: break
-            element.set_scaling(**{f: name})
+            element.set_scaling({f: name})
             vc = element.define_scalar_field(f, space)
             vc = var(f)
             v.append(vc / s)
-            element.set_test_scaling(**{f: name})
+            element.set_test_scaling({f: name})
             vtest.append(testfunction(f) / S)
         return v, vtest, namelist
     
-    def get_normal_vector_or_component(self,cg:"FiniteElementCodeGenerator",component:Optional[int]=None,only_base_mode:bool=False,only_perturbation_mode:bool=False,where:str="Residual"):
+    def get_normal_vector_or_component(self,cg:"FiniteElementCodeGenerator",component:int | None=None,only_base_mode:bool=False,only_perturbation_mode:bool=False,where:str="Residual"):
         dim = cg.get_nodal_dimension()
         edim=cg.get_element_dimension()
         if not cg._coordinates_as_dofs or (where!="Residual" and (not self.expand_with_modes_for_python_debugging or where!="Python")):
@@ -913,7 +1125,7 @@ class CartesianCoordinateSystemWithAdditionalNormalMode(CartesianCoordinateSyste
             
             if dim==2:
                 if edim==1:
-                    n0=[cg._get_normal_component(0),cg._get_normal_component(1),0]
+                    n0:list[ExpressionOrNum]=[cg._get_normal_component(0),cg._get_normal_component(1),0]
                     Xk,Yk=pcoords[0],pcoords[1]
                     x,y=dcoords[0],dcoords[1]
                     I=self.imaginary_i
@@ -981,6 +1193,24 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
         self.map_real_part_of_mode0=map_real_part_of_mode0 #Normally not necessary
         self.with_phi_component_in_mesh_coordinates=False # TODO: Implement that some day
         self.expand_with_modes_for_python_debugging=False # If you want to use expand_expression_for_debugging, set this
+
+    # use_x_as_symmetry_axis belongs to plain axisymmetry alone. It is inherited, and the constructor
+    # above never passes it on, so the only way to get it set here is an assignment afterwards - which
+    # used to be accepted and then ignored: every branch of this class spells out the (r,z,phi) layout
+    # directly, from the I*m/r factors of the derivative operators to the "_phi" component of
+    # define_vector_field, so the flag would have flipped the inherited geometric_jacobian and nothing
+    # else. A half-flipped system is worse than a refused one, hence the property.
+    @property
+    def use_x_as_symmetry_axis(self)->bool:
+        return False
+
+    @use_x_as_symmetry_axis.setter
+    def use_x_as_symmetry_axis(self,value:bool)->None:
+        if value:
+            raise RuntimeError("use_x_as_symmetry_axis is only supported in a plain "
+                               "AxisymmetricCoordinateSystem, not in the azimuthal normal mode system: "
+                               "this class assumes the (r,z,phi) slot layout throughout. Swap the mesh "
+                               "coordinates instead, so that x is the radius.")
 
         
 
@@ -1074,7 +1304,7 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
             return 2*pi*(dcoords[0]*nondim("dx")+ mm*dx_eps)
             
     def scalar_gradient(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
-        res:List[ExpressionOrNum] = []
+        res:list[ExpressionOrNum] = []
         coords = self.get_coords(3, with_scales, lagrangian)
         dcoords=self.map_to_zero_epsilon(coords)
         pcoords=self.map_to_first_order_epsilon(coords)
@@ -1126,14 +1356,14 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
             X0=self.map_to_zero_epsilon(r)
             Xm=self.map_to_first_order_epsilon(r)
             if not lagrangian:
-                res:List[List[ExpressionOrNum]] = [[diff(arg[0], X0), diff(arg[0],self.phi) / X0 - arg[1] / X0,zero],
+                res:list[list[ExpressionOrNum]] = [[diff(arg[0], X0), diff(arg[0],self.phi) / X0 - arg[1] / X0,zero],
                    [diff(arg[1], X0), diff(arg[1],self.phi) / X0 + arg[0] / X0,zero],[zero,zero,zero]]                
                 res[0][0]+=mm*(-diff(Xm, X0)*diff(arg[0], X0))
                 res[0][1]+=mm*(-I*m*Xm*diff(arg[0], X0)/X0 + Xm*arg[1]/X0**2 - Xm*diff(arg[0], phi)/X0**2)
                 res[1][0]+=mm*(-diff(Xm, X0)*diff(arg[1], X0))
                 res[1][1]+=mm*(-I*m*Xm*diff(arg[1], X0)/X0 - Xm*arg[0]/X0**2 - Xm*diff(arg[1], phi)/X0**2)
             else:
-                res:List[List[ExpressionOrNum]] = [[diff(arg[0], r), 0, 0], [0, arg[0] / r, 0], [0, 0, 0]]
+                res = [[diff(arg[0], r), 0, 0], [0, arg[0] / r, 0], [0, 0, 0]]
         else:
             if arg.nops() != 3:
                 raise RuntimeError(
@@ -1147,7 +1377,7 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
             #res:List[List[ExpressionOrNum]]=[[ diff(arg[0],dr),diff(arg[0],dz),diff(arg[0],self.phi)/dr-arg[2]/dr],
              #    [diff(arg[1],dr),diff(arg[1],dz),diff(arg[1],self.phi)/dr],
              #    [diff(arg[2],dr) ,diff(arg[2],dz),diff(arg[2],self.phi)/dr+arg[0]/dr]]
-            res:List[List[ExpressionOrNum]]= [[diff(arg[0], x), diff(arg[0], y), -arg[2]/x + diff(arg[0], phi)/x], 
+            res= [[diff(arg[0], x), diff(arg[0], y), -arg[2]/x + diff(arg[0], phi)/x], 
                                               [diff(arg[1], x), diff(arg[1], y), diff(arg[1], phi)/x], 
                                               [diff(arg[2], x), diff(arg[2], y), arg[0]/x + diff(arg[2], phi)/x]]
             res[0][0]+=mm*(-diff(Xp, x)*diff(arg[0], x) - diff(Yp, x)*diff(arg[0], y))
@@ -1167,7 +1397,6 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
     def vector_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
         if lagrangian:
             return super().vector_divergence(arg, ndim, edim, with_scales, lagrangian)
-        res = 0
         coords = self.get_coords(arg.nops(), with_scales, lagrangian)
         dcoords=self.map_to_zero_epsilon(coords)
         pcoords=self.map_to_first_order_epsilon(coords)
@@ -1204,15 +1433,14 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
                 #raise RuntimeError("divergence with ndim=2, edim=1 not implemented")
             else:
                 raise RuntimeError("divergence with ndim=2, edim=0 not implemented")
-            return res
-            
+
         else:
             raise RuntimeError("Cannot use this coordinate system on a 3d mesh")
         
         
 
 
-    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations") -> Tuple[List[Expression], List[Expression], List[str]]:
+    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations") -> tuple[list[Expression], list[Expression], list[str]]:
         s = scale_factor(name)
         S = test_scale_factor(name)        
         if ndim == 2:
@@ -1222,19 +1450,59 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
             vx = var(name + "_x")
             vy = var(name + "_y")
             vt = var(name + "_phi")
-            element.set_scaling(**{name + "_x": name, name + "_y": name, name + "_phi": name})
-            element.set_test_scaling(**{name + "_x": name, name + "_y": name,name + "_phi": name})            
+            element.set_scaling({name + "_x": name, name + "_y": name, name + "_phi": name})
+            element.set_test_scaling({name + "_x": name, name + "_y": name,name + "_phi": name})            
             return [vx / s, vy / s, vt/s], [testfunction(name + "_x") / S,testfunction(name + "_y") / S, testfunction(name + "_phi") / S], [name + "_x",name + "_y",name+"_phi"]
         elif ndim == 1:
             vx = element.define_scalar_field(name + "_x", space)
             vt = element.define_scalar_field(name + "_phi", space)
             vx = var(name + "_x")
             vt = var(name + "_phi")
-            element.set_scaling(**{name + "_x": name,name+"_phi":name})
-            element.set_test_scaling(**{name + "_x": name,name+"_phi":name})
+            element.set_scaling({name + "_x": name,name+"_phi":name})
+            element.set_test_scaling({name + "_x": name,name+"_phi":name})
             return [vx / s, vt/s], [testfunction(name + "_x") / S,testfunction(name + "_phi") / S], [name + "_x",name + "_phi"]
         else:
             raise RuntimeError("Axisymmetric vector fields do not work for dimension " + str(ndim))
+
+    def define_tensor_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations", symmetric:bool)->tuple[list[list[Expression]],list[list[Expression]],list[list[str]]]:
+        """A tensor unknown that carries its azimuthal off-diagonals.
+
+        The inherited axisymmetric version puts the azimuthal direction on the diagonal alone,
+        because plain axisymmetry is swirl-free and T_rphi/T_zphi vanish identically there. A
+        non-axisymmetric mode excites exactly those two, so here they are unknowns - the same reason
+        define_vector_field above adds a "_phi" component that the inherited one does not have.
+
+        The slot layout is the one tensor_divergence and directional_tensor_derivative below expect:
+        (r,z,phi) on a bulk mesh and (r,phi) on a radial one, i.e. the azimuthal direction sits at
+        slot 2 or slot 1 respectively. Its index letter stays "a", as in the inherited "_aa", so a
+        two-dimensional tensor spans _xx _xy _xa / _yx _yy _ya / _ax _ay _aa.
+
+        Written as a loop rather than unrolled like the implementations it mirrors: nine components
+        times three lists is not readable spelled out, and the symmetric case would double it again.
+        """
+        if ndim not in (1,2):
+            raise RuntimeError("define_tensor_field: ndim="+str(ndim)+" is not supported for AxisymmetryBreakingCoordinateSystem (only ndim=1 or ndim=2)")
+        s = scale_factor(name)
+        S = test_scale_factor(name)
+        letters = ["x","y","a"] if ndim==2 else ["x","a"]
+        n = len(letters)
+        # symmetric shares one unknown between each pair, as every other define_tensor_field does
+        namelist = [[name+"_"+(letters[min(i,j)]+letters[max(i,j)] if symmetric else letters[i]+letters[j])
+                     for j in range(n)] for i in range(n)]
+        for compo in sorted({c for row in namelist for c in row}):
+            element.define_scalar_field(compo, space)
+            element.set_scaling({compo: name})
+            element.set_test_scaling({compo: name})
+        zero = Expression(0)
+        vals:list[list[Expression]] = [[zero]*3 for _i in range(3)]
+        tests:list[list[Expression]] = [[zero]*3 for _i in range(3)]
+        names:list[list[str]] = [["" for _j in range(3)] for _i in range(3)]
+        for i in range(n):
+            for j in range(n):
+                vals[i][j] = var(namelist[i][j]) / s
+                tests[i][j] = testfunction(namelist[i][j]) / S
+                names[i][j] = namelist[i][j]
+        return vals, tests, names
 
 
     def expand_coordinate_or_mesh_vector(self,cg:"FiniteElementCodeGenerator", name:str,dimensional:bool,no_jacobian:bool,no_hessian:bool):        
@@ -1263,7 +1531,7 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
 
 
 
-    def get_normal_vector_or_component(self,cg:"FiniteElementCodeGenerator",component:Optional[int]=None,only_base_mode:bool=False,only_perturbation_mode:bool=False,where:str="Residual"):
+    def get_normal_vector_or_component(self,cg:"FiniteElementCodeGenerator",component:int | None=None,only_base_mode:bool=False,only_perturbation_mode:bool=False,where:str="Residual"):
         dim = cg.get_nodal_dimension()        
         edim=cg.get_element_dimension()
         if not cg._coordinates_as_dofs or (where!="Residual" and (not self.expand_with_modes_for_python_debugging or where!="Python")):
@@ -1343,14 +1611,136 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
                 mycomps=posscompos[:dim]        
                 return vector(*mycomps)
             else:
-                return cg._get_normal_component(component)            
-            
+                return cg._get_normal_component(component)
+
 
     def tensor_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
-        raise RuntimeError("Implement the tensor_divergence for this coordinate system. Occured upon taking the div of " + str(arg))
+        """
+        Divergence of a second order tensor, i.e. ``(div T)_i = d_j T_ij``, contracting the second index, as in the
+        Cartesian and the plain axisymmetric coordinate system.
 
-    def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int)->Expression:
-        raise RuntimeError("Implement the directional tensor derivative for this coordinate system")
+        The mesh coordinates (x,y) and the angle phi are mapped to the physical cylindrical coordinates by
+        ``r = x + eps*x_eigen*exp(I*m*phi)`` and ``z = y + eps*y_eigen*exp(I*m*phi)``, with phi itself
+        unperturbed. The orthonormal frame (e_r(phi), e_z, e_phi(phi)) therefore does not move at all, so
+        the physical components are the usual ones and the connection terms below are exactly those of the
+        unperturbed cylindrical system. All the perturbation does is change what the derivative operators
+        and the 1/r factor mean once written in the mesh coordinates. Inverting the mapping to first order
+        in eps gives, for any scalar q,
+
+            d/dr|_(z,phi)  =  q_x - (x_e_x*q_x + y_e_x*q_y)
+            d/dz|_(r,phi)  =  q_y - (x_e_y*q_x + y_e_y*q_y)
+            d/dphi|_(r,z)  =  q_phi - I*m*(x_e*q_x + y_e*q_y)
+            1/r            =  1/x - x_e/x**2
+
+        The same four rules reproduce scalar_gradient and vector_divergence above term by term, which is
+        what makes this implementation checkable against them. Feeding them into the cylindrical tensor
+        divergence is then all that is left to do.
+        """
+        if lagrangian:
+            return super().tensor_divergence(arg, ndim, edim, with_scales, lagrangian)
+        T = arg
+        d_dr, d_dz, d_dphi_over_r, over_r = self._first_order_derivative_operators(ndim, edim, with_scales, lagrangian, "Tensor divergence")
+        # The connection terms are those of the cylindrical frame, where e_r and e_phi rotate with phi:
+        # (T_rr-T_phiphi)/r on the radial row, T_zr/r on the axial one, (T_rphi+T_phir)/r on the azimuthal
+        # one. The PLUS on the last is what the identity div(dyadic(a,b)) = div(b)*a + (b.grad)a requires
+        # here, checked against vector_divergence and vector_gradient of this class, which do carry all
+        # three components. AxisymmetricCoordinateSystem.tensor_divergence agrees term for term now; it
+        # used to have a minus in that spot, which went unnoticed because its own vector_gradient is
+        # swirl-free (the a_phi entries are hard zeros), so nothing it can build reaches that row.
+        if ndim == 2:
+            div_r = d_dr(T[0,0]) + d_dz(T[0,1]) + d_dphi_over_r(T[0,2]) + over_r(T[0,0] - T[2,2])
+            div_z = d_dr(T[1,0]) + d_dz(T[1,1]) + d_dphi_over_r(T[1,2]) + over_r(T[1,0])
+            div_phi = d_dr(T[2,0]) + d_dz(T[2,1]) + d_dphi_over_r(T[2,2]) + over_r(T[0,2] + T[2,0])
+            return vector(div_r, div_z, div_phi)
+        else:
+            # On a radial mesh the components are ordered [r, phi] rather than [r, z, phi] -- that is
+            # what define_vector_field, scalar_gradient and vector_divergence use for ndim==1 -- so the
+            # azimuthal slot is index 1 here and index 2 is unused.
+            div_r = d_dr(T[0,0]) + d_dphi_over_r(T[0,1]) + over_r(T[0,0] - T[1,1])
+            div_phi = d_dr(T[1,0]) + d_dphi_over_r(T[1,1]) + over_r(T[0,1] + T[1,0])
+            return vector(div_r, div_phi, 0)
+
+    def _first_order_derivative_operators(self, ndim:int, edim:int, with_scales:bool, lagrangian:bool, what:str):
+        """
+        The four first-order operators of the docstring of tensor_divergence, as callables.
+
+        Kept in one place because tensor_divergence and directional_tensor_derivative need exactly the
+        same four, and because a discrepancy between them would be invisible in every identity that
+        tests one against the other. ``what`` only names the caller in the bulk-only error message.
+
+        On a one-dimensional radial mesh there is no axial direction at all, so nothing is perturbed
+        along y and d_dz is returned as a plain zero: the remaining three reduce to the plane-polar ones.
+        """
+        if ndim != edim or ndim not in (1, 2):
+            raise RuntimeError(what + " in the axisymmetry-breaking coordinate system is only implemented on a bulk mesh, not for ndim=" + str(ndim) + ", edim=" + str(edim))
+        coords = self.get_coords(3, with_scales, lagrangian)
+        x = self.map_to_zero_epsilon(coords[0])
+        Xp = self.map_to_first_order_epsilon(coords[0])
+        mm = _pyoomph.GiNaC_EvalFlag("moving_mesh")
+        m, I, phi = self.m_angular_symbol, self.imaginary_i, self.phi
+        if ndim == 2:
+            y = self.map_to_zero_epsilon(coords[1])
+            Yp = self.map_to_first_order_epsilon(coords[1])
+        else:
+            # A one-dimensional radial mesh has no axial direction at all, so nothing is perturbed
+            # along y and the operators below reduce to the plane-polar ones.
+            y, Yp = None, None
+
+        # y and Yp are absent together, but each test below has to name the one it dereferences: a
+        # guard on y alone leaves Yp optional for a type checker.
+        def d_dr(q:Expression)->Expression:  # d/dr at fixed z and phi
+            corr = diff(Xp, x)*diff(q, x) + (diff(Yp, x)*diff(q, y) if y is not None and Yp is not None else 0)
+            return diff(q, x) - mm*corr
+
+        def d_dz(q:Expression)->Expression:  # d/dz at fixed r and phi, replaced by zero for ndim==1
+            assert y is not None and Yp is not None
+            return diff(q, y) - mm*(diff(Xp, y)*diff(q, x) + diff(Yp, y)*diff(q, y))
+
+        def d_dphi_over_r(q:Expression)->Expression:  # (1/r)*d/dphi at fixed r and z
+            conv = Xp*diff(q, x) + (Yp*diff(q, y) if y is not None and Yp is not None else 0)
+            return diff(q, phi)/x - mm*(I*m*conv/x + Xp*diff(q, phi)/x**2)
+
+        def over_r(q:ExpressionOrNum)->Expression:  # q/r
+            return q/x - mm*Xp*q/x**2
+
+        if ndim == 1:
+            d_dz = lambda q : Expression(0)
+        return d_dr, d_dz, d_dphi_over_r, over_r
+
+    def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int,with_scales:bool)->Expression:
+        """
+        ``((d.grad)T)_ij``, the directional derivative of a second order tensor along ``direct``.
+
+        Same four operators as tensor_divergence, but contracted with the direction rather than with the
+        second index, so a different group of connection terms survives. Only the azimuthal part of the
+        direction sees the frame turning:
+
+            (d.grad)T = d_r*d_dr(T) + d_z*d_dz(T) + d_phi*( d_dphi_over_r(T) + (1/r)*C(T) )
+
+        with C the frame rotation of AxisymmetricCoordinateSystem.azimuthal_frame_rotation_of_tensor,
+        which is where that group is derived. Contrast tensor_divergence, where contracting the second
+        index folds both index rotations into the single hoop group (T_rr-T_phiphi)/r, T_zr/r,
+        (T_rphi+T_phir)/r.
+
+        The reference for this is the product rule (d.grad)(a (x) b) = ((d.grad)a) (x) b + a (x) (d.grad)b,
+        whose right-hand side is built from matproduct(grad(.),d), i.e. from this class's vector_gradient,
+        which carries all three components. That is what makes it testable here and not in plain
+        axisymmetry, whose own vector_gradient is swirl-free (see dev_docs/coordinate_system_tensor_ops.md).
+        """
+        if lagrangian:
+            return super().directional_tensor_derivative(T,direct,lagrangian,dimensional,ndim,edim,with_scales)
+        d_dr, d_dz, d_dphi_over_r, over_r = self._first_order_derivative_operators(ndim, edim, with_scales, lagrangian, "Directional tensor derivative")
+        # (r,z,phi) on a 2d mesh, (r,phi) on a radial one -- the same slot layout tensor_divergence uses
+        azi = 2 if ndim == 2 else 1
+        C = self.azimuthal_frame_rotation_of_tensor(T, 0, azi)
+        res:list[list[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
+        for i in range(azi+1):
+            for j in range(azi+1):
+                entry = direct[0]*d_dr(T[i,j]) + direct[azi]*(d_dphi_over_r(T[i,j]) + over_r(C[i][j]))
+                if ndim == 2:
+                    entry += direct[1]*d_dz(T[i,j])
+                res[i][j] = entry
+        return matrix(res)
 
 
 
@@ -1368,12 +1758,12 @@ class RadialSymmetricCoordinateSystem(BaseCoordinateSystem):
     def get_id_name(self)->str:
         return "RadialSymmetric"
 
-    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations") -> Tuple[List[Expression], List[Expression], List[str]]:
+    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations") -> tuple[list[Expression], list[Expression], list[str]]:
         if ndim == 1:
             vx = element.define_scalar_field(name + "_x", space)
             vx = var(name + "_x")
-            element.set_scaling(**{name + "_x": name})
-            element.set_test_scaling(**{name + "_x": name})
+            element.set_scaling({name + "_x": name})
+            element.set_test_scaling({name + "_x": name})
             s = scale_factor(name)
             S = test_scale_factor(name)
             return [vx / s], [testfunction(name + "_x") / S], [name + "_x"]
@@ -1417,23 +1807,21 @@ class RadialSymmetricCoordinateSystem(BaseCoordinateSystem):
                 r = r - self.Rcenter
             else:
                 r = r - self.Rcenter / scale_factor("spatial")
-            res:List[List[ExpressionOrNum]] = [[diff(arg[0], r), 0, 0], [0, arg[0] / r, 0], [0, 0, arg[0] / r]]
+            res:list[list[ExpressionOrNum]] = [[diff(arg[0], r), 0, 0], [0, arg[0] / r, 0], [0, 0, arg[0] / r]]
         return matrix(res)
 
     def vector_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
         if ndim != 1:
             raise RuntimeError("Vector divergence in radial symmetry does not work for dimension " + str(ndim))
-        res = 0
         coords = self.get_coords(arg.nops(), with_scales, lagrangian)
         if with_scales:
             coords[0] -= self.Rcenter
         else:
             coords[0] -= self.Rcenter / scale_factor("spatial")
-        res += diff(arg[0], coords[0]) + 2 * arg[0] / coords[0]
-        return res
+        return diff(arg[0], coords[0]) + 2 * arg[0] / coords[0]
 
     def scalar_gradient(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
-        res:List[ExpressionOrNum] = []
+        res:list[ExpressionOrNum] = []
         for i, a in enumerate(self.get_coords(3, with_scales, lagrangian)):
             res.append(diff(arg, a) if i < ndim else 0)
         return vector(res)
@@ -1442,7 +1830,7 @@ class RadialSymmetricCoordinateSystem(BaseCoordinateSystem):
     def tensor_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
         raise RuntimeError("Implement the tensor_divergence for this coordinate system. Occured upon taking the div of " + str(arg))
 
-    def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int)->Expression:
+    def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int,with_scales:bool)->Expression:
         raise RuntimeError("Implement the directional tensor derivative for this coordinate system")
 
 
@@ -1463,17 +1851,17 @@ class BaseDifferentialGeometryCoordinateSystem(BaseCoordinateSystem):
         #: Select suffixes of the vector components
         self.vector_component_suffixes = ["x", "y", "z"]
         #: Additional vector components (used for e.g. additional normal mode)
-        self.additional_vector_component_suffixes = []
+        self.additional_vector_component_suffixes:list[str] = []
         #: Additional local coordinates (used for e.g. additional normal mode)
-        self.additional_local_coordinates=[]        
+        self.additional_local_coordinates:list[Expression]=[]
         #: Use subexpressions for the transformations
         self.use_subexpressions = True	
         
         self._values_to_substitute = {} # Values to subsitute at the end of an expansion
         
         self._dx_integration_factor=1
-        # Cache for the covariant basis vectors, map from (bool[lagrangian],bool[dimensional],ndim,edim) to a list of basis vectors        
-        self._cached_basis_vectors = {}
+        # Cache for the covariant basis vectors, map from (bool[lagrangian],bool[dimensional],ndim,edim) to a list of basis vectors
+        self._cached_basis_vectors:dict[tuple[bool,bool,int,int],list[Expression]] = {}
         # Cache for the covariant metric tensors, map from (bool[lagrangian],bool[dimensional],ndim,edim) to a g_ab
         self._cached_covariant_metrics = {}
         # Cache for the contravariant metric tensors, map from (bool[lagrangian],bool[dimensional],ndim,edim) to a g^ab
@@ -1499,7 +1887,7 @@ class BaseDifferentialGeometryCoordinateSystem(BaseCoordinateSystem):
             expr=_pyoomph.GiNaC_SymSubs(expr,k,v)
         return expr 
 
-    def add_additional_parametric_variable(self, name: str,value_to_substitute:Optional[ExpressionOrNum]=0,dx_integration_factor:Optional[ExpressionOrNum]=None) -> Expression:
+    def add_additional_parametric_variable(self, name: str,value_to_substitute:ExpressionOrNum | None=0,dx_integration_factor:ExpressionOrNum | None=None) -> Expression:
         """Add a new local coordinate to the coordinate system. This can be e.g. phi in an axisymmetric coordinate system
 
         """
@@ -1521,7 +1909,7 @@ class BaseDifferentialGeometryCoordinateSystem(BaseCoordinateSystem):
         from ..expressions import determinant,square_root
         eaug=self.get_augmented_edim(nodal_dim,edim)			
         if eaug==0:
-            J=1        
+            J:ExpressionOrNum=1        
         else:
             g_ab=self.get_covariant_metric_tensor(nodal_dim,edim,lagrangian,False) # Cannot do it with scales here=> Can mess up the sqrt
             g=self.substitute_values_for_additional_local_coordinates(determinant(g_ab))
@@ -1540,7 +1928,7 @@ class BaseDifferentialGeometryCoordinateSystem(BaseCoordinateSystem):
         # Just alwas 3
         return 3
     
-    def get_local_coordinate(self, i:int, ndim: int, edim: int,lagrangian:bool,dimensional:bool) -> List[Expression]:
+    def get_local_coordinate(self, i:int, ndim: int, edim: int,lagrangian:bool,dimensional:bool) -> Expression:
         if i<edim:            
             return nondim("local_coordinate_"+str(i+1))
         elif i<edim+len(self.additional_local_coordinates):
@@ -1548,14 +1936,14 @@ class BaseDifferentialGeometryCoordinateSystem(BaseCoordinateSystem):
         else:
             raise RuntimeError("The local coordinate index is out of bounds.")
         
-    def get_all_local_coordinates(self, ndim: int, edim: int,lagrangian:bool,dimensional:bool) -> List[Expression]:
+    def get_all_local_coordinates(self, ndim: int, edim: int,lagrangian:bool,dimensional:bool) -> list[Expression]:
         eaug=self.get_augmented_edim(ndim,edim)
         return [self.get_local_coordinate(i,ndim,edim,lagrangian,dimensional) for i in range(eaug)]
     
-    def get_augmented_edim(self, ndim:Optional[int],edim: int) -> int:
+    def get_augmented_edim(self, ndim:int | None,edim: int) -> int:
         return edim+len(self.additional_local_coordinates)
 
-    def get_covariant_basis_vectors(self, ndim: int, edim: int,lagrangian:bool,dimensional:bool) -> List[Expression]:
+    def get_covariant_basis_vectors(self, ndim: int, edim: int,lagrangian:bool,dimensional:bool) -> list[Expression]:
         if (lagrangian,dimensional,ndim, edim) in self._cached_basis_vectors:
             return self._cached_basis_vectors[(lagrangian,dimensional,ndim, edim)]
         s = var("local_coordinate")  # Local coordinate
@@ -1595,28 +1983,28 @@ class BaseDifferentialGeometryCoordinateSystem(BaseCoordinateSystem):
         return g_contra
         
 
-    def define_vector_field(self, name: str, space: "FiniteElementSpaceEnum", ndim: int, element: "Equations") -> Tuple[List[Expression], List[Expression], List[str]]:
-        namelist: List[str] = []
+    def define_vector_field(self, name: str, space: "FiniteElementSpaceEnum", ndim: int, element: "Equations") -> tuple[list[Expression], list[Expression], list[str]]:
+        namelist: list[str] = []
         if ndim > self.max_nodal_dimension:
             raise RuntimeError(
                 "Cannot use a this coordinate system in "+str(ndim)+"D")
         for i in range(ndim):
             namelist.append(name + "_" + self.vector_component_suffixes[i])
-        for v in self.additional_vector_component_suffixes:
-            namelist.append(name + "_" + v)  # TODO: Axisymmetric?
+        for suffix in self.additional_vector_component_suffixes:
+            namelist.append(name + "_" + suffix)  # TODO: Axisymmetric?
 
-        v: List[Expression] = []
-        vtest: List[Expression] = []
+        v: list[Expression] = []
+        vtest: list[Expression] = []
         s = scale_factor(name)
         S = test_scale_factor(name)
         for i, f in enumerate(namelist):
             if i >= ndim+1:
                 break
-            element.set_scaling(**{f: name})
+            element.set_scaling({f: name})
             vc = element.define_scalar_field(f, space)
             vc = var(f)
             v.append(vc / s)
-            element.set_test_scaling(**{f: name})
+            element.set_test_scaling({f: name})
             vtest.append(testfunction(f) / S)
         return v, vtest, namelist
 
@@ -1626,21 +2014,28 @@ class BaseDifferentialGeometryCoordinateSystem(BaseCoordinateSystem):
         eaug=self.get_augmented_edim(ndim,edim)
         s=self.get_all_local_coordinates(ndim,edim,lagrangian,with_scales)
         # TODO: This is likely not right!
-        return self.substitute_values_for_additional_local_coordinates(sum([g_contra[a,b]*t[a]*diff(arg,s[b]) for a in range(eaug) for b in range(eaug)]))
+        return self.substitute_values_for_additional_local_coordinates(Expression(sum([g_contra[a,b]*t[a]*diff(arg,s[b]) for a in range(eaug) for b in range(eaug)])))
     
-    def vector_gradient(self, arg: List[Expression], ndim: int, edim: int, with_scales: bool, lagrangian: bool) -> List[Expression]:
+    def vector_gradient(self, arg: Expression, ndim: int, edim: int, with_scales: bool, lagrangian: bool) -> Expression:
         g_contra=self.get_contravariant_metric_tensor(ndim,edim,lagrangian,with_scales)
         t=self.get_covariant_basis_vectors(ndim,edim,lagrangian,with_scales)
         eaug=self.get_augmented_edim(ndim,edim)
         s=self.get_all_local_coordinates(ndim,edim,lagrangian,with_scales)
-        # TODO: This is likely not right!
-        return self.substitute_values_for_additional_local_coordinates(sum([g_contra[a,b]*dyadic(t[a],diff(arg,s[b])) for a in range(eaug) for b in range(eaug)]))
+        # dyadic(d_b arg, t[a]), not dyadic(t[a], d_b arg): the free index of t[a] is the derivative direction and the one
+        # of diff(arg,s[b]) is the component, so the latter has to come first to give grad(u)_ij = d u_i/d x_j as in every
+        # other coordinate system here. Written the other way round this returned the transpose - reducing it to Cartesian
+        # (g^ab = delta_ab, t[a] = e_a) makes that immediate: sum_a e_a[i] * d arg_j/d x_a is d arg_j/d x_i. Reasoned, not
+        # measured: nothing in the repository subclasses this coordinate system, so the path is unexercised.
+        return self.substitute_values_for_additional_local_coordinates(Expression(sum([g_contra[a,b]*dyadic(diff(arg,s[b]),t[a]) for a in range(eaug) for b in range(eaug)])))
     
     def vector_divergence(self, arg: Expression, ndim: int, edim: int, with_scales: bool, lagrangian: bool) -> Expression:
         g_contra=self.get_contravariant_metric_tensor(ndim,edim,lagrangian,with_scales)
         t=self.get_covariant_basis_vectors(ndim,edim,lagrangian,with_scales)
         eaug=self.get_augmented_edim(ndim,edim)
         s=self.get_all_local_coordinates(ndim,edim,lagrangian,with_scales)
-        return self.substitute_values_for_additional_local_coordinates(sum([g_contra[a,b]*dot(t[a].evalm(),diff(arg,s[b]).evalm()) for a in range(eaug) for b in range(eaug)]))
+        return self.substitute_values_for_additional_local_coordinates(Expression(sum([g_contra[a,b]*dot(t[a].evalm(),diff(arg,s[b]).evalm()) for a in range(eaug) for b in range(eaug)])))
     
 
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

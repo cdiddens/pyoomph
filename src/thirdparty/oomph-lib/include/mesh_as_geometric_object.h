@@ -336,7 +336,7 @@ namespace oomph
     MeshAsGeomObject() {}
 
     /// Destructor
-    ~MeshAsGeomObject()
+    ~MeshAsGeomObject() override
     {
       delete Sample_point_container_pt;
     }
@@ -348,14 +348,14 @@ namespace oomph
     void operator=(const MeshAsGeomObject&) = delete;
 
     /// How many items of Data does the shape of the object depend on?
-    unsigned ngeom_data() const
+    unsigned ngeom_data() const override
     {
       return Geom_data_pt.size();
     }
 
     /// Return pointer to the j-th Data item that the object's
     /// shape depends on
-    Data* geom_data_pt(const unsigned& j)
+    Data* geom_data_pt(const unsigned& j) override
     {
       return Geom_data_pt[j];
     }
@@ -373,7 +373,7 @@ namespace oomph
     void locate_zeta(const Vector<double>& zeta,
                      GeomObject*& sub_geom_object_pt,
                      Vector<double>& s,
-                     const bool& use_coordinate_as_initial_guess = false)
+                     const bool& use_coordinate_as_initial_guess = false) override
     {
 #ifdef PARANOID
       if (use_coordinate_as_initial_guess)
@@ -394,7 +394,7 @@ namespace oomph
     /// zeta. This provides an (expensive!) default implementation in which we
     /// loop over all the constituent sub-objects and check if they contain zeta
     /// and then evaluate their position() function.
-    void position(const Vector<double>& zeta, Vector<double>& r) const
+    void position(const Vector<double>& zeta, Vector<double>& r) const override
     {
       // Call position function at current timestep:
       unsigned t = 0;
@@ -408,7 +408,7 @@ namespace oomph
     /// contain zeta and then evaluate their position() function.
     void position(const unsigned& t,
                   const Vector<double>& zeta,
-                  Vector<double>& r) const
+                  Vector<double>& r) const override
     {
       // Storage for the GeomObject that contains the zeta coordinate
       // and the intrinsic coordinate within it.
@@ -440,7 +440,7 @@ namespace oomph
     } // end of position
 
     /// Return the derivative of the position
-    void dposition(const Vector<double>& xi, DenseMatrix<double>& drdxi) const
+    void dposition(const Vector<double>& xi, DenseMatrix<double>& drdxi) const override
     {
       throw OomphLibError("dposition() not implemented",
                           OOMPH_CURRENT_FUNCTION,

@@ -1,34 +1,38 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
+import abc
 import inspect
+import math
 import os.path
+import weakref
 
-from ..generic.mpi import mpi_barrier
+from ..generic.mpi import mpi_barrier, get_mpi_nproc, get_mpi_any, get_mpi_rank, get_mpi_world_comm, mpi_share_root_failure
 
 from ..typings import *
 
@@ -38,9 +42,8 @@ import numpy
 from .. import _pyoomph_core as _pyoomph
 
 from ..expressions.generic import Expression, ExpressionOrNum, is_zero, NameStrSequence
-from ..generic.mpi import get_mpi_rank
 
-
+from .ordering import SortAlongAxis, sort_line_segments
 
 import itertools
 
@@ -54,12 +57,17 @@ if TYPE_CHECKING:
 
 Node = _pyoomph.Node
 Element=_pyoomph.OomphGeneralisedElement
-AnySpatialMesh = Union["InterfaceMesh", "MeshFromTemplate1d",
-                       "MeshFromTemplate2d", "MeshFromTemplate3d"]
-AnyMesh = Union[AnySpatialMesh, "ODEStorageMesh"]
+AnySpatialMesh:TypeAlias = "InterfaceMesh | MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d"
+AnyMesh:TypeAlias = "AnySpatialMesh | ODEStorageMesh"
+# Union of the concrete "mesh built from a MeshTemplate" classes. Used in type annotations
+# in place of MeshFromTemplateBase: nanobind does not support combining a bound C++ base
+# (e.g. _pyoomph.TemplatedMeshBase1d) with an additional Python base in the same class, so
+# MeshFromTemplateBase is no longer a real (nominal) base of MeshFromTemplate1d/2d/3d -- see
+# the _install_mixin() docstring below for how shared behavior and isinstance() still work.
+BulkTemplateMesh:TypeAlias = "MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d"
 
 
-def assert_spatial_mesh(mesh: Optional[Union[AnyMesh, "MeshFromTemplateBase"]]) -> AnySpatialMesh:
+def assert_spatial_mesh(mesh: "AnyMesh | MeshFromTemplateBase | None") -> AnySpatialMesh:
     if mesh is None:
         raise RuntimeError("Mesh is None")
     elif isinstance(mesh, ODEStorageMesh):
@@ -70,18 +78,48 @@ def assert_spatial_mesh(mesh: Optional[Union[AnyMesh, "MeshFromTemplateBase"]]) 
         raise RuntimeError("Should not end up here")
 
 
-class BaseMesh:
+def _install_mixin(target_cls: type, mixin_cls: type) -> type:
+    """
+    Copies every method/attribute defined anywhere in mixin_cls's MRO onto target_cls
+    (without overriding anything target_cls already defines itself), and registers
+    target_cls as a virtual subclass of every ABC found in mixin_cls's MRO.
+
+    This replaces plain Python multiple inheritance (e.g. ``class MeshFromTemplate1d(
+    _pyoomph.TemplatedMeshBase1d, MeshFromTemplateBase)``) for classes that also derive
+    from a nanobind-bound C++ type: nanobind only supports a single linear chain of C++
+    bases and does not support combining a bound base with an additional Python base in
+    the same class. Copying the mixin's methods directly into target_cls's __dict__
+    gives every instance the same attribute lookup result as real inheritance would,
+    without adding mixin_cls to target_cls.__bases__. The ABC registration keeps
+    isinstance(x, mixin_cls) (used throughout the codebase, e.g. to recognize any
+    MeshFromTemplate1d/2d/3d instance as a MeshFromTemplateBase) working, even though
+    mixin_cls is no longer a real ancestor. Static type checkers do not see this virtual
+    relationship, so use a Union type alias (e.g. BulkTemplateMesh) instead of mixin_cls
+    itself in type annotations for values that are actually instances of target_cls.
+    """
+    for base in reversed(mixin_cls.__mro__):
+        if base in (object, abc.ABC):
+            continue
+        for name, value in vars(base).items():
+            if name in ("__dict__", "__weakref__", "__module__", "__doc__"):
+                continue
+            if name not in target_cls.__dict__:
+                setattr(target_cls, name, value)
+        if isinstance(base, abc.ABCMeta):
+            base.register(target_cls)
+    return target_cls
+
+
+class BaseMesh(abc.ABC):
     def __init__(self):
-        super(BaseMesh, self).__init__()
         # self._interfacial_elements=dict()
-        self._interfacemeshes: Dict[str, "InterfaceMesh"] = dict()
+        self._interfacemeshes: dict[str, "InterfaceMesh"] = dict()
         self._outputscales = {}
         self.initial_uniform_refinements = 0
         self._initial_interface_refinement = {}
         # Tracer particles -> name to tracer instance
-        self._tracers: Dict[str, _pyoomph.TracerCollection] = {}
-        self._codegen: Optional["FiniteElementCodeGenerator"]
-        self._problem: "Problem"
+        self._tracers: dict[str, _pyoomph.TracerCollection] = {}
+        self._codegen: "FiniteElementCodeGenerator | None"
         self._eqtree: "EquationTree"
 
     def get_code_gen(self) -> "FiniteElementCodeGenerator":
@@ -91,7 +129,14 @@ class BaseMesh:
     def get_eqtree(self) -> "EquationTree":
         return self._eqtree
 
-    def get_tracers(self, name: str = "tracers", error_on_missing: bool = True) -> Optional[_pyoomph.TracerCollection]:
+    def get_problem(self) -> "Problem":
+        # Overridden by every concrete mesh class (MeshFromTemplateBase, InterfaceMesh,
+        # ODEStorageMesh); declared here only so that BaseMesh methods (like
+        # evaluate_all_observables below) can call self.get_problem() without a static
+        # type checker complaining that BaseMesh itself has no such attribute.
+        raise NotImplementedError("Please specify")
+
+    def get_tracers(self, name: str = "tracers", error_on_missing: bool = True) -> _pyoomph.TracerCollection | None:
         if name not in self._tracers.keys():
             if error_on_missing:
                 raise RuntimeError("Cannot find tracers " +
@@ -109,19 +154,23 @@ class BaseMesh:
                 raise ValueError(
                     "Please set Dirichlet active either to True or False")
 
-    def boundary_intersection_nodes(self, bname1: str, bname2: str) -> List[Node]:
+    def boundary_intersection_nodes(self, bname1: str, bname2: str) -> list[Node]:
         assert isinstance(self, _pyoomph.Mesh)
         imesh = self.get_mesh(bname1)
         assert imesh is not None
-        res: Set[Node] = set()
+        # First-encounter order, not the order of a set of nodes: a set of Node objects iterates by
+        # id(), i.e. by allocation address, which differs from process to process. Anything derived
+        # from that order - a list index, a preCICE vertex numbering, the seed of a flood fill -
+        # then differs between the MPI ranks. The dict is only used to deduplicate.
+        res: dict[Node, None] = {}
         i2 = self.get_boundary_index(bname2)
         for e in imesh.boundary_elements(bname2):
             nn = e.nnode()
             for i in range(nn):
                 n = e.node_pt(i)
                 if n.is_on_boundary(i2):
-                    res.add(n)
-        return list(res)
+                    res[n] = None
+        return list(res.keys())
 
     def nodes(self) -> Iterator[_pyoomph.Node]:
         assert isinstance(self, _pyoomph.Mesh)
@@ -141,37 +190,33 @@ class BaseMesh:
 
     @overload
     def boundary_elements(
-        self, b: str, with_directions: Literal[True]) -> Iterator[Tuple[_pyoomph.OomphGeneralisedElement, int]]: ...
+        self, b: str, with_directions: Literal[True]) -> Iterator[tuple[_pyoomph.OomphGeneralisedElement, int]]: ...
 
-    def boundary_elements(self, b: str, with_directions: bool = False) -> Union[Iterator[_pyoomph.OomphGeneralisedElement], Iterator[Tuple[_pyoomph.OomphGeneralisedElement, int]]]:
+    def boundary_elements(self, b: str, with_directions: bool = False) -> Iterator[_pyoomph.OomphGeneralisedElement] | Iterator[tuple[_pyoomph.OomphGeneralisedElement, int]]:
         assert isinstance(self, _pyoomph.Mesh)
-        bn = self.get_boundary_names()
-        bn = bn.index(b)
-        numelems = self.nboundary_element(bn)
+        bind = self.get_boundary_names().index(b)
+        numelems = self.nboundary_element(bind)
         if with_directions:
             for i in range(numelems):
-                yield self.boundary_element_pt(bn, i), self.face_index_at_boundary(bn, i)
+                yield self.boundary_element_pt(bind, i), self.face_index_at_boundary(bind, i)
         else:
             for i in range(numelems):
-                yield self.boundary_element_pt(bn, i)
+                yield self.boundary_element_pt(bind, i)
 
     def boundary_nodes(self, b: str) -> Iterable[_pyoomph.Node]:
         assert isinstance(self, _pyoomph.Mesh)
-        bn = self.get_boundary_names()
-        bn = bn.index(b)
-        numelems = self.nboundary_node(bn)
+        bind = self.get_boundary_names().index(b)
+        numelems = self.nboundary_node(bind)
         for i in range(numelems):
-            yield self.boundary_node_pt(bn, i)
+            yield self.boundary_node_pt(bind, i)
 
     @overload
-    def get_mesh(self, name: str, return_None_if_not_found: Literal[False] = ...) -> Union["MeshFromTemplate1d",
-                                                                                           "MeshFromTemplate2d", "MeshFromTemplate3d", "InterfaceMesh"]: ...
+    def get_mesh(self, name: str, return_None_if_not_found: Literal[False] = ...) -> "MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d | InterfaceMesh": ...
 
     @overload
-    def get_mesh(self, name: str, return_None_if_not_found: Literal[True]) -> Union["MeshFromTemplate1d",
-                                                                                    "MeshFromTemplate2d", "MeshFromTemplate3d", "InterfaceMesh", None]: ...
+    def get_mesh(self, name: str, return_None_if_not_found: Literal[True]) -> "MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d | InterfaceMesh | None": ...
 
-    def get_mesh(self, name: str, return_None_if_not_found: bool = False) -> Union["MeshFromTemplate1d", "MeshFromTemplate2d", "MeshFromTemplate3d", "InterfaceMesh", None]:
+    def get_mesh(self, name: str, return_None_if_not_found: bool = False) -> "MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d | InterfaceMesh | None":
         splt = name.split("/")
         if len(splt) == 1:
             if not (name in self._interfacemeshes.keys()):
@@ -238,46 +283,51 @@ class BaseMesh:
         lst = self.list_integral_functions()
         assert self._codegen is not None
         deps = self._codegen._dependent_integral_funcs
-        cmb: Set[str] = set()
+        cmb: set[str] = set()
         cmb.update(lst)
         cmb.update(deps.keys())
 
+        res:ExpressionOrNum
         if name in lst:
             res = self._evaluate_integral_function(name)
         elif name in self._codegen._dependent_integral_funcs.keys():
             l = deps[name]
-            args: List[ExpressionOrNum] = []
+            args: list[ExpressionOrNum] = []
             for a in inspect.signature(l).parameters:
                 if not (a in cmb):
                     raise RuntimeError("During evaluation of integral observable "+name +
-                                       ": Cannot evaluate the observable "+name+". Possible are "+", ".join(cmb))
+                                       ": Cannot evaluate the observable "+name+". Possible are "+", ".join(sorted(cmb)))
                 args.append(self.evaluate_observable(a))
             res = l(*args)
 
         else:
 
             raise ValueError("Integral observable "+name +
-                             " not defined on this mesh. Possible integral observables on this mesh are: "+", ".join(cmb))
+                             " not defined on this mesh. Possible integral observables on this mesh are: "+", ".join(sorted(cmb)))
         return res
 
-    def evaluate_all_observables(self) -> Dict[str, ExpressionOrNum]:
+    def evaluate_all_observables(self) -> dict[str, ExpressionOrNum]:
         assert isinstance(self, _pyoomph.Mesh)
         lst = self.list_integral_functions()
         assert self._codegen is not None
         deps = self._codegen._dependent_integral_funcs
-        res: Dict[str, ExpressionOrNum] = {}
-        for l in lst:
-            res[l] = self._evaluate_integral_function(l)
-        args: Dict[str, ExpressionOrNum] = {k: v for k, v in res.items()}
-        args["time"] = self._problem.get_current_time()
-        remaining: Set[str] = set(deps.keys())
+        res: dict[str, ExpressionOrNum] = {}
+        for name in lst:
+            res[name] = self._evaluate_integral_function(name)
+        args: dict[str, ExpressionOrNum] = {k: v for k, v in res.items()}
+        args["time"] = self.get_problem().get_current_time()
+        # A list in declaration order, not a set: the order in which the dependent observables are
+        # resolved here is the insertion order of res, and hence the column order of the observable
+        # output files. Iterating a set of strings made those columns move from run to run, since
+        # Python randomizes that order per process.
+        remaining: list[str] = list(deps.keys())
         while len(remaining) > 0:
-            torem: Set[str] = set()
+            torem: set[str] = set()
             for r in remaining:
                 # Check if we can evaluate
                 l = deps[r]
                 all_present = True
-                arglist: List[ExpressionOrNum] = []
+                arglist: list[ExpressionOrNum] = []
                 for a in inspect.signature(l).parameters:
                     if not a in args.keys():
                         all_present = False
@@ -291,12 +341,12 @@ class BaseMesh:
             if len(torem) == 0:
                 raise RuntimeError(
                     "Cannot evaluate the dependent integral functions, probably due to unknown or circular arguments : "+str(remaining))
-            remaining = remaining-torem
+            remaining = [r for r in remaining if r not in torem]
         # Now remove the vector helpers
         for k in self._codegen._dependent_integral_funcs_is_vector_helper.keys():
             del res[k]
         # And expand all numpy arrays
-        newres: Dict[str, ExpressionOrNum] = {}
+        newres: dict[str, ExpressionOrNum] = {}
         for k, v in res.items():
             if isinstance(v, numpy.ndarray):
                 for i, direct, compo in zip([0, 1, 2], ["x", "y", "z"], v):
@@ -312,7 +362,7 @@ class BaseMesh:
     def get_maximum_value_of_field(self,fieldname:str,minimum_instead:bool=False,dimensional:Literal[True]=...)->ExpressionOrNum: ...
 
     @overload
-    def get_maximum_value_of_field(self,fieldname:str,minimum_instead:bool=False,dimensional:Literal[False]=...)->float: ...
+    def get_maximum_value_of_field(self,fieldname:str,minimum_instead:bool=False,*,dimensional:Literal[False])->float: ...
 
     def get_maximum_value_of_field(self,fieldname:str,minimum_instead:bool=False,dimensional:bool=True) ->ExpressionOrNum:
         assert self._codegen is not None
@@ -343,19 +393,30 @@ class BaseMesh:
 ######################################################
 
 class MeshTemplateOppositeInterfaceConnection:
-    def __init__(self, sideA: str, sideB: str, problem:"Problem", matchfunc: Optional[Callable[[Sequence[float], Sequence[float]], float]] = None):
+    def __init__(self, sideA: str, sideB: str, problem:"Problem", matchfunc: Callable[[Sequence[float], Sequence[float]], float] | None = None):
         self._sideA = sideA
         self._sideB = sideB
-        self._problem=problem
+        # Stored as a weakref, not a strong reference: this connection is owned (via
+        # MeshTemplate._opposite_interface_connections) by a MeshTemplate that is itself
+        # kept alive by the Problem's nb::keep_alive of its meshes - a strong back-reference
+        # here would form the same kind of uncollectible cycle fixed for meshes/codegens.
+        self._problem_wr=weakref.ref(problem)
+        self._match_pos_func: Callable[[Sequence[float], Sequence[float]], float]
         if matchfunc:
             self._match_pos_func = matchfunc
             self._use_kdtree = False
         else:
-            self._match_pos_func: Callable[[Sequence[float], Sequence[float]], float] = lambda a, b: sum([pow(a[j] - b[j], 2) for j in range(len(b))])
+            self._match_pos_func = lambda a, b: sum([pow(a[j] - b[j], 2) for j in range(len(b))])
             self._use_kdtree = True
 
     def __str__(self) -> str:
         return "MeshTemplateOppositeInterfaceConnection("+str(self._sideA)+","+str(self._sideB)+")"
+
+    @property
+    def _problem(self)->"Problem":
+        p=self._problem_wr()
+        assert p is not None, "The Problem this connection belonged to has already been destroyed"
+        return p
 
     def _connect_opposite_interfaces(self, eqtree_root: "EquationTree"):
         sideA = eqtree_root.get_by_path(self._sideA)
@@ -408,10 +469,10 @@ class MeshTemplateOppositeInterfaceConnection:
         assert not isinstance(meshA, _pyoomph.ODEStorageMesh)
         assert not isinstance(meshB, _pyoomph.ODEStorageMesh)
 
-        posBmap: Dict[Tuple[Tuple[float, ...], ...],
+        posBmap: dict[tuple[tuple[float, ...], ...],
                       _pyoomph.OomphGeneralisedElement] = {}
         for eB in meshB.elements():
-            pos: List[Tuple[float, ...]] = []
+            pos: list[tuple[float, ...]] = []
             for nvj in range(eB.nvertex_node()):
                 v = eB.vertex_node_pt(nvj)
                 pos.append(tuple([v.x(xi) for xi in range(v.ndim())]))
@@ -422,7 +483,7 @@ class MeshTemplateOppositeInterfaceConnection:
         rev_offset=[-o for o in offset_vector]
         print("OFFSET VECTOR",offset_vector)
         for eA in meshA.elements():
-            pos2find: List[List[float]] = []
+            pos2find: list[list[float]] = []
             for nvi in range(eA.nvertex_node()):
                 v = eA.vertex_node_pt(nvi)
                 pos2find.append([v.x(xi) for xi in range(v.ndim())])
@@ -430,7 +491,7 @@ class MeshTemplateOppositeInterfaceConnection:
             found = False
             for pB, eB in posBmap.items():
                 if len(pB) == len(pos2find):
-                    dist = 0
+                    dist = 0.0
                     for i in range(len(pos2find)):
                         dist += self._match_pos_func(pos2find[i], pB[i])
                     # print(pB,len(pB),dist)
@@ -440,7 +501,7 @@ class MeshTemplateOppositeInterfaceConnection:
                         found = True
                         break
             if not found:
-                debug_entries: List[Tuple[float,Tuple[Tuple[float, ...], ...]]] = []
+                debug_entries: list[tuple[float,tuple[tuple[float, ...], ...]]] = []
                 for pB, eB in posBmap.items():
                     if len(pB) == len(pos2find):
                         dist = 0.0
@@ -468,8 +529,7 @@ class MeshTemplate(_pyoomph.MeshTemplate):
     """
     def __init__(self):
         super(MeshTemplate, self).__init__()
-        self._domains: Dict[str, _pyoomph.MeshTemplateElementCollection] = {}
-        self._problem = None
+        self._domains: dict[str, _pyoomph.MeshTemplateElementCollection] = {}
         self._geometry_defined = False
         #: The minimum permitted error for the spatial error estimator. If ``None``, we use the value from the :py:class:`~pyoomph.generic.problem.Problem` object.
         self.min_permitted_error = None
@@ -479,16 +539,16 @@ class MeshTemplate(_pyoomph.MeshTemplate):
         self.max_refinement_level = None
         #: The minimum refinement level for spatial adaptivity. If ``None``, we use the value from the :py:class:`~pyoomph.generic.problem.Problem` object.
         self.min_refinement_level = None
-        self._opposite_interface_connections: List[MeshTemplateOppositeInterfaceConnection] = [
+        self._opposite_interface_connections: list[MeshTemplateOppositeInterfaceConnection] = [
         ]
         self._meshfile = None
         #: Must be set to allow for remeshing.
-        self.remesher: Optional["RemesherBase"] = None
+        self.remesher: "RemesherBase | None" = None
         self.auto_find_opposite_interface_connections = True
         self._template_override = None
-        self._interior_boundaries: Set[str] = set()
-        self._macrobounds: List[_pyoomph.MeshTemplateCurvedEntityBase] = []
-        self._fntrunk:Optional[str]=None # To be set for remeshing
+        self._interior_boundaries: set[str] = set()
+        self._macrobounds: list[_pyoomph.MeshTemplateCurvedEntityBase] = []
+        self._fntrunk:str | None=None # To be set for remeshing
         self.all_nodes_as_boundary_nodes:bool=False
         
     def _reset(self):
@@ -500,14 +560,14 @@ class MeshTemplate(_pyoomph.MeshTemplate):
         self._macrobounds = []
 
     def get_problem(self) -> "Problem":
-        return self._problem
-    
+        return self._get_problem() #type:ignore
+
     def set_boundary_as_interior(self, *args: str):
         for name in args:
             self._interior_boundaries.add(name)
 
-    def define_state_file(self, state: "DumpFile",additional_info={}) -> "MeshTemplate":
-        mshfile = self.get_template()._meshfile
+    def _define_state_file(self, state: "DumpFile",additional_info={}) -> "MeshTemplate":
+        mshfile = self._get_template()._meshfile
         if mshfile is None:
             mshfile = ""
         else:
@@ -522,43 +582,41 @@ class MeshTemplate(_pyoomph.MeshTemplate):
 #            print("Writing meshfile "+found_mshfile)
 
         has_remesher = 1 if self.remesher is not None else 0
-        state.int_data(lambda: has_remesher,
-                       lambda r: state.assert_equal(has_remesher, r))
+        # We must follow the flag stored in the file here, not our own: since MeshedMeshTemplate attaches a
+        # RemesherViaRecreation by default, a template can now have a remesher while an older state file - written
+        # when the same script had none - does not contain the remesher counter. Asserting equality would make all
+        # those files unloadable, and reading the counter unconditionally would desynchronize the entire file.
+        has_remesher = state.int_data(lambda: has_remesher, lambda r: r)
         if has_remesher:
-            assert self.remesher is not None
+            if self.remesher is None:
+                raise RuntimeError("The state file was written with a remesher attached to the mesh template, but the template does not have one anymore")
             self.remesher._cnt = state.int_data(
                 lambda: self.remesher._cnt, lambda s: s)  # type:ignore
         if found_mshfile != mshfile:
             # We need to load the remeshed version here
-            from . import gmsh
             statedir = os.path.dirname(state.fname)
             fffound_mshfile = os.path.join(statedir, found_mshfile)
-            newtempl = gmsh.GmshTemplate(fffound_mshfile)
+            newtempl = self._template_for_stored_mesh_file(fffound_mshfile)
             newtempl.remesher = self.remesher
-            assert self._problem is not None
-            newtempl._do_define_geometry(self._problem)
+            if newtempl.remesher is not None:
+                # Otherwise the next remesh would recreate the geometry from the template this state
+                # file replaced, whose domains and geometry belong to the run that wrote it.
+                newtempl.remesher.template = newtempl
+            newtempl._do_define_geometry(self.get_problem())
             self._template_override = newtempl
-            newtempl.get_template()._meshfile = fffound_mshfile
+            newtempl._get_template()._meshfile = fffound_mshfile
             # self._meshfile=found_mshfile
-        return self.get_template()
+        return self._get_template()
         # print("IN STATE FILE "+mshfile,state.fname,)
         # exit()
-
-    def get_opposite_interface(self, side: str) -> Optional[str]:
-        for ic in self._opposite_interface_connections:
-            if ic._sideA == side:
-                return ic._sideB
-            elif ic._sideB == side:
-                return ic._sideA
-        return None
 
     # Called from C on automatic finding
     def _add_opposite_interface_connection(self, sideA: str, sideB: str):
         self.add_opposite_interface_connection(sideA, sideB)
 
-    def add_opposite_interface_connection(self, sideA: str, sideB: str, matchfunc: Optional[Callable[[Sequence[float], Sequence[float]], float]] = None):
+    def add_opposite_interface_connection(self, sideA: str, sideB: str, matchfunc: Callable[[Sequence[float], Sequence[float]], float] | None = None):
         self._opposite_interface_connections.append(
-            MeshTemplateOppositeInterfaceConnection(sideA, sideB, self._problem, matchfunc))
+            MeshTemplateOppositeInterfaceConnection(sideA, sideB, self.get_problem(), matchfunc))
 
     def _connect_opposite_interfaces(self, eqtree_root: "EquationTree"):
         for conn in self._opposite_interface_connections:
@@ -572,7 +630,7 @@ class MeshTemplate(_pyoomph.MeshTemplate):
         for conn in self._opposite_interface_connections:
             conn._connect_elements(eqtree_root)
 
-    def get_template(self) -> "MeshTemplate":
+    def _get_template(self) -> "MeshTemplate":
         if self._template_override is None:
             return self
         else:
@@ -584,7 +642,12 @@ class MeshTemplate(_pyoomph.MeshTemplate):
         """
         raise RuntimeError("Please implement the function define_geometry")
 
-    def available_domains(self) -> Set[str]:
+    def _remeshing_can_change_the_mesh(self) -> bool:
+        # Whether remeshing this template can give a mesh different from the current one. Only a
+        # MeshedMeshTemplate can tell (see there), any other remesher is always taken at face value.
+        return True
+
+    def _available_domains(self) -> set[str]:
         """
         Returns a list of all available domains constructed with :py:meth:`new_domain`.
         """
@@ -602,7 +665,7 @@ class MeshTemplate(_pyoomph.MeshTemplate):
                 "Can only check the available domains after _do_define_geometry")
         return name in self._domains.keys()
 
-    def get_domain(self, name: str) -> _pyoomph.MeshTemplateElementCollection:
+    def _get_domain(self, name: str) -> _pyoomph.MeshTemplateElementCollection:
         """
         Get a domain by name constructed with the method :py:meth:`new_domain` before.
         """
@@ -614,18 +677,40 @@ class MeshTemplate(_pyoomph.MeshTemplate):
     def _do_define_geometry(self, problem: "Problem"):
         if not self._geometry_defined:
             self._geometry_defined = True
-            self._problem = problem
             self._set_problem(problem)
-            self.define_geometry()
+            if self._define_geometry_is_required():
+                self.define_geometry()
             if self.auto_find_opposite_interface_connections:
                 self._find_opposite_interface_connections()
 
-    def new_domain(self, name: str, nodal_dimension: Optional[int] = None) -> _pyoomph.MeshTemplateElementCollection:
+    def _define_geometry_is_required(self) -> bool:
+        """Whether :py:meth:`define_geometry` has to run at all.
+
+        ``False`` where the geometry comes from a file instead of from the user's code - a
+        :py:class:`~pyoomph.meshes.gmsh.GmshTemplate` reloading a stored ``.msh`` after a state file
+        was read. Calling ``define_geometry`` there would ask a subclass to build a geometry with no
+        backend behind it, which is what used to make the reload fall back to a plain
+        ``GmshTemplate`` and lose the template's class. See :py:meth:`_template_for_stored_mesh_file`.
+        """
+        return True
+
+    def _template_for_stored_mesh_file(self, meshfile: str) -> "MeshTemplate":
+        """The template that a state file's stored mesh is to be rebuilt from.
+
+        A distinct object from ``self``, since the mesh is only replaced when the template changes
+        (see ``Problem._define_state_file``). The default cannot do anything but a plain
+        :py:class:`~pyoomph.meshes.gmsh.GmshTemplate`; :py:class:`~pyoomph.meshes.gmsh.GmshTemplate`
+        itself overrides it to keep the class.
+        """
+        from . import gmsh
+        return gmsh.GmshTemplate(meshfile)
+
+    def new_domain(self, name: str, nodal_dimension: int | None = None) -> _pyoomph.MeshTemplateElementCollection:
         """
         Create a new domain with the given name. With the help of this domain, elements can be added to the mesh.
         """
         if not self.has_domain(name):
-            self._domains[name] = self.new_bulk_element_collection(name)
+            self._domains[name] = self._new_bulk_element_collection(name)
             if nodal_dimension is not None:
                 self._domains[name].set_nodal_dimension(nodal_dimension)
         else:
@@ -639,9 +724,9 @@ class MeshTemplate(_pyoomph.MeshTemplate):
     def nondim_size(self, a: ExpressionOrNum) -> float: ...
 
     @overload
-    def nondim_size(self, a: List[ExpressionOrNum]) -> List[float]: ...
+    def nondim_size(self, a: list[ExpressionOrNum]) -> list[float]: ...
 
-    def nondim_size(self, a: Union[ExpressionOrNum, List[ExpressionOrNum]]) -> Union[float, List[float]]:
+    def nondim_size(self, a: ExpressionOrNum | list[ExpressionOrNum]) -> float | list[float]:
         """
         Nondimensionalize a coordinate or a length scale by dividing by the spatial scale of the problem.
         
@@ -652,46 +737,54 @@ class MeshTemplate(_pyoomph.MeshTemplate):
             The arguments divided by the spatial scale of the problem.
         """
         if isinstance(a, list):
-            resL: List[float] = []
+            resL: list[float] = []
             for b in a:
                 resL.append(self.nondim_size(b))
             return resL
         res: float
-        if isinstance(a, float) or isinstance(a, int) or isinstance(a,_pyoomph.GiNaC_GlobalParam) or isinstance(a,numpy.floating) or isinstance(a,numpy.integer):
-            assert self._problem is not None
-            res = (float(a / self._problem.get_scaling("spatial")))
-        elif isinstance(a, _pyoomph.Expression):  # type:ignore
-            assert self._problem is not None
-            res = ((a / self._problem.get_scaling("spatial")).float_value())        
-        else:
-            raise ValueError("Strange spatial argument for a mesh:"+str(a)+" of type "+str(type(a)))
+        spatial = self.get_problem().get_scaling("spatial")
+        try:
+            if isinstance(a, float) or isinstance(a, int) or isinstance(a,_pyoomph.GiNaC_GlobalParam) or isinstance(a,numpy.floating) or isinstance(a,numpy.integer):
+                res = (float(a / spatial))
+            elif isinstance(a, _pyoomph.Expression):  # type:ignore
+                res = ((a / spatial).float_value())
+            else:
+                raise ValueError("Strange spatial argument for a mesh:"+str(a)+" of type "+str(type(a)))
+        except RuntimeError as e:
+            # Mixing a dimensionless mesh coordinate with a dimensional spatial scale only surfaced as
+            # "Cannot convert meter^(-1) to double" from the float conversion, which does not say which
+            # of the two sides is the problem.
+            raise RuntimeError("Cannot nondimensionalise the mesh coordinate/size "+str(a)+" with the spatial scale "+str(spatial)+" of the problem.\n"
+                               "If the problem uses dimensional scales (set_scaling(spatial=...)), all mesh coordinates and sizes must be given dimensionally as well, e.g. size=1*meter.\n"
+                               "Original error: "+str(e)) from e
         return res
-
-    def add_nodes(self, *args: Sequence[float]) -> Optional[Union[int , Tuple[int, ...]]]:
-        res: List[int] = []
-        for a in args:
-            res.append(self.add_node(*a))
-        if len(res) == 0:
-            return
-        elif len(res) == 1:
-            return res[0]
-        else:
-            return tuple(res)
 
     def create_curved_entity(self, typ: str, *args: Any, **kwargs: Any)-> _pyoomph.MeshTemplateCurvedEntityBase:
         """
-        Creates a curved entity on the mesh. Currently only the type ``"circle_arc"`` is supported, which requires the start and end point as positional arguments and either the ``center`` or ``through_point`` as keyword argument.
+        Creates a curved entity, i.e. the exact geometry that facets of this mesh lie on. Nodes created
+        by spatial refinement are then placed on that geometry instead of on the straight-sided
+        interpolation between the coarse mesh's nodes.
+
+        Supported types, with the arguments each expects (points may be given either as node indices or
+        as coordinate lists):
+
+        * ``"circle_arc"``: the arc's ``start`` and ``end`` as positional arguments, plus ``center``.
+        * ``"sphere_part"``: one ``point_on_sphere`` as positional argument, plus ``center``. The
+          parametrisation is the outward unit normal, so a patch may be of any size short of half the
+          sphere and may contain the poles.
+        * ``"cylinder_arc"``: the arc's ``start`` and ``end`` as positional arguments, plus ``center``.
+          The cylinder's axis follows from those three points.
 
         Args:
-            typ: Type of the curved entity. Currently only ``"circle_arc"`` is supported.
-            args: Positional arguments for the curved entity.
-            kwargs: Keyword arguments for the curved entity.
+            typ: One of ``"circle_arc"``, ``"sphere_part"``, ``"cylinder_arc"``.
+            args: Positional arguments for the curved entity, as listed above.
+            kwargs: Keyword arguments for the curved entity, in particular ``center``.
 
         Returns:
             The created curved entity to be used in :py:meth:`add_facet_to_boundary`.
         """
         store_entity: bool = kwargs.get("store_entity", True)
-        res = None
+        res: "_pyoomph.MeshTemplateCurvedEntityBase"
         if typ == "circle_arc":
             if len(args) != 2 or (kwargs.get("center") is None and kwargs.get("through_point") is None):
                 raise RuntimeError(
@@ -712,6 +805,28 @@ class MeshTemplate(_pyoomph.MeshTemplate):
                 end = self.get_node_position(end)
             res = _pyoomph.CurvedEntityCircleArc(
                 center, start, end)  # type:ignore
+        elif typ == "sphere_part":
+            if len(args) != 1 or kwargs.get("center") is None:
+                raise RuntimeError(
+                    "sphere_part must have one positional arg {point_on_sphere} and center as kwarg")
+            center, onsphere = kwargs.get("center"), args[0]
+            if isinstance(center, int):
+                center = self.get_node_position(center)
+            if isinstance(onsphere, int):
+                onsphere = self.get_node_position(onsphere)
+            res = _pyoomph.CurvedEntitySpherePart(center, onsphere)  # type:ignore
+        elif typ == "cylinder_arc":
+            if len(args) != 2 or kwargs.get("center") is None:
+                raise RuntimeError(
+                    "cylinder_arc must have two positional args {start,end} and center as kwarg")
+            center, start, end = kwargs.get("center"), args[0], args[1]
+            if isinstance(center, int):
+                center = self.get_node_position(center)
+            if isinstance(start, int):
+                start = self.get_node_position(start)
+            if isinstance(end, int):
+                end = self.get_node_position(end)
+            res = _pyoomph.CurvedEntityCylinderArc(center, start, end)  # type:ignore
         else:
             raise RuntimeError("Unknown type "+str(typ))
         if store_entity:
@@ -719,44 +834,361 @@ class MeshTemplate(_pyoomph.MeshTemplate):
         return res
 
 
+class MeshedMeshTemplate(MeshTemplate):
+    """
+    Base class of all :py:class:`MeshTemplate` classes that let an external mesh generator (e.g. Gmsh) create the mesh
+    from a geometry description given in :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.define_geometry`.
+
+    Since the geometry is described by a method that can be called again at any time, remeshing is done by recreation:
+    a :py:class:`~pyoomph.meshes.remesher.RemesherViaRecreation` is attached by default, which calls
+    :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.define_geometry` again whenever remeshing is required. It is therefore
+    up to you to describe both the initial and the remeshed geometry in that single method: use :py:meth:`is_remeshing`
+    (or its complement :py:meth:`is_first_time`) to distinguish the two cases and
+    :py:meth:`get_boundary_coordinates` to reconstruct the boundaries that have moved meanwhile.
+
+    A :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.define_geometry` that never asks either of the two would describe the
+    very same geometry again, i.e. recreating it cannot give a different mesh. Such a template is therefore skipped
+    when :py:meth:`~pyoomph.generic.problem.Problem.force_remesh` gathers the meshes to remesh by itself, but not when
+    it is asked for this particular mesh, e.g. by a :py:class:`~pyoomph.equations.generic.RemeshWhen`.
+
+    If you prefer the mesh generator to reconstruct the geometry automatically from the deformed mesh, overwrite the
+    :py:attr:`~pyoomph.meshes.mesh.MeshTemplate.remesher` attribute by e.g. a
+    :py:class:`~pyoomph.meshes.remesher.Remesher2d` instead.
+
+    .. note::
+        On a mesh distributed with ``--distribute``, :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.define_geometry` is a
+        **collective** region: :py:meth:`get_boundary_coordinates` gathers the boundary from all ranks, since no rank
+        holds more than its own part of it. Every rank must therefore reach the same calls, with the same arguments and
+        in the same order - do not branch on the MPI rank inside ``define_geometry``, and do not ask for a boundary on
+        some ranks only. A ``define_geometry`` that raises on one rank is caught and turned into an error on all of
+        them; one whose ranks disagree on which collectives to enter can only hang. See dev_docs/distributed_remeshing.md.
+    """
+
+    def __init__(self):
+        super().__init__()
+        # Deferred import: remesher.py imports gmsh.py, which imports this module, so importing it at module level
+        # would be circular.
+        from .remesher import RemesherViaRecreation
+        self.remesher = RemesherViaRecreation(self)
+        # Remember the remesher we attached ourselves, so that we can tell it from one the user has chosen deliberately
+        self._auto_remesher = self.remesher
+        self._within_define_geometry = False
+        # Set by is_first_time(), i.e. whenever define_geometry asks whether it is remeshing. A define_geometry that
+        # never asks will describe the very same geometry again, so recreating it cannot give a different mesh
+        self._has_remeshing_path = False
+
+    def is_first_time(self) -> bool:
+        """Will return ``True``, if the mesh is being generated for the first time. Otherwise, it will return ``False``, which means that the mesh is being remeshed. You can use this to define different geometries for the initial mesh and the remeshed mesh.
+
+        May only be called from within :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.define_geometry`, since only there the answer is meaningful.
+
+        Returns:
+            Whether it is the first time the mesh is generated or not. ``True`` means first time, ``False`` means remeshing.
+        """
+        self._assert_within_define_geometry("is_first_time() and is_remeshing()")
+        # Asking the question is what tells us that this template describes a different geometry when remeshed
+        self._has_remeshing_path = True
+        return not self.get_problem().is_initialised()
+
+    def _assert_within_define_geometry(self, what: str):
+        if not self._within_define_geometry:
+            raise RuntimeError(what+" may only be called from within the define_geometry method of the mesh template. Elsewhere, no mesh is being created, so there is nothing to tell apart. If you require the information later on, store it in an attribute during define_geometry.")
+
+    def _remeshing_can_change_the_mesh(self) -> bool:
+        # Used by Problem.force_remesh() when it collects the meshes to remesh on its own: since we attach a
+        # RemesherViaRecreation to every meshed template, remeshing all of them would also rebuild those templates
+        # whose define_geometry does not react on remeshing at all - which just burns time to arrive at the same mesh.
+        # A remesher the user has set deliberately is of course never skipped.
+        if self.remesher is not self._auto_remesher:
+            return True
+        return self._has_remeshing_path
+
+    def is_remeshing(self) -> bool:
+        """Complement of :py:meth:`is_first_time`, i.e. ``True`` whenever :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.define_geometry` is called to remesh an already existing mesh.
+
+        Returns:
+            Whether the mesh is currently being recreated for remeshing.
+        """
+        return not self.is_first_time()
+
+    def get_boundary_coordinates(self, name: str, sort_along_axis: "SortAlongAxis | None" = None, start_near_point: tuple["ExpressionOrNum", "ExpressionOrNum"] | None = None, nondimensional: bool = False) -> list[list[tuple["ExpressionOrNum", "ExpressionOrNum"]]]:
+        """Returns a list of boundary segments, which are lists of (x,y) coordinates (dimensional or not can be controlled by the nondimensional argument). The segments are sorted and reversed based on the sort_along_axis or start_near_point arguments. If both are None, the order is arbitrary.
+
+        On a mesh distributed with ``--distribute`` this is a **collective** call that returns the
+        whole boundary on every rank, not just this rank's part of it. Every rank must therefore
+        reach it, with the same arguments and in the same order - see :py:class:`MeshedMeshTemplate`.
+
+        Args:
+            name: Name of the boundary, e.g. "domain1/boundary1"
+            sort_along_axis: Sort the segments along a given axis, e.g. "x+" means sort along x in increasing order, "y-" means sort along y in decreasing order. Defaults to None.
+            start_near_point: Sort the segments by their distance to this point, closest first, and start each segment at its end closer to the point. May carry units. Defaults to None.
+            nondimensional: Whether to return nondimensional coordinates. Defaults to False.
+
+        Returns:
+            A list of boundary segments, which are each a list of (x,y) coordinates. These are plain
+            floats only for ``nondimensional``; otherwise they carry the spatial scaling and are
+            therefore dimensional expressions.
+        """
+        self._assert_within_define_geometry("get_boundary_coordinates()")
+        self._has_remeshing_path = True # The geometry obviously depends on the mesh we are replacing
+        problem = self.get_problem()
+        if not problem.is_initialised():
+            raise RuntimeError("Cannot get boundary coordinates before the first mesh is generated")
+
+        mesh, merge = self._resolve_mesh_for_boundary_coordinates(name)
+        payload:list[list[tuple[float,float]]] | None
+        if not merge:
+            # Serial, or mpirun without --distribute: this rank holds the whole boundary already.
+            segs, pts = self._sorted_boundary_segments(mesh, sort_along_axis, start_near_point)
+            assert segs is not None and pts is not None  # only a global request returns None
+            payload = [[(float(pts[0, i]), float(pts[1, i])) for i in seg] for seg in segs]
+        else:
+            # Each rank sees only its own partition of the boundary, which is not a piece of the
+            # answer - it is a different, truncated geometry, and the segments are cut wherever the
+            # partition happens to run. So merge the mesh data (collective, result on rank 0), sort
+            # there, and hand the polylines to everybody.
+            #
+            # The broadcast has to be here rather than inside the merge: a repeated request is a
+            # cache hit on rank 0, which broadcasts nothing (see meshdatamerge.py §3.4b), and the
+            # other ranks would then wait for a request that never comes.
+            comm = get_mpi_world_comm()
+            assert comm is not None  # needs_merging implies more than one process
+            payload = None
+            error: BaseException | None = None
+            if get_mpi_rank() == 0:
+                # Everything from here to the broadcast happens on rank 0 alone, so it has to end for
+                # all ranks or for none - the sorting rejects a bad sort_along_axis, and the merge
+                # itself checks that the nodes it identified really do coincide.
+                try:
+                    segs, pts = self._sorted_boundary_segments(mesh, sort_along_axis, start_near_point,
+                                                               global_mesh=True)
+                    assert segs is not None and pts is not None  # rank 0 is the one that gets the merged data
+                    payload = [[(float(pts[0, i]), float(pts[1, i])) for i in seg] for seg in segs]
+                except BaseException as e:
+                    error = e
+            else:
+                self._sorted_boundary_segments(mesh, sort_along_axis, start_near_point, global_mesh=True)
+            # Only the nondimensional numbers travel, so a dimensional scaling (a GiNaC expression)
+            # never has to survive being pickled - it is applied below, on every rank.
+            payload = comm.bcast(payload, root=0)
+            mpi_share_root_failure(error, context="building the boundary coordinates of '"+name+"' from the merged mesh data")
+            assert payload is not None
+
+        SS = 1 if nondimensional else problem.get_scaling("spatial")
+        return [[(x*SS, y*SS) for x, y in seg] for seg in payload]
+
+    def _resolve_mesh_for_boundary_coordinates(self, name: str):
+        """The mesh named by get_boundary_coordinates, and whether its data has to be merged.
+
+        Both answers are agreed on across the ranks, because both decide whether this rank enters the
+        merge collective that follows, and a rank that decides differently from the others hangs them
+        rather than failing:
+
+        * a name this rank cannot resolve becomes an error on all of them, instead of unwinding one
+          rank alone - the same asymmetry MeshedMeshTemplate._do_define_geometry guards against one
+          level further out;
+        * ``needs_merging`` is asked of every rank rather than trusted locally. It reads
+          ``is_mesh_distributed()`` off *this* mesh, and an interface mesh whose partition happens to
+          hold no element of it is exactly the kind of place where that could come out differently.
+        """
+        problem = self.get_problem()
+        collective = bool(problem.is_distributed()) and get_mpi_nproc() > 1
+        mesh = None
+        error: BaseException | None = None
+        try:
+            mesh = problem.get_mesh(name)
+        except BaseException as e:
+            error = e
+        if not collective:
+            if error is not None:
+                raise error
+            return mesh, False
+        if get_mpi_any(error is not None):
+            if error is not None:
+                raise error
+            raise RuntimeError("get_boundary_coordinates('"+name+"'): another MPI rank could not resolve "
+                               "that mesh. This rank raises here rather than entering the collective merge "
+                               "alone; the real error is reported by the rank that saw it.")
+        # Deferred, like everywhere else that touches the merge: a serial run must not pull in mpi4py
+        # through this path.
+        from .meshdatamerge import needs_merging
+        assert mesh is not None # get_mesh() returns a mesh or raises, and a raise has been dealt with above
+        return mesh, get_mpi_any(needs_merging(mesh))
+
+    def _sorted_boundary_segments(self, mesh, sort_along_axis: "SortAlongAxis | None", start_near_point: tuple["ExpressionOrNum", "ExpressionOrNum"] | None, global_mesh: bool = False):
+        """The boundary's line segments, oriented and ordered, together with the coordinate array.
+
+        With ``global_mesh`` the extraction is collective and only rank 0 gets data back; the other
+        ranks still have to call it, which is why it returns ``(None, None)`` there instead of
+        refusing."""
+        data = self.get_problem().get_cached_mesh_data(mesh, nondimensional=True, global_mesh=global_mesh)
+        if data is None:
+            return None, None
+        pts = data.get_coordinates()
+        segs, _ = data.get_interface_line_segments()
+        segs = sort_line_segments(pts, segs, sort_along_axis=sort_along_axis, start_near_point=start_near_point, spatial_unit=self.get_problem().get_scaling("spatial"), whom="get_boundary_coordinates()")
+        return segs, pts
+
+    def _do_define_geometry(self, problem: "Problem", filename_trunk: str | None = None):
+        # RemesherViaRecreation passes a fresh file name trunk for each remeshing round, so that the meshes written by
+        # the backend do not overwrite each other. Backends that do not write any file can simply ignore it.
+        if filename_trunk is not None:
+            self._fntrunk = filename_trunk
+        self._within_define_geometry = True
+        error: BaseException | None = None
+        try:
+            super()._do_define_geometry(problem)
+        except BaseException as e:
+            error = e
+        finally:
+            self._within_define_geometry = False
+        # Whatever the backend does with the geometry afterwards is collective (the barriers and the
+        # run_on_rank_zero write in generate_mesh_to_file), so a rank that unwinds from here alone
+        # leaves the others waiting for it forever. Agree on the outcome instead, symmetrically
+        # rather than rooted at rank 0, precisely because the rank that fails need not be rank 0.
+        #
+        # This catches a define_geometry that raises once all ranks are through its own collectives -
+        # a geometry only one rank finds invalid, say. It cannot catch a raise BEFORE one of them:
+        # get_boundary_coordinates() is collective on a distributed mesh, so a rank that never
+        # reaches it hangs the others inside its merge and this point is never reached. That is what
+        # the "do not branch on rank" contract on MeshedMeshTemplate is for; see
+        # dev_docs/distributed_remeshing.md, stage 1.
+        if get_mpi_nproc() > 1:
+            if get_mpi_any(error is not None) and error is None:
+                raise RuntimeError("Another MPI rank failed inside the define_geometry() of "+type(self).__name__ +
+                                   ". This rank succeeded and raises here so that the job ends rather than waiting "
+                                   "for a rank that is gone; the real error is reported by the rank that saw it.")
+        if error is not None:
+            raise error
+
+
+def _evaluate_extremum_impl(mesh:"AnySpatialMesh",name:str | list[str],sign:int,dimensional:bool,as_float:bool,return_x:bool):
+    """Shared body of ``evaluate_maximum``/``evaluate_minimum`` for bulk and interface meshes.
+
+    ``sign`` is +1 for a maximum and -1 for a minimum, matching ``Mesh::evaluate_extremum``.
+
+    On a distributed mesh this is **collective**: an extremum is a property of the whole mesh, while
+    ``Mesh::evaluate_extremum`` samples only the elements this rank holds (its halo copies merely
+    repeat a neighbour's answer). Every rank therefore has to reach it, with the same arguments -
+    ``rayleigh_plateau.py`` derives its *time step* from one of these, so ranks that answered
+    differently did not fail, they quietly stopped being one simulation.
+    """
+    if not isinstance(name,str):
+        if return_x:
+            raise RuntimeError("Please set return_x=False for multiple extremum evaluations (or call them one by one)")
+        return [cast(ExpressionOrNum, _evaluate_extremum_impl(mesh,n,sign,dimensional,as_float,False)) for n in name]
+    flags=0
+    if dimensional:
+        flags|=1
+
+    x:list[float] | None=None
+    if mesh.nelement():
+        val,s,elem=mesh._evaluate_extremum(name,sign,flags)
+        if return_x:
+            x=[float(xc) for xc in elem.get_interpolated_position_at_s(0,s,False)]
+        fval=float(_pyoomph.GiNaC_collect_units(val)[0]) if dimensional else float(val)
+    else:
+        # A rank holding no element of this mesh has nothing to offer - which happens for an
+        # interface mesh whose boundary lies entirely in another partition. -inf loses a maximum
+        # search and +inf loses a minimum one, so it needs no special case in the comparison.
+        fval=-math.inf if sign>0 else math.inf
+
+    if mesh.is_mesh_distributed() and get_mpi_nproc()>1:
+        comm=get_mpi_world_comm()
+        assert comm is not None
+        # One allgather of a float and a handful of coordinates, rather than a reduction followed by
+        # a broadcast: min()/max() over the gathered list settles a tie by the lowest rank, and does
+        # so identically on every rank.
+        gathered=comm.allgather((fval,x))
+        pick=max if sign>0 else min
+        best=pick(range(len(gathered)),key=lambda r:gathered[r][0])
+        fval,x=gathered[best]
+        if fval in (math.inf,-math.inf):
+            raise RuntimeError("evaluate_maximum/evaluate_minimum('"+name+"'): no rank holds any element of '"+
+                               mesh.get_full_name()+"', so there is no extremum to report.")
+
+    # The unit comes from the registered expression rather than from the value just evaluated, so
+    # that a rank holding no element of this mesh - which has no value to read it off - can still
+    # build the dimensional result. Only the number travels between the ranks; a GiNaC expression
+    # could not, and would not have to.
+    unit:ExpressionOrNum=1
+    if dimensional and not as_float:
+        unit=mesh.get_code_gen()._get_extremum_expression_unit_factor(name)
+
+    if return_x and x is not None and dimensional:
+        SS=mesh.get_problem().get_scaling("spatial")
+        assert isinstance(SS, Expression)
+        xdim:list[ExpressionOrNum]=[xc*SS for xc in x]
+    else:
+        xdim=list(x) if x is not None else None  # type:ignore
+
+    if not dimensional:
+        outval:ExpressionOrNum=fval
+    elif as_float:
+        outval=fval
+        if return_x:
+            assert xdim is not None
+            xn:list[ExpressionOrNum]=[]
+            for xc in xdim:
+                assert isinstance(xc, Expression)
+                factor, _, _, _ = _pyoomph.GiNaC_collect_units(xc)
+                xn.append(float(factor))
+            xdim=xn
+    else:
+        outval=fval*unit
+    if return_x:
+        assert xdim is not None
+        return outval,xdim
+    else:
+        return outval
+
+
 class MeshFromTemplateBase(BaseMesh):
-    def __init__(self, problem: "Problem", templatemesh: MeshTemplate, domainname: str, eqtree: "EquationTree", previous_mesh: Optional["MeshFromTemplateBase"] = None):
-        super(MeshFromTemplateBase, self).__init__()
+    # Restated with the types of the C++ Mesh properties they really are: assigning them in __init__
+    # would otherwise define plain attributes here, which the concrete meshes then inherit twice with
+    # two different types (once from this mixin, once from the C++ base).
+    min_permitted_error:float
+    max_permitted_error:float
+    max_refinement_level:int
+    min_refinement_level:int
+
+    def __init__(self, problem: "Problem", templatemesh: MeshTemplate, domainname: str, eqtree: "EquationTree", previous_mesh: "BulkTemplateMesh | None" = None):
+        # Not super().__init__(): self is a MeshFromTemplate1d/2d/3d instance, which (due to the
+        # nanobind single-inheritance restriction, see _install_mixin) is not a real subclass of
+        # MeshFromTemplateBase/BaseMesh, so super(MeshFromTemplateBase, self) would fail its MRO check.
+        BaseMesh.__init__(self)
 
         assert isinstance(
             self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
 
-        self._problem = problem
         self._templatemesh: MeshTemplate = templatemesh
         self._name = domainname
         self._eqtree: "EquationTree" = eqtree
-        self._eqtree._mesh = self
-        # self._equations = eqtree._equations
         self._codegen = eqtree.get_code_gen()
-        self._codegen._mesh = self
+        self._eqtree._mesh = self
         self.ignore_initial_condition = False
         self._set_problem(problem, self._codegen._code)
         self._error_estimator: Z2ErrorEstimator  # =None
         self._solves_since_remesh = 0  # Counting the number of solves since last remesh
-        self._periodic_corner_node_info: Dict[Node, Node] = {}
+        self._periodic_corner_node_info: dict[Node, Node] = {}
         self._initial_uniform_refinement_level=0
 
         T = TypeVar("T")
 
-        def a_or_b(a: Optional[T], b: Optional[T]) -> T:
+        def a_or_b(a: T | None, b: T | None) -> T:
             res = b if a is None else a
             assert res is not None
             return res
 
         if previous_mesh is None:
             self.min_permitted_error = a_or_b(
-                templatemesh.min_permitted_error, self._problem.min_permitted_error)
+                templatemesh.min_permitted_error, problem.min_permitted_error)
             self.max_permitted_error = a_or_b(
-                templatemesh.max_permitted_error, self._problem.max_permitted_error)
+                templatemesh.max_permitted_error, problem.max_permitted_error)
             self.max_refinement_level = a_or_b(
-                templatemesh.max_refinement_level, self._problem.max_refinement_level)
+                templatemesh.max_refinement_level, problem.max_refinement_level)
             self.min_refinement_level = a_or_b(
-                templatemesh.min_refinement_level, self._problem.min_refinement_level)
+                templatemesh.min_refinement_level, problem.min_refinement_level)
         else:
             self.min_permitted_error = previous_mesh.min_permitted_error
             self.max_permitted_error = previous_mesh.max_permitted_error
@@ -767,7 +1199,7 @@ class MeshFromTemplateBase(BaseMesh):
             self._setup_information_from_old_mesh(previous_mesh)
 
         if previous_mesh is None:
-            coll = self._templatemesh.get_domain(self._name)
+            coll = self._templatemesh._get_domain(self._name)
             edim = coll.get_element_dimension()
             assert self._codegen is not None
             self._codegen._set_nodal_dimension(coll.nodal_dimension())
@@ -783,16 +1215,16 @@ class MeshFromTemplateBase(BaseMesh):
             self._was_remeshed = True
         self._interfacemeshes = {}
         for n, eqtree in self._eqtree.get_children().items():
-            pinter = None
+            pinter:"InterfaceMesh | None" = None
             if previous_mesh is not None:
-                pinter = previous_mesh.get_mesh(n)
-                assert isinstance(pinter, InterfaceMesh)
+                prev = previous_mesh.get_mesh(n)
+                assert isinstance(prev, InterfaceMesh)
+                pinter = prev
             self._interfacemeshes[n] = InterfaceMesh(
-                self._problem, self, n, eqtree, previous_mesh=pinter)
+                problem, self, n, eqtree, previous_mesh=pinter)
 
     def get_problem(self) -> "Problem":
-        assert self._problem is not None
-        return self._problem
+        return self._get_problem() #type:ignore
 
     def get_bulk_mesh(self):
         return None
@@ -804,7 +1236,7 @@ class MeshFromTemplateBase(BaseMesh):
             self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
         if len(self._periodic_corner_node_info) == 0:
             return
-        newmap: Dict[Node, Node] = {}
+        newmap: dict[Node, Node] = {}
         for islv, imst in self._periodic_corner_node_info.items():
             rmst = imst
             visited = set([imst])
@@ -839,7 +1271,7 @@ class MeshFromTemplateBase(BaseMesh):
         for e in self.elements():
             e._elemental_error_max_override = 0.0
 
-    def _merge_my_error_with_elemental_max_override(self) -> List[float]:
+    def _merge_my_error_with_elemental_max_override(self) -> NPFloatArray:
         assert isinstance(
             self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
         res = self.get_elemental_errors()
@@ -850,10 +1282,12 @@ class MeshFromTemplateBase(BaseMesh):
         # TODO: Elements that are only at one interface
         return res
 
-    def get_nodal_field_indices(self) -> Dict[str, int]:
+    def get_nodal_field_indices(self) -> dict[str, int]:
         return self.get_code_gen().get_code().get_nodal_field_indices()
 
     def recreate_boundary_information(self):
+        assert isinstance(
+            self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
         from .. import get_dev_option
 
         if self.refinement_possible() or (get_dev_option("allow_tri_refine") and self.get_dimension() == 2):
@@ -861,7 +1295,10 @@ class MeshFromTemplateBase(BaseMesh):
 
         self.setup_boundary_element_info()
 
-        for interior_bound in self._templatemesh.get_template()._interior_boundaries:
+        # sorted: _interior_boundaries is a set of names, whose iteration order is randomized per
+        # process by PYTHONHASHSEED. It decides in which order the interior boundary elements are
+        # created, and with them the element and equation numbering.
+        for interior_bound in sorted(self._templatemesh._get_template()._interior_boundaries):
             try:
                 bindex = self.get_boundary_index(interior_bound)
                 self.setup_interior_boundary_elements(bindex)
@@ -869,6 +1306,8 @@ class MeshFromTemplateBase(BaseMesh):
                 pass
 
     def _setup_output_scales(self):
+        assert isinstance(
+            self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
         codegen = self.get_code_gen()
         code = codegen.get_code()
         _, unit, _, _ = _pyoomph.GiNaC_collect_units(
@@ -880,14 +1319,14 @@ class MeshFromTemplateBase(BaseMesh):
             _factor, unit, _rest, _success = _pyoomph.GiNaC_collect_units(s)
             if not (_rest-1).is_zero():
                 raise RuntimeError(
-                    "Cannot set output scale for field "+k+" to "+str(s)+" because it has a non-unit factor "+str(_factor)+" and a non-unit rest "+str(_rest))            
+                    "Cannot set output scale for field "+k+" to "+str(s)+" because it has a non-unit factor "+str(_factor)+" and a non-unit rest "+str(_rest))
             self.set_output_scale(k, unit, code)
         
     def _finalise_creation(self):
         assert isinstance(
             self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
         self.generate_from_template(
-            self._templatemesh.get_template().get_domain(self._name))
+            self._templatemesh._get_template()._get_domain(self._name))
         # if self.refinement_possible():
         from .. import get_dev_option
 
@@ -896,7 +1335,8 @@ class MeshFromTemplateBase(BaseMesh):
 
         self.setup_boundary_element_info()
 
-        for interior_bound in self._templatemesh.get_template()._interior_boundaries:
+        # sorted, for the reason given in recreate_boundary_information() above.
+        for interior_bound in sorted(self._templatemesh._get_template()._interior_boundaries):
             try:
                 bindex = self.get_boundary_index(interior_bound)
                 self.setup_interior_boundary_elements(bindex)
@@ -927,7 +1367,7 @@ class MeshFromTemplateBase(BaseMesh):
                     raise RuntimeError(
                         "Cannot add one interface element instance to different bulk equations. Create a new interface element instance instead")
             else:
-                icg._set_problem(self._problem)
+                icg._set_problem(self.get_problem())
                 assert self._codegen
                 icg._set_nodal_dimension(self._codegen.get_nodal_dimension())
                 icg._set_lagrangian_dimension(
@@ -940,7 +1380,7 @@ class MeshFromTemplateBase(BaseMesh):
             for b, imsh in imsh1._interfacemeshes.items():
                 if not (b in bn) and b!="_internal_facets_":
                     raise RuntimeError("Boundary " + b + " not in mesh")
-                ieqs = imsh._eqtree._equations
+                ieqs = imsh._eqtree.get_equations()
                 icg = imsh._eqtree._codegen
                 assert icg is not None
                 assert ieqs is not None
@@ -957,7 +1397,7 @@ class MeshFromTemplateBase(BaseMesh):
                             "Cannot add one interface element instance to different bulk equations. Create a new interface element instance instead. Boundary "+b)
                 else:
                     assert self._codegen is not None
-                    icg._set_problem(self._problem)
+                    icg._set_problem(self.get_problem())
                     icg._set_nodal_dimension(
                         self._codegen.get_nodal_dimension())
                     icg._set_lagrangian_dimension(
@@ -965,33 +1405,36 @@ class MeshFromTemplateBase(BaseMesh):
                     icg._coordinate_space = self._codegen._coordinate_space
                     icg._do_define_fields(self._codegen.dimension - 2)
 
-    def _compile_bulk_equations(self) -> _pyoomph.DynamicBulkElementInstance:
-        assert self._problem is not None
+    def _compile_bulk_equations(self) -> _pyoomph.DynamicJITCode:
+        problem = self.get_problem()
+        assert problem is not None
         assert self._codegen is not None
         eqs = self._eqtree.get_equations()
-        self._codegen._set_problem(self._problem)
+        self._codegen._set_problem(problem)
         mesh = self._eqtree._mesh
         if mesh is not None:
-            assert isinstance(
-                mesh, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
+            # isinstance against the ABC (rather than the 3 concrete classes) so mypy still
+            # knows about MeshFromTemplateBase's members (see _install_mixin); equivalent at
+            # runtime since only MeshFromTemplate1d/2d/3d are registered against it.
+            assert isinstance(mesh, MeshFromTemplateBase)
             templ = mesh._templatemesh
             # Get point to evaluate the IC and DBC to check whether it is a numeric value (Can prevent problems if somethink like 1/x is used)
             if templ is not None:
-                templ = templ.get_template()
-                dom = templ.get_domain(self._name)
+                templ = templ._get_template()
+                dom = templ._get_domain(self._name)
                 refpos = dom._get_reference_position_for_IC_and_DBC(set())
                 refnorm=[0.1,0.1,0.1] # TODO: Get a right reference normal
-                t = self._problem.time_pt().time()
+                t = problem.time_pt().time()
                 self._codegen._set_reference_point_for_IC_and_DBC(
                     refpos[0], refpos[1], refpos[2], t,refnorm[0],refnorm[1],refnorm[2])
-        self._eqtree._equations._set_current_codegen(self._eqtree._codegen)
-        #self._problem.before_compile_equations(self._eqtree._equations)
+        eqs._set_current_codegen(self._eqtree._codegen)
+        #problem.before_compile_equations(self._eqtree._equations)
         eqs.before_finalization(self._codegen)
         self._codegen._finalise()
-        eqs.before_compilation(self._codegen)        
-        self._codegen._code = self._problem.compile_bulk_element_code(
+        eqs._before_compilation(self._codegen)
+        self._codegen._code = problem._compile_bulk_element_code(
             self._codegen, assert_spatial_mesh(self), self._name)
-        self._templatemesh.get_domain(
+        self._templatemesh._get_domain(
             self._name).set_element_code(self._codegen.get_code())
         self._finalise_creation()
 #        self._transfer_mesh_functions()
@@ -1001,7 +1444,7 @@ class MeshFromTemplateBase(BaseMesh):
 
     def _construct_after_remesh(self):
         assert self._codegen is not None
-        self._templatemesh.get_domain(
+        self._templatemesh._get_domain(
             self._name).set_element_code(self._codegen.get_code())
         self._finalise_creation()
         # self._transfer_mesh_functions()
@@ -1009,22 +1452,58 @@ class MeshFromTemplateBase(BaseMesh):
     def get_dimension(self) -> int:
         raise NotImplementedError("Please specify")
 
-    def define_state_file(self, state: "DumpFile",additional_info={}):
+    def _define_state_file(self, state: "DumpFile",additional_info={}):
         # Write/load the template information
         assert isinstance(
             self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
 
+        if state.save or state.version_at_least(0,1,0):
+            self._define_state_file_structural(state)
+        else:
+            self._define_state_file_legacy(state)
+
+    def _define_state_file_structural(self, state: "DumpFile"):
+        # The refinement is stored as the shape of each root's tree and every node/element by a key
+        # that does not mention the partition, so the file is the same whether it was written serially
+        # or on any number of processes, and either can read the other.
+        # See pyoomph/meshes/meshstate.py and dev_docs/distributed_state_files.md.
+        assert isinstance(
+            self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
+        from .meshstate import save_mesh_state, load_mesh_state
+        # The base element numbers have to exist before anything can be addressed by them. On a
+        # distributed mesh they were assigned while it was still whole - before the initial
+        # distribution, or in Problem._redistribute_after_remeshing() for a mesh a remesh replaced -
+        # and must not be touched here, where only the local share is visible. Otherwise assign them
+        # now: besides being idempotent for a mesh that has them, this covers the meshes that did not
+        # exist when the problem was initialised - the ones a remesh built, and the ones the loader
+        # itself builds when the state file carries a different mesh template. Both are built from a
+        # template, in its element order, so writer and reader agree on the numbers.
+        if not self.is_mesh_distributed():
+            self.assign_global_base_element_indices()
+        if state.save:
+            save_mesh_state(self,state)
+        else:
+            load_mesh_state(self,state)
+        self._define_tracer_state_file(state)
+
+    def _define_state_file_legacy(self, state: "DumpFile"):
+        # Reader for state files written before version 0.1.0: the refinement as oomph-lib's level-wise
+        # element numbers and one flat nodal blob in the mesh's own traversal order, both of which only
+        # mean anything to a process holding exactly this mesh. Still writes as well (nothing calls it
+        # to write any more, but that is what makes the two formats comparable in a benchmark).
+        assert isinstance(
+            self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
         old_ordering = True
         # Refinement pattern
         if state.save:
-            refinementS: List[NPInt32Array] = self.get_refinement_pattern()
+            refinementS: list[NPInt32Array] = self.get_refinement_pattern()
             nref = len(refinementS)
             state.int_data(lambda: nref, lambda v: v)
             for n in range(nref):
                 state.numpy_data(lambda: refinementS[n], lambda v: v)
         else:
             nref = state.int_data(lambda: 0, lambda v: v)
-            refinementL: List[List[int]] = []
+            refinementL: list[list[int]] = []
             for n in range(nref):
                 refinementL.append(list(state.numpy_data(
                     lambda: refinementL[n], lambda v: v)))  # type:ignore
@@ -1063,58 +1542,45 @@ class MeshFromTemplateBase(BaseMesh):
             # print("LOAD DATA",mdata)
             self._load_state(mdata)  # type:ignore
 
+        self._define_tracer_state_file(state)
+
+    def _define_tracer_state_file(self, state: "DumpFile"):
+        assert isinstance(
+            self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
+        # No MPI refusal here any more: TracerCollection._save_state gathers every process's
+        # particles and sorts them by their persistent identity, and _load_state hands the whole set
+        # to every process, each of which keeps the ones it owns. So the file says nothing about the
+        # partitioning and can be written at one process count and read at another.
         numtracercols = len(self._tracers)
         state.int_data(lambda: numtracercols,
                        lambda n: state.assert_equal(n, numtracercols))
+        # The rolling position history came in with 0.1.3. Older files simply do not have it, and
+        # the two arrays are laid out differently with and without it, so the reader and the writer
+        # have to agree on this flag - which is what the version condition gives.
+        with_history = state.version_at_least(0, 1, 3)
         for tname in sorted(self._tracers.keys()):
             tcol = self.get_tracers(tname)
             assert tcol is not None
             state.string_data(
                 lambda: tname, lambda tn: state.assert_equal(tn, tname))
             if state.save:
-                pdata, tdata = tcol._save_state()
+                pdata, tdata = tcol._save_state(with_history)
                 state.numpy_data(lambda: pdata, lambda v: v)  # type:ignore
                 state.numpy_data(lambda: tdata, lambda v: v)  # type:ignore
             else:
                 pdata = state.numpy_data(lambda: 0, lambda v: v)  # type:ignore
                 tdata = state.numpy_data(lambda: 0, lambda v: v)  # type:ignore
-                tcol._load_state(pdata, tdata)  # type:ignore
-    
-    
-    def _evaluate_extremum_wrapper(self,name:Union[str,List[str]],sign:int,dimensional:bool=True,as_float:bool=False,return_x:bool=True):
-        if not isinstance(name,str):
-            if return_x:
-                raise RuntimeError("Please set return_x=False for multiple extremum evaluations (or call them one by one)")
-            return [self._evaluate_extremum_wrapper(n,sign,dimensional=dimensional,as_float=as_float,return_x=False) for n in name]
-        flags=0
-        if dimensional:
-            flags|=1
-        val,s,elem=self._evaluate_extremum(name,sign,flags)        
-        #print(val,s,elem)
-        if return_x:
-            x=elem.get_interpolated_position_at_s(0,s,False)
-            #print("X",x)
-            if dimensional:
-                SS=self.get_problem().get_scaling("spatial")
-                x=[xc*SS for xc in x]
-        if not dimensional:
-            val=float(val)
-        else:
-            if as_float:
-                factor, _, _, _ = _pyoomph.GiNaC_collect_units(val)
-                val = float(factor)
-                if return_x:
-                    xn=[]
-                    for xc in x:
-                        factor, _, _, _ = _pyoomph.GiNaC_collect_units(xc)
-                        xn.append(float(factor))
-                    x=xn                
-        if return_x:
-            return val,x
-        else:
-            return val
-                    
-    def evaluate_maximum(self,name:Union[str,List[str]],dimensional:bool=True,as_float:bool=False,return_x:bool=False)->Union[ExpressionOrNum,List[ExpressionOrNum],Tuple[ExpressionOrNum,List[ExpressionOrNum]]]:
+                tcol._load_state(pdata, tdata, with_history)  # type:ignore
+
+
+
+    def _evaluate_extremum_wrapper(self,name:str | list[str],sign:int,dimensional:bool=True,as_float:bool=False,return_x:bool=True):
+        assert isinstance(
+            self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
+        return _evaluate_extremum_impl(self,name,sign,dimensional,as_float,return_x)
+
+
+    def evaluate_maximum(self,name:str | list[str],dimensional:bool=True,as_float:bool=False,return_x:bool=False)->ExpressionOrNum | Sequence[ExpressionOrNum] | tuple[ExpressionOrNum, Sequence[ExpressionOrNum]]:
         """Evaluate the maximum of a quantity defined by ExtremumObservables on the mesh.
         
         Args:
@@ -1129,7 +1595,7 @@ class MeshFromTemplateBase(BaseMesh):
         """
         return self._evaluate_extremum_wrapper(name,1,dimensional=dimensional,as_float=as_float,return_x=return_x)
            
-    def evaluate_minimum(self,name:Union[str,List[str]],dimensional:bool=True,as_float:bool=False,return_x:bool=False)->Union[ExpressionOrNum,List[ExpressionOrNum],Tuple[ExpressionOrNum,List[ExpressionOrNum]]]:
+    def evaluate_minimum(self,name:str | list[str],dimensional:bool=True,as_float:bool=False,return_x:bool=False)->ExpressionOrNum | Sequence[ExpressionOrNum] | tuple[ExpressionOrNum, Sequence[ExpressionOrNum]]:
         """Evaluate the minimum of a quantity defined by ExtremumObservables on the mesh.
         
         Args:
@@ -1145,11 +1611,46 @@ class MeshFromTemplateBase(BaseMesh):
         return self._evaluate_extremum_wrapper(name,-1,dimensional=dimensional,as_float=as_float,return_x=return_x)
 
 
-class MeshFromTemplate1d(_pyoomph.TemplatedMeshBase1d, MeshFromTemplateBase):
-    def __init__(self, problem: "Problem", templatemesh: MeshTemplate, domainname: str, elementtype: "EquationTree", previous_mesh: Optional[MeshFromTemplateBase] = None):
+if TYPE_CHECKING:
+    # _install_mixin() (see its docstring above) copies MeshFromTemplateBase's members onto
+    # MeshFromTemplate1d/2d/3d at runtime without adding it to __bases__, since nanobind does
+    # not support combining a bound C++ base with an additional Python base in the same class.
+    # A static type checker has no such restriction - here (TYPE_CHECKING only, never executed)
+    # each concrete class instead really inherits from both, so every MeshFromTemplateBase/
+    # BaseMesh member (get_code_gen, _interfacemeshes, _eqtree, get_full_name, ...) is visible
+    # automatically, without having to hand-declare each one as they get used (as happened
+    # before for get_code_gen). Only members the *C++* base also defines under the same name
+    # (e.g. boundary_elements, whose auto-generated binding is less precise than the overloads
+    # below) still need restating directly on the concrete class: Python's MRO would otherwise
+    # let the C++ base's version - first in this bases tuple - win over MeshFromTemplateBase's.
+    # The ignores are for the refinement settings: the C++ base has them as properties and the mixin
+    # restates them as the attributes they are assigned as, which mypy will not accept as the same
+    # member. At runtime there is only one of each - the C++ property - since the mixin is not a base
+    # of these classes at all (see _install_mixin).
+    class _MeshFromTemplate1dTypingBase(_pyoomph.TemplatedMeshBase1d, MeshFromTemplateBase): pass # type: ignore[misc]
+    class _MeshFromTemplate2dTypingBase(_pyoomph.TemplatedMeshBase2d, MeshFromTemplateBase): pass # type: ignore[misc]
+    class _MeshFromTemplate3dTypingBase(_pyoomph.TemplatedMeshBase3d, MeshFromTemplateBase): pass # type: ignore[misc]
+else:
+    _MeshFromTemplate1dTypingBase = _pyoomph.TemplatedMeshBase1d
+    _MeshFromTemplate2dTypingBase = _pyoomph.TemplatedMeshBase2d
+    _MeshFromTemplate3dTypingBase = _pyoomph.TemplatedMeshBase3d
+
+
+class MeshFromTemplate1d(_MeshFromTemplate1dTypingBase):
+    if TYPE_CHECKING:
+        @overload
+        def boundary_elements(self, b: str, with_directions: Literal[False] = ...) -> Iterator[_pyoomph.OomphGeneralisedElement]: ...
+        @overload
+        def boundary_elements(self, b: str, with_directions: Literal[True]) -> Iterator[tuple[_pyoomph.OomphGeneralisedElement, int]]: ...
+        def boundary_elements(self, b: str, with_directions: bool = ...) -> Iterator[_pyoomph.OomphGeneralisedElement] | Iterator[tuple[_pyoomph.OomphGeneralisedElement, int]]: ...
+
+    def __init__(self, problem: "Problem", templatemesh: MeshTemplate, domainname: str, elementtype: "EquationTree", previous_mesh: BulkTemplateMesh | None = None):
         super(MeshFromTemplate1d, self).__init__()
+        # self is not nominally a MeshFromTemplateBase (see _install_mixin); the explicit
+        # unbound call still works fine at runtime since MeshFromTemplateBase.__init__ only
+        # duck-types on self's attributes.
         MeshFromTemplateBase.__init__(
-            self, problem, templatemesh, domainname, elementtype, previous_mesh=previous_mesh)
+            self, problem, templatemesh, domainname, elementtype, previous_mesh=previous_mesh)  # type: ignore[arg-type]
 
     def get_dimension(self) -> int:
         return 1
@@ -1161,11 +1662,21 @@ class MeshFromTemplate1d(_pyoomph.TemplatedMeshBase1d, MeshFromTemplateBase):
         return pr
 
 
-class MeshFromTemplate2d(_pyoomph.TemplatedMeshBase2d, MeshFromTemplateBase):
-    def __init__(self, problem: "Problem", templatemesh: MeshTemplate, domainname: str, elementtype: "EquationTree", previous_mesh: Optional[MeshFromTemplateBase] = None):
+_install_mixin(MeshFromTemplate1d, MeshFromTemplateBase)
+
+
+class MeshFromTemplate2d(_MeshFromTemplate2dTypingBase):
+    if TYPE_CHECKING:
+        @overload
+        def boundary_elements(self, b: str, with_directions: Literal[False] = ...) -> Iterator[_pyoomph.OomphGeneralisedElement]: ...
+        @overload
+        def boundary_elements(self, b: str, with_directions: Literal[True]) -> Iterator[tuple[_pyoomph.OomphGeneralisedElement, int]]: ...
+        def boundary_elements(self, b: str, with_directions: bool = ...) -> Iterator[_pyoomph.OomphGeneralisedElement] | Iterator[tuple[_pyoomph.OomphGeneralisedElement, int]]: ...
+
+    def __init__(self, problem: "Problem", templatemesh: MeshTemplate, domainname: str, elementtype: "EquationTree", previous_mesh: BulkTemplateMesh | None = None):
         super(MeshFromTemplate2d, self).__init__()
         MeshFromTemplateBase.__init__(
-            self, problem, templatemesh, domainname, elementtype, previous_mesh=previous_mesh)
+            self, problem, templatemesh, domainname, elementtype, previous_mesh=previous_mesh)  # type: ignore[arg-type]
 
     def get_dimension(self)->int:
         return 2
@@ -1177,11 +1688,21 @@ class MeshFromTemplate2d(_pyoomph.TemplatedMeshBase2d, MeshFromTemplateBase):
         return pr
 
 
-class MeshFromTemplate3d(_pyoomph.TemplatedMeshBase3d, MeshFromTemplateBase):
-    def __init__(self, problem: "Problem", templatemesh: MeshTemplate, domainname: str, elementtype: "EquationTree", previous_mesh: Optional[MeshFromTemplateBase] = None):
+_install_mixin(MeshFromTemplate2d, MeshFromTemplateBase)
+
+
+class MeshFromTemplate3d(_MeshFromTemplate3dTypingBase):
+    if TYPE_CHECKING:
+        @overload
+        def boundary_elements(self, b: str, with_directions: Literal[False] = ...) -> Iterator[_pyoomph.OomphGeneralisedElement]: ...
+        @overload
+        def boundary_elements(self, b: str, with_directions: Literal[True]) -> Iterator[tuple[_pyoomph.OomphGeneralisedElement, int]]: ...
+        def boundary_elements(self, b: str, with_directions: bool = ...) -> Iterator[_pyoomph.OomphGeneralisedElement] | Iterator[tuple[_pyoomph.OomphGeneralisedElement, int]]: ...
+
+    def __init__(self, problem: "Problem", templatemesh: MeshTemplate, domainname: str, elementtype: "EquationTree", previous_mesh: BulkTemplateMesh | None = None):
         super(MeshFromTemplate3d, self).__init__()
         MeshFromTemplateBase.__init__(
-            self, problem, templatemesh, domainname, elementtype, previous_mesh=previous_mesh)
+            self, problem, templatemesh, domainname, elementtype, previous_mesh=previous_mesh)  # type: ignore[arg-type]
 
     def get_dimension(self)->int:
         return 3
@@ -1193,11 +1714,14 @@ class MeshFromTemplate3d(_pyoomph.TemplatedMeshBase3d, MeshFromTemplateBase):
         return pr
 
 
-def MeshFromTemplate(problem: "Problem", templatemesh: MeshTemplate, domainname: str, eqtree: "EquationTree", previous_mesh: Optional[MeshFromTemplateBase] = None) -> Union[MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d]:
+_install_mixin(MeshFromTemplate3d, MeshFromTemplateBase)
+
+
+def MeshFromTemplate(problem: "Problem", templatemesh: MeshTemplate, domainname: str, eqtree: "EquationTree", previous_mesh: BulkTemplateMesh | None = None) -> MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d:
     if not templatemesh.has_domain(domainname):
         raise RuntimeError("There is no domain '" +
                            domainname + "' defined in this mesh")
-    coll = templatemesh.get_domain(domainname)
+    coll = templatemesh._get_domain(domainname)
 
     edim = coll.get_element_dimension()
 
@@ -1215,19 +1739,45 @@ def MeshFromTemplate(problem: "Problem", templatemesh: MeshTemplate, domainname:
 
 ######################################################
 
-class InterfaceMesh(_pyoomph.InterfaceMesh, BaseMesh):
+if TYPE_CHECKING:
+    # See the identical block above MeshFromTemplate1d for the general rationale. BaseMesh's
+    # members (_interfacemeshes, get_code_gen, elements, ...) are now visible automatically
+    # via this typing-only base; only boundary_elements/get_mesh (also defined by the *C++*
+    # base, less precisely) still need restating directly on InterfaceMesh below.
+    class _InterfaceMeshTypingBase(_pyoomph.InterfaceMesh, BaseMesh): pass
+else:
+    _InterfaceMeshTypingBase = _pyoomph.InterfaceMesh
+
+
+class InterfaceMesh(_InterfaceMeshTypingBase):
     """
-    A mesh that is added to the boundary to add Neumann terms or setting Dirichlet conditions or add new fields directly on the interface, like e.g. surfactants.    
+    A mesh that is added to the boundary to add Neumann terms or setting Dirichlet conditions or add new fields directly on the interface, like e.g. surfactants.
     """
-    def __init__(self, problem: "Problem", parent: "AnySpatialMesh", intername: str, eqtree: "EquationTree", previous_mesh: Optional["InterfaceMesh"] = None):
+    if TYPE_CHECKING:
+        @overload
+        def boundary_elements(self, b: str, with_directions: Literal[False] = ...) -> Iterator[_pyoomph.OomphGeneralisedElement]: ...
+        @overload
+        def boundary_elements(self, b: str, with_directions: Literal[True]) -> Iterator[tuple[_pyoomph.OomphGeneralisedElement, int]]: ...
+        def boundary_elements(self, b: str, with_directions: bool = ...) -> Iterator[_pyoomph.OomphGeneralisedElement] | Iterator[tuple[_pyoomph.OomphGeneralisedElement, int]]: ...
+        @overload
+        def get_mesh(self, name: str, return_None_if_not_found: Literal[False] = ...) -> "MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d | InterfaceMesh": ...
+        @overload
+        def get_mesh(self, name: str, return_None_if_not_found: Literal[True]) -> "MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d | InterfaceMesh | None": ...
+        def get_mesh(self, name: str, return_None_if_not_found: bool = ...) -> "MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d | InterfaceMesh | None": ...
+        def _pre_compile_interface_equations(self, tree_depth: int) -> None: ...
+        def _compile_interface_equations(self, tree_depth: int) -> None: ...
+        def _generate_interface_elements(self, tree_depth: int) -> None: ...
+
+    def __init__(self, problem: "Problem", parent: "AnySpatialMesh", intername: str, eqtree: "EquationTree", previous_mesh: "InterfaceMesh | None" = None):
         super(InterfaceMesh, self).__init__()
-        BaseMesh.__init__(self)
+        # self is not nominally a BaseMesh (see _install_mixin); the explicit unbound call
+        # still works fine at runtime since BaseMesh.__init__ only duck-types on self's attributes.
+        BaseMesh.__init__(self)  # type: ignore[arg-type]
         # _pyoomph.InterfaceMesh.__init__(self,problem)
         # super().__init__(problem)
-        self._problem = problem
         self._set_problem(problem, eqtree.get_code_gen()._code)
         self._parent: "AnySpatialMesh" = parent
-        self._opposite_interface_mesh: Optional["InterfaceMesh"] = None
+        self._opposite_interface_mesh: "InterfaceMesh | None" = None
         self._interface_name: str = intername
         self._codegen = eqtree.get_code_gen()
         self._eqtree: "EquationTree" = eqtree
@@ -1235,17 +1785,41 @@ class InterfaceMesh(_pyoomph.InterfaceMesh, BaseMesh):
         self._error_estimator = _pyoomph.Z2ErrorEstimator()
         self._error_estimator.use_Lagrangian = False
         self.ignore_initial_condition = False
+        #: Set while somebody else owns this interface's zeta chart for the duration of one remesh -
+        #: a topological-change handler, whose chart spans an event that no assignment derived from
+        #: the geometry could reproduce. A zeta assigner then leaves the mesh alone until the
+        #: transfer is over (see pyoomph.meshes.zeta.AssignZetaCoordinatesBase). It lives here rather
+        #: than on the interpolator because the assignment that would clobber it happens in
+        #: after_mapping_on_macro_elements, which sees no interpolator at all.
+        self._zeta_chart_overridden: bool = False
         self.set_spatial_error_estimator_pt(self._error_estimator)
+        # Inherit the refinement thresholds from the bulk mesh this interface hangs off (which in
+        # turn got them from the template or the Problem). Only MeshFromTemplate* used to set them,
+        # so an interface silently ran on oomph-lib's own defaults, 1e-3/1e-5 - the max coinciding
+        # with pyoomph's default and the min not (1e-4). Nobody chose that, and it only started to
+        # matter once an interface could estimate its own error. Settable afterwards per interface.
+        self.min_permitted_error = parent.min_permitted_error
+        self.max_permitted_error = parent.max_permitted_error
         if previous_mesh is not None:
             self._setup_information_from_old_mesh(previous_mesh)
+            # Carry the tracer collections over to the replacement mesh. Remeshing does this for the
+            # bulk meshes explicitly (Problem.remesh_handler_during_solve), but an interface mesh is
+            # rebuilt as a new object rather than replaced in _meshdict, so without this the
+            # collections - and every particle in them - simply disappeared. The dict is shared
+            # rather than copied, for the same reason the bulk path shares it: the TracerParticles
+            # equation may still be holding the old mesh, and both then see the same collections.
+            # Re-pointing each collection at this mesh has to wait until it has elements, which is
+            # what TracerParticles.after_remeshing does.
+            self._tracers = previous_mesh._tracers
 
         for n, eqtree in self._eqtree.get_children().items():
-            pinter = None
+            pinter:"InterfaceMesh | None" = None
             if previous_mesh is not None:
-                pinter = previous_mesh.get_mesh(n)
-                assert isinstance(pinter, InterfaceMesh)
+                prev = previous_mesh.get_mesh(n)
+                assert isinstance(prev, InterfaceMesh)
+                pinter = prev
             self._interfacemeshes[n] = InterfaceMesh(
-                self._problem, self, n, eqtree, previous_mesh=pinter)
+                problem, self, n, eqtree, previous_mesh=pinter)
 
     def get_problem(self) -> "Problem":
         from ..generic.problem import Problem
@@ -1254,13 +1828,20 @@ class InterfaceMesh(_pyoomph.InterfaceMesh, BaseMesh):
         return pr
 
     def refinement_possible(self) -> bool:
-        p = self
+        p:"AnySpatialMesh" = self
         while isinstance(p, InterfaceMesh):
             p = p._parent
         return p.refinement_possible()
 
     def get_dimension(self) -> int:
         return self._parent.get_dimension()-1
+
+    def get_bulk_mesh(self) -> "AnySpatialMesh":
+        # The nanobind C++ binding no longer exposes get_bulk_mesh() (see mesh.cpp): with the
+        # MeshHandle machinery there is no bare mesh pointer nanobind could wrap for a return
+        # value, and it would also not be the same Python object as self._parent anyway. This is
+        # already stored directly, so just return it.
+        return self._parent
 
     def setup_initial_conditions_with_interfaces(self, resetting_first_step: bool, ic_name: str):
         if self.ignore_initial_condition:
@@ -1344,7 +1925,7 @@ class InterfaceMesh(_pyoomph.InterfaceMesh, BaseMesh):
             do_on_bulk_mesh(self._opposite_interface_mesh._parent,
                             self._opposite_interface_mesh._interface_name, True)
 
-    def get_nodal_field_indices(self) -> Dict[str, int]:
+    def get_nodal_field_indices(self) -> dict[str, int]:
         return self.get_code_gen().get_code().get_nodal_field_indices()
 
     def _setup_output_scales(self):
@@ -1367,7 +1948,7 @@ class InterfaceMesh(_pyoomph.InterfaceMesh, BaseMesh):
         from ..generic.codegen import FiniteElementCodeGenerator
         name: str = self._interface_name
         curri: AnySpatialMesh = self._parent
-        boundname_set: Set[str] = {name}
+        boundname_set: set[str] = {name}
         while isinstance(curri, InterfaceMesh):
             assert curri._interface_name is not None
             name = curri._interface_name + "__" + name
@@ -1375,13 +1956,11 @@ class InterfaceMesh(_pyoomph.InterfaceMesh, BaseMesh):
             curri = cast(AnySpatialMesh, curri._parent)
         # assert isinstance(curri,(MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d))
         assert isinstance(curri, MeshFromTemplateBase)
-        if not self.get_problem().is_quiet():
-            print("Generating interface code "+curri._name+" "+name)
-        templ: Optional[MeshTemplate] = curri._templatemesh
+        templ: MeshTemplate | None = curri._templatemesh
         # Get point to evaluate the IC and DBC to check whether it is a numeric value (Can prevent problems if somethink like 1/x is used)
         if templ is not None:
-            templ = templ.get_template()
-            dom = templ.get_domain(curri._name)
+            templ = templ._get_template()
+            dom = templ._get_domain(curri._name)
             bnames = curri.get_boundary_names()
             if boundname_set=={"_internal_facets_"}:
                 # Just select anything
@@ -1393,7 +1972,7 @@ class InterfaceMesh(_pyoomph.InterfaceMesh, BaseMesh):
                 bind_set = {bnames.index(n) for n in boundname_set}
             refpos = dom._get_reference_position_for_IC_and_DBC(bind_set)
             refnorm=[0.1,0.1,0.1] # TODO: Get a right reference norm
-            t = self._problem.time_pt().time()
+            t = self.get_problem().time_pt().time()
             self.get_code_gen()._set_reference_point_for_IC_and_DBC(
                 refpos[0], refpos[1], refpos[2], t,refnorm[0],refnorm[1],refnorm[2])
 
@@ -1418,9 +1997,7 @@ class InterfaceMesh(_pyoomph.InterfaceMesh, BaseMesh):
         self._eqtree.get_equations()._set_current_codegen(self._codegen)
 
         assert self._codegen is not None
-        self._codegen._mesh = self
         eqs = self._eqtree.get_equations()
-
 
         #self._problem.before_compile_equations(self._eqtree)
         eqs.before_finalization(self._codegen)
@@ -1437,9 +2014,9 @@ class InterfaceMesh(_pyoomph.InterfaceMesh, BaseMesh):
                         internal_eqs._additional_residuals[destination]=int_contrib                        
 
         eqs._set_current_codegen(self._codegen)
-        eqs.before_compilation(self._codegen)
+        eqs._before_compilation(self._codegen)
 
-        self._codegen._code = self._codegen.get_problem().compile_bulk_element_code(self._codegen, self, curri._name + "__" + name)  
+        self._codegen._code = self._codegen.get_problem()._compile_bulk_element_code(self._codegen, self, curri._name + "__" + name)  
 
         self._set_problem(self.get_problem(),
                           self._codegen._code)  # type:ignore
@@ -1448,35 +2025,46 @@ class InterfaceMesh(_pyoomph.InterfaceMesh, BaseMesh):
             oppblk.get_equations()._set_current_codegen(old_oppblkcg)  # type:ignore
 
         blk.get_equations()._set_current_codegen(oldblk)
-        self._eqtree._equations._set_current_codegen(oldmy)  # type:ignore
+        self._eqtree.get_equations()._set_current_codegen(oldmy)
 
-        self._eqtree._equations.after_compilation(self._codegen)  # type:ignore
+        self._eqtree.get_equations().after_compilation(self._codegen)
                 
         mpi_barrier()
 
     def nodes(self) -> Iterator[_pyoomph.Node]:
-        uniqnods: Set[Node] = set()
+        """The nodes of this interface, each once, in the order the elements first reach them.
+
+        An interface mesh has no Node_pt array of its own, so the nodes have to be collected from
+        the elements. Collecting them in a *set* made the yielded order the id() order of the Node
+        objects, i.e. their allocation addresses: reproducible within one process, but different on
+        every MPI rank and between two runs. Callers that pair this order with anything else broke
+        silently - update_history() indexes evaluate_local_expression_at_nodes(), which is in the
+        C++ node order, and the preCICE adapter numbers its coupling vertices by it. The dict is
+        only a set that keeps insertion order.
+        """
+        uniqnods: dict[Node, None] = {}
         for e in self.elements():
             nn = e.nnode()
             for ni in range(nn):
                 n = e.node_pt(ni)
-                uniqnods.add(n)
-        for n in uniqnods:
+                uniqnods[n] = None
+        for n in uniqnods.keys():
             yield n
 
     def boundary_nodes(self, b: str) -> Iterable[_pyoomph.Node]:
-        uniqnods: Set[Node] = set()
+        # Element order rather than set order, for the reason given in nodes() above.
+        uniqnods: dict[Node, None] = {}
         bind = self.get_boundary_index(b)
         for e in self.boundary_elements(b):
             nn = e.nnode()
             for ni in range(nn):
                 n = e.node_pt(ni)
                 if n.is_on_boundary(bind):
-                    uniqnods.add(n)
-        return uniqnods
+                    uniqnods[n] = None
+        return list(uniqnods.keys())
 
-    def nodes_on_both_sides(self) -> Generator[Tuple[_pyoomph.Node, _pyoomph.Node], None, None]:
-        nodemap: Dict[Node, Node] = {}
+    def nodes_on_both_sides(self) -> Generator[tuple[_pyoomph.Node, _pyoomph.Node], None, None]:
+        nodemap: dict[Node, Node] = {}
         for e in self.elements():
             nn = e.nnode()
             for ni in range(nn):
@@ -1484,48 +2072,19 @@ class InterfaceMesh(_pyoomph.InterfaceMesh, BaseMesh):
                 # print(e.get_opposite_bulk_element())
                 no = e.opposite_node_pt(ni)
                 nodemap[n] = no
-        for ni, no in nodemap.items():
-            yield ni, no
+        for nfrom, nto in nodemap.items():
+            yield nfrom, nto
 
     def _reset_elemental_error_max_override(self):
         for e in self.elements():
             e._elemental_error_max_override = 0.0
 
 
-    def _evaluate_extremum_wrapper(self,name:Union[str,List[str]],sign:int,dimensional:bool=True,as_float:bool=False,return_x:bool=True):
-        if not isinstance(name,str):
-            if return_x:
-                raise RuntimeError("Please set return_x=False for multiple extremum evaluations (or call them one by one)")
-            return [self._evaluate_extremum_wrapper(n,sign,dimensional=dimensional,as_float=as_float,return_x=False) for n in name]
-        flags=0
-        if dimensional:
-            flags|=1
-        val,s,elem=self._evaluate_extremum(name,sign,flags)        
-        #print(val,s,elem)
-        if return_x:
-            x=elem.get_interpolated_position_at_s(0,s,False)
-            #print("X",x)
-            if dimensional:
-                SS=self.get_problem().get_scaling("spatial")
-                x=[xc*SS for xc in x]
-        if not dimensional:
-            val=float(val)
-        else:
-            if as_float:
-                factor, _, _, _ = _pyoomph.GiNaC_collect_units(val)
-                val = float(factor)
-                if return_x:
-                    xn=[]
-                    for xc in x:
-                        factor, _, _, _ = _pyoomph.GiNaC_collect_units(xc)
-                        xn.append(float(factor))
-                    x=xn                
-        if return_x:
-            return val,x
-        else:
-            return val
-                    
-    def evaluate_maximum(self,name:Union[str,List[str]],dimensional:bool=True,as_float:bool=False,return_x:bool=False)->Union[ExpressionOrNum,List[ExpressionOrNum],Tuple[ExpressionOrNum,List[ExpressionOrNum]]]:
+    def _evaluate_extremum_wrapper(self,name:str | list[str],sign:int,dimensional:bool=True,as_float:bool=False,return_x:bool=True):
+        return _evaluate_extremum_impl(self,name,sign,dimensional,as_float,return_x)
+
+
+    def evaluate_maximum(self,name:str | list[str],dimensional:bool=True,as_float:bool=False,return_x:bool=False)->ExpressionOrNum | Sequence[ExpressionOrNum] | tuple[ExpressionOrNum, Sequence[ExpressionOrNum]]:
         """Evaluate the maximum of a quantity defined by ExtremumObservables on the mesh.
         
         Args:
@@ -1540,7 +2099,7 @@ class InterfaceMesh(_pyoomph.InterfaceMesh, BaseMesh):
         """
         return self._evaluate_extremum_wrapper(name,1,dimensional=dimensional,as_float=as_float,return_x=return_x)
            
-    def evaluate_minimum(self,name:Union[str,List[str]],dimensional:bool=True,as_float:bool=False,return_x:bool=False)->Union[ExpressionOrNum,List[ExpressionOrNum],Tuple[ExpressionOrNum,List[ExpressionOrNum]]]:
+    def evaluate_minimum(self,name:str | list[str],dimensional:bool=True,as_float:bool=False,return_x:bool=False)->ExpressionOrNum | Sequence[ExpressionOrNum] | tuple[ExpressionOrNum, Sequence[ExpressionOrNum]]:
         """Evaluate the minimum of a quantity defined by ExtremumObservables on the mesh.
         
         Args:
@@ -1556,6 +2115,9 @@ class InterfaceMesh(_pyoomph.InterfaceMesh, BaseMesh):
         return self._evaluate_extremum_wrapper(name,-1,dimensional=dimensional,as_float=as_float,return_x=return_x)
 
 
+_install_mixin(InterfaceMesh, BaseMesh)
+
+
 class ODEStorageMesh(_pyoomph.ODEStorageMesh):
     """
     A sort of a mesh storing ODE values. This is not a real mesh, but a container for ODE values.
@@ -1563,8 +2125,8 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
     def __init__(self, problem: "Problem", eqtree: "EquationTree", domainname: str):
         super().__init__()
         #print("ODEStorageMesh: Creating ODE storage mesh for domain", domainname,get_mpi_rank())
-        self._problem: "Problem" = problem
-        self._eqtree: Optional["EquationTree"] = eqtree
+        self._set_problem(problem, None)
+        self._eqtree: "EquationTree | None" = eqtree
         self._eqtree._mesh = self  # type:ignore
         self._codegen = eqtree._codegen  # type:ignore
         self._name = domainname
@@ -1573,7 +2135,7 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
         self._codegen._do_define_fields(0)  # type:ignore
         self._codegen._index_fields()  # type:ignore
         self._codegen.get_equations()._set_current_codegen(ocg)  # type:ignore
-        self._element = None
+        self._element:"_pyoomph.OomphGeneralisedElement | None" = None
         self.ignore_initial_condition=False
         for _, eqtree in self._eqtree.get_children().items():
             raise RuntimeError("ODE domains may not have children yet")
@@ -1582,46 +2144,52 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
         assert self._codegen is not None
         return self._codegen
 
+    def get_eqtree(self) -> "EquationTree":
+        assert self._eqtree is not None
+        return self._eqtree
+
     def get_problem(self) -> "Problem":
-        return self._problem
+        return self._get_problem() #type:ignore
 
     def get_bulk_mesh(self):
         return None
     
     def _setup_output_scales(self):
-        ocg = self._codegen.get_equations()._get_current_codegen()  
-        self._codegen.get_equations()._set_current_codegen(self._codegen)  
-        _, indices = self._element._ode_elem_to_numpy()
-        scales: List[ExpressionOrNum] = [1.0] * len(indices)
+        codegen = self.get_code_gen()
+        eqtree = self.get_eqtree()
+        ocg = codegen.get_equations()._get_current_codegen()
+        codegen.get_equations()._set_current_codegen(codegen)
+        _, indices = self.get_element()._ode_elem_to_numpy()
+        scales: list[ExpressionOrNum] = [1.0] * len(indices)
         for k, i in indices.items():
-            s = self._eqtree.get_equations().get_scaling(k)
+            s = eqtree.get_equations().get_scaling(k)
             if isinstance(s, Expression):
-                factor, _, _, _ = _pyoomph.GiNaC_collect_units(s)  
+                factor, _, _, _ = _pyoomph.GiNaC_collect_units(s)
                 s = float(factor)
             scales[i]=s
-        self._codegen.get_equations()._set_current_codegen(ocg) 
+        codegen.get_equations()._set_current_codegen(ocg)
 
-    def _compile_bulk_equations(self) -> _pyoomph.DynamicBulkElementInstance:
+    def _compile_bulk_equations(self) -> _pyoomph.DynamicJITCode:
         assert self._eqtree is not None
         assert self._codegen is not None
-        self._codegen._set_problem(self._problem)  
+        problem=self.get_problem()
+        self._codegen._set_problem(problem)
 
-        ocg = self._codegen.get_equations()._get_current_codegen()  
-        self._codegen.get_equations()._set_current_codegen(self._codegen)  
+        ocg = self._codegen.get_equations()._get_current_codegen()
+        self._codegen.get_equations()._set_current_codegen(self._codegen)
 
         eqs=self._eqtree.get_equations()
-        #self._problem.before_compile_equations(self._eqtree)
-        eqs.before_finalization(self._codegen)  
-        eqs._problem=self._problem
-        self._codegen._finalise()  
-        self._codegen.get_equations()._set_current_codegen(self._codegen)  
+        #problem.before_compile_equations(self._eqtree)
+        eqs.before_finalization(self._codegen)
+        self._codegen._finalise()
+        self._codegen.get_equations()._set_current_codegen(self._codegen)
 
-        eqs.before_compilation(self._codegen)  
-        self._codegen._code = self._problem.compile_bulk_element_code(self._codegen, self, self._name)  
-        #self._element = _pyoomph.BulkElementODE0d.construct_new(self._codegen.get_code(), self._problem.timestepper)  
+        eqs._before_compilation(self._codegen)
+        self._codegen._code = problem._compile_bulk_element_code(self._codegen, self, self._name)
+        #self._element = _pyoomph.BulkElementODE0d.construct_new(self._codegen.get_code(), problem.timestepper)
         #self._element.set_must_be_kept_as_halo(True) # ODE Dofs are always halo dofs, so they can be accessed from everywhere
-        self._set_problem(self._problem, self._codegen._code)  
-        self._element=self._create_ode_element(self._problem.timestepper)
+        self._set_problem(problem, self._codegen._code)
+        self._element=self._create_ode_element(problem.timestepper)
         self._setup_output_scales()
 #        self._add_ODE("ODE", self._element)
         # self._transfer_mesh_functions()
@@ -1640,12 +2208,13 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
         for i in range(numelems):
             yield self.element_pt(i)
 
-    def evaluate_all_observables(self) -> Dict[str, ExpressionOrNum]:
+    def evaluate_all_observables(self) -> dict[str, ExpressionOrNum]:
         return BaseMesh.evaluate_all_observables(self)  # type:ignore
 
     #def get_element(self) -> _pyoomph.BulkElementODE0d:
     def get_element(self) -> Element:
         #print("GET ELEMENT",self._element)
+        assert self._element is not None
         return self._element
         #return self._get_ODE("ODE")
 
@@ -1656,12 +2225,12 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
     def get_value(self, name: str, *, dimensional: bool=..., as_float: Literal[True]) -> float: ...
 
     @overload
-    def get_value(self, name: NameStrSequence, *,dimensional: bool=..., as_float: Literal[False]=...) -> Tuple[_pyoomph.Expression, ...]: ...
+    def get_value(self, name: NameStrSequence, *,dimensional: bool=..., as_float: Literal[False]=...) -> tuple[_pyoomph.Expression, ...]: ...
     
     @overload
-    def get_value(self, name: NameStrSequence, *,dimensional: bool=..., as_float: Literal[True]) -> Tuple[float, ...]: ...
+    def get_value(self, name: NameStrSequence, *,dimensional: bool=..., as_float: Literal[True]) -> tuple[float, ...]: ...
 
-    def get_value(self, name: Union[str, NameStrSequence], *, dimensional: bool = True, as_float: bool = False) -> Union[_pyoomph.Expression, float, Tuple[float, ...], Tuple[_pyoomph.Expression, ...]]:
+    def get_value(self, name: str | NameStrSequence, *, dimensional: bool = True, as_float: bool = False) -> _pyoomph.Expression | float | tuple[float, ...] | tuple[_pyoomph.Expression, ...]:
         """
         Get the value(s) associated with the given name(s) from the ODE.
 
@@ -1679,10 +2248,7 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
         assert self._eqtree is not None
         ode = self.get_element()
         vals, inds = ode._ode_elem_to_numpy()
-        if isinstance(name, str):
-            names = [name]
-        else:
-            names = name
+        names:Sequence[str] = [name] if isinstance(name, str) else name
         res = []
         for n in names:
             if n not in inds.keys():
@@ -1740,8 +2306,8 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
             assert isinstance(val, (float, int))
             ode.internal_data_pt(inds[n]).set_value(0, val)
 
-    def define_state_file(self, state: "DumpFile",additional_info={}):
-        ode = self._element
+    def _define_state_file(self, state: "DumpFile",additional_info={}):
+        ode = self.get_element()
         _, inds = ode._ode_elem_to_numpy()
         inds_sorted = list(sorted(list(inds)))
         numinds = len(inds_sorted)
@@ -1774,3 +2340,7 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
             else:
                 raise ValueError(
                     "Please set Dirichlet active either to True or False")
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

@@ -64,6 +64,22 @@ As for the insoluble surfactants, the interface properties for an interface with
    :start-at: # For soluble surfactants, we also must have it in the bulk (potentially at zero concentration)
    :end-at: interface = get_interface_properties(liquid, gas, surfactants=surfactants)
 
+In the example above, the amount of surfactant in the bulk is given as a *mass fraction*. Since both the isotherms and the literature values are expressed in terms of the molar concentration :math:`C`, it is usually more convenient to state it that way directly. Any pure liquid -- and hence any surfactant -- may be multiplied by a concentration instead of by a fraction:
+
+.. code-block:: python
+
+   liquid = Mixture(get_pure_liquid("water") + 1*milli*molar*get_pure_liquid("my_soluble_surfactant"),
+                    temperature=20*celsius)
+
+Unlike a dissolved salt (:numref:`secmcflowsaltsdefine`), such a component is never treated as a dilute rider: it is a genuine component of the mixture, i.e. it obtains a mass fraction, a mole fraction and a share of the density, and the registered :py:class:`~pyoomph.materials.generic.MixtureLiquidProperties` for the full set of names is required just as for the mass fraction form. The fractions of the remaining components describe the *base mixture* and are scaled by :math:`1-\sum w` to make room, so that ``water + 20*percent*glycerol + 1*milli*molar*surfactant`` retains a 20 % glycerol base. A mass concentration such as ``5*gram/litre*...`` works in the same way and needs no molar mass. A ``temperature`` must be passed, since the conversion needs the mass density as a number and essentially every density correlation depends on the temperature.
+
+A concentration is an amount per volume, and there are two volumes involved. Which one is meant is selected by the ``concentration_basis`` argument of :py:func:`~pyoomph.materials.generic.Mixture`:
+
+- ``"base_mixture"``, the default, is how a solution is prepared in practice: the base -- here the water, or the water-glycerol mixture -- is mixed first, its volume is measured, and the surfactant is added according to that volume. The statement is thus a mass balance and nothing is assumed about the volume the surfactant itself occupies.
+- ``"solution"`` means the amount per volume of the *finished* solution, which is the quantity the simulation reports: ``var("molarconc_my_soluble_surfactant")``, i.e. :math:`C=\rho w/M` with the density :math:`\rho` of the full mixture, is then exactly the value entered at :math:`t=0`. Since :math:`\rho` depends on the very composition being calculated, this is solved by a fixed point iteration.
+
+Both differ by the mass fraction of the surfactant itself, i.e. not at all in the dilute limit that a surfactant is usually in.
+
 .. only:: html
 
 	.. container:: downloadbutton

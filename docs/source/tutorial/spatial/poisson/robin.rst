@@ -70,4 +70,4 @@ The outward unit normal is obtained by :py:meth:`~pyoomph.generic.codegen.BaseEq
 		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
 		    
 
-For the latter approach, there is also a generic class :py:class:`~pyoomph.meshes.bcs.EnforcedBC`, which allows us to enforce arbitrary boundary conditions. To get the same result as with the custom implemented class ``PoissonRobinCondition("u",alpha,beta,g)``, the generic class requires to cast it into residual form, i.e. ``EnforcedBC(u=alpha*var("u")+beta*dot(grad(var("u",domain="..")),var("normal"))-g)``.
+For the latter approach, there is also a generic class :py:class:`~pyoomph.equations.generic.EnforcedBC`, which allows us to enforce arbitrary boundary conditions. To get the same result as with the custom implemented class ``PoissonRobinCondition("u",alpha,beta,g)``, the generic class requires to cast it into residual form, i.e. ``EnforcedBC(u=alpha*var("u")+beta*dot(grad(var("u",domain="..")),var("normal"))-g)``.

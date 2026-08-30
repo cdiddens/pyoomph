@@ -30,7 +30,7 @@ And the :py:class:`~pyoomph.generic.problem.Problem` class combining the equatio
    :start-at: class ALEProblem(Problem):
    :end-at: problem.run(1,numouts=20)
 
-Note how we pin the :math:`y`-coordinate by a :py:class:`~pyoomph.meshes.bcs.DirichletBC` applied on the entire ``"domain"``. There is no equation for the :math:`y`-coordinate, so we have to fix it. We furthermore set a Gaussian initial condition for the diffusion field.
+Note how we pin the :math:`y`-coordinate by a :py:class:`~pyoomph.equations.generic.DirichletBC` applied on the entire ``"domain"``. There is no equation for the :math:`y`-coordinate, so we have to fix it. We furthermore set a Gaussian initial condition for the diffusion field.
 
 ..  figure:: ALE1.*
 	:name: figaleale1

@@ -1,24 +1,25 @@
+#  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -49,7 +50,10 @@ class TuringProblem(Problem):
     def __init__(self):
         super().__init__()
         # Parameters, see https://dx.doi.org/10.1007/s10994-023-06334-9
-        self.d,self.a,self.b,self.c=self.define_global_parameter(d=40,a=0.01,b=1.2,c = 0.7)        
+        self.d=self.define_global_parameter(d=40)
+        self.a=self.define_global_parameter(a=0.01)
+        self.b=self.define_global_parameter(b=1.2)
+        self.c=self.define_global_parameter(c=0.7)
         # Reaction terms
         self.f=self.a-self.b*var("u")+var("u")**2/(var("v")*(1+self.c*var("u")**2))
         self.g=var("u")**2-var("v")

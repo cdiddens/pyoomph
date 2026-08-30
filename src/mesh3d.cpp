@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -27,6 +27,7 @@ The main author may be contacted at c.diddens@utwente.nl
 #include "problem.hpp"
 #include "elements.hpp"
 #include "mesh3d.hpp"
+#include <array>
 
 #include "Telements.h"
 // #include "unstructured_two_d_mesh_geometry_base.h"
@@ -42,12 +43,41 @@ namespace pyoomph
 	// refinement was requested but the mesh contains non-brick (e.g. tetrahedral) elements.
 	bool TemplatedMeshBase3d::refinement_possible()
 	{
-		bool allQ = true;
+		// h-refinement via the OcTree hierarchy is implemented for pure-brick meshes and (branch
+		// mixed_adapt) pure-tetrahedron meshes (a tet refines 1->8, reusing the OcTree's 8-son
+		// bookkeeping, with geometric node-sharing/hanging). Mixed brick+tet is not yet supported.
+		// One cast per element for all five questions: element_family() is cached on the element,
+		// whereas each of the four dynamic_casts this used to do walks the virtual-inheritance diamond
+		// (~1500 cycles a piece) - and it did them twice, once here and once in the allRefinable loop
+		// below, which is now folded into the same pass.
+		bool allQ = true, allT = true, allW = true, allP = true;
+		bool allRefinable = true; // every element is a refineable family: brick/tet/wedge/pyramid
 		for (unsigned int i = 0; i < this->nelement(); i++)
 		{
-			allQ = allQ && (dynamic_cast<oomph::BrickElementBase *>(this->element_pt(i)) != NULL);
+			pyoomph::BulkElementBase *be = dynamic_cast<pyoomph::BulkElementBase *>(this->element_pt(i));
+			BulkElementBase::ElementFamily fam = (be ? be->element_family() : BulkElementBase::EF_OTHER);
+			bool is_brick = (fam == BulkElementBase::EF_BRICK);
+			bool is_tet = (fam == BulkElementBase::EF_SIMPLEX);
+			bool is_wedge = (fam == BulkElementBase::EF_WEDGE);
+			bool is_pyramid = (fam == BulkElementBase::EF_PYRAMID);
+			allQ = allQ && is_brick;
+			allT = allT && is_tet;
+			allW = allW && is_wedge;
+			allP = allP && is_pyramid;
+			allRefinable = allRefinable && (is_brick || is_tet || is_wedge || is_pyramid);
 		}
-		if (allQ)
+		// Pure-brick, pure-tet, or (branch mixed_adapt) pure-wedge meshes refine 1->8 via the OcTree; a
+		// wedge refines its triangular cross-section 1->4 and its extrusion 1->2 (shape-closed). A pure-
+		// pyramid mesh refines with HETEROGENEOUS offspring (1 pyramid -> 6 pyramids + 4 tets), so its
+		// leaves become a mix of pyramids and tets after the first level.
+		//
+		// A MIXED mesh -- any combination of bricks, tets, wedges and pyramids -- also refines: all four
+		// families key their new interface nodes into one shared weight-augmented registry (via
+		// RefineablePyramidElement::Mixed_forest_active), so elements of different shapes sharing a face (a
+		// brick meets a pyramid base / wedge side on a QUAD; a tet meets a wedge/pyramid on a TRIANGLE) produce
+		// one shared node, not a torn pair. In a mixed mesh a brick refines through the registry
+		// (build_as_brick_son) rather than oomph-lib's native octree node-reuse.
+		if (allQ || allT || allW || allP || allRefinable)
 		{
 			return true;
 		}
@@ -55,10 +85,284 @@ namespace pyoomph
 		{
 			if (this->max_refinement_level() && !issued_tri_refinement_warning && !this->problem->is_quiet())
 			{
-				std::cerr << "WARNING: Found a tri or something in the mesh -> cannot be adaptive right now. Requires to implement a good tree for mixed meshes" << std::endl;
+				std::cerr << "WARNING: Mixed-element 3d mesh -> cannot be adaptive yet. Requires cross-shape facet neighbouring for mixed meshes" << std::endl;
 				issued_tri_refinement_warning = true;
 			}
 			return false;
+		}
+	}
+
+	// Tetrahedral hanging nodes are now installed PER ELEMENT by oomph's adapt loop, fully topologically:
+	// RefineableTElement<3>::setup_hanging_nodes (geometric slot -1) and setup_hang_for_value (the separate
+	// C1/C2 value slots, driven from BulkElementTetra3dC2::further_setup_hanging_nodes, which also applies the
+	// C1(TB) mid-node rule) -- each via tet_hang_face / tet_hang_edge (OcTree neighbour finders + the exact
+	// affine map + interpolating_basis). oomph's complete_hanging_nodes then flattens the recursive master
+	// chains (an earlier explicit mesh-level re-flatten here was not only redundant once the install moved
+	// into the hooks -- it ran AFTER complete_hanging_nodes and could corrupt an already-correct scheme).
+	// So this pass has nothing left to do for tets; it replaced the former mesh-level geometric facet-
+	// adjacency passes. Being per-element, the scheme now also covers refinement paths that bypass this
+	// pyoomph pass entirely -- refine_selected_elements / custom_adapt (the tet analogue of the 2d fix).
+	void TemplatedMeshBase3d::post_adapt_setup_hanging_nodes()
+	{
+		// --- Cross-shape 2:1 hanging for the registry-based families (tet, wedge, pyramid): pure OR mixed. --
+		// After non-uniform refinement a 2:1 interface has a finer neighbour whose extra face nodes must hang
+		// on the coarser leaf's interpolation. One generative, position-based pass (NOT locate_zeta): for
+		// every leaf element and every face, walk the face's fine lattice (step h=0.5/(nnode_1d-1)), map each
+		// point to physical x via interpolated_x, look the node up by position, and hang it on THIS (coarse)
+		// element's interpolating_basis via mixed_hang_node_at. It is shape-agnostic on the finer side (it
+		// only needs the node's position), so it handles ANY combination: a coarse pyramid (4 tri + 1 quad
+		// face), tet (4 tri) or wedge (2 tri + 3 quad) with a finer neighbour of any shape -- a tet meets a
+		// wedge/pyramid on a triangle, a wedge meets a pyramid on a triangle (cap<->tri face) or quad
+		// (side<->base). The pyramid's triangular faces meet at the apex (s2=1) where the 1/(1-s2) shape is
+		// singular, so lattice points with a non-finite image are skipped (only the apex VERTEX, never a hang
+		// node at s2<=0.5). This subsumes the former separate pure-pyramid (M3c) and pure-wedge (M2) passes.
+		{
+			bool has_pyr = false, has_wedge = false, has_brick = false, has_tet = false, all_reg = true;
+			for (unsigned int ie = 0; ie < this->nelement(); ie++)
+			{
+				const bool isp = (dynamic_cast<oomph::RefineablePyramidElement *>(this->element_pt(ie)) != nullptr);
+				const bool isw = (dynamic_cast<oomph::RefineableWedgeElement *>(this->element_pt(ie)) != nullptr);
+				const bool isb = (dynamic_cast<oomph::BrickElementBase *>(this->element_pt(ie)) != nullptr);
+				const bool ist = (dynamic_cast<oomph::TElementBase *>(this->element_pt(ie)) != nullptr);
+				has_pyr = has_pyr || isp;
+				has_wedge = has_wedge || isw;
+				has_brick = has_brick || isb;
+				has_tet = has_tet || ist;
+				all_reg = all_reg && (isp || isw || isb || ist);
+			}
+			// Pure-tet meshes use the per-element OcTree hooks and pure-brick meshes oomph-lib's octree hanging;
+			// this generative pass runs for a pure wedge/pyramid mesh OR any MIXED refineable mesh (>=2 of
+			// {brick,tet,wedge,pyramid}) -- where find_neighbours is skipped so ALL hanging comes from here.
+			const int nfam = (has_pyr ? 1 : 0) + (has_wedge ? 1 : 0) + (has_brick ? 1 : 0) + (has_tet ? 1 : 0);
+			if (all_reg && (has_pyr || has_wedge || nfam >= 2))
+			{
+				// Face tables (corner local coords). Pyramid vertices 0(0,0,0)1(1,0,0)2(1,1,0)3(0,1,0)4(0,0,1)
+				// apex; tet vertices 0(0,0,0)1(1,0,0)2(0,1,0)3(0,0,1). Matching get_vertex_nodes_of_face.
+				struct PFace { bool quad; int nc; double c[4][3]; };
+				static const PFace PYR_FACES[5] = {
+					{false, 3, {{0, 0, 0}, {1, 0, 0}, {0, 0, 1}, {0, 0, 0}}}, // 0 tri s1=0
+					{false, 3, {{1, 0, 0}, {1, 1, 0}, {0, 0, 1}, {0, 0, 0}}}, // 1 tri s0=1-s2
+					{false, 3, {{1, 1, 0}, {0, 1, 0}, {0, 0, 1}, {0, 0, 0}}}, // 2 tri s1=1-s2
+					{false, 3, {{0, 0, 0}, {0, 1, 0}, {0, 0, 1}, {0, 0, 0}}}, // 3 tri s0=0
+					{true,  4, {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}}}};// 4 quad base s2=0
+				static const PFace TET_FACES[4] = {
+					{false, 3, {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {0, 0, 0}}}, // 0
+					{false, 3, {{0, 0, 0}, {0, 1, 0}, {0, 0, 1}, {0, 0, 0}}}, // 1
+					{false, 3, {{0, 0, 0}, {1, 0, 0}, {0, 0, 1}, {0, 0, 0}}}, // 2
+					{false, 3, {{1, 0, 0}, {0, 1, 0}, {0, 0, 0}, {0, 0, 0}}}};// 3
+				// Wedge: (s0,s1)=triangular cross-section, s2=extrusion. 2 tri caps + 3 quad sides
+				// (see BulkElementWedge3dC1::get_vertex_nodes_of_face).
+				static const PFace WEDGE_FACES[5] = {
+					{false, 3, {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 0}}}, // 0 bottom tri s2=0
+					{false, 3, {{0, 0, 1}, {1, 0, 1}, {0, 1, 1}, {0, 0, 0}}}, // 1 top tri s2=1
+					{true,  4, {{0, 0, 0}, {0, 1, 0}, {0, 1, 1}, {0, 0, 1}}}, // 2 quad s0=0
+					{true,  4, {{0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1}}}, // 3 quad s1=0
+					{true,  4, {{1, 0, 0}, {0, 1, 0}, {0, 1, 1}, {1, 0, 1}}}};// 4 quad hypotenuse s0+s1=1
+				// Brick: local coords in [-1,1]^3; 6 quad faces at s0/s1/s2 = -+1 (a mixed-mesh brick reaches
+				// this pass; a pure-brick mesh uses oomph-lib's own octree hanging instead).
+				static const PFace BRICK_FACES[6] = {
+					{true, 4, {{-1, -1, -1}, {-1, 1, -1}, {-1, 1, 1}, {-1, -1, 1}}}, // s0=-1
+					{true, 4, {{1, -1, -1}, {1, 1, -1}, {1, 1, 1}, {1, -1, 1}}},     // s0=+1
+					{true, 4, {{-1, -1, -1}, {1, -1, -1}, {1, -1, 1}, {-1, -1, 1}}}, // s1=-1
+					{true, 4, {{-1, 1, -1}, {1, 1, -1}, {1, 1, 1}, {-1, 1, 1}}},     // s1=+1
+					{true, 4, {{-1, -1, -1}, {1, -1, -1}, {1, 1, -1}, {-1, 1, -1}}}, // s2=-1
+					{true, 4, {{-1, -1, 1}, {1, -1, 1}, {1, 1, 1}, {-1, 1, 1}}}};    // s2=+1
+
+				for (unsigned int in = 0; in < this->nnode(); in++) this->node_pt(in)->set_nonhanging();
+				const double scale = 1e8;
+				std::map<std::array<long long, 3>, oomph::Node *> node_at;
+				for (unsigned int in = 0; in < this->nnode(); in++)
+				{
+					oomph::Node *n = this->node_pt(in);
+					node_at[{(long long)std::llround(n->x(0) * scale), (long long)std::llround(n->x(1) * scale), (long long)std::llround(n->x(2) * scale)}] = n;
+				}
+
+				const int ncont = this->nelement() ? (int)dynamic_cast<oomph::RefineableElement *>(this->element_pt(0))->ncont_interpolated_values() : 0;
+				for (unsigned int ie = 0; ie < this->nelement(); ie++)
+				{
+					BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+					oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(this->element_pt(ie));
+					oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(this->element_pt(ie));
+					if (!be || !re || !fe || !re->tree_pt() || !re->tree_pt()->is_leaf()) continue;
+					const bool is_pyr = (dynamic_cast<oomph::RefineablePyramidElement *>(this->element_pt(ie)) != nullptr);
+					const bool is_wedge = (dynamic_cast<oomph::RefineableWedgeElement *>(this->element_pt(ie)) != nullptr);
+					const bool is_brick = (dynamic_cast<oomph::BrickElementBase *>(this->element_pt(ie)) != nullptr);
+					const PFace *FACES = is_pyr ? PYR_FACES : (is_wedge ? WEDGE_FACES : (is_brick ? BRICK_FACES : TET_FACES));
+					const int nfaces = is_brick ? 6 : ((is_pyr || is_wedge) ? 5 : 4);
+					const unsigned n1d = fe->nnode_1d();
+					const int steps = 2 * ((int)n1d - 1);
+					if (steps < 1) continue;
+					const double h = 1.0 / steps;
+					for (int f = 0; f < nfaces; f++)
+					{
+						const PFace &F = FACES[f];
+						for (int iu = 0; iu <= steps; iu++)
+							for (int iv = 0; iv <= steps; iv++)
+							{
+								const double u = iu * h, v = iv * h;
+								if (!F.quad && u + v > 1.0 + 1e-12) continue; // tri face: barycentric u+v<=1
+								oomph::Vector<double> s(3), x(3);
+								for (int d = 0; d < 3; d++)
+								{
+									if (F.quad)
+										s[d] = (1 - u) * (1 - v) * F.c[0][d] + u * (1 - v) * F.c[1][d] + u * v * F.c[2][d] + (1 - u) * v * F.c[3][d];
+									else
+										s[d] = F.c[0][d] + u * (F.c[1][d] - F.c[0][d]) + v * (F.c[2][d] - F.c[0][d]);
+								}
+								be->interpolated_x(s, x);
+								if (!std::isfinite(x[0]) || !std::isfinite(x[1]) || !std::isfinite(x[2])) continue; // apex (s2=1)
+								std::array<long long, 3> key = {(long long)std::llround(x[0] * scale), (long long)std::llround(x[1] * scale), (long long)std::llround(x[2] * scale)};
+								auto it = node_at.find(key);
+								if (it == node_at.end()) continue;
+								oomph::Node *H = it->second;
+								be->mixed_hang_node_at(H, re, s, -1);
+								for (int val = 0; val < ncont; val++) be->mixed_hang_node_at(H, re, s, val);
+							}
+					}
+				}
+				return;
+			}
+		}
+
+	}
+
+	// Enforce 2:1 refinement balancing for tetrahedral meshes (see header). Iteratively refine any
+	// leaf tet that has a node at the quarter point (t=0.25 or 0.75) of one of its edges -- which
+	// means a neighbour is >=2 refinement levels finer than it -- until no such tet remains. Each
+	// refinement round uses oomph-lib's refine_selected_elements (full, correct rebuild).
+	// Quantized centroid of an element: a rank-independent key, so a selection made on one process can be
+	// recognised on another that holds the same element as a halo copy.
+	static std::array<long long, 3> element_centroid_key(oomph::GeneralisedElement *ge, double scale)
+	{
+		oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(ge);
+		std::array<long long, 3> key = {0, 0, 0};
+		if (!fe || !fe->nnode()) return key;
+		const unsigned n = fe->nnode();
+		for (unsigned d = 0; d < 3; d++)
+		{
+			double c = 0.0;
+			for (unsigned k = 0; k < n; k++) c += fe->node_pt(k)->x(d);
+			key[d] = (long long)std::llround((c / n) * scale);
+		}
+		return key;
+	}
+
+	void TemplatedMeshBase3d::enforce_refinement_balance()
+	{
+		bool has_simplexlike = false;
+		for (unsigned int ie = 0; ie < this->nelement() && !has_simplexlike; ie++)
+			if (dynamic_cast<oomph::TElementBase *>(this->element_pt(ie)) || dynamic_cast<oomph::RefineableWedgeElement *>(this->element_pt(ie)) ||
+				dynamic_cast<oomph::RefineablePyramidElement *>(this->element_pt(ie)))
+				has_simplexlike = true;
+		if (!has_simplexlike) return; // brick/hex meshes: oomph-lib's tree bounds the level difference itself
+
+		const double scale = 1e8;
+		const int max_rounds = 40; // safety bound; convergence is bounded by max_refinement_level()
+		for (int round = 0; round < max_rounds; round++)
+		{
+			// Quantized set of all node positions, for O(1) "does a node exist here?" lookups.
+			std::set<std::array<long long, 3>> positions;
+			for (unsigned int in = 0; in < this->nnode(); in++)
+			{
+				oomph::Node *n = this->node_pt(in);
+				positions.insert({(long long)std::llround(n->x(0) * scale), (long long)std::llround(n->x(1) * scale), (long long)std::llround(n->x(2) * scale)});
+			}
+
+			oomph::Vector<unsigned> to_refine;
+			for (unsigned int ie = 0; ie < this->nelement(); ie++)
+			{
+				oomph::TElementBase *tet = dynamic_cast<oomph::TElementBase *>(this->element_pt(ie));
+				oomph::RefineableWedgeElement *wedge = dynamic_cast<oomph::RefineableWedgeElement *>(this->element_pt(ie));
+				oomph::RefineablePyramidElement *pyr = dynamic_cast<oomph::RefineablePyramidElement *>(this->element_pt(ie));
+				oomph::BrickElementBase *brick = dynamic_cast<oomph::BrickElementBase *>(this->element_pt(ie));
+				oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(this->element_pt(ie));
+				// Bricks are candidates too, but only in a mixed mesh: a pure-brick mesh returns above
+				// (has_simplexlike is false) and is balanced by oomph-lib's own tree.
+				if ((!tet && !wedge && !pyr && !brick) || !fe) continue;
+				oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(this->element_pt(ie));
+				if (re && re->refinement_level() >= this->max_refinement_level()) continue; // cannot refine further
+				// This element's edges as vertex-index pairs: a tet's 6, a wedge's 9 (2 tri caps + 3
+				// verticals), or a pyramid's 8 (4 base + 4 lateral to the apex). Only genuine edges (not face
+				// diagonals), so a node at their 1/2^nnode_1d quarter-point signals a neighbour >=2 levels
+				// finer (see the C1:1/4, C2:1/8 note below).
+				static const int TET_E[6][2] = {{0, 1}, {0, 2}, {0, 3}, {1, 2}, {1, 3}, {2, 3}};
+				static const int WEDGE_E[9][2] = {{0, 1}, {1, 2}, {2, 0}, {3, 4}, {4, 5}, {5, 3}, {0, 3}, {1, 4}, {2, 5}};
+				static const int PYR_E[8][2] = {{0, 1}, {1, 2}, {2, 3}, {3, 0}, {0, 4}, {1, 4}, {2, 4}, {3, 4}};
+				// Brick vertices (vertex_node_pt) in tensor order 000,100,010,110,001,101,011,111; its 12 edges
+				// are the 4 bottom + 4 top + 4 vertical edges (no face/body diagonals).
+				static const int BRICK_E[12][2] = {{0, 1}, {1, 3}, {3, 2}, {2, 0}, {4, 5}, {5, 7}, {7, 6}, {6, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+				const int(*E)[2] = tet ? TET_E : (wedge ? WEDGE_E : (pyr ? PYR_E : BRICK_E));
+				const int nE = tet ? 6 : (wedge ? 9 : (pyr ? 8 : 12));
+				// The edge-fraction whose presence signals a neighbour >=2 levels finer. A 1-level
+				// neighbour subdivides the edge at its midpoint (t=1/2) and, for order p>=2 (e.g. C2),
+				// additionally places the sub-edges' own mid-nodes at t=1/4, 3/4 -- so the finest node a
+				// 2:1-allowed neighbour produces is at t=1/2^nnode_1d. A node at that fraction therefore
+				// means the neighbour is >=2 levels finer. C1 (nnode_1d=2): 1/4; C2 (nnode_1d=3): 1/8.
+				const double frac = 1.0 / (double)(1u << fe->nnode_1d());
+				const double fracs[2] = {frac, 1.0 - frac};
+				bool imbalanced = false;
+				for (int e = 0; e < nE && !imbalanced; e++)
+				{
+					oomph::Node *va = fe->vertex_node_pt(E[e][0]);
+					oomph::Node *vb = fe->vertex_node_pt(E[e][1]);
+					for (int fi = 0; fi < 2; fi++)
+					{
+						std::array<long long, 3> q;
+						for (int d = 0; d < 3; d++)
+							q[d] = (long long)std::llround((va->x(d) + fracs[fi] * (vb->x(d) - va->x(d))) * scale);
+						if (positions.count(q)) { imbalanced = true; break; }
+					}
+				}
+				if (imbalanced) to_refine.push_back(ie);
+			}
+			// On a DISTRIBUTED mesh this selection must be made globally, not per rank. Each rank can only
+			// see its own elements plus a halo layer, so a rank may fail to select a HALO copy of an element
+			// that its owner selects -- leaving behind a coarse parent whose sons exist on every other rank.
+			// That stale halo element then makes the tet face-neighbour finder report a genuinely coarser
+			// neighbour where there is none, so a 2:1 hang is installed that does not exist globally, the
+			// hanging sets diverge between ranks, and with them the global equation numbering
+			// (dev_docs/adaptive_refinement.md §8.2). The loop bound was rank-local too, so ranks could
+			// even run different numbers of rounds around the collective inside refine_selected_elements.
+			//
+			// Fix both: union the selected elements across all processes (keyed by quantized centroid, the
+			// same shape- and rank-independent key style used for node positions above), re-select locally
+			// from that union, and terminate on the GLOBAL set being empty so every rank runs the same
+			// rounds and enters refine_selected_elements together -- even with nothing of its own to refine.
+			bool global_empty = (to_refine.size() == 0);
+#ifdef OOMPH_HAS_MPI
+			if (this->is_mesh_distributed() && this->communicator_pt())
+			{
+				MPI_Comm mc = this->communicator_pt()->mpi_comm();
+				int nproc = 1;
+				MPI_Comm_size(mc, &nproc);
+				std::vector<long long> mine;
+				mine.reserve(3 * to_refine.size());
+				for (unsigned int k = 0; k < to_refine.size(); k++)
+				{
+					std::array<long long, 3> c = element_centroid_key(this->element_pt(to_refine[k]), scale);
+					mine.push_back(c[0]); mine.push_back(c[1]); mine.push_back(c[2]);
+				}
+				int mycount = (int)mine.size();
+				std::vector<int> counts(nproc, 0), displs(nproc, 0);
+				MPI_Allgather(&mycount, 1, MPI_INT, &counts[0], 1, MPI_INT, mc);
+				int total = 0;
+				for (int i = 0; i < nproc; i++) { displs[i] = total; total += counts[i]; }
+				std::vector<long long> all((size_t)std::max(total, 1));
+				MPI_Allgatherv(mycount ? &mine[0] : NULL, mycount, MPI_LONG_LONG,
+							   &all[0], &counts[0], &displs[0], MPI_LONG_LONG, mc);
+				std::set<std::array<long long, 3>> global_sel;
+				for (int i = 0; i + 2 < total; i += 3)
+					global_sel.insert({all[i], all[i + 1], all[i + 2]});
+				global_empty = global_sel.empty();
+				to_refine.clear();
+				if (!global_empty)
+					for (unsigned int ie = 0; ie < this->nelement(); ie++)
+						if (global_sel.count(element_centroid_key(this->element_pt(ie), scale)))
+							to_refine.push_back(ie);
+			}
+#endif
+			if (global_empty) break;
+			this->refine_selected_elements(to_refine); // flags + full adapt_mesh rebuild
 		}
 	}
 
@@ -70,9 +374,9 @@ namespace pyoomph
 	}
 
 	// Build Boundary_element_pt / Face_index_at_boundary for a (possibly mixed brick/tet) 3d mesh.
-	// For adaptive, pure-brick meshes, delegates to the generic facet-based TemplatedMeshBase
-	// implementation (identication_of_boundary_elements_by_facets), which is robust under refinement.
-	// Otherwise (non-adaptive or mixed meshes), uses the brick- and tet-specific helpers below.
+	// Normally the single, shape-neutral identification from the per-element face boundary tags,
+	// which is exact on arbitrarily refined meshes; only untagged meshes use the brick- and
+	// tet-specific legacy helpers below.
 	void TemplatedMeshBase3d::setup_boundary_element_info(std::ostream &outfile)
 	{
 
@@ -83,19 +387,15 @@ namespace pyoomph
 		Boundary_element_pt.resize(nbound);
 		Face_index_at_boundary.resize(nbound);
 
-		if (identication_of_boundary_elements_by_facets)
-        {
-         if (is_adaptation_enabled() &&refinement_possible() )
-         {
-          identication_of_boundary_elements_by_facets=false; // For adaptive meshes, we find the facets conventionally, but for non-adaptive meshes we can use the facet information from the mesh template which is always accurate, even at mixed corners
-         }
-        }
-        if (identication_of_boundary_elements_by_facets)
-        {
-         TemplatedMeshBase::setup_boundary_element_info(outfile);
-		 Lookup_for_elements_next_boundary_is_setup = true;
-         return;
-        }
+		// Unified, shape-neutral identification from the per-element face boundary tags; see
+		// TemplatedMeshBase::setup_boundary_element_info_from_face_tags. Meshes without tags fall
+		// back to the legacy per-shape reconstruction below.
+		if (face_boundary_tags_valid)
+		{
+			setup_boundary_element_info_from_face_tags();
+			Lookup_for_elements_next_boundary_is_setup = true;
+			return;
+		}
 
 		setup_boundary_element_info_bricks(outfile);
 		setup_boundary_element_info_tris(outfile);
@@ -429,6 +729,98 @@ namespace pyoomph
 
 				// Increment counter
 				e_count++;
+			}
+		}
+	}
+
+	// Find all "internal facets" of a 3d mesh, i.e. element faces shared by two bulk elements (as
+	// opposed to faces on an outer mesh boundary), and pair each element/face with its neighbour on
+	// the far side. Used to assemble DG-type interior-facet terms and to carry fields on the
+	// "_internal_facets_" skeleton.
+	//
+	// Unlike the 1d/2d overrides this is built on the generic build_facet_adjacency() primitive
+	// (vertex-node set of a face -> incident (element, face index) pairs), which is shape-neutral and
+	// therefore handles tets, bricks, wedges, pyramids and mixed meshes in one go -- the face indices
+	// it reports ARE the values construct_face_element() expects (see Possible_Face_Indices). That
+	// same primitive is the designated replacement for the 2d version's "Mixed meshes here"
+	// limitation, which is why the 2d hanging-node branch is left alone rather than generalised here.
+	//
+	// CONFORMING meshes only. Under 2:1 refinement a coarse face and the four fine faces facing it
+	// have different vertex sets, so the adjacency map would silently report all five as boundary
+	// facets and the skeleton would come out missing exactly the interesting facets; the explicit
+	// hanging/refinement-level check below turns that into an error instead. The 2d version's
+	// quadtree branch (with opposite_already_at_index and shared coarse opposite elements) is what a
+	// 3d adaptive version would have to mirror.
+	void TemplatedMeshBase3d::fill_internal_facet_buffers(std::vector<BulkElementBase *> &internal_elements, std::vector<int> &internal_face_dir, std::vector<BulkElementBase *> &opposite_elements, std::vector<int> &opposite_face_dir, std::vector<int> &opposite_already_at_index)
+	{
+		internal_elements.clear();
+		internal_face_dir.clear();
+		opposite_elements.clear();
+		opposite_face_dir.clear();
+		opposite_already_at_index.clear();
+
+		const std::string nonconforming_msg = "Interior facets of a 3d mesh can currently only be enumerated on a conforming (non-adapted) mesh. Spatial adaptivity together with interior-facet terms or fields on '_internal_facets_' is not supported in 3d yet.";
+		oomph::TreeBasedRefineableMeshBase *tbself = dynamic_cast<oomph::TreeBasedRefineableMeshBase *>(this);
+		if (tbself && tbself->forest_pt())
+		{
+			unsigned milev = 0, malev = 0;
+			tbself->get_refinement_levels(milev, malev);
+			if (milev < malev) throw_runtime_error(nonconforming_msg);
+		}
+		for (unsigned int in = 0; in < this->nnode(); in++)
+		{
+			if (this->node_pt(in)->is_hanging()) throw_runtime_error(nonconforming_msg);
+		}
+
+		FacetAdjacencyMap adj = this->build_facet_adjacency();
+
+		auto face_key = [](BulkElementBase *el, int face_id)
+		{
+			std::set<pyoomph::Node *> key;
+			for (pyoomph::Node *n : el->get_vertex_nodes_of_face(face_id))
+			{
+				if (n->is_a_copy()) n = static_cast<pyoomph::Node *>(n->copied_node_pt());
+				key.insert(n);
+			}
+			return key;
+		};
+
+		// Emit in element/face order rather than by iterating adj: it keys on node POINTERS, so its
+		// iteration order follows heap addresses and therefore differs from process to process.
+		// oomph-lib splits the element list of a NON-distributed problem by index across ranks and
+		// assumes every rank sees the same list; with a rank-dependent facet order the ranks would
+		// assemble different subsets of the interior facets (the 2d version carries the same note,
+		// where that double-counted some DG contributions and dropped others).
+		for (unsigned int ie = 0; ie < this->nelement(); ie++)
+		{
+			BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+			if (!be) continue;
+			for (int face_id : be->get_possible_face_indices())
+			{
+				std::set<pyoomph::Node *> key = face_key(be, face_id);
+				if (key.empty()) continue;
+				const auto &attached = adj.at(key);
+				if (attached.size() == 1) continue; // Exterior facet
+				if (attached.size() > 2)
+				{
+					throw_runtime_error("Found a facet with " + std::to_string(attached.size()) + " attached element faces. " + nonconforming_msg);
+				}
+				// The NEAR side (the one the facet element is attached to, whose outward normal the facet
+				// terms use) must come out the same on every rank: distributed, the two elements can sit
+				// on different ranks and neither consults the other. Local element order alone would only
+				// agree because Mesh::distribute() happens to re-add the retained elements in their
+				// original order; the structural index says it outright, and coincides with local order
+				// while the mesh is whole.
+				unsigned nearside = (Mesh::compare_structural_order(attached[0].first, attached[1].first) > 0 ? 1 : 0);
+				const auto &near = attached[nearside];
+				const auto &far = attached[1 - nearside];
+				if (near.first != be || near.second != face_id) continue; // Emitted from the other side
+				internal_elements.push_back(near.first);
+				internal_face_dir.push_back(near.second);
+				opposite_elements.push_back(far.first);
+				opposite_face_dir.push_back(far.second);
+				// No 2:1 hanging facets on a conforming mesh, so no opposite element is ever shared.
+				opposite_already_at_index.push_back(-1);
 			}
 		}
 	}

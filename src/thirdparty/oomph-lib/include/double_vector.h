@@ -81,7 +81,7 @@ namespace oomph
 
     /// Destructor - just calls this->clear() to delete the distribution and
     /// data
-    ~DoubleVector()
+    ~DoubleVector() override
     {
       this->clear();
     }

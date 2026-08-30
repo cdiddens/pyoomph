@@ -1,51 +1,51 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
 from abc import abstractmethod
-from token import OP
 
 from ..typings import *
-from ..expressions.cb import CustomMultiReturnExpression,Expression
+from ..expressions.cb import CustomMultiReturnExpression
 from ..expressions.units import kelvin
 from ..expressions import ExpressionNumOrNone,ExpressionOrNum, var
 
 import numpy
 
 if TYPE_CHECKING:
-    from .generic import MixtureLiquidProperties,PureLiquidProperties
+    from .generic import MixtureLiquidProperties
 
-_TypeActivityModel=TypeVar("_TypeActivityModel",bound=Type["ActivityModel"])
+_TypeActivityModel=TypeVar("_TypeActivityModel",bound=type["ActivityModel"])
 
 class ActivityModel:
     """
     A generic class to predict activity coefficients of mixtures. 
     """
-    registered_models:Dict[str,Type["ActivityModel"]]={}
-    model_instances:Dict[str,Optional["ActivityModel"]]={}
+    registered_models:dict[str,type["ActivityModel"]]={}
+    model_instances:dict[str,"ActivityModel | None"]={}
     name:str
     @classmethod
     def register_activity_model(cls, *, override:bool=False):
@@ -74,27 +74,38 @@ class ActivityModel:
         pass
 
 class UNIFACMainGroup:
-    def __init__(self,name:str,index:Optional[int]=None):
+    def __init__(self,name:str,index:int | None=None):
         self.name=name
         self.index=index
-        self.subgroups:Dict[str,"UNIFACSubGroup"]={}
+        self.subgroups:dict[str,"UNIFACSubGroup"]={}
 
 class UNIFACSubGroup:
-    def __init__(self,name:str,maingroup:UNIFACMainGroup,R:float,Q:float,index:Optional[int]=None):
+    def __init__(self,name:str,maingroup:UNIFACMainGroup,R:float,Q:float,index:int | None=None,
+                 molar_mass:float | None=None,charge:int=0):
         self.name=name
         self.maingroup=maingroup
         self.R=R
         self.Q=Q
         self.index=index
+        #: Molar mass in kg/mol. Used to be accepted by define_sub_group and dropped on the floor;
+        #: the middle-range part of AIOMFAC weights a main group's contribution by its mass, so it
+        #: is real data now.
+        self.molar_mass=molar_mass
+        #: Charge number. Nonzero only for the ion subgroups of AIOMFAC, which is what makes a
+        #: subgroup an ion as far as the activity model is concerned.
+        self.charge=charge
         self.maingroup.subgroups[self.name]=self
+
+    def is_ion(self)->bool:
+        return self.charge!=0
 
 class UNIFACMolecule:
     def __init__(self,name:str,server:ActivityModel):
         self.name=name
         self.server=server
-        self.groups:Dict[str,int]={}
+        self.groups:dict[str,int]={}
 
-    def add_subgroup(self,name_or_index:Union[str,int],count:int=1):
+    def add_subgroup(self,name_or_index:str | int,count:int=1):
         assert isinstance(self.server,UNIFACLikeActivityModel)
         if isinstance(name_or_index,int):
             name_or_index=self.server.subgroup_by_index[name_or_index].name
@@ -175,20 +186,21 @@ class UNIFACMixture:
         else:
             self._VOtherExponent=self._V #type:ignore
 
-        self._allgroups:Dict[str,int]={}
+        self._allgroups:dict[str,int]={}
         for c in self.components:
             for sg,sgcount in c.groups.items():
                 self._allgroups[sg]=self._allgroups.get(sg,0)+sgcount #Total number of each subgroup
-        self._nu:Dict[str,Dict[str,int]]={}
+        self._nu:dict[str,dict[str,int]]={}
         for c in self.components:
             entry= {n:0 for n in self._allgroups.keys()}
             for sg,sgcount in c.groups.items():
                 entry[sg]=sgcount
             self._nu[c.name]=entry
-        self._group_Qs:Dict[str,float]={n: self.server.subgroups[n].Q for n in self._allgroups.keys()}
-        self._sub_to_main:Dict[str,str]={}
+        self._group_Qs:dict[str,float]={n: self.server.subgroups[n].Q for n in self._allgroups.keys()}
+        self._sub_to_main:dict[str,str]={}
         for sg in self._allgroups.keys():
             self._sub_to_main[sg]=self.server.subgroups[sg].maingroup.name
+        self._check_interactions_are_known()
         self._As = {n: {m: self.server.interaction_table.get(self._sub_to_main[n], {}).get(self._sub_to_main[m], {}).get("A",0) for m in self._allgroups.keys()} for n in self._allgroups.keys()} 
         self._Bs = {n: {m: self.server.interaction_table.get(self._sub_to_main[n], {}).get(self._sub_to_main[m], {}).get("B", 0) for m in self._allgroups.keys()} for n in self._allgroups.keys()}
         self._Cs = {n: {m: self.server.interaction_table.get(self._sub_to_main[n], {}).get(self._sub_to_main[m], {}).get("C", 0) for m in self._allgroups.keys()} for n in self._allgroups.keys()}
@@ -196,6 +208,24 @@ class UNIFACMixture:
 
 
 
+
+    def _check_interactions_are_known(self)->None:
+        """Refuse a mixture that needs an interaction parameter the model does not have."""
+        assert isinstance(self.server,UNIFACLikeActivityModel)
+        if not self.server.undetermined_interactions:
+            return
+        mains={sg:self.server.subgroups[sg].maingroup for sg in self._allgroups.keys()}
+        missing:set[tuple[str,str]]=set()
+        for a in self._allgroups.keys():
+            for b in self._allgroups.keys():
+                ia,ib=mains[a].index,mains[b].index
+                if ia is not None and ib is not None and (ia,ib) in self.server.undetermined_interactions:
+                    missing.add((mains[a].name,mains[b].name))
+        if missing:
+            raise RuntimeError("The activity model '"+str(self.server.name)+"' has no interaction "+
+                               "parameter for "+", ".join(a+" <-> "+b for a,b in sorted(missing))+
+                               ", so it cannot describe this mixture. AIOMFAC itself stops on these "+
+                               "rather than assuming they are zero.")
 
     def get_ln_combinatorial_gamma(self,compo): #type:ignore
         r = compo.get_molecular_r() #type:ignore
@@ -290,7 +320,7 @@ class UNIFACMixture:
         else:
             raise RuntimeError("Component " + compo + " not in the mixture")
 
-    def get_activity_coefficient_expression(self,compo:Union[str,UNIFACMolecule]): #type:ignore
+    def get_activity_coefficient_expression(self,compo:str | UNIFACMolecule): #type:ignore
         if self._generator is None:
             raise RuntimeError("Set an expression generator first")
         if isinstance(compo,str):
@@ -309,17 +339,21 @@ class UNIFACLikeActivityModel(ActivityModel):
     """
     def __init__(self):
         super(UNIFACLikeActivityModel, self).__init__()
-        self.maingroups:Dict[str,UNIFACMainGroup]={}
-        self.maingroup_by_index:Dict[int,UNIFACMainGroup]={}
-        self.subgroups:Dict[str,UNIFACSubGroup]={}
-        self.subgroup_by_index:Dict[int,UNIFACSubGroup]={}
+        self.maingroups:dict[str,UNIFACMainGroup]={}
+        self.maingroup_by_index:dict[int,UNIFACMainGroup]={}
+        self.subgroups:dict[str,UNIFACSubGroup]={}
+        self.subgroup_by_index:dict[int,UNIFACSubGroup]={}
         self._current_subgroup_definer:Any=None
-        self.interaction_table:Dict[str,Dict[str,Dict[str,float]]]={}
+        self.interaction_table:dict[str,dict[str,dict[str,float]]]={}
 
         self.modified_volume_fraction_exponent=1
+        #: Main-group index pairs for which the model has no interaction parameter. A mixture whose
+        #: groups need one is refused: treating it as ideal would give a plausible wrong answer, and
+        #: AIOMFAC itself stops with an error on these.
+        self.undetermined_interactions:set[tuple[int,int]]=set()
         self.coordination_number=10
 
-    def define_main_group(self,name:str,index:Optional[int]=None):
+    def define_main_group(self,name:str,index:int | None=None):
         server=self
         class _MainGroupDefiner:
             def __init__(self,maingrp:UNIFACMainGroup):
@@ -332,10 +366,10 @@ class UNIFACLikeActivityModel(ActivityModel):
                 server._current_subgroup_definer=None
                 return
 
-            def sub_group(self,name:str,R:float,Q:float,index:Optional[int]=None,molar_mass:Optional[float]=None):
+            def sub_group(self,name:str,R:float,Q:float,index:int | None=None,molar_mass:float | None=None,charge:int=0):
                 if name in server.subgroups.keys():
                     raise RuntimeError("Subgroup "+name+" already defined in another main group "+server.subgroups[name].maingroup.name)
-                res=UNIFACSubGroup(name,self.maingrp,R,Q,index)
+                res=UNIFACSubGroup(name,self.maingrp,R,Q,index,molar_mass=molar_mass,charge=charge)
                 server.subgroups[name]=res
                 if index is not None:
                     server.subgroup_by_index[index]=res
@@ -347,12 +381,13 @@ class UNIFACLikeActivityModel(ActivityModel):
         return _MainGroupDefiner(grp)
 
 
-    def define_sub_group(self,name:str,R:float,Q:float,index:int,molar_mass:Optional[float]=None):
+    def define_sub_group(self,name:str,R:float,Q:float,index:int,molar_mass:float | None=None,
+                         charge:int=0):
         if self._current_subgroup_definer is None:
             raise RuntimeError("Can only do it in 'with self.define_main_group():' statements")
-        self._current_subgroup_definer.sub_group(name,R,Q,index,molar_mass=molar_mass)
+        self._current_subgroup_definer.sub_group(name,R,Q,index,molar_mass=molar_mass,charge=charge)
 
-    def set_interaction(self,mainI:Union[int,str],mainJ:Union[int,str],*,Aij:Optional[float]=None,Aji:Optional[float]=None,Bij:Optional[float]=None,Bji:Optional[float]=None,Cij:Optional[float]=None,Cji:Optional[float]=None):
+    def set_interaction(self,mainI:int | str,mainJ:int | str,*,Aij:float | None=None,Aji:float | None=None,Bij:float | None=None,Bji:float | None=None,Cij:float | None=None,Cji:float | None=None):
         def ensure_table(first:str,second:str):
             if not (first in self.interaction_table.keys()):
                 self.interaction_table[first]={}
@@ -398,12 +433,17 @@ class UNIFACMultiReturnExpression(CustomMultiReturnExpression):
         self.argument_order=list(self.mix.required_adv_diff_fields)        
         self.argument_order.sort()        
         self.argument_order_with_passive=self.argument_order.copy()
+        assert self.mix.passive_field is not None, "The mixture "+str(self.mix)+" has no passive field set (it must have at least one component)"
         self.argument_order_with_passive.append(self.mix.passive_field)
-        
-        
-        self.server=ActivityModel.get_activity_model_by_name(modelname)
-        unifac_components:Dict[str,UNIFACMolecule]={cn:UNIFACMolecule(cn,self.server) for cn in mix.components}
-        for cn in mix.components:
+
+
+        server=ActivityModel.get_activity_model_by_name(modelname)
+        assert isinstance(server,UNIFACLikeActivityModel), "UNIFACMultiReturnExpression requires a UNIFAC-like activity model, got "+str(type(server))+" for model name "+modelname
+        self.server:UNIFACLikeActivityModel=server
+        # sorted: mix.components is a set, and UNIFACMixture keeps the order it is constructed with.
+        # That order propagates into _allgroups/_nu/_As/... and hence into every generated sum.
+        unifac_components:dict[str,UNIFACMolecule]={cn:UNIFACMolecule(cn,self.server) for cn in sorted(mix.components)}
+        for cn in sorted(mix.components):
             comp=mix.pure_properties[cn]
             assert isinstance(comp,PureLiquidProperties)
             subgroups=comp._UNIFAC_groups[modelname] 
@@ -416,18 +456,18 @@ class UNIFACMultiReturnExpression(CustomMultiReturnExpression):
         self.component_name_to_arg_index={n:self.argument_order_with_passive.index(n) for n in self.argument_order_with_passive}
                
 
-        self._allgroups:Dict[str,int]={}
+        self._allgroups:dict[str,int]={}
         for c in self.unifac_mix.components:
             for sg,sgcount in c.groups.items():
                 self._allgroups[sg]=self._allgroups.get(sg,0)+sgcount #Total number of each subgroup
-        self._nu:Dict[str,Dict[str,int]]={}
+        self._nu:dict[str,dict[str,int]]={}
         for c in self.unifac_mix.components:
             entry= {n:0 for n in self._allgroups.keys()}
             for sg,sgcount in c.groups.items():
                 entry[sg]=sgcount
             self._nu[c.name]=entry
-        self._group_Qs:Dict[str,float]={n: self.server.subgroups[n].Q for n in self._allgroups.keys()}
-        self._sub_to_main:Dict[str,str]={}
+        self._group_Qs:dict[str,float]={n: self.server.subgroups[n].Q for n in self._allgroups.keys()}
+        self._sub_to_main:dict[str,str]={}
         for sg in self._allgroups.keys():
             self._sub_to_main[sg]=self.server.subgroups[sg].maingroup.name
         self._As = {n: {m: self.server.interaction_table.get(self._sub_to_main[n], {}).get(self._sub_to_main[m], {}).get("A",0) for m in self._allgroups.keys()} for n in self._allgroups.keys()} 
@@ -437,8 +477,8 @@ class UNIFACMultiReturnExpression(CustomMultiReturnExpression):
         self.unifac_mix._nu=self._nu
         self.unifac_mix._group_Qs=self._group_Qs
 
-        self.rs=[0]*len(self.argument_order_with_passive)
-        self.qs=[0]*len(self.argument_order_with_passive)
+        self.rs:list[float]=[0]*len(self.argument_order_with_passive)
+        self.qs:list[float]=[0]*len(self.argument_order_with_passive)
         self.thetas_pure={}
         for c in self.unifac_mix.components:
             i=self.component_name_to_arg_index[c.name]
@@ -502,18 +542,19 @@ class UNIFACMultiReturnExpression(CustomMultiReturnExpression):
             """
 
         # First get the Thetas at this composition
-        counts_matrix = {n:[] for n in self._allgroups.keys()}
+        counts_matrix:dict[str,list[int]] = {n:[] for n in self._allgroups.keys()}
         for j, c in enumerate(self.argument_order_with_passive):
             for sgn in self._allgroups.keys():
                 counts_matrix[sgn].append(self._nu[c][sgn])
+        counts_matrix_np:dict[str,NPAnyArray] = {}
         for sgn in self._allgroups.keys():
-            counts_matrix[sgn]=numpy.array(counts_matrix[sgn])
-            counts_matrix[sgn][:-1]-=counts_matrix[sgn][-1]
+            counts_matrix_np[sgn]=numpy.array(counts_matrix[sgn])
+            counts_matrix_np[sgn][:-1]-=counts_matrix_np[sgn][-1]
         for sgi,sgn in enumerate(self._allgroups.keys()):
             res+="double Theta_sg_"+str(sgi)+ " = "
-            if counts_matrix[sgn][-1]!=0:
-                res+=str(counts_matrix[sgn][-1])+" + "
-            res+=("+".join(["("+str(counts_matrix[sgn][i])+")"+"*molefracs["+str(i)+"]" for i in range(T_index) if counts_matrix[sgn][i]!=0]))+""";
+            if counts_matrix_np[sgn][-1]!=0:
+                res+=str(counts_matrix_np[sgn][-1])+" + "
+            res+=("+".join(["("+str(counts_matrix_np[sgn][i])+")"+"*molefracs["+str(i)+"]" for i in range(T_index) if counts_matrix_np[sgn][i]!=0]))+""";
             """
         res+="double Theta_denom = "+ ("+".join("Theta_sg_"+str(sgi) for sgi in range(len(self._allgroups))))+""";
             """
@@ -528,13 +569,13 @@ class UNIFACMultiReturnExpression(CustomMultiReturnExpression):
 
         res+=""" //Interaction table
             """        
-        for ii,i in enumerate(self._allgroups.keys()):           
-            for jj,j in enumerate(self._allgroups.keys()):
-                res+="const double interact_"+str(ii)+"_"+str(jj)+" = exp(-( ("+str(self._As[i][j])+")/T_in_K "
-                if self._Bs[i][j]!=0:
-                     res+="+ ("+str(self._Bs[i][j])+")"
-                if self._Cs[i][j]!=0:
-                     res+="+ ("+str(self._Cs[i][j])+")*T_in_K"
+        for ii,gi in enumerate(self._allgroups.keys()):           
+            for jj,gj in enumerate(self._allgroups.keys()):
+                res+="const double interact_"+str(ii)+"_"+str(jj)+" = exp(-( ("+str(self._As[gi][gj])+")/T_in_K "
+                if self._Bs[gi][gj]!=0:
+                     res+="+ ("+str(self._Bs[gi][gj])+")"
+                if self._Cs[gi][gj]!=0:
+                     res+="+ ("+str(self._Cs[gi][gj])+")*T_in_K"
                 res+=""" ));                
             """                
 
@@ -593,9 +634,9 @@ class UNIFACMultiReturnExpression(CustomMultiReturnExpression):
             arg_list2[-1]=1-sum(arg_list2[:-1])
         else:
             T_in_K=self._constant_temperature_in_K
-            arg_list2=list(arg_list2)
-            arg_list2.append(1-sum(arg_list2))
-            arg_list2=numpy.array(arg_list2)
+            with_passive=list(arg_list2)
+            with_passive.append(1-sum(with_passive))
+            arg_list2=numpy.array(with_passive)
         
         for i,c in enumerate(self.argument_order_with_passive):
             V+=self.rs[i]*arg_list2[i] #type:ignore
@@ -629,8 +670,8 @@ class UNIFACMultiReturnExpression(CustomMultiReturnExpression):
                 Xms[sgn] = counts[sgn] / denom #type:ignore
         
         Qs = self._group_Qs
-        Thetas = {n:0 for n in self._allgroups.keys()}
-        Qdenom = 0
+        Thetas:dict[str,ExpressionOrNum] = {n:0 for n in self._allgroups.keys()}
+        Qdenom:ExpressionOrNum = 0
         for sgn in self._allgroups.keys():
             Qdenom += Xms[sgn] * Qs[sgn]
         for sgn in self._allgroups.keys():
@@ -638,19 +679,19 @@ class UNIFACMultiReturnExpression(CustomMultiReturnExpression):
         
         
         # ln_residual
-        interaction_table = {}
-        for i in self._allgroups.keys():
-            interaction_table[i] = {}
-            for j in self._allgroups.keys():
-                interaction_table[i][j] = numpy.exp(-(self._As[i][j] / T_in_K + self._Bs[i][j] + self._Cs[i][j] * T_in_K))
+        interaction_table:dict[str,dict[str,ExpressionOrNum]] = {}
+        for gi in self._allgroups.keys():
+            interaction_table[gi] = {}
+            for gj in self._allgroups.keys():
+                interaction_table[gi][gj] = numpy.exp(-(self._As[gi][gj] / T_in_K + self._Bs[gi][gj] + self._Cs[gi][gj] * T_in_K))
         
         ln_residual=[]
-        denomM = {}
+        denomM:dict[str,ExpressionOrNum] = {}
         for m in self._allgroups.keys():
             for n in self._allgroups.keys():
                 denomM[m] = denomM.get(m,0)+ Thetas[n] * interaction_table[n][m] #type:ignore
         for i,c in enumerate(self.argument_order_with_passive):                                               
-            denomMpure = {}
+            denomMpure:dict[str,ExpressionOrNum] = {}
             for m in self._allgroups.keys():
                 for n in self._allgroups.keys():                    
                     denomMpure[m] = denomMpure.get(m,0) + self.thetas_pure[c][n] * interaction_table[n][m] #type:ignore            
@@ -675,15 +716,19 @@ class UNIFACMultiReturnExpression(CustomMultiReturnExpression):
             self.fill_python_derivatives_by_FD(arg_list,result_list,derivative_matrix,fd_epsilion=self.FD_epsilon)
         
     
-    def process_args_to_scalar_list(self, *args: ExpressionOrNum) -> List[ExpressionOrNum]:
+    def process_args_to_scalar_list(self, *args: ExpressionOrNum) -> list[ExpressionOrNum]:
         res=[a for a in args]
         res[-1]=res[-1]/kelvin
         return res
     
 
-    def get_activity_coefficient(self,component:str,domain:Optional[str]=None):
+    def get_activity_coefficient(self,component:str,domain:str | None=None):
         call_args=[var("molefrac_"+c,domain=domain) for c in self.argument_order]
         if self._constant_temperature_in_K is None:
             call_args.append(var("temperature",domain=domain))
         print("CALL ARGS",call_args)
         return self.__call__(*call_args)[self.argument_order_with_passive.index(component)]
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

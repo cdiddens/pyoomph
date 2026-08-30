@@ -2684,7 +2684,6 @@ namespace oomph
     }
 
     // Now keep processing the empty bins until there are none left
-    unsigned iter = 0;
     Vector<unsigned> newly_filled_bin;
     while (empty_bins.size() != 0)
     {
@@ -2755,8 +2754,6 @@ namespace oomph
         }
       }
 
-      // Get ready for next iteration on remaining empty bins
-      iter++;
       // Now update the vector that records which bins were empty up to now
       unsigned n = newly_filled_bin.size();
       for (unsigned i = 0; i < n; i++)

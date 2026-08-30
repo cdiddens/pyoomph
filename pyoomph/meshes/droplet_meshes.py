@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -45,10 +46,10 @@ class DropletMesh3d(MeshTemplate):
         self._x100:NPFloatArray
         self._x010:NPFloatArray
         self._x110:NPFloatArray
-        self._lsouth:Callable[[List[float]],NPFloatArray]=lambda s : (1-s[0])*self._x000+s[0]*self._x100
-        self._lnorth:Callable[[List[float]],NPFloatArray] = lambda s: (1 - s[0]) * self._x010 + s[0] * self._x110
-        self._lwest:Callable[[List[float]],NPFloatArray] = lambda s: (1 - s[1]) * self._x000 + s[1] * self._x010
-        self._least:Callable[[List[float]],NPFloatArray]= lambda s: (1 - s[1]) * self._x100 + s[1] * self._x110
+        self._lsouth:Callable[[list[float]],NPFloatArray]=lambda s : (1-s[0])*self._x000+s[0]*self._x100
+        self._lnorth:Callable[[list[float]],NPFloatArray] = lambda s: (1 - s[0]) * self._x010 + s[0] * self._x110
+        self._lwest:Callable[[list[float]],NPFloatArray] = lambda s: (1 - s[1]) * self._x000 + s[1] * self._x010
+        self._least:Callable[[list[float]],NPFloatArray]= lambda s: (1 - s[1]) * self._x100 + s[1] * self._x110
         self._hf:Callable[[float],float]=lambda x: x # Will be changed later
         self.spherical_cap=spherical_cap
         self._rot_x:Callable[[Sequence[float]],Sequence[float]]=lambda x:x
@@ -56,10 +57,10 @@ class DropletMesh3d(MeshTemplate):
         self.Nr=Nr
         self.Np=Nphi
         self.tetra=False
-        self._nodes=[]
-        self._tetra_nodes=[]
-        self._hex_nodes=[]
-        self._boundary_nodes={}
+        self._nodes:list[int]=[]
+        self._tetra_nodes:list[set[int]]=[]
+        self._hex_nodes:list[set[int]]=[]
+        self._boundary_nodes:dict[str,set[int]]={}
         #self._node_calls=0
         #self._node_max = 0
 
@@ -70,8 +71,10 @@ class DropletMesh3d(MeshTemplate):
         #print(self._node_calls,self._node_max)
         return res
 
-    def add_tetra_3d_C1(self,n1,n2,n3,n4):        
-        self._dom.add_tetra_3d_C1(n1,n2,n3,n4)
+    def add_tetra_3d_C1(self,n1,n2,n3,n4):
+        domain=self._dom
+        assert domain is not None
+        domain.add_tetra_3d_C1(n1,n2,n3,n4)
         self._tetra_nodes.append(set([n1,n2,n3,n4]))
         
 
@@ -88,13 +91,13 @@ class DropletMesh3d(MeshTemplate):
             domain.add_brick_3d_C1(*pf)
             self._hex_nodes.append(set([*pf]))
 
-    def mark_boundary_nodes(self, iname:str, ni:List[int]):
+    def mark_boundary_nodes(self, iname:str, ni:list[int]):
         if iname not in self._boundary_nodes.keys():
             self._boundary_nodes[iname]=set()
         self._boundary_nodes[iname].update(ni)
         
-    def add_brick_curved(self,sl:List[float],sh:List[float],end:bool=False):
-        def n(s:List[float]) -> int:
+    def add_brick_curved(self,sl:list[float],sh:list[float],end:bool=False):
+        def n(s:list[float]) -> int:
             x=0.5*(self._lsouth(s)*(1-s[1])+self._lnorth(s)*s[1]+self._lwest(s)*(1-s[0])+self._least(s)*s[0])
             x*=1-(s[2]*(1-s[2])*self._inward_slant)*numpy.sqrt(s[0]**2)
             x[2]=self._hf(x)*s[2]
@@ -222,3 +225,6 @@ class DropletMesh3d(MeshTemplate):
             if len(intersect)==4:
                 self.add_facet_to_boundary("droplet_gas", list(intersect))
 
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

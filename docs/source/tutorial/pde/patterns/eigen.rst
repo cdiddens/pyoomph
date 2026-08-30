@@ -45,7 +45,7 @@ The parameters :math:`\gamma` and :math:`\delta` are now bound as parameters, i.
 	Initial conditions used as initial guesses for the stationary solutions.
 
 
-One might wonder why we do not add :py:class:`~pyoomph.meshes.bcs.PeriodicBC` boundaries here. The reason is that we later on want to calculate stationary solutions and eigenvalues. Since :math:numref:`eqpdeksestrong` is invariant with respect to a shift of the coordinate system, any stationary solution :math:`h_0` would automatically imply an infinite set of stationary solutions :math:`h_{0,\vec{s}}(\vec{x})=h_0(\vec{x}-\vec{\text{s}})`. And each of these solutions would have eigenvalues of zero corresponding to this shift, i.e. with eigenfunctions :math:`\nabla h_0\cdot{s}`. This would hamper the stability analysis tremendously. Instead, we fix the arbitrary shift (and the rotational freedom due to the isotropy of :math:numref:`eqpdeksestrong`) by omitting the :py:class:`~pyoomph.meshes.bcs.PeriodicBC`. Thereby, zero Neumann fluxes will be imposed at the boundaries, i.e. :math:`\partial_x h=\partial_x^3 h=0` at the ``"left"`` and ``"right"`` boundaries and :math:`\partial_y h=\partial_y^3 h=0` at the ``"top"`` and ``"bottom"`` boundaries will be present.
+One might wonder why we do not add :py:class:`~pyoomph.equations.generic.PeriodicBC` boundaries here. The reason is that we later on want to calculate stationary solutions and eigenvalues. Since :math:numref:`eqpdeksestrong` is invariant with respect to a shift of the coordinate system, any stationary solution :math:`h_0` would automatically imply an infinite set of stationary solutions :math:`h_{0,\vec{s}}(\vec{x})=h_0(\vec{x}-\vec{\text{s}})`. And each of these solutions would have eigenvalues of zero corresponding to this shift, i.e. with eigenfunctions :math:`\nabla h_0\cdot{s}`. This would hamper the stability analysis tremendously. Instead, we fix the arbitrary shift (and the rotational freedom due to the isotropy of :math:numref:`eqpdeksestrong`) by omitting the :py:class:`~pyoomph.equations.generic.PeriodicBC`. Thereby, zero Neumann fluxes will be imposed at the boundaries, i.e. :math:`\partial_x h=\partial_x^3 h=0` at the ``"left"`` and ``"right"`` boundaries and :math:`\partial_y h=\partial_y^3 h=0` at the ``"top"`` and ``"bottom"`` boundaries will be present.
 
 Furthermore, we add :py:class:`~pyoomph.equations.generic.IntegralObservables` here. These are observables of the type
 
@@ -70,10 +70,14 @@ First, let us investigate only the case :math:`\delta=0` for varying :math:`\gam
 
 .. literalinclude:: kuramoto_sivanshinsky_arclength_eigen.py
    :language: python
-   :start-at: # slepc eigensolver is more reliable here
+   :start-at: if __name__ == "__main__":
 
-We use another eigensolver, provided by the PETSc/SLEPc package. These can be installed as explained in :numref:`petscslepc`.
-These packages might not be available on Windows. Just give it a try. If these packages cannot be installed, you can omit the import and the :py:meth:`~pyoomph.generic.problem.Problem.set_eigensolver` call to use the default ``scipy`` eigensolver. 
+No eigensolver is selected explicitly here. The default ``scipy`` eigensolver would struggle with this
+problem, but pyoomph does not fall back to it unless it has to: it picks the best backend available on
+your machine, which is SLEPc when PETSc/SLEPc is installed (see :numref:`petscslepc`, and the only
+option that also runs distributed under MPI) and the built-in ``spectra`` otherwise. The latter needs
+no PETSc at all and is therefore also available on Windows. You can still override the choice with
+:py:meth:`~pyoomph.generic.problem.Problem.set_eigensolver` if you want a particular one. 
 
 We then jump on the stationary solution by a stationary :py:meth:`~pyoomph.generic.problem.Problem.solve` command. However, before that, we step a bit in the direction with a transient solve command, since we might otherwise converge into the flat solution :math:`h=0`. We perform an :py:meth:`~pyoomph.generic.problem.Problem.arclength_continuation` along :math:`\gamma` and output the eigenvalue with the largest real part and the calculated rms to a text file. Based on the real part of the eigenvalue, we can determine whether the stationary solution is stable or not. The results are depicted in :numref:`figpdeksefold`, where we also include the flat solution, whose stability has been investigated analytically before.
 

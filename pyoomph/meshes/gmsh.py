@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -33,7 +34,7 @@ import numpy
 
 from ..expressions.generic import Expression, ExpressionNumOrNone, ExpressionOrNum
 
-from .mesh import MeshTemplate
+from .mesh import MeshTemplate, MeshedMeshTemplate
 
 # from .meshio import MeshioMesh2d
 from .. import _pyoomph_core as _pyoomph
@@ -43,14 +44,15 @@ from pygmsh.common.point import Point #type:ignore
 from pygmsh.common.line import Line #type:ignore
 from pygmsh.common.spline import Spline #type:ignore
 from pygmsh.common.bspline import BSpline #type:ignore
-from pygmsh.common.circle_arc import CircleArc #type:ignore 
+from pygmsh.common.circle_arc import CircleArc #type:ignore
+from pygmsh.common.ellipse_arc import EllipseArc #type:ignore
 
 from pygmsh.common.plane_surface import PlaneSurface #type:ignore
 from pygmsh.common.surface import Surface #type:ignore
 
 from pygmsh.common.volume import Volume #type:ignore
 
-from ..generic.mpi import get_mpi_rank, mpi_barrier, get_mpi_nproc
+from ..generic.mpi import mpi_barrier, get_mpi_any, run_on_rank_zero
 
 import gmsh #type:ignore
 import os
@@ -58,7 +60,6 @@ import os
 import meshio #type:ignore
 import scipy.optimize #type:ignore
 import re
-from scipy import interpolate #type:ignore
 
 
 import scipy.spatial #type:ignore
@@ -67,11 +68,26 @@ import math
 if TYPE_CHECKING:
     from ..generic.problem import Problem
 
+
+# Geometrical entities as the geometry methods below take them: either the object returned when the
+# entity was created, or the name it was created with (both are resolved by _resolve_name, which
+# also skips None -- line() and circle_arc() return None for a degenerate entity).
+GmshCurve:TypeAlias = Union[Line, Spline, BSpline, CircleArc, EllipseArc]
+GmshSurface:TypeAlias = Union[PlaneSurface, Surface]
+GmshCurveArg:TypeAlias = Union[GmshCurve, str, None]
+GmshSurfaceArg:TypeAlias = Union[GmshSurface, str, None]
+# Nested sequences are accepted as well, since the creating methods hand back lists: plane_surface
+# returns one surface per disjunct domain, line() one segment per point pair, and passing such a
+# result straight on to the next method is the usual case.
+NestedGmshCurveArg:TypeAlias = Union[GmshCurveArg, Sequence["NestedGmshCurveArg"]]
+NestedGmshSurfaceArg:TypeAlias = Union[GmshSurfaceArg, Sequence["NestedGmshSurfaceArg"]]
+
+
 class GmshSizeCallback:
     def __init__(self,default_resolution:float=1.0):
         self.gmsh:"GmshTemplate"
         self.default_resolution=default_resolution
-        self._registered_handlers:List[Dict[int,Callable[[float,float,float],float]]] = [{},{},{},{}]
+        self._registered_handlers:list[dict[int,Callable[[float,float,float],float]]] = [{},{},{},{}]
 
 
     def initialize(self):
@@ -91,13 +107,13 @@ class GmshSizeCallback:
                         for entity in entities:
                             self._registered_handlers[2][entity._id]=getattr(self,m) #type:ignore
 
-    def get_points_at_line(self,name:str,merge_connected:bool=True,sort:Optional[Literal["x","y","z","rev_x","rev_y","rev_z"]]=None,circle_arc_samples:int=25):
+    def get_points_at_line(self,name:str,merge_connected:bool=True,sort:Literal["x", "y", "z", "rev_x", "rev_y", "rev_z", "x+", "y+", "z+", "x-", "y-", "z-"] | None=None,circle_arc_samples:int=25):
         entities = self.gmsh._named_entities.get(name, None) #type:ignore
         if entities is None:
             raise RuntimeError("No named entity with name "+name)
-        allpts:List[NPFloatArray]=[]
+        allpts:list[NPFloatArray]=[]
         for entity in entities:
-            pts:List[List[float]]=[]
+            pts:list[list[float]]=[]
             if isinstance(entity,(pygmsh.geo.geometry.common.geometry.Line,pygmsh.geo.geometry.common.geometry.Spline,pygmsh.geo.geometry.common.geometry.BSpline)):
                 for pt in entity.points: #type:ignore
                     pts.append(pt.x) #type:ignore
@@ -157,18 +173,22 @@ class GmshSizeCallback:
                         start=o2[:0:-1]
                         old.remove(o2)
                         current_seg.insert(0,start)
-                current_seg=numpy.vstack(current_seg) #type:ignore
-                allpts.append(current_seg)
+                allpts.append(numpy.vstack(current_seg)) #type:ignore
         #exit()
         if (sort is not None) and len(allpts)>0:
+            # "x+"/"x-" is how the same direction is spelled everywhere else (pyoomph.meshes.ordering);
+            # "x"/"rev_x" is this method's original spelling and stays valid.
+            sort=cast(Literal["x", "y", "z", "rev_x", "rev_y", "rev_z"],{"x+":"x","y+":"y","z+":"z","x-":"rev_x","y-":"rev_y","z-":"rev_z"}.get(sort,sort))
             if sort in {"x","y","z","rev_x","rev_y","rev_z"}:
                 si:int={"x":0,"rev_x":0,"y":1,"rev_y":1,"z":2,"rev_z":2}[sort]
+                # Note that this sorts the points themselves, unlike the mesh-side sorting, which only
+                # orients whole segments: a line that runs backwards in this direction is reordered.
                 allpts=[pts[numpy.argsort(pts[:,si])] for pts in allpts ] #type:ignore
                 allpts=list(sorted(allpts,key=lambda pts:pts[0][si]))
                 if sort in {"rev_x","rev_y","rev_z"}:
                     allpts=[numpy.array(list(reversed(pt))) for pt in reversed(allpts)] #type:ignore
             else:
-                raise ValueError("sort must be one of x,y,z,rev_x,rev_y,rev_z")
+                raise ValueError("sort must be one of x,y,z,rev_x,rev_y,rev_z (or the equivalent x+,y+,z+,x-,y-,z-)")
 
         return allpts
 
@@ -184,17 +204,19 @@ class GmshSizeCallback:
     def finalize(self):
         pass
 
-    def _setup_for_mesh(self,gmsh:"GmshTemplate")->Callable[[int,int,float,float,float],float]:
+    def _setup_for_mesh(self,gmsh:"GmshTemplate")->Callable[...,float]:
         self.gmsh=gmsh
         self.initialize()
-        return lambda dim,tag,x,y,z : self._cb(dim,tag,x,y,z)
+        # gmsh invokes the size callback with (dim, tag, x, y, z, lc); older versions
+        # pass (dim, tag, x, y, z). Accept a variadic tail so both arities work.
+        return lambda dim,tag,x,y,z,*_ : self._cb(dim,tag,x,y,z)
 
 
 
 
 
-def generate_mesh_to_file(geom:pygmsh.geo.Geometry, outdir:str, trunk:str, mesher:Optional["GmshTemplate"]=None,dim:int=2, order:Optional[int]=None, algorithm:Optional[int]=None, verbose:bool=False, recombine_algo:Optional[int]=None,
-                          postgen_cb:Optional[Callable[[],None]]=None, only_geo:bool=False,mesh_mode:Optional[str]=None,mesh_size_callback:Optional[Union[GmshSizeCallback,Callable[[int,int,float,float,float],float]]]=None,quiet:bool=False):
+def generate_mesh_to_file(geom:pygmsh.geo.Geometry | pygmsh.occ.Geometry, outdir:str, trunk:str, mesher:"GmshTemplate | None"=None,dim:int=2, order:int | None=None, algorithm:"int | float | None"=None, verbose:bool=False, recombine_algo:"int | float | None"=None,
+                          postgen_cb:Callable[[], None] | None=None, only_geo:bool=False,mesh_mode:str | None=None,mesh_size_callback:GmshSizeCallback | Callable[[int, int, float, float, float], float] | None=None,quiet:bool=False):
     if quiet:
         gmsh.option.setNumber("General.Terminal", 0) #type:ignore
     geom.synchronize()
@@ -273,9 +295,11 @@ def generate_mesh_to_file(geom:pygmsh.geo.Geometry, outdir:str, trunk:str, meshe
             gmsh.option.setNumber(n,v) #type:ignore
             
     mpi_barrier()
-    if get_mpi_rank() == 0 or get_mpi_nproc()<=1:        
-        gmsh.write(os.path.join(outdir, trunk + ".geo_unrolled")) #type:ignore
-    mpi_barrier()
+    # Written by rank 0 alone, so a failure (unwritable output directory, full disk, a gmsh error)
+    # must be shared: raising it here would leave every other rank waiting for a rank that has
+    # already unwound. run_on_rank_zero ends in a collective, so it replaces the trailing barrier.
+    geofile=os.path.join(outdir, trunk + ".geo_unrolled")
+    run_on_rank_zero(lambda: gmsh.write(geofile), "writing "+geofile) #type:ignore
 
     
 
@@ -296,74 +320,79 @@ def generate_mesh_to_file(geom:pygmsh.geo.Geometry, outdir:str, trunk:str, meshe
         postgen_cb()
 
     mpi_barrier()
-    if get_mpi_rank() == 0 or get_mpi_nproc()<=1:
-        gmsh.write(os.path.join(outdir, trunk + ".msh")) #type:ignore
-    mpi_barrier()
+    mshfile=os.path.join(outdir, trunk + ".msh")
+    run_on_rank_zero(lambda: gmsh.write(mshfile), "writing "+mshfile) #type:ignore
     gmsh.clear()
 
 
 
 
 
-class GmshTemplate(MeshTemplate):
+class GmshTemplate(MeshedMeshTemplate):
     """
     A template for creating a mesh using Gmsh as backend. Specify the geometry in an overridden :py:meth:`define_geometry` method, using the :py:meth:`point`, :py:meth:`line`, :py:meth:`spline`, :py:meth:`circle_arc`, :py:meth:`plane_surface` and other methods.
+
+    Remeshing is done by recreation, i.e. :py:meth:`define_geometry` is called again whenever remeshing is required. Use :py:meth:`~pyoomph.meshes.mesh.MeshedMeshTemplate.is_remeshing` there to tell the initial mesh from a remeshed one and :py:meth:`~pyoomph.meshes.mesh.MeshedMeshTemplate.get_boundary_coordinates` to rebuild the boundaries that have moved in the meantime.
     """
-    def __init__(self,loaded_from_mesh_file:Optional[str]=None):
+    def __init__(self,loaded_from_mesh_file:str | None=None):
         super(GmshTemplate, self).__init__()
-        self._meshfile:Optional[str]
+        self._meshfile:str | None
         self._loaded_from_mesh_file=loaded_from_mesh_file
         
         #: If True, macro elements will be used for the mesh, i.e. curved elements will be considered
         self.use_macro_elements:bool=True
-        self._geom:Optional[pygmsh.geo.Geometry] = None
-        self._named_entities:Dict[str,List[object]] = {}
-        self._rev_names:Dict[object,str] = {}
-        self._dim_tag_names:Dict[Tuple[int,int],Tuple(str,object)] = {}
+        #: Selects the Gmsh geometry kernel. ``"geo"`` (default) is Gmsh's built-in kernel; ``"occ"`` uses the OpenCASCADE kernel, which additionally supports boolean operations and CAD file import.
+        self.kernel:Literal["geo","occ"]="geo"
+        self._geom:pygmsh.geo.Geometry | pygmsh.occ.Geometry | None = None
+        self._named_entities:dict[str,list[object]] = {}
+        self._rev_names:dict[object,str] = {}
+        self._dim_tag_names:dict[tuple[int,int],tuple[str,object]] = {}
         
         #: If set, the input mesh will be mirrored and copied along the given axis or axes. Useful to generate symmetric meshes for e.g. pitchfork tracking
-        self.mirror_mesh:Optional[Union[Literal["mirror_x","mirror_y"],List[Literal["mirror_x","mirror_y"]]]]=None
+        self.mirror_mesh:Literal["mirror_x", "mirror_y"] | list[Literal["mirror_x", "mirror_y"]] | None=None
         #: If set, the entire mesh will be extruded in the next dimension. The first entry in the tuple is the dimensional distance, the second the number of layers. 
-        self.extrude_generated_mesh:Optional[Tuple[ExpressionOrNum,int]]=None 
-        self.gmsh_options:Dict[str,int] = {}
+        self.extrude_generated_mesh:tuple[ExpressionOrNum, int] | None=None 
+        self.gmsh_options:dict[str,int|float] = {}
         #self.gmsh_options["algorithm"] = 8
         #self.gmsh_options["recombine_algo"] = 2
         #self.gmsh_options["recombine_algo"] = None
-        self._entities2d:Dict[int,Union[PlaneSurface,Surface]] = {}
-        self._entities1d:Dict[int,Union[Line,Spline,BSpline,CircleArc]] = {}
-        self._entities0d:Dict[int,Point] = {}
-        self._pointhash:Dict[Tuple[float,float,float],Point] = {}
-        self._point_size_hash:Dict[Point,float] = {}
-        self._onedims_attached_to_point:Dict[Point,Set[Union[Line,Spline,BSpline,CircleArc]]]={}
+        self._entities1d:dict[int,Line | Spline | BSpline | CircleArc | EllipseArc] = {}
+        self._pointhash:dict[tuple[float,float,float],Point] = {}
+        self._point_size_hash:dict[Point,float] = {}
+        self._onedims_attached_to_point:dict[Point,set[Line | Spline | BSpline | CircleArc | EllipseArc]]={}
         
 
         self._mesh_size_callback=None
 
-        self._curved_entities0d = {}  # TODO Does this make sense at all?
-        self._curved_entities1d:Dict[int,_pyoomph.MeshTemplateCurvedEntityBase] = {} 
-        self._curved_entities2d:Dict[int,_pyoomph.MeshTemplateCurvedEntityBase] = {}  # TODO: Set those
+        self._curved_entities1d:dict[int,_pyoomph.MeshTemplateCurvedEntityBase] = {} 
+        # Curved surfaces, keyed by Gmsh surface tag. Filled by sphere() and by
+        # ruled_surface(map_to_sphere=...) and read when the 3d boundary facets are built.
+        self._curved_entities2d:dict[int,_pyoomph.MeshTemplateCurvedEntityBase] = {}
 
         self._mesh:Any = None
         #: The default resolution for the mesh as a nondimensional typical element length scale
-        self.default_resolution:Optional[float] = None
+        self.default_resolution:float | None = None
         
         #: This factor is used to scale all size arguments (including the default resolution) by the given factor. Useful to e.g. increase the mesh resolution by a factor.
         self.mesh_size_factor:float=1
-        #self.default_quads = True
-        #self.default_quads = False
         
         #: Selects the default element type of the mesh. Can be ``"quads"`` (try to create quads if possible), ``"tris"`` (only triangles), ``"SV"`` (Scott-Vogelius elements) or ``"only_quads"`` (only quadrilateral elements by splitting triangles)
         self.mesh_mode:Literal["quads","tris","SV","only_quads"]="quads"
         #: The default order of the elements. Can be 1 or 2. Note that if only first order (``"C1"``) elements are created, the mesh will be reduced to first order, even if the mesh is set to second order. Likewise, a first order mesh will be split to second order if second order elements (``"C2"``) are created on it.
         self.order = 2
+        #: If True (default), planar 2d elements that come out of Gmsh clockwise are relabelled during construction so that every element has a positive ``det(dx/ds)``. Gmsh orients the elements after the surface normal, i.e. after the winding of the curve loop, which for a loop assembled programmatically (e.g. by a :py:class:`~pyoomph.meshes.remesher.Remesher2d`) can come out either way. pyoomph integrates with ``sqrt(det(g_ab))``, which is non-negative, so an inside-out mesh used to be harmless - but it makes ``set_detect_inverted_elements(True)`` flag the entire mesh. Also fixes the mirrored half of a :py:attr:`mirror_mesh`.
+        self.fix_2d_orientation:bool=True
+        #: How many elements the last mesh construction had to flip (see :py:attr:`fix_2d_orientation`). Read by dev_docs/examples/gmsh_orientation_matrix.py
+        self.num_flipped_2d_elements:int=0
+        self._node_xy_cache:dict[int,list[float]]={}
         self._maxdim = 0
 
         self.consider_spatial_scale:bool=True
 
         if False and  self._loaded_from_mesh_file:
             self._geometry_defined = True
-            super(GmshTemplate, self)._do_define_geometry(self._problem)
-            self._set_problem(self._problem)
+            super(GmshTemplate, self)._do_define_geometry(self.get_problem())
+            self._set_problem(self.get_problem())
             print("Loading mesh from: "+self._loaded_from_mesh_file)
             self._load_mesh(self._loaded_from_mesh_file)
         pass
@@ -374,9 +403,7 @@ class GmshTemplate(MeshTemplate):
         self._named_entities = {}
         self._rev_names = {}
         self._dim_tag_names = {}
-        self._entities2d = {}
         self._entities1d = {}
-        self._entities0d = {}
         self._pointhash = {}
         self._point_size_hash = {}
         self._onedims_attached_to_point={}        
@@ -384,7 +411,36 @@ class GmshTemplate(MeshTemplate):
         self._maxdim=0
 
 
-    def point(self, x:ExpressionOrNum, y:ExpressionOrNum=0.0, z:ExpressionOrNum=0.0, size:ExpressionNumOrNone=None, *,name:Optional[str]=None,consider_spatial_scale:Optional[bool]=None)->Point:
+    def _define_geometry_is_required(self) -> bool:
+        # With a mesh file to load, the geometry is whatever that file holds and define_geometry() has
+        # nothing to add - it would only try to build gmsh entities with no geometry object open.
+        return self._loaded_from_mesh_file is None
+
+    def _template_for_stored_mesh_file(self, meshfile:str) -> "MeshTemplate":
+        """A sibling of this template, of the SAME class, whose geometry is the stored ``.msh``.
+
+        The reload used to build a plain ``GmshTemplate``, so every subclass lost its class across a
+        restart from a state file that had been written after a remesh - and with it everything that
+        dispatches on the class, most visibly
+        :py:class:`~pyoomph.equations.topological_changes.AxisymmetricReconnection`, which refuses a
+        bulk template that is not a ``TopologicalChangesGmshTemplate``.
+
+        The class cannot be re-instantiated (a subclass's ``__init__`` takes whatever arguments the
+        user gave it), so the object is built empty and given this template's attributes: the C++ base
+        is constructed explicitly, ``__dict__`` carries the user's own configuration over, and
+        ``_reset()`` then replaces every geometry container with a fresh one, so the two share no
+        mutable state. ``define_geometry`` is suppressed by ``_define_geometry_is_required``.
+        """
+        cls = type(self)
+        new = cls.__new__(cls)
+        _pyoomph.MeshTemplate.__init__(new)   # the C++ side; cls.__init__ needs the user's arguments
+        new.__dict__.update(self.__dict__)
+        new._reset()
+        new._loaded_from_mesh_file = meshfile
+        new._meshfile = meshfile
+        return new
+
+    def point(self, x:ExpressionOrNum, y:ExpressionOrNum=0.0, z:ExpressionOrNum=0.0, size:ExpressionNumOrNone=None, *,name:str | None=None,consider_spatial_scale:bool | None=None)->Point:
         """
         Add a point to the geometry. Coordinates must be given in the spatial unit, e.g. in meter if the problem has a metric set_scaling(spatial=...) set.
         The size controls the mesh size and will default to self.default_resolution if not given.
@@ -413,13 +469,13 @@ class GmshTemplate(MeshTemplate):
             consider_spatial_scale=self.consider_spatial_scale
         for i, c in enumerate(coord):
             if consider_spatial_scale:
-                c = c / self._problem.get_scaling("spatial")
+                c = c / self.get_problem().get_scaling("spatial")
                 if isinstance(c,Expression):
                     c=c.float_value()
                 coord[i] = c
-        x, y, z = cast(List[float],coord)
-        if self._pointhash.get(tuple([x, y, z])) is not None:
-            return self._pointhash[tuple([x, y, z])]
+        x, y, z = cast(list[float],coord)
+        if self._pointhash.get((x, y, z)) is not None:
+            return self._pointhash[(x, y, z)]
         if size is None:
             size = self.default_resolution
         if size is not None:
@@ -429,50 +485,25 @@ class GmshTemplate(MeshTemplate):
                 except:
                     raise RuntimeError("mesh resolution (i.e. size argument) is expected to be nondimensional, i.e. must be a float, not "+str(size))
     #            if isinstance(size, _pyoomph.Expression):
-    #                size = size / self._problem.get_scaling("spatial")
+    #                size = size / self.get_problem().get_scaling("spatial")
     #                size = size.float_value()
         size=cast(float,size)
         if size is not None:
             if size<0:
+                if self.default_resolution is None:
+                    raise RuntimeError("A negative mesh resolution (i.e. size argument) is given relative to self.default_resolution, but self.default_resolution is not set")
                 size=-size*self.default_resolution
             size*=self.mesh_size_factor
         if size is not None and self.mesh_mode=="only_quads":
             size*=2
         res = self._geom.add_point([x, y, z], size) #type:ignore
-        self._pointhash[tuple([x, y, z])] = res
+        self._pointhash[(x, y, z)] = res
         self._point_size_hash[res]=size
         self._store_name(name, res)
-        self._entities0d[res._id] = res #type:ignore
         self._maxdim = max(self._maxdim, 0)
         return res
 
-    def points(self,*coords:List[ExpressionOrNum],size:Optional[Union[float,Sequence[float]]]=None) -> List[Point]:
-        res:List[Point]=[]
-        if size:
-            if isinstance(size,float):
-                sizeC=[size]*len(coords)
-            else:
-                sizeC=size
-        else:
-            sizeC=None
-        for i,c in enumerate(coords):
-            s=None
-            if sizeC is not None:
-                s=sizeC[i]
-            x,y,z=0,0,0
-            if len(c)>0:
-                x=c[0]
-                if len(c)>1:
-                    y=c[1]
-                    if len(c)>2:
-                        z=c[2]
-                        if len(c)>3:
-                            s=c[3]
-                            assert isinstance(s,float) or s is None
-            res.append(self.point(x,y,z,size=s))
-        return res
-
-    def _store_name(self, name:Optional[str], obj:object):
+    def _store_name(self, name:str | None, obj:object):
         if name is None:
             return
         if isinstance(obj, list):
@@ -483,12 +514,18 @@ class GmshTemplate(MeshTemplate):
             self._named_entities[name] = []
         self._named_entities[name].append(obj)
         self._rev_names[obj] = name
-        self._dim_tag_names[obj.dim_tag] = (name,obj)
+        self._dim_tag_names[obj.dim_tag] = (name,obj) #type:ignore
 
-    def _resolve_name(self, typ:str, *args:Union[str,object])->List[object]:
-        res:List[object] = []
+    def _resolve_name(self, typ:str, *args:str | object)->list[object]:
+        res:list[object] = []
         for a in args:
             if a is None:
+                continue
+            if isinstance(a, (list,tuple)):
+                # Flattened, so that the list-returning creators (plane_surface, multi-point line,
+                # create_lines, ...) can be fed straight into the methods taking entities. Only
+                # ordered containers, since the caller's order decides e.g. the curve loop.
+                res.extend(self._resolve_name(typ, *a)) #type:ignore
                 continue
             if isinstance(a, str):
                 if not (a in self._named_entities.keys()):
@@ -509,7 +546,13 @@ class GmshTemplate(MeshTemplate):
                 res.append(a)
         return res
 
-    def line(self, *args:Union[Sequence[ExpressionOrNum],Point], name:Optional[str]=None)->Optional[Union[Line,List[Line]]]:
+    @overload
+    def line(self, start:Sequence[ExpressionOrNum] | Point, end:Sequence[ExpressionOrNum] | Point, /, *, name:str | None=None)->Line | None: ...
+
+    @overload
+    def line(self, start:Sequence[ExpressionOrNum] | Point, second:Sequence[ExpressionOrNum] | Point, third:Sequence[ExpressionOrNum] | Point, /, *further:Sequence[ExpressionOrNum] | Point, name:str | None=None)->list[Line]: ...
+
+    def line(self, *args:Sequence[ExpressionOrNum] | Point, name:str | None=None)->Line | list[Line] | None:
         """
         Create a line (segment-wise) line for the mesh. When given a name, it can be used to identify the line later, e.g. for boundary conditions.
 
@@ -518,7 +561,7 @@ class GmshTemplate(MeshTemplate):
             name: Name of the line entity.
 
         Returns:
-            The created line entity, or None if the line is degenerate.
+            The created line entity, or None if the line is degenerate. When more than two points are passed, one line per point pair is returned instead.
 
         Raises:
             RuntimeError: If the geometry is not defined inside the 'define_geometry' function.
@@ -526,7 +569,7 @@ class GmshTemplate(MeshTemplate):
         if self._geom is None:
             raise RuntimeError("Can only add geometry inside the function 'define_geometry'")
         
-        argsc:List[Point]=[]
+        argsc:list[Point]=[]
         for _,a in enumerate(list(args)):
             if isinstance(a,(list,tuple)):
                 assert len(a)<=3 or isinstance(a[3],float)
@@ -561,7 +604,7 @@ class GmshTemplate(MeshTemplate):
         elif len(argsc)<2:
             raise ValueError("A line must have at least 2 points")
         else:
-            resg:List[Line]=[]
+            resg:list[Line]=[]
             for p1,p2 in zip(argsc[:-1],argsc[1:]):
                 if p1==p2:
                     raise ValueError("Degenerate line with identical points")
@@ -571,11 +614,30 @@ class GmshTemplate(MeshTemplate):
                     resg.append(ll)
             return resg
 
-    def make_lines_transfinite(self,*linesIn:Union[Line,str],numnodes:Union[Literal["auto"],int]="auto",mode:str="Progression",coeff:Optional[float]=None,dry_run:bool=False) -> List[Tuple[int, float]]:
+    def make_lines_transfinite(self,*linesIn:NestedGmshCurveArg,numnodes:Literal["auto"] | int="auto",mode:str="Progression",coeff:float | None=None,dry_run:bool=False) -> list[tuple[int, float]]:
+        """
+        Distributes the nodes on the given curves explicitly, instead of letting Gmsh size them from the point sizes.
+
+        Args:
+            *linesIn: The curves, by name or object, also as (nested) lists of these.
+            numnodes: Number of nodes on each curve, or "auto" to take it from the point sizes of the individual curve.
+            mode: Node distribution, e.g. "Progression" or "Bump", passed on to Gmsh.
+            coeff: Coefficient of the distribution, i.e. the grading. If None, it is calculated from the point sizes at both ends.
+            dry_run: Only calculate and return the numbers, without applying them to the curves.
+
+        Returns:
+            One (numnodes, coeff) entry per curve, in the order the curves were resolved.
+        """
         lines=self._resolve_name("lines", *linesIn)
-        res_info:List[Tuple[int,float]]=[]
+        res_info:list[tuple[int,float]]=[]
         for line in lines:
-            if numnodes == "auto":
+            # Per line, deliberately: the automatic node count and coefficient are properties of the
+            # line being processed. Assigning them back to the arguments would leave the first line's
+            # values in place for all the remaining ones, so "auto" over several lines would size
+            # only the first of them and give every other line that same count.
+            line_numnodes:Literal["auto"] | int=numnodes
+            line_coeff:float | None=coeff
+            if line_numnodes == "auto":
                 if isinstance(line,(pygmsh.geo.geometry.common.geometry.Line, pygmsh.geo.geometry.common.geometry.Spline,pygmsh.geo.geometry.common.geometry.BSpline)):
                     lastpt = line.points[0] #type:ignore
                     line_len=0
@@ -609,49 +671,58 @@ class GmshTemplate(MeshTemplate):
 
                 sstart=self._point_size_hash[line.points[0]]  #type:ignore
                 send=self._point_size_hash[line.points[-1]]  #type:ignore
-                numnodes = math.ceil(0.5 * (line_len /sstart + line_len / send) - 1e-12)  #type:ignore
-                if coeff is None:
-                    coeff = ( send/sstart) ** (1.0 / ((2 if numnodes < 2 else numnodes) - 1))  #type:ignore
+                line_numnodes = int(math.ceil(0.5 * (line_len /sstart + line_len / send) - 1e-12))  #type:ignore
+                if line_coeff is None:
+                    line_coeff = ( send/sstart) ** (1.0 / ((2 if line_numnodes < 2 else line_numnodes) - 1))  #type:ignore
                     #if send < sstart:
                     #    if coeff > 1:
                     #        coeff = 1 / coeff
                     #if line._id<0:
                     #    coeff=1/coeff
 
-            if coeff is None:
-                coeff=1.0
-            res_info.append((numnodes,coeff,))
+            if line_coeff is None:
+                line_coeff=1.0
+            res_info.append((line_numnodes,line_coeff,))
             if not dry_run:
-                self._geom.set_transfinite_curve(line,numnodes,mesh_type=mode,coeff=coeff) #type:ignore
+                self._geom.set_transfinite_curve(line,line_numnodes,mesh_type=mode,coeff=line_coeff) #type:ignore
         return res_info
 
-    def make_surface_transfinite(self,*surfsIn:Union[str,PlaneSurface],corners:List[Point]=[],arrangement:str=""):
+    def make_surface_transfinite(self,*surfsIn:NestedGmshSurfaceArg,corners:Sequence[Point]=[],arrangement:str=""):
+        """
+        Meshes the given surfaces with a structured (transfinite) grid, i.e. by interpolating the node distribution of the bounding curves.
+
+        Args:
+            *surfsIn: The surfaces, by name or object, also as (nested) lists of these, e.g. the return value of plane_surface.
+            corners: The four corner points spanning the grid. If empty, they are taken from the bounding curves, which requires a surface with exactly four edges and no holes.
+            arrangement: How the elements are arranged, e.g. "Left", "Right" or "Alternate", passed on to Gmsh.
+        """
         surfs=self._resolve_name("surfaces", *surfsIn)
-        for surf in surfs:
-            for s in surf: #type:ignore
-                if len(corners) == 0:
-                    if s.num_edges!=4: #type:ignore
-                        raise RuntimeError("Please set corners explicitly, surface has more than 4 corners")
-                    if len(s.holes)>0: #type:ignore
-                        raise RuntimeError("Please set corners explicitly, surface has holes")
-                    corners=[c.points[0] for c in s.curve_loop.curves] #type:ignore
-                    linfos=[self.make_lines_transfinite(l,dry_run=True)[0] for l in s.curve_loop.curves] #type:ignore
-                    N1=int(numpy.ceil( (linfos[0][0]+linfos[2][0]-1e-10)/2))
-                    N2 = int(numpy.ceil((linfos[1][0] + linfos[3][0] - 1e-10) / 2))
-                    NS=[N1,N2,N1,N2]
-                    #Progs = [N1, N2, N1, N2]
-                    for i,l in enumerate(s.curve_loop.curves): #type:ignore
-                        print(i,l,linfos[i][1]) #type:ignore
-                        coeff=linfos[i][1] #type:ignore
-                        #if l._id<0:
-                        #    coeff=1/coeff
-                        self.make_lines_transfinite(l,numnodes=NS[i],coeff=coeff) #type:ignore
-                    #exit()
-                self._geom.set_transfinite_surface(s,arrangement,corner_pts=corners) #type:ignore
+        for s in surfs:
+            # Per surface, deliberately: corners passed in by the caller apply to every surface,
+            # but the ones detected below belong to the surface they were read from. Assigning
+            # them back to the argument would hand the first surface's corners to all the rest.
+            surf_corners=list(corners)
+            if len(surf_corners) == 0:
+                if s.num_edges!=4: #type:ignore
+                    raise RuntimeError("Please set corners explicitly, surface has more than 4 corners")
+                if len(s.holes)>0: #type:ignore
+                    raise RuntimeError("Please set corners explicitly, surface has holes")
+                surf_corners=[c.points[0] for c in s.curve_loop.curves] #type:ignore
+                # Opposite sides of a transfinite surface must carry the same number of nodes, so
+                # the automatic counts of each pair are averaged. Note that this overrides any
+                # transfinite setting made on these curves beforehand -- pass the corners
+                # explicitly if the curves have already been set up by hand.
+                linfos=[self.make_lines_transfinite(l,dry_run=True)[0] for l in s.curve_loop.curves] #type:ignore
+                N1=int(numpy.ceil( (linfos[0][0]+linfos[2][0]-1e-10)/2))
+                N2 = int(numpy.ceil((linfos[1][0] + linfos[3][0] - 1e-10) / 2))
+                NS=[N1,N2,N1,N2]
+                for i,l in enumerate(s.curve_loop.curves): #type:ignore
+                    self.make_lines_transfinite(l,numnodes=NS[i],coeff=linfos[i][1]) #type:ignore
+            self._geom.set_transfinite_surface(s,arrangement,corner_pts=surf_corners) #type:ignore
 
 
     # Add lines as p1, <name>, p2, <name>, p3, <name>, p4...
-    def create_lines(self, *args:Union[Point,List[ExpressionOrNum],Tuple[ExpressionOrNum,...],str]) -> List[Line]:
+    def create_lines(self, *args:Point | list[ExpressionOrNum] | tuple[ExpressionOrNum, ...] | str) -> list[Line]:
         """
         Creates multiple lines with different names based on the given arguments. 
         For line loop around a box, you can e.g. do
@@ -675,7 +746,7 @@ class GmshTemplate(MeshTemplate):
             closed_loop=True
             #raise ValueError("create line needs arguments like p1, <name>, p2, <name>, p3, <name>, p4 ,...")
         NL = len(args) // 2
-        res:List[Line] = []
+        res:list[Line] = []
         for i in range(NL):
             pstart = args[2 * i]
             name = args[2 * i + 1]
@@ -693,10 +764,11 @@ class GmshTemplate(MeshTemplate):
                 name=None
             lin=self.line(pstart, pend, name=name)
             if lin is not None:
+                assert not isinstance(lin,list) # line() only returns a list when called with more than 2 points
                 res.append(lin)
         return res
 
-    def bspline(self, ptlist:Sequence[Point], *, name:Optional[str]=None)->BSpline:
+    def bspline(self, ptlist:Sequence[Point], *, name:str | None=None)->BSpline:
         if self._geom is None:
             raise RuntimeError("Can only add geometry inside the function 'define_geometry'")
         res = self._geom.add_bspline(ptlist) #type:ignore
@@ -709,7 +781,7 @@ class GmshTemplate(MeshTemplate):
             self._onedims_attached_to_point[p].add(res)
         return res
 
-    def spline(self, ptlistIn:Sequence[Union[Point,Sequence[ExpressionOrNum]]], *, name:Optional[str]=None,with_macro_element:bool=True)->Spline:
+    def spline(self, ptlistIn:Sequence[Point | Sequence[ExpressionOrNum]], *, name:str | None=None,with_macro_element:bool=True)->Spline:
         """
         Create a spline curve given by a list of points. If a name is supplied, it can be used for e.g. boundary conditions.
 
@@ -727,7 +799,7 @@ class GmshTemplate(MeshTemplate):
         for i,p in enumerate(ptlist):
             if isinstance(p,(list,tuple)):
                 ptlist[i]=self.point(*p) #type:ignore
-        ptlist=cast(List[Point],ptlist)
+        ptlist=cast(list[Point],ptlist)
         for _,other in self._entities1d.items():
             if isinstance(other,pygmsh.geo.geometry.common.geometry.Spline):
                 if len(other.points)==len(ptlist):
@@ -758,21 +830,29 @@ class GmshTemplate(MeshTemplate):
             self._onedims_attached_to_point[p].add(res)
         return res
 
-    def create_circle_lines(self,centre:Union[Tuple[ExpressionOrNum,...],Point],radius:ExpressionOrNum,*,mesh_size:Optional[float]=None,line_name:Optional[str]=None)->List[Line]:
+    def create_circle_lines(self,centre:tuple[ExpressionOrNum, ...] | Point,radius:ExpressionOrNum,*,mesh_size:float | None=None,line_name:str | None=None)->list[CircleArc]:
         if not isinstance(centre,Point):
             centre=self.point(*centre)
-        corners:List[Point]=[]
+        corners:list[Point]=[]
         SS=self.get_problem().get_scaling("spatial")
         for signs in [[1,0],[0,1],[-1,0],[0,-1]]:
             corners.append(self.point(centre.x[0]*SS +signs[0]*radius,centre.x[1]*SS+signs[1]*radius,size=mesh_size))
         corners.append(corners[0])
-        lines:List[CircleArc]=[]
+        lines:list[CircleArc]=[]
         for i in range(4):
-            lines.append(self.circle_arc(corners[i],corners[i+1],center=centre,name=line_name))
+            arc=self.circle_arc(corners[i],corners[i+1],center=centre,name=line_name)
+            assert isinstance(arc,CircleArc) # circle_arc() only returns a plain Line when called with through_point instead of center
+            lines.append(arc)
         return lines
             
 
-    def circle_arc(self, startpt:Union[Point,Sequence[ExpressionOrNum]], endpt:Union[Point,Sequence[ExpressionOrNum]], *, center:Optional[Union[Point,Sequence[ExpressionOrNum]]]=None, through_point:Optional[Union[Point,Sequence[ExpressionOrNum]]]=None, name:Optional[str]=None, with_macro_element:bool=True)->Optional[Union[Line,CircleArc]]:
+    @overload
+    def circle_arc(self, startpt:Point | Sequence[ExpressionOrNum], endpt:Point | Sequence[ExpressionOrNum], *, center:Point | Sequence[ExpressionOrNum], through_point:None=None, name:str | None=None, with_macro_element:bool=True)->CircleArc: ...
+
+    @overload
+    def circle_arc(self, startpt:Point | Sequence[ExpressionOrNum], endpt:Point | Sequence[ExpressionOrNum], *, center:None=None, through_point:Point | Sequence[ExpressionOrNum], name:str | None=None, with_macro_element:bool=True)->Line | CircleArc | None: ...
+
+    def circle_arc(self, startpt:Point | Sequence[ExpressionOrNum], endpt:Point | Sequence[ExpressionOrNum], *, center:Point | Sequence[ExpressionOrNum] | None=None, through_point:Point | Sequence[ExpressionOrNum] | None=None, name:str | None=None, with_macro_element:bool=True)->Line | CircleArc | None:
         """
         Adds a circlular arc to the mesh geometry.
 
@@ -809,6 +889,7 @@ class GmshTemplate(MeshTemplate):
             c = (x1 * x1 + y1 * y1) * (x2 - x3) + (x2 * x2 + y2 * y2) * (x3 - x1) + (x3 * x3 + y3 * y3) * (x1 - x2); #type:ignore
             if abs(a) < 1e-10: #type:ignore
                 res = self.line(startpt, endpt)
+                assert not isinstance(res,list) # line() only returns a list when called with more than 2 points
                 if res is not None:
                     self._store_name(name, res)
                     self._entities1d[res._id] = res #type:ignore
@@ -840,7 +921,7 @@ class GmshTemplate(MeshTemplate):
         return res
 
 
-    def ellipse_arc(self,startpt:Union[Point,Sequence[ExpressionOrNum]],endpt:Union[Point,Sequence[ExpressionOrNum]],center:Union[Point,Sequence[ExpressionOrNum]],pt_on_major_axis:Optional[Union[Point,Sequence[ExpressionOrNum]]]=None,name:Optional[str]=None):
+    def ellipse_arc(self,startpt:Point | Sequence[ExpressionOrNum],endpt:Point | Sequence[ExpressionOrNum],center:Point | Sequence[ExpressionOrNum],pt_on_major_axis:Point | Sequence[ExpressionOrNum] | None=None,name:str | None=None):
         """
         Adds an ellipse arc to the mesh geometry.
 
@@ -878,14 +959,14 @@ class GmshTemplate(MeshTemplate):
         return res
 
 
-    def _get_boundary_corner_size_map(self)->Dict[str,Dict[Tuple[float,...],float]]:
-        entlist:Dict[Union[Line,Spline,BSpline,CircleArc],Set[Point]]=dict()
+    def _get_boundary_corner_size_map(self)->dict[str,dict[tuple[float,...],float]]:
+        entlist:dict[Line | Spline | BSpline | CircleArc | EllipseArc,set[Point]]=dict()
         for pt,ptinfo in self._onedims_attached_to_point.items():
             for l in ptinfo:
                 if l not in entlist:
                     entlist[l]=set()
                 entlist[l].add(pt)
-        res:Dict[str,Dict[Tuple[float],float]] = {}
+        res:dict[str,dict[tuple[float,...],float]] = {}
         for l,pts in entlist.items():
             name=self._rev_names.get(l)
             if name is None:
@@ -905,24 +986,79 @@ class GmshTemplate(MeshTemplate):
                     res[name][tuple(p.x)]=self._point_size_hash[p] #type:ignore
         return res
 
-    def sphere(self, origin:Point, radius:float=1, surface_name:Optional[str]=None, mesh_size:Optional[float]=None)->Any:
+    def sphere(self, origin:Point, radius:ExpressionOrNum=1, surface_name:str | None=None, mesh_size:float | None=None, name:str | None=None, with_curved_entity:bool=True)->Any:
+        """
+        Adds a solid ball, i.e. a volume bounded by a sphere. Unlike :py:meth:`ruled_surface` plus
+        :py:meth:`volume`, the ball is a single entity of the Gmsh kernel, so its boundary is one
+        exact spherical surface instead of a patchwork of ruled surfaces.
+
+        Args:
+            origin: The centre of the ball.
+            radius: The radius of the ball, in the spatial unit - as for :py:meth:`point`, i.e. in
+                meter if the problem has a metric ``set_scaling(spatial=...)``.
+            surface_name: Name of the bounding sphere, to identify it later as a boundary.
+            mesh_size: Element size on the ball, defaulting to :py:attr:`default_resolution`.
+                Negative sizes are relative to it, as for :py:meth:`point`.
+            name: Name of the volume, i.e. the name of the bulk domain it will become.
+            with_curved_entity: Attach a spherical macro element to the bounding surface, so that
+                nodes created by spatial refinement land on the sphere rather than on the facets
+                Gmsh meshed it with. Unlike ``ruled_surface(map_to_sphere=...)`` this is on by
+                default: the surface of a ball really is a sphere, so there is nothing to guess.
+        """
         if self._geom is None:
             raise RuntimeError("Can only add geometry inside the function 'define_geometry'")
+        if self.consider_spatial_scale:
+            radius = radius / self.get_problem().get_scaling("spatial")
+        if isinstance(radius, Expression):
+            radius = radius.float_value()
+        radius = float(radius)
+        # A ball is built from coordinates, not from Points, so it never picks up the resolution the
+        # way the rest of the geometry does (via point()) - it would silently come out at whatever
+        # Gmsh derives from the bounding box. Apply the same defaulting here.
+        if mesh_size is None:
+            mesh_size = self.default_resolution
+        if mesh_size is not None:
+            if mesh_size < 0:
+                if self.default_resolution is None:
+                    raise RuntimeError("A negative mesh_size is given relative to self.default_resolution, but self.default_resolution is not set")
+                mesh_size = -mesh_size * self.default_resolution
+            mesh_size *= self.mesh_size_factor
         ball = self._geom.add_ball([x for x in origin.x], radius, mesh_size=mesh_size) #type:ignore
-        if surface_name is not None:
-            for entry in ball.surface_loop.surfaces: #type:ignore
-                self._store_name(surface_name, entry) #type:ignore
-                self._entities2d[entry._id] = entry #type:ignore
-        self._maxdim = max(self._maxdim, 2)  ##TODO 2 or 1
+        centre = [float(x) for x in origin.x]
+        onsphere = [centre[0] + radius, centre[1], centre[2]]
+        if surface_name is not None or (with_curved_entity and self.use_macro_elements):
+            if self.kernel == "occ":
+                # occ's add_ball returns a plain Ball with just a dim_tag (no .surface_loop like
+                # the geo kernel's ellipsoid-based ball) -- fetch its boundary surfaces instead.
+                self._geom.env.synchronize() #type:ignore
+                tags = [tag for dim, tag in gmsh.model.getBoundary([ball.dim_tag], combined=False, oriented=False)] #type:ignore
+                for tag in tags:
+                    entry = GmshTemplate.GmshFakeEntry(tag, (2, tag))
+                    if surface_name is not None:
+                        self._store_name(surface_name, entry)
+            else:
+                tags = []
+                for entry in ball.surface_loop.surfaces: #type:ignore
+                    if surface_name is not None:
+                        self._store_name(surface_name, entry) #type:ignore
+                    tags.append(entry._id) #type:ignore
+            if with_curved_entity and self.use_macro_elements:
+                for tag in tags:
+                    self._curved_entities2d[tag] = _pyoomph.CurvedEntitySpherePart(centre, onsphere) #type:ignore
+        if name is not None:
+            # add_ball always comes with its volume, but where that volume lives differs per kernel:
+            # occ's Ball *is* the volume, the geo kernel wraps it in an Ellipsoid.
+            self._store_name(name, ball if self.kernel == "occ" else ball.volume) #type:ignore
+        self._maxdim = max(self._maxdim, 3)
         return ball
 
-    def _sort_line_loop(self, lst:Sequence[Union[Line,Spline,BSpline,CircleArc]], name:Optional[str]=None) -> List[List[Union[Line , Spline , BSpline , CircleArc]]]:
+    def _sort_line_loop(self, lst:Sequence[Line | Spline | BSpline | CircleArc], name:str | None=None) -> list[list[Line | Spline | BSpline | CircleArc]]:
         tocheck = [a for a in lst]
         currentelem = tocheck.pop(0)
         startpoint = currentelem.points[0] #type:ignore
         currentendpoint = currentelem.points[-1] #type:ignore
         gmshres = [currentelem]
-        totalres:List[List[Union[Line,Spline,BSpline,CircleArc]]]=[]
+        totalres:list[list[Line | Spline | BSpline | CircleArc]]=[]
         debug_info = [self._rev_names.get(currentelem, "<unnamed>")]
         while len(tocheck) > 0:
             found = False
@@ -955,27 +1091,27 @@ class GmshTemplate(MeshTemplate):
                     break
             if not found:
                 llist = map(lambda e: self._rev_names.get(e, "<unnamed>"), lst)
-                mshdir = os.path.join(self._problem._outdir, "_gmsh") #type:ignore
+                mshdir = os.path.join(self.get_problem()._outdir, "_gmsh") #type:ignore
                 Path(mshdir).mkdir(parents=True, exist_ok=True)
                 mshtrunk = "DEBUG"
                 assert self._geom is not None
                 generate_mesh_to_file(self._geom, mshdir, mshtrunk, mesher=self,dim=self._maxdim, order=self.order,
                                       algorithm=self.gmsh_options.get("algorithm",None),
                                       recombine_algo=self.gmsh_options.get("recombine_algo",None),
-                                      postgen_cb=lambda: self.post_process(),mesh_mode=self.mesh_mode,mesh_size_callback=self._mesh_size_callback, quiet=self._problem.is_quiet())
+                                      postgen_cb=lambda: self._post_process(),mesh_mode=self.mesh_mode,mesh_size_callback=self._mesh_size_callback, quiet=self.get_problem().is_quiet())
                 raise RuntimeError("Cannot close line loop" + (
                     "" if name is None else " for surface " + name) + ". Cannot find the next element in the loop.\nLoop so far: " + (
                                        "\n".join(debug_info)) + "\n\nLine list:\n" + "\n".join(llist))
         if currentendpoint != startpoint:
             llist = map(lambda e: self._rev_names.get(e, "<unnamed>"), lst)
-            mshdir = os.path.join(self._problem._outdir, "_gmsh") #type:ignore
+            mshdir = os.path.join(self.get_problem()._outdir, "_gmsh") #type:ignore
             Path(mshdir).mkdir(parents=True, exist_ok=True)
             mshtrunk = "DEBUG"
             assert self._geom is not None
             generate_mesh_to_file(self._geom, mshdir, mshtrunk, mesher=self, dim=self._maxdim, order=self.order,
                                   algorithm=self.gmsh_options.get("algorithm",None),
                                   recombine_algo=self.gmsh_options.get("recombine_algo",None),
-                                  postgen_cb=lambda: self.post_process(),mesh_mode=self.mesh_mode,mesh_size_callback=self._mesh_size_callback, quiet=self._problem.is_quiet())
+                                  postgen_cb=lambda: self._post_process(),mesh_mode=self.mesh_mode,mesh_size_callback=self._mesh_size_callback, quiet=self.get_problem().is_quiet())
             raise RuntimeError("Could not close line loop" + (
                 "" if name is None else " for surface " + name) + ". Start and end not matching.\nLoop so far: " + (
                                    "\n".join(debug_info)) + "\n\nLine list:\n" + "\n".join(llist))
@@ -983,11 +1119,11 @@ class GmshTemplate(MeshTemplate):
         totalres.append(gmshres)
         return totalres
 
-    def set_gmsh_parameter(self, n:str, v:Union[float,int]):
+    def set_gmsh_parameter(self, n:str, v:float | int):
         gmsh.option.setNumber(n, v) #type:ignore
 
 
-    def plane_surface(self, *args:Union[str,Line,Spline,BSpline,CircleArc,None], name:Optional[str]=None,holes:Optional[List[Sequence[Union[str,Line,Spline,BSpline,CircleArc]]]]=None,reversed_order:bool=False) -> List[PlaneSurface]:
+    def plane_surface(self, *args:NestedGmshCurveArg, name:str | None=None,holes:Sequence[Sequence[NestedGmshCurveArg]] | None=None,reversed_order:bool=False) -> list[PlaneSurface]:
         """
         Creates a planar surface in the mesh. You must supply the enclosing boundaries (either by name or the line/circle_arc/spline/bspline objects) as arguments.
         If you give it a name, it can be used to add equations to the domain.
@@ -1003,15 +1139,15 @@ class GmshTemplate(MeshTemplate):
         """
         holesO = []
         if holes is not None:
-            holes_names:List[List[str]]=[]
-            revnamemap:Dict[object,str]={}
+            holes_names:list[list[str]]=[]
+            revnamemap:dict[object,str]={}
             for k,v in self._named_entities.items():
                 for vv in v:
                     revnamemap[vv]=k
             for hole in holes:
                 resolved = self._resolve_name("lines", *hole)                
                 srted = self._sort_line_loop(resolved) #type:ignore                
-                hole_names:List[str]=[]
+                hole_names:list[str]=[]
                 for s in srted:
                     ll = self._geom.add_curve_loop(s) #type:ignore
                     holesO.append(ll) #type:ignore
@@ -1024,14 +1160,17 @@ class GmshTemplate(MeshTemplate):
                 if len(hole_names)>0:
                     holes_names.append(hole_names)
             if len(holes_names)>0 and self.remesher is not None and name is not None:
-                self.remesher.set_holes(name,holes_names)
+                # set_holes is only defined on Remesher2d, not on the RemesherBase base class (e.g. RemesherViaRecreation
+                # lacks it). Guard with hasattr so other remesher types don't crash with an AttributeError here.
+                if hasattr(self.remesher,"set_holes"):
+                    self.remesher.set_holes(name,holes_names) #type:ignore
 
 
         resolved = self._resolve_name("lines", *args)
         resolved = [l for l in resolved if l is not None]
         
         srted = self._sort_line_loop(resolved, name=name)  #type:ignore
-        allres:List[PlaneSurface]=[]
+        allres:list[PlaneSurface]=[]
         for s in srted:
             if reversed_order:
                 s = list(reversed([-x for x in s]))
@@ -1046,7 +1185,6 @@ class GmshTemplate(MeshTemplate):
             if is_hole:
                 continue
             res = self._geom.add_plane_surface(ll,holes=holesO) #type:ignore
-            self._entities2d[res._id] = res #type:ignore
             if name is not None:
                 self._store_name(name, res)
             if self.mesh_mode in ["quads","only_quads"]:
@@ -1060,16 +1198,114 @@ class GmshTemplate(MeshTemplate):
         
         return allres
 
-    def ruled_surface(self, *args:Union[str,Line,Spline,BSpline,CircleArc], name:Optional[str]=None,reversed_order:bool=False) -> List[Surface]:
+    def _sphere_from_boundary_curves(self, curves:Sequence[Any], explicit_center:Sequence[float] | None=None) -> tuple[NPFloatArray,float]:
+        """Work out which sphere a surface's bounding curves lie on.
+
+        Only the points that are certainly ON the surface are used: the two end points of every
+        bounding curve. A CircleArc's middle point is its arc centre, which lies on the sphere only
+        when the arc happens to be a great circle, so it is collected separately and merely offered
+        as a candidate centre. Interior control points of splines are ignored for the same reason.
+
+        The centre is taken from the first arc centre that is equidistant from every boundary point,
+        which is exact for the usual construction (a patch bounded by great-circle arcs about the
+        sphere's own centre); failing that, from a least-squares sphere fit, which needs four
+        boundary points that are not coplanar. Either way the result is verified against every
+        boundary point before it is used -- an unverifiable guess here would silently deform the
+        mesh, so this raises instead.
+        """
+        on_sphere:list[NPFloatArray] = []
+        arc_centers:list[NPFloatArray] = []
+        for c in curves:
+            pts = getattr(c, "points", None)
+            if not pts:
+                continue
+            if isinstance(c, CircleArc) and len(pts) == 3:
+                on_sphere.append(numpy.array(pts[0].x, dtype=numpy.float64))
+                on_sphere.append(numpy.array(pts[2].x, dtype=numpy.float64))
+                arc_centers.append(numpy.array(pts[1].x, dtype=numpy.float64))
+            else:
+                on_sphere.append(numpy.array(pts[0].x, dtype=numpy.float64))
+                on_sphere.append(numpy.array(pts[-1].x, dtype=numpy.float64))
+        uniq:list[NPFloatArray] = []
+        for q in on_sphere:
+            if not any(numpy.linalg.norm(q - u) < 1e-12 for u in uniq): #type:ignore
+                uniq.append(q)
+        if len(uniq) < 3:
+            raise RuntimeError("map_to_sphere: the surface's bounding curves give only "+str(len(uniq))+" distinct points, which cannot determine a sphere")
+
+        def consistent(centre:NPFloatArray) -> float | None:
+            radii = [float(numpy.linalg.norm(q - centre)) for q in uniq] #type:ignore
+            rmean = sum(radii) / len(radii)
+            if rmean < 1e-12:
+                return None
+            if max(abs(r - rmean) for r in radii) > 1e-8 * rmean:
+                return None
+            return rmean
+
+        candidates:list[NPFloatArray] = []
+        if explicit_center is not None:
+            candidates.append(numpy.array([float(c) for c in explicit_center], dtype=numpy.float64))
+        else:
+            candidates.extend(arc_centers)
+            if len(uniq) >= 5:
+                # Algebraic sphere fit: |p-c|^2 = r^2  <=>  2 p.c + (r^2 - |c|^2) = |p|^2, linear in
+                # (c, r^2-|c|^2). Five points minimum, not four: four points in general position lie on
+                # exactly one sphere, so a fit through four always succeeds and the verification below
+                # could never reject anything. Only from the fifth point on does agreeing with the fit
+                # say something about the surface rather than about the arithmetic.
+                A = numpy.array([[2 * q[0], 2 * q[1], 2 * q[2], 1.0] for q in uniq], dtype=numpy.float64)
+                b = numpy.array([float(numpy.dot(q, q)) for q in uniq], dtype=numpy.float64) #type:ignore
+                try:
+                    sol, *_ = numpy.linalg.lstsq(A, b, rcond=None) #type:ignore
+                    candidates.append(numpy.array(sol[:3], dtype=numpy.float64))
+                except numpy.linalg.LinAlgError:
+                    pass
+
+        for centre in candidates:
+            radius = consistent(centre)
+            if radius is not None:
+                return centre, radius
+
+        raise RuntimeError(
+            "map_to_sphere: could not find a sphere through this surface's bounding curves. Its "
+            "boundary points are not equidistant from any arc centre, and either there are too few "
+            "of them for a fit to mean anything (four points always lie on some sphere) or the fit "
+            "does not pass through them. So this surface is either not a spherical patch, or its "
+            "boundary does not pin the sphere down. Pass map_to_sphere=(cx,cy,cz) to state the "
+            "centre explicitly.")
+
+    def ruled_surface(self, *args:NestedGmshCurveArg, name:str | None=None,reversed_order:bool=False,map_to_sphere:bool | Sequence[float]=False) -> list[Surface]:
+        """
+        Adds a ruled surface spanned by the given bounding curves.
+
+        Args:
+            args: The bounding curves, by name or object.
+            name: The name of the surface, to identify it later e.g. as boundary.
+            reversed_order: Whether to reverse the orientation of the curve loop.
+            map_to_sphere: Attach a spherical macro element to this surface, so that nodes created
+                by spatial refinement are placed on the sphere rather than on the surface Gmsh
+                actually meshed. Pass ``True`` to work the sphere out from the bounding curves, or a
+                ``(cx, cy, cz)`` centre to state it explicitly.
+
+                This is opt-in on purpose. A ruled surface is *not* in general a sphere -- Gmsh's
+                built-in kernel does not produce an exact sphere from one even when the bounding
+                curves are great-circle arcs -- so pyoomph cannot assume it. Say so only when the
+                surface really is meant to be spherical; the mesh's own nodes on it are then also
+                projected onto the exact sphere, which moves them slightly.
+        """
         resolved = self._resolve_name("lines", *args)
         srted = self._sort_line_loop(resolved, name=name) #type:ignore
-        allres:List[Surface] = []
+        allres:list[Surface] = []
         for s in srted:
             if reversed_order:
                 s = list(reversed([-x for x in s]))
             ll = self._geom.add_curve_loop(s) #type:ignore
             res = self._geom.add_surface(ll) #type:ignore
-            self._entities2d[res._id] = res #type:ignore
+            if map_to_sphere is not False and self.use_macro_elements:
+                centre, radius = self._sphere_from_boundary_curves(
+                    s, None if map_to_sphere is True else map_to_sphere) #type:ignore
+                onsphere = [centre[0] + radius, centre[1], centre[2]]
+                self._curved_entities2d[res._id] = _pyoomph.CurvedEntitySpherePart(list(centre), onsphere) #type:ignore
             if name is not None:
                 self._store_name(name, res)
             if self.mesh_mode in ["quads","only_quads"]:
@@ -1078,7 +1314,7 @@ class GmshTemplate(MeshTemplate):
             allres.append(res)
         return allres
 
-    def volume(self, *args:Union[str,Surface,PlaneSurface], name:Optional[str]=None,reversed_order:bool=False) -> List[Volume]:
+    def volume(self, *args:NestedGmshSurfaceArg, name:str | None=None,reversed_order:bool=False) -> list[Volume]:
         resolved = self._resolve_name("surfaces", *args) #type:ignore
         #print(resolved)
         srted=resolved # TODO: Sort?
@@ -1086,7 +1322,7 @@ class GmshTemplate(MeshTemplate):
         #srted=
         #print(srted)
         #exit()
-        allres:List[Volume]=[]
+        allres:list[Volume]=[]
         #srted = self._sort_line_loop(resolved, name=kwargs.get("name"))
         #if kwargs.get("reversed", False) == True:
         #    srted = list(reversed([-x for x in srted]))
@@ -1112,15 +1348,17 @@ class GmshTemplate(MeshTemplate):
         #exit()
         return allres
 
-    def set_recombined_surfaces(self, surfs:Union[List[Union[PlaneSurface,Surface,str]],str,PlaneSurface,Surface]):
-        if isinstance(surfs, list):
-            for e in surfs:
-                self.set_recombined_surfaces(e)
-        elif isinstance(surfs, str):
-            resolve = self._resolve_name("surfaces", surfs)
-            self.set_recombined_surfaces(resolve) #type:ignore
-        else:
-            self._geom.set_recombined_surfaces([surfs]) #type:ignore
+    def set_recombined_surfaces(self, surfs:NestedGmshSurfaceArg, *more_surfs:NestedGmshSurfaceArg):
+        """
+        Marks the given surfaces for recombination, i.e. Gmsh will merge the triangles it meshed them with into quadrilaterals.
+
+        Args:
+            surfs: The surfaces, by name or object, also as a (nested) list of these, e.g. the return value of plane_surface.
+            *more_surfs: Further surfaces in the same form.
+        """
+        resolved = self._resolve_name("surfaces", surfs, *more_surfs)
+        if len(resolved)>0:
+            self._geom.set_recombined_surfaces(resolved) #type:ignore
 
     def define_geometry(self):
         """
@@ -1128,14 +1366,15 @@ class GmshTemplate(MeshTemplate):
         """
         pass
 
-    def post_process(self):
-        #gmsh.model.mesh.refine()
-        #gmsh.model.mesh.recombine()
+    def _post_process(self):
+        # Hook called after Gmsh has meshed the geometry, e.g. for gmsh.model.mesh.refine() or
+        # .recombine(). Underscored because nothing in the tutorials, tests or user scripts ever
+        # overrode it - rename it back if it becomes a documented extension point.
         pass
 
 
 
-    def process_cells_for_optional_mirroring(self,cells):
+    def _process_cells_for_optional_mirroring(self,cells):
         if self.mirror_mesh is not None:            
             mirrors=self.mirror_mesh
             if not isinstance(mirrors,list):
@@ -1145,7 +1384,7 @@ class GmshTemplate(MeshTemplate):
         return cells
     
     # Must return process cells and potentially, if nodes might be overlapping, True
-    def process_points_for_optional_mirroring(self,points):
+    def _process_points_for_optional_mirroring(self,points):
         reindex=False
         if self.mirror_mesh is not None:
             self._mirror_index_shift=[]
@@ -1177,6 +1416,8 @@ class GmshTemplate(MeshTemplate):
                     zs=numpy.linspace(0,dist,layers+1,endpoint=True)
                 elif self.order==2:
                     zs=numpy.linspace(0,dist,layers*2+1,endpoint=True)
+                else:
+                    raise RuntimeError("Mesh extrusion is only implemented for order 1 or 2, not order "+str(self.order))
                 numpoints=len(points)
                 points=numpy.transpose(numpy.tile(numpy.transpose(points),len(zs)))
                 zcoords=numpy.repeat(zs,numpoints)
@@ -1207,16 +1448,16 @@ class GmshTemplate(MeshTemplate):
         exit()
     
     def _load_mesh(self,mshfilename:str):
-        if not self._problem.is_quiet():
+        if not self.get_problem().is_quiet():
             print("Loading mesh file: "+mshfilename)
         self._mesh = meshio.read(mshfilename, file_format="gmsh") #type:ignore
         curvedfile,_=os.path.splitext(mshfilename)
         curvedfile=curvedfile+".geo_unrolled"
-        self.read_curved_entities(curvedfile)
+        self._read_curved_entities(curvedfile)
         # Find the maximum element dimension. All domains of this dimension will be considered to be bulk domains, the rest are interfaces
         maxeldim = -1
         named_eldims = {"line": 1, "line3": 1, "quad": 2, "quad9": 2, "triangle": 2, "triangle6": 2, "hexahedron27": 3,
-                        "hexahedron": 3, "vertex": 0, "tetra10":3,"tetra":3,"wedge":3,"wedge18":3}
+                        "hexahedron": 3, "vertex": 0, "tetra10":3,"tetra":3,"wedge":3,"wedge18":3,"pyramid":3,"pyramid14":3}
         for name, entry in self._mesh.cell_sets.items(): #type:ignore
             if name == "gmsh:bounding_entities":
                 continue
@@ -1237,10 +1478,10 @@ class GmshTemplate(MeshTemplate):
         self._max_elem_dim = maxeldim
 
         # Create the points
-        self._nodeinds:List[int] = []
+        self._nodeinds:list[int] = []
         _nodal_dim = 1
         mesh_points=self._mesh.points
-        mesh_points,unique_adding=self.process_points_for_optional_mirroring(mesh_points)        
+        mesh_points,unique_adding=self._process_points_for_optional_mirroring(mesh_points)        
         for i, p in enumerate(mesh_points): #type:ignore
             if unique_adding:
                 self._nodeinds.append(self.add_node_unique(p[0],p[1],p[2]))
@@ -1252,7 +1493,10 @@ class GmshTemplate(MeshTemplate):
                 _nodal_dim = 3
         self._max_nodal_dim = _nodal_dim
         self._nodeinds = numpy.array(self._nodeinds) #type:ignore
-        
+        # Node indices are handed out afresh here, so any cached position is stale now
+        self._node_xy_cache = {}
+        self.num_flipped_2d_elements = 0
+
         if self.extrude_generated_mesh is not None:
             self._post_extrude_mesh()
 
@@ -1284,15 +1528,15 @@ class GmshTemplate(MeshTemplate):
             self._find_opposite_interface_connections()
 
 
-    def _do_define_geometry(self, problem:"Problem", filename_trunk:Optional[str]=None):
-        self._problem=problem
-        
+    def _do_define_geometry(self, problem:"Problem", filename_trunk:str | None=None):
+        self._set_problem(problem)
+
         if not self._geometry_defined:
-            mshdir = os.path.join(self._problem._outdir, "_gmsh") #type:ignore
+            mshdir = os.path.join(self.get_problem()._outdir, "_gmsh") #type:ignore
             Path(mshdir).mkdir(parents=True, exist_ok=True)
             # Find a unique name:
             if filename_trunk is None:
-                cnt:Optional[int] = None
+                cnt:int | None = None
                 mshtrunk = self.__class__.__name__
                 for mt in problem._meshtemplate_list: #type:ignore
                     if isinstance(mt, GmshTemplate):
@@ -1312,20 +1556,27 @@ class GmshTemplate(MeshTemplate):
             self._fntrunk = mshtrunk
 
             if self._loaded_from_mesh_file is None:
-                with pygmsh.geo.Geometry(["-noenv"]) as geom:
+                GeometryClass = pygmsh.occ.Geometry if self.kernel == "occ" else pygmsh.geo.Geometry
+                with GeometryClass(["-noenv"]) as geom:
                     self._geom = geom
                     super(GmshTemplate, self)._do_define_geometry(problem)
                     for name, objlist in self._named_entities.items():
                         geom.add_physical(objlist, label=name) #type:ignore
 
                     self._meshfile=os.path.join(mshdir, mshtrunk + ".msh")
-                    if ((self._problem._runmode!="continue" or self._problem._continue_initialized) and self._problem._runmode!="replot") or not os.path.exists(self._meshfile): #type:ignore
+                    must_generate=((self.get_problem()._runmode!="continue" or self.get_problem()._continue_initialized) and self.get_problem()._runmode!="replot") or not os.path.exists(self._meshfile) #type:ignore
+                    # generate_mesh_to_file() contains collectives, so the decision to call it has
+                    # to be unanimous - a rank that does not yet see the existing .msh file (an
+                    # output directory that is not shared, or not yet in sync) would otherwise run
+                    # them alone and hang. Regenerating when only some ranks ask for it is the safe
+                    # side of the disagreement: the file is rewritten with the same content.
+                    if get_mpi_any(must_generate):
                         generate_mesh_to_file(geom, mshdir, mshtrunk, mesher=self, dim=self._maxdim, order=self.order,
                                           algorithm=self.gmsh_options.get("algorithm",None),
                                           recombine_algo=self.gmsh_options.get("recombine_algo",None),
-                                          postgen_cb=lambda: self.post_process(),mesh_mode=self.mesh_mode,mesh_size_callback=self._mesh_size_callback, quiet=self._problem.is_quiet())
+                                          postgen_cb=lambda: self._post_process(),mesh_mode=self.mesh_mode,mesh_size_callback=self._mesh_size_callback, quiet=self.get_problem().is_quiet())
 
-                        #self.write_curved_entities(os.path.join(mshdir, mshtrunk + ".curved"))
+                        #self._write_curved_entities(os.path.join(mshdir, mshtrunk + ".curved"))
             else:
                 super(GmshTemplate, self)._do_define_geometry(problem)
             if self._loaded_from_mesh_file:
@@ -1377,6 +1628,22 @@ class GmshTemplate(MeshTemplate):
                     perm=[0, 1, 2, 6, 7, 9, 8, 10, 11, 15, 16, 17, 3, 4, 5, 12, 13, 14]
                     for q in mycells:
                         domain.add_wedge_3d_C2(self._nodeinds[q[perm]]) #type:ignore
+                elif cells.type == "pyramid":
+                    # meshio passes gmsh's raw 5-node pyramid order through unchanged
+                    # (base quad 0-3 in CCW order seen from the apex, then apex 4),
+                    # which already matches pyoomph's reference pyramid -- no reorder needed.
+                    perm = [0, 1, 2, 3, 4]
+                    for q in mycells:
+                        domain.add_pyramid_3d_C1(*self._nodeinds[q[perm]]) #type:ignore
+                elif cells.type == "pyramid14":
+                    # meshio/gmsh order: 0-3 base verts, 4 apex, 5-8 base mid-edges,
+                    # 9-12 verts-to-apex mid-edges, 13 base-face centroid.
+                    # pyoomph order: 0-3 base verts, 4 apex, 5=mid(0,1), 6=mid(1,2),
+                    # 7=mid(2,3), 8=mid(0,3), 9=mid(0,4), 10=mid(1,4), 11=mid(2,4),
+                    # 12=mid(3,4), 13=base-face centroid.
+                    perm = [0, 1, 2, 3, 4, 5, 8, 10, 6, 7, 9, 11, 12, 13]
+                    for q in mycells:
+                        domain.add_pyramid_3d_C2(self._nodeinds[q[perm]]) #type:ignore
                 else:
                     print("Unsupported cell type in 3d domain:", cells.type)
                     q0=mycells[0]
@@ -1399,30 +1666,72 @@ class GmshTemplate(MeshTemplate):
                         mycells = cells.data[idx]
                         mygeoms = self._mesh.cell_data["gmsh:geometrical"][i][idx]
                         for li, l in enumerate(mycells): #type:ignore 
-                            ninds:List[int] = self._nodeinds[l] #type:ignore 
+                            ninds:list[int] = self._nodeinds[l] #type:ignore 
                             if -1 in ninds:  # Do only consider lines full inside
                                 continue                            
                             if no_macro_elements:
                                 curved = None
                             else:
                                 curved = self._curved_entities2d.get(mygeoms[li]) #type:ignore
-                                if curved:
-                                    self._has_curved_entries = True
+                            vertex_inds:list[int] | None = None
                             if cells.type=="triangle":
                                 vertex_inds=ninds[[0, 1, 2]] #type:ignore
                             elif cells.type=="triangle6":
-                                vertex_inds=ninds[[0, 1, 2]] # Let hope that this is correct
+                                vertex_inds=ninds[[0, 1, 2]] #type:ignore # Let hope that this is correct
                             elif cells.type=="quad":
                                 vertex_inds=ninds[[0, 1, 2, 3]] #type:ignore
                             elif cells.type=="quad9":
                                 #raise RuntimeError("TODO: Implement curved facets for second order triangles")
                                 # This has to be checked, but I think this is correct
-                                vertex_inds=ninds[[0, 1, 2, 3]] #type:ignore                            
+                                vertex_inds=ninds[[0, 1, 2, 3]] #type:ignore
+                            # cells.type was already checked to be one of the four handled above (see enclosing if at the top of this loop)
+                            assert vertex_inds is not None
                             self.add_facet_to_boundary(name, ninds,vertex_inds,curved)
 
 
 
-    def _construct_template_domain_2d(self, name:str, entry:Any):    
+    # Local corner cycles and the relabelling that reverses an element, per node ordering
+    # expected by the add_*_2d_* methods. Reversing a quad means transposing its (s0,s1)
+    # index pair; reversing a triangle means swapping corners 1 and 2, which also swaps the
+    # mid-side nodes mid(0,1) and mid(0,2) while mid(1,2) stays put.
+    _ORIENTATION_2D = {
+        "quad":      ([0, 1, 3, 2], [0, 2, 1, 3]),
+        "quad9":     ([0, 2, 8, 6], [0, 3, 6, 1, 4, 7, 2, 5, 8]),
+        "triangle":  ([0, 1, 2],    [0, 2, 1]),
+        "triangle6": ([0, 1, 2],    [0, 2, 1, 5, 4, 3]),
+    }
+
+    def _is_negatively_oriented_2d(self, nodeinds:Any, corner_cycle:list[int])->bool:
+        """Whether the corners of this element run clockwise, i.e. whether det(dx/ds) < 0."""
+        cache = self._node_xy_cache
+        twice_area = 0.0
+        for k in range(len(corner_cycle)):
+            i = int(nodeinds[corner_cycle[k]])
+            j = int(nodeinds[corner_cycle[(k + 1) % len(corner_cycle)]])
+            pi = cache.get(i)
+            if pi is None:
+                pi = cache[i] = self.get_node_position(i)
+            pj = cache.get(j)
+            if pj is None:
+                pj = cache[j] = self.get_node_position(j)
+            twice_area += pi[0] * pj[1] - pj[0] * pi[1]
+        return twice_area < 0.0
+
+    def _orient_2d(self, nodeinds:Any, celltype:str)->Any:
+        """Relabel the nodes of a planar element so that it comes out counter-clockwise.
+
+        A mesh in a 3d nodal space is a surface with no orientation to fix, so it is left
+        alone - the same case the C++ inversion check skips for not having a square mapping.
+        """
+        if (not self.fix_2d_orientation) or self._max_nodal_dim != 2:
+            return nodeinds
+        corner_cycle, reverse = self._ORIENTATION_2D[celltype]
+        if not self._is_negatively_oriented_2d(nodeinds, corner_cycle):
+            return nodeinds
+        self.num_flipped_2d_elements += 1
+        return nodeinds[reverse]
+
+    def _construct_template_domain_2d(self, name:str, entry:Any):
         domain = self.new_domain(name)
         if self.all_nodes_as_boundary_nodes:
             domain.set_all_nodes_as_boundary_nodes()
@@ -1430,35 +1739,31 @@ class GmshTemplate(MeshTemplate):
             if len(idx): #type:ignore
                 cells = self._mesh.cells[i]
                 mycells = cells.data[idx]
-                mycells=self.process_cells_for_optional_mirroring(mycells)
+                mycells=self._process_cells_for_optional_mirroring(mycells)
                 if cells.type == "quad":
                     perm = [0, 1, 3, 2]
                     for q in mycells:
-                        domain.add_quad_2d_C1(*self._nodeinds[q[perm]]) #type:ignore
+                        domain.add_quad_2d_C1(*self._orient_2d(self._nodeinds[q[perm]],"quad")) #type:ignore
                 elif cells.type == "quad9":
                     perm = [0, 4, 1, 7, 8, 5, 3, 6, 2]
 
                     for q in mycells:
-                        domain.add_quad_2d_C2(*self._nodeinds[q[perm]]) #type:ignore
+                        domain.add_quad_2d_C2(*self._orient_2d(self._nodeinds[q[perm]],"quad9")) #type:ignore
                 elif cells.type == "triangle":
                     perm = [0, 1, 2]
                     if self.mesh_mode!="SV":
                         for t in mycells:
-                            domain.add_tri_2d_C1(*self._nodeinds[t[perm]]) #type:ignore
+                            domain.add_tri_2d_C1(*self._orient_2d(self._nodeinds[t[perm]],"triangle")) #type:ignore
                     else:
+                        # The Scott-Vogelius split keeps the orientation of its parent, so
+                        # flipping the parent is enough for all three sub-triangles.
                         for t in mycells:
-                            domain.add_SV_tri_2d_C1(*self._nodeinds[t[perm]]) #type:ignore
-                            #c1,c2,c3=self._nodeinds[t[perm]]                            
-                            #bc_pos=(numpy.array(self.get_node_position(c1))+numpy.array(self.get_node_position(c2))+numpy.array(self.get_node_position(c3)))/3.0
-                            #bc=self.add_node_unique(*bc_pos)
-                            #domain.add_tri_2d_C1(c1,c2,bc) #type:ignore
-                            #domain.add_tri_2d_C1(c2,c3,bc) #type:ignore
-                            #domain.add_tri_2d_C1(c3,c1,bc) #type:ignore
-                elif cells.type == "triangle6":                    
+                            domain.add_SV_tri_2d_C1(*self._orient_2d(self._nodeinds[t[perm]],"triangle")) #type:ignore
+                elif cells.type == "triangle6":
 
                     perm = [0, 1, 2,3,4,5]
                     for t in mycells:
-                        domain.add_tri_2d_C2(*self._nodeinds[t[perm]]) #type:ignore
+                        domain.add_tri_2d_C2(*self._orient_2d(self._nodeinds[t[perm]],"triangle6")) #type:ignore
                 else:
                     raise RuntimeError("Unsupported cell type: " + cells.type)
 
@@ -1482,7 +1787,7 @@ class GmshTemplate(MeshTemplate):
                     cells = self._mesh.cells[i]
                     if cells.type == "line" or cells.type == "line3":
                         mycells = cells.data[idx]
-                        mycells=self.process_cells_for_optional_mirroring(mycells)
+                        mycells=self._process_cells_for_optional_mirroring(mycells)
                         mygeoms = self._mesh.cell_data["gmsh:geometrical"][i][idx]
                         for li, l in enumerate(mycells):
                             ninds = self._nodeinds[l] #type:ignore
@@ -1493,8 +1798,6 @@ class GmshTemplate(MeshTemplate):
                                 curved = None
                             else:
                                 curved = self._curved_entities1d.get(mygeoms[li]) #type:ignore
-                                if curved:
-                                    self._has_curved_entries = True
                             vertex_inds=ninds[[0, 1]] #type:ignore
                             self.add_facet_to_boundary(name, ninds,vertex_inds,curved)
                             
@@ -1502,8 +1805,6 @@ class GmshTemplate(MeshTemplate):
                             #    self.add_nodes_to_boundary(name, ninds) #type:ignore
                             #else:
                             #    curved = self._curved_entities1d.get(mygeoms[li])
-                            #    if curved:
-                            #        self._has_curved_entries = True                             
                             #    self.add_nodes_to_boundary(name, ninds) #type:ignore
                             #    if curved: 
                             #        self.add_facet_to_curve_entity(ninds[[0, 1]], curved) #type:ignore
@@ -1560,13 +1861,11 @@ class GmshTemplate(MeshTemplate):
                                 curved = None
                             else:
                                 curved = self._curved_entities1d.get(mygeoms[li]) #type:ignore
-                                if curved:
-                                    self._has_curved_entries = True                            
                             self.add_facet_to_boundary(name, ninds,ninds,curved)
                             
 
 
-    def write_curved_entities(self,fname:str):
+    def _write_curved_entities(self,fname:str):
         fout=open(fname,"w")
         fout.write(str(len(self._curved_entities1d)) + "\n")
         for i,e in self._curved_entities1d.items():
@@ -1575,7 +1874,7 @@ class GmshTemplate(MeshTemplate):
             fout.write(e.get_information_string())
         fout.close()
 
-    def read_curved_entities(self,fname:str):
+    def _read_curved_entities(self,fname:str):
         self._curved_entities1d = {}
         try:
             geo = Path(fname).read_text()
@@ -1591,29 +1890,83 @@ class GmshTemplate(MeshTemplate):
         #num_patt = '[-+]? (?: (?: \d* \. \d+ ) | (?: \d+ \.? ) )(?: [Ee] [+-]? \d+ ) ?'
         #num_patt="[-+]?\d*\.?\d+|[-+]?\d+"
         num_patt=r"[-+]?(\d+([.]\d*)?|[.]\d+)([eE][-+]?\d+)?"
+
+        # The OCC kernel writes some auto-generated points (e.g. circle arc centers) with
+        # tags relative to a script variable instead of a plain integer literal, e.g.:
+        #   p3 = newp;
+        #   Point(p3 + 1) = {0, 0, 0};
+        #   Circle(3) = {7, p3 + 1, 6};
+        # Track those variables plus a running "newp" counter (mirroring Gmsh's own semantics:
+        # newp == highest point tag emitted so far, plus one) to resolve such expressions to
+        # concrete point tags. Under the geo kernel every tag is already a plain integer, so
+        # this is a no-op there.
+        varvals:dict[str,int] = {}
+        last_point_tag = 0
+
+        def resolve_tag(expr:str)->int:
+            expr=expr.strip()
+            m=re.match(r"^(?P<name>[A-Za-z_]\w*)\s*(?P<op>[+-])\s*(?P<num>\d+)$",expr)
+            if m:
+                base=varvals.get(m.group("name"))
+                if base is None:
+                    raise RuntimeError("Unknown script variable '"+m.group("name")+"' referenced in gmsh geo_unrolled output: "+expr)
+                return base+int(m.group("num")) if m.group("op")=="+" else base-int(m.group("num"))
+            m=re.match(r"^(?P<name>[A-Za-z_]\w*)$",expr)
+            if m:
+                val=varvals.get(m.group("name"))
+                if val is None:
+                    raise RuntimeError("Unknown script variable '"+m.group("name")+"' referenced in gmsh geo_unrolled output: "+expr)
+                return val
+            return int(expr)
+
         for c in cmds:
+            c=c.strip()
+            if not c:
+                continue
+            newp_assign=re.match(r"^(?P<name>[A-Za-z_]\w*)\s*=\s*newp\s*$",c)
+            if newp_assign:
+                varvals[newp_assign.group("name")]=last_point_tag+1
+                continue
             if c.startswith("Point("):
-                match=re.search(r"\s*Point\(\s*(?P<index>\d*)\s*\)\s*=\s*\{\s*(?P<x>"+num_patt+r")\s*,\s*(?P<y>"+num_patt+r")\s*,\s*(?P<z>"+num_patt+r")\s*",c)
+                match=re.search(r"\s*Point\(\s*(?P<index>[^)]+?)\s*\)\s*=\s*\{\s*(?P<x>"+num_patt+r")\s*,\s*(?P<y>"+num_patt+r")\s*,\s*(?P<z>"+num_patt+r")\s*",c)
                 if not match:
                     raise RuntimeError("Cannot match Point at "+c)
-                ind=int(match.group("index"))
+                ind=resolve_tag(match.group("index"))
                 pos=list(map(float,match.group("x","y","z")))
                 points[ind]=pos
+                last_point_tag=max(last_point_tag,ind)
             elif c.startswith("Circle"):
-                match = re.search(r"\s*Circle\(\s*(?P<index>\d*)\s*\)\s*=\s*\{\s*(?P<P1>\d*)\s*,\s*(?P<P2>\d*)\s*,\s*(?P<P3>\d*)\s*",c)
+                match = re.search(r"\s*Circle\(\s*(?P<index>[^)]+?)\s*\)\s*=\s*\{\s*(?P<args>[^}]*)\}",c)
                 if not match:
                     raise RuntimeError("Cannot match Circle at " + c)
-                ind = int(match.group("index"))
-                PS=list(map(int,match.group("P1","P2","P3")))
+                ind = resolve_tag(match.group("index"))
+                PS=[resolve_tag(a) for a in match.group("args").split(",")]
                 center,startpt,endpt=points[PS[1]],points[PS[0]],points[PS[2]] #type:ignore
                 self._curved_entities1d[ind]=_pyoomph.CurvedEntityCircleArc(center, startpt, endpt) #type:ignore
             elif c.startswith("Spline"):
-                match=re.search(r"\s*Spline\(\s*(?P<index>\d*)\s*\)\s*=\s*\{\s*(?P<list>(?:\d+,\s*)+\d+\s*)",c)
+                if self.kernel=="occ":
+                    # Under the geo kernel, Gmsh's Spline is literally the same Catmull-Rom curve
+                    # pyoomph's own CurvedEntityCatmullRomSpline reconstructs, through the exact
+                    # points pyoomph passed in -- so re-parsing the dump always reproduces the
+                    # true meshed curve there. Under OCC, add_spline instead builds a genuine CAD
+                    # B-spline, and neither the original input points nor OCC's own (differently
+                    # resampled) dumped point list reliably reconstruct a Catmull-Rom curve close
+                    # enough to what was actually meshed for every case: e.g. OCC's dense dump
+                    # works for a simple few-point spline but its C++ inversion fails for a
+                    # remeshed, already-dense interface spline, while the original sparse points
+                    # do the opposite. Rather than pick a heuristic that only works sometimes,
+                    # skip macro-element curvature for OCC-kernel splines entirely -- the actual
+                    # mesh boundary nodes are still exactly where Gmsh placed them (following the
+                    # true curve at the mesh's own resolution), this just forgoes the additional
+                    # curvature-aware sub-facet refinement for spline curves specifically. Circle
+                    # arcs are unaffected: CurvedEntityCircleArc is analytic and OCC's arc is the
+                    # same curve, so there is no approximation mismatch there.
+                    continue
+                match=re.search(r"\s*Spline\(\s*(?P<index>[^)]+?)\s*\)\s*=\s*\{\s*(?P<args>[^}]*)\}",c)
                 if not match:
                     raise RuntimeError("Cannot match Spline at "+c)
-                ind = int(match.group("index"))
-                lst=match.group("list").replace(" ","").replace("\t","")
-                lst=list(map(int,lst.split(",")))
+                ind = resolve_tag(match.group("index"))
+                lst=[resolve_tag(a) for a in match.group("args").split(",")]
                 PTS=numpy.array([points[l] for l in lst]) #type:ignore
                 self._curved_entities1d[ind]=_pyoomph.CurvedEntityCatmullRomSpline(PTS) #type:ignore
 
@@ -1628,7 +1981,7 @@ class GmshTemplate(MeshTemplate):
             self.dim=dim_tag[0]
                 
             
-    def extrude(self,*args,shift:List[ExpressionOrNum]=[0,0,1],recombine:bool=False,start_name=lambda s: s+"_start",end_name=lambda s: s+"_end",layers:Optional[int]=None):
+    def extrude(self,*args,shift:list[ExpressionOrNum]=[0,0,1],recombine:bool=False,start_name=lambda s: s+"_start",end_name=lambda s: s+"_end",layers:int | None=None):
         """Extrudes the given entities by the given shift. The bulk surface name will become a volume and the line surfaces will become 2d surfaces.
         Additionally, the start and end surfaces of the extrusion will be named according to the given functions.
         
@@ -1641,11 +1994,12 @@ class GmshTemplate(MeshTemplate):
             layers: Number of layers to extrude. If None, the extrusion will be determined by the mesh size.        
         """
         for i, c in enumerate(shift):
-            c = c / self._problem.get_scaling("spatial")
+            c = c / self.get_problem().get_scaling("spatial")
             if isinstance(c,Expression):
                 c=c.float_value()
             shift[i] = c
-        gmsh.model.geo.synchronize()
+        assert self._geom is not None # only reachable from within define_geometry(), which sets it
+        self._geom.env.synchronize()
         dimtags=[]
         newdim=0
         name_list=[]
@@ -1680,11 +2034,11 @@ class GmshTemplate(MeshTemplate):
 
         newdim+=1 # The new dimension
         self._maxdim=max(self._maxdim,newdim)
-        res=gmsh.model.geo.extrude(dimtags,shift[0],shift[1],shift[2],recombine=recombine,numElements=([layers]*len(dimtags) if layers is not None else None))        
+        res=self._geom.env.extrude(dimtags,shift[0],shift[1],shift[2],recombine=recombine,numElements=([layers]*len(dimtags) if layers is not None else None))
         
         
         
-        gmsh.model.geo.synchronize()
+        self._geom.env.synchronize()
         bulk_name_index=0
         for i,entry in enumerate(res):            
             #print("ADD PHYSICAL GROUP",entry[0],[entry[1]])
@@ -1699,18 +2053,25 @@ class GmshTemplate(MeshTemplate):
                 pass
 
         # Go over it once more, finding the missing entities
-        given_names={a._id for a in self._rev_names}
+        given_names={a._id for a in self._rev_names} #type:ignore
         start_index=-1
-        
-        
+        sub_index:int | None=None
+
         for entry in res:
-            print("Entry",entry,given_names)
             if entry[0]==newdim:
                 start_index+=1
                 sub_index=0
             if entry[0]==newdim-1:
+                if sub_index is None:
+                    # gmsh lists the auto-generated "end"/top surface (a copy of
+                    # the original input surface) BEFORE the extruded volume
+                    # entry, not after -- it mirrors the whole input surface,
+                    # not one of its boundary curves, so there is no per-curve
+                    # name to propagate for it here (it is handled above, via
+                    # end_name()).
+                    continue
                 if entry[1] not in given_names:
-                    original=to_extrude[start_index]                    
+                    original=to_extrude[start_index]
                     if isinstance(original,PlaneSurface):
                         #print("Found missing entity, trying to find name for it. Original was",original,"with dim_tag",original.dim_tag,"subindex",sub_index)
                         orig_curv=original.curve_loop.curves[sub_index]
@@ -1721,8 +2082,8 @@ class GmshTemplate(MeshTemplate):
                             #print("To remove from here",self._named_entities[self._dim_tag_names[dim_tag][0]],orig_curv)
                             # Remove all list entries from self._named_entities[self._dim_tag_names[dim_tag][0]] which ar enot a GmshFakeEntry
                             self._named_entities[self._dim_tag_names[dim_tag][0]] = [
-                                entry for entry in self._named_entities[self._dim_tag_names[dim_tag][0]] 
-                                if isinstance(entry, GmshTemplate.GmshFakeEntry)
+                                named for named in self._named_entities[self._dim_tag_names[dim_tag][0]] 
+                                if isinstance(named, GmshTemplate.GmshFakeEntry)
                             ]
                             
                             #self._named_entities[self._dim_tag_names[dim_tag][0]].remove((orig_curv.dim_tag[0],orig_curv.dim_tag[1]))
@@ -1740,7 +2101,7 @@ class GmshTemplate(MeshTemplate):
         return res
     
     
-    def revolve(self,*args,angle:ExpressionOrNum=0,axis:List[ExpressionOrNum]=[0,0,1],center:List[ExpressionOrNum]=[0,0,0],start_name=lambda s: s+"_start",end_name=lambda s: s+"_end",layers:Optional[int]=None,recombine:bool=False):
+    def revolve(self,*args,angle:ExpressionOrNum=0,axis:list[ExpressionOrNum]=[0,0,1],center:list[ExpressionOrNum]=[0,0,0],start_name=lambda s: s+"_start",end_name=lambda s: s+"_end",layers:int | None=None,recombine:bool=False):
         """Rotates the given entities by the given angle around the given axis and center.
         
         Args:
@@ -1754,7 +2115,7 @@ class GmshTemplate(MeshTemplate):
                 c=c.float_value()
             axis[i] = c
         for i, c in enumerate(center):
-            c = c / self._problem.get_scaling("spatial")
+            c = c / self.get_problem().get_scaling("spatial")
             if isinstance(c,Expression):
                 c=c.float_value()
             center[i] = c
@@ -1762,7 +2123,8 @@ class GmshTemplate(MeshTemplate):
             angle=angle.float_value()
         
         
-        gmsh.model.geo.synchronize()
+        assert self._geom is not None # only reachable from within define_geometry(), which sets it
+        self._geom.env.synchronize()
         dimtags=[]
         newdim=0
         name_list=[]
@@ -1796,9 +2158,9 @@ class GmshTemplate(MeshTemplate):
         newdim+=1 # The new dimension
         self._maxdim=max(self._maxdim,newdim)
         
-        res=gmsh.model.geo.revolve(dimtags,center[0],center[1],center[2],axis[0],axis[1],axis[2],angle,recombine=recombine,numElements=([layers]*len(dimtags) if layers is not None else None)) 
+        res=self._geom.env.revolve(dimtags,center[0],center[1],center[2],axis[0],axis[1],axis[2],angle,recombine=recombine,numElements=([layers]*len(dimtags) if layers is not None else None))
         
-        gmsh.model.geo.synchronize()
+        self._geom.env.synchronize()
         
         bulk_name_index=0
         for i,entry in enumerate(res):            
@@ -1814,16 +2176,25 @@ class GmshTemplate(MeshTemplate):
                 pass
 
         # Go over it once more, finding the missing entities
-        given_names={a._id for a in self._rev_names}
+        given_names={a._id for a in self._rev_names} #type:ignore
         start_index=-1
-        
-        for entry in res:            
+        sub_index:int | None=None
+
+        for entry in res:
             if entry[0]==newdim:
                 start_index+=1
                 sub_index=0
             if entry[0]==newdim-1:
+                if sub_index is None:
+                    # gmsh lists the auto-generated "end"/top surface (a copy of
+                    # the original input surface) BEFORE the revolved volume
+                    # entry, not after -- it mirrors the whole input surface,
+                    # not one of its boundary curves, so there is no per-curve
+                    # name to propagate for it here (it is handled above, via
+                    # end_name()).
+                    continue
                 if entry[1] not in given_names:
-                    original=to_extrude[start_index]                    
+                    original=to_extrude[start_index]
                     if isinstance(original,PlaneSurface):
                         #print("Found missing entity, trying to find name for it. Original was",original,"with dim_tag",original.dim_tag,"subindex",sub_index)
                         orig_curv=original.curve_loop.curves[sub_index]
@@ -1834,8 +2205,8 @@ class GmshTemplate(MeshTemplate):
                             #print("To remove from here",self._named_entities[self._dim_tag_names[dim_tag][0]],orig_curv)
                             # Remove all list entries from self._named_entities[self._dim_tag_names[dim_tag][0]] which ar enot a GmshFakeEntry
                             self._named_entities[self._dim_tag_names[dim_tag][0]] = [
-                                entry for entry in self._named_entities[self._dim_tag_names[dim_tag][0]] 
-                                if isinstance(entry, GmshTemplate.GmshFakeEntry)
+                                named for named in self._named_entities[self._dim_tag_names[dim_tag][0]] 
+                                if isinstance(named, GmshTemplate.GmshFakeEntry)
                             ]
                             
                             #self._named_entities[self._dim_tag_names[dim_tag][0]].remove((orig_curv.dim_tag[0],orig_curv.dim_tag[1]))
@@ -1876,4 +2247,19 @@ class GmshTemplate(MeshTemplate):
         See https://gmsh.info/doc/texinfo/#Gmsh-mesh-size-fields for more information on the available field types and their parameters.
         """
         gmsh.model.mesh.field.setAsBackgroundMesh(field_id)
+
+    def set_mesh_size_boundary_layer_field(self,field_id:int):
+        """
+        Registers the given field (which must be of type "BoundaryLayer") as a boundary layer field,
+        i.e. gmsh grows graded, wall-normal element layers from the curves the field was given.
+        This is deliberately not the same as set_mesh_size_background_field: a boundary layer field
+        does not describe a mesh size to be sampled, but a structured region to be extruded from the
+        wall, so gmsh treats it separately.
+        See https://gmsh.info/doc/texinfo/#Gmsh-mesh-size-fields for the available parameters.
+        """
+        gmsh.model.mesh.field.setAsBoundaryLayer(field_id)
     
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

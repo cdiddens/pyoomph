@@ -16,6 +16,8 @@ This defines new residuals
 
 which obviously fulfill the required properties. The shift :math:`\alpha` prevents numerically diverging unknowns :math:`\vec{U}` from being considered as a new solution, since the inverse norm can easily fall below the accuracy threshold of the Newton solver applied to :math:`\vec{R}_\mathrm{defl}`.
 
+Internally, pyoomph normalizes :math:`\mathbf{W}` by its far-field value, i.e. it uses :math:`\left(1/(\alpha\|\vec{U}-\vec{U}_1\|^p)+1\right)` so that the deflation factor tends to :math:`1` far away from all known solutions and is :math:`\ge 1` everywhere. This matters because Newton's convergence criterion is applied to :math:`\vec{R}_\mathrm{defl}`: with the plain expression above and the default :math:`\alpha=0.1`, the residual would shrink by a factor of ten for every known solution, so that after a handful of found branches any perturbed guess would pass the tolerance immediately. The normalization does not change the Newton iterates at all -- the deflated Newton step depends on :math:`\mathbf{W}` only through :math:`\nabla\log\mathbf{W}` -- it only keeps the convergence check honest.
+
 pyoomph can apply the method of Ref. :cite:`Farrell2015` automatically and iterate over multiple found solutions at a given parameter value. As an example, we will calculate the solutions of a pitchfork bifurcation at a specific parameter, where three solutions exist. The considered pitchfork normal form is the same as in :math:numref:`eqodepitchforknf`, so we do not reiterate it here. Also, we do not define a problem class, but assemble our problem directly in the run script:
 
 .. literalinclude:: deflated_solve.py
@@ -25,7 +27,7 @@ pyoomph can apply the method of Ref. :cite:`Farrell2015` automatically and itera
 
 When running, the method :py:meth:`~pyoomph.generic.problem.Problem.iterate_over_multiple_solutions_by_deflation` will first solve the problem normally, without any deflation. The ``for``-loop will receive the corresponding degrees of freedom. After that, the first solution is removed by the deflation operator specified above. Here, you can select the exponent :math:`p` and the shift :math:`\alpha` by the keyword arguments ``deflation_p`` and ``deflation_alpha``. However, we must perturb the first solution before trying to find the next one. Otherwise, we would divide by zero. This is done by a random perturbation of the solution with an amplitude given by ``perturbation_amplitude``. A single random try may not be enough, so we also allow specifying the number of attempted solves with different random perturbations of the previous solution, which can be selected by ``num_random_tries``. Optionally, you can also perform a perturbation by the dominant eigenvector when adding the argument ``use_eigenperturbation=True``. An attempted solve with the perturbation in eigendirection will then be done additionally to the random perturbation(s). Whenever a new solution is found, also this solution is considered in the deflation operator. Afterwards, all found solutions are perturbed again and new attempts are started to find even more solutions.
 
-Depending on the generated random numbers, one either finds all three solutions :math:`x=0`, :math:`x=\pm 1`, or only two of them. Hence, deflation provides no guarantee that indeed all solutions are found, but it is at least a promising approach to find further solutions.
+Depending on the generated random numbers, one either finds all three solutions :math:`x=0`, :math:`x=\pm 1`, or only two of them. Hence, deflation provides no guarantee that indeed all solutions are found, but it is at least a promising approach to find further solutions. The random numbers are drawn from a generator seeded by the argument ``random_seed`` (:math:`0` by default), so repeating a run reproduces it exactly; pass ``random_seed=None`` to get a different sequence every time. 
 
 
 .. only:: html
@@ -41,7 +43,7 @@ Deflation can furthermore be combined with parameter scanning, in a sort of cont
 
 .. literalinclude:: deflated_continuation.py
    :language: python
-   :start-at: problem=Problem()
+   :start-at: with Problem() as problem:
    :end-at: output_files[branch_index].add_row(rvalue,sol[0],Re_ev)
 
 A call of :py:meth:`~pyoomph.generic.problem.Problem.deflated_continuation` expects a parameter sampling range and has similar additional optional arguments as :py:meth:`~pyoomph.generic.problem.Problem.iterate_over_multiple_solutions_by_deflation`. At each solution, the ``for``-loop receives an increasing branch index, the current parameter value and the degrees of freedom of the solution. Feel free to calculate e.g. eigenvalues or call e.g. :py:meth:`~pyoomph.generic.problem.Problem.output` inside the loop to process the current solution. You could also consider adding a :py:meth:`~pyoomph.generic.problem.Problem.write_state` whenever a new branch index starts. With another script, you can load these states via :py:meth:`~pyoomph.generic.problem.Problem.load_state` and e.g. finalize the bifurcation diagram by arclength continuation of all found solutions.

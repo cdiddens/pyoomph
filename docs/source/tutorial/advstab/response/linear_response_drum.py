@@ -1,24 +1,25 @@
+#  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -31,6 +32,8 @@ from pyoomph.expressions.units import *
 # Load tools for periodic driving response and text file output
 from pyoomph.utils.periodic_driving_response import *
 from pyoomph.utils.num_text_out import *
+# Merging the mesh data of a distributed mesh onto rank 0 (only relevant with --distribute)
+from pyoomph.meshes.meshdatamerge import run_with_global_mesh_data
 
 # Driven damped wave equation
 class DrumEquation(Equations):
@@ -89,13 +92,23 @@ with DrumProblem() as problem:
 
         # Output the resonant undamped frequencies        
         freqs=numpy.linspace(1,1000,1000) # Use frequencies f instead of omega
-        for response in pdr.iterate_over_driving_frequencies(freqs=freqs,unit=hertz):        
-            # Get the response as nondimensional data. The response is stored as eigenvector, so we split it in real and imaginary part
-            nd_resp_real=problem.get_cached_mesh_data("drum",eigenmode="real",eigenvector=0,nondimensional=True)
-            nd_resp_imag=problem.get_cached_mesh_data("drum",eigenmode="imag",eigenvector=0,nondimensional=True)
-            # Add interpolators to perform the Bessel projection
-            interr=scipy.interpolate.UnivariateSpline(nd_resp_real.get_data("coordinate_x"),nd_resp_real.get_data("h"),k=3,s=0)
-            interi=scipy.interpolate.UnivariateSpline(nd_resp_imag.get_data("coordinate_x"),nd_resp_imag.get_data("h"),k=3,s=0)
+        # Add interpolators to perform the Bessel projection. Mesh data comes in the mesh's own
+        # node order, which is not the order along the radius - and a spline with s=0 insists on a
+        # strictly increasing x - so sort by the coordinate first rather than trusting the order.
+        def radial_spline(data):
+            r=numpy.asarray(data.get_data("coordinate_x"))
+            order=numpy.argsort(r)
+            return scipy.interpolate.UnivariateSpline(r[order],numpy.asarray(data.get_data("h"))[order],k=3,s=0)
+        def project_and_write():
+            # Get the response as nondimensional data. The response is stored as eigenvector, so we split it in real and imaginary part.
+            # global_mesh=True because the projection integrates over the WHOLE radius: with --distribute
+            # each rank holds only its own arc of it, and a spline through a partial radius would give a
+            # different (and wrong) amplitude on every rank. Merged onto rank 0, which is also the only
+            # rank NumericalTextOutputFile writes from.
+            nd_resp_real=problem.get_cached_mesh_data("drum",eigenmode="real",eigenvector=0,nondimensional=True,global_mesh=True)
+            nd_resp_imag=problem.get_cached_mesh_data("drum",eigenmode="imag",eigenvector=0,nondimensional=True,global_mesh=True)
+            interr=radial_spline(nd_resp_real)
+            interi=radial_spline(nd_resp_imag)
             # Calculate the Bessel decomposition of the response
             bessel_data=[]
             for i in range(numbessel):                
@@ -107,5 +120,10 @@ with DrumProblem() as problem:
                 bessel_data.append(dim_response_ampl_by_F)            
             # add a row to the output
             outfile.add_row(pdr.get_driving_frequency()/hertz,*bessel_data)
+        for response in pdr.iterate_over_driving_frequencies(freqs=freqs,unit=hertz):        
+            # run_with_global_mesh_data lets rank 0 run the projection while the other ranks serve its
+            # merge requests. Serially it just calls it. Without it, the global_mesh=True requests above
+            # would have to be reached by every rank in lockstep, which a rank-0-only body cannot do.
+            run_with_global_mesh_data({"drum":problem},project_and_write)
 
         

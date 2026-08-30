@@ -272,7 +272,7 @@ namespace oomph
     void operator=(const BinArrayParameters&) = delete;
 
     /// Empty destructor
-    virtual ~BinArrayParameters() {}
+    ~BinArrayParameters() override {}
 
     /// Number of bins in each coordinate direction
     Vector<unsigned>& dimensions_of_bin_array()
@@ -342,7 +342,7 @@ namespace oomph
     void operator=(const RefineableBinArrayParameters&) = delete;
 
     /// Empty destructor
-    virtual ~RefineableBinArrayParameters() {}
+    ~RefineableBinArrayParameters() override {}
 
 
     /// Is bin recursive?
@@ -471,7 +471,7 @@ namespace oomph
     void operator=(const NonRefineableBinArrayParameters&) = delete;
 
     /// Empty destructor
-    virtual ~NonRefineableBinArrayParameters() {}
+    ~NonRefineableBinArrayParameters() override {}
 
     /// Number of spirals that are being
     /// visited before doing another circular mpi communication

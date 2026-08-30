@@ -483,7 +483,11 @@ namespace oomph
     /// be uniform over all processors.
     LinearAlgebraDistribution* Dof_distribution_pt;
 
-  private:
+    // FOR PYOOMPH: get_my_eqns() and parallel_sparse_assemble() were private; they are now protected
+    // and the latter is virtual, so that a derived Problem can substitute its own distributed
+    // assembly. Nothing else changed -- in particular the default implementations are untouched, so
+    // a class that does not override sees exactly the previous behaviour.
+  protected:
 #ifdef OOMPH_HAS_MPI
 
     /// Helper method that returns the (unique) global equations to which
@@ -496,13 +500,18 @@ namespace oomph
 
     /// Helper method to assemble CRDoubleMatrices from distributed
     /// on multiple processors.
-    void parallel_sparse_assemble(
+    virtual void parallel_sparse_assemble( // FOR PYOOMPH: made virtual
       const LinearAlgebraDistribution* const& dist_pt,
       Vector<int*>& column_or_row_index,
       Vector<int*>& row_or_column_start,
       Vector<double*>& value,
       Vector<unsigned>& nnz,
       Vector<double*>& residuals);
+
+#endif
+
+  private:
+#ifdef OOMPH_HAS_MPI
 
     /// A private helper function to
     /// copy the haloed equation numbers into the halo equation numbers,
@@ -707,6 +716,43 @@ namespace oomph
     /// matrix is zero. If it is then storage need not be allocated.
     double Numerical_zero_for_sparse_assembly;
 
+    //FOR PYOOMPH
+    /// The tolerance above to use for the matrix_index-th matrix of a multi-matrix assembly (the
+    /// sparse assembly routines can build several matrices in one pass over the elements, e.g. the
+    /// Jacobian AND the mass matrix for an eigenproblem). Defaults to the single problem-wide value,
+    /// so behaviour is unchanged unless a derived Problem overrides this. It is virtual so that a
+    /// derived problem can apply a different sparsity policy per matrix: pyoomph keeps structurally
+    /// zero entries in the Jacobian, which makes its pattern depend on the equation numbering alone
+    /// and hence reusable by the linear solver, but must NOT do so for the mass matrix, which is
+    /// several times sparser and would otherwise be inflated to the Jacobian's pattern.
+    virtual double numerical_zero_for_sparse_assembly(const unsigned& matrix_index) const
+    {
+      return Numerical_zero_for_sparse_assembly;
+    }
+
+    //FOR PYOOMPH
+    /// Optional structural sparsity mask for one element's contribution to the matrix_index-th matrix
+    /// of a multi-matrix assembly: an nvar*nvar array of 0/1 in row-major order, or NULL for "no mask"
+    /// (the default, which reproduces the original behaviour exactly). Fetched once per element, so a
+    /// derived problem may return a pointer into a scratch buffer rather than allocating -- but note
+    /// that the masks for ALL matrices of an element are fetched before any of them is used, so the
+    /// pointers returned for different matrix_index must remain valid simultaneously (i.e. one scratch
+    /// buffer per matrix, not one shared buffer).
+    ///
+    /// A set entry means "this position of the elemental block is STRUCTURALLY present": store it even
+    /// if it currently evaluates to zero. The mask is applied with OR, never instead of, the numerical
+    /// test -- so it can only ever ADD entries. That asymmetry is deliberate: a mask that over-reports
+    /// merely stores explicit zeros, whereas one that under-reported would silently drop real entries
+    /// from the assembled matrix. pyoomph uses it to give the Jacobian a sparsity pattern that depends
+    /// on the equation numbering alone (and is hence reusable by the linear solver across Newton
+    /// steps) without paying for the entries its symbolic analysis proves can never be nonzero.
+    virtual const char* sparsity_mask_for_element(const unsigned& matrix_index,
+                                                  GeneralisedElement* const& elem_pt,
+                                                  const unsigned& nvar)
+    {
+      return 0;
+    }
+
     /// Protected helper function that is used to assemble the Jacobian
     /// matrix in the case when the storage is row or column compressed.
     /// The boolean Flag indicates
@@ -753,6 +799,24 @@ namespace oomph
     /// schemes. Lower scaling values will reject the time-step (and retry
     /// with a smaller dt).
     double DTSF_min_decrease;
+
+    //FOR PYOOMPH: backported from a later oomph-lib (see INFO_oomph-lib).
+    /// Safety factor to ensure we are aiming for a target error, TARGET,
+    /// that is below our tolerance:
+    ///     TARGET = Target_error_safety_factor * TOL
+    /// For this to make sense Target_error_safety_factor should be <1.0. If
+    /// Keep_temporal_error_below_tolerance is set to true (default) then,
+    /// without this, timesteps suggested by the adaptive time-stepper can be
+    /// expected to lead to rejection (because the error exceeds TOL) about
+    /// half of the time.
+    /// Hairer et al. (1993, ISBN:978-3-540-56670-0, p168) suggest a value
+    /// around 0.25-0.40 to be the most efficient, however this is highly
+    /// problem and timestepper dependent and sometimes as high as 0.95 may be
+    /// effective at improving the robustness of timestep prediction.
+    ///
+    /// Note: Despite this, we are setting this to default to 1.0 to prevent
+    /// introducing any change in the default behaviour.
+    double Target_error_safety_factor;
 
     /// If  Minimum_dt_but_still_proceed positive, then dt will not be
     /// reduced below this value during adaptive timestepping and the
@@ -1072,6 +1136,29 @@ namespace oomph
     /// Actions that are to be performed after a mesh adaptation.
     virtual void actions_after_adapt() {}
 
+    //FOR PYOOMPH: hooks that let a subclass survive a Newton failure in an adaptive solve loop
+    // instead of the run ending there. Both are no-ops by default, so a Problem that does not
+    // override them behaves exactly as it did before. See dev_docs/adaptive_resolve_recovery.md.
+
+    /// Called immediately before and immediately after every adapt() inside an adaptive Newton
+    /// solve. just_adapted==false is the only moment at which the pre-adapt state still exists --
+    /// and, because these loops always solve first and adapt afterwards, that state is a converged
+    /// one, which is what makes a rollback worth anything.
+    virtual void adaptive_solve_checkpoint(const unsigned& isolve,
+                                           const bool& just_adapted)
+    {
+    }
+
+    /// Called from the catch blocks that would otherwise abandon the run. Return true if a
+    /// consistent state has been restored, in which case the caller throws
+    /// AdaptiveResolveRecovered -- which nothing in oomph-lib catches -- instead of the fatal
+    /// OomphLibError.
+    virtual bool recover_from_failed_adaptive_resolve(
+      const bool& linear_solver_error, const unsigned& iterations)
+    {
+      return false;
+    }
+
   protected:
     /// Any actions that are to be performed before a complete
     /// Newton solve (e.g. adjust boundary conditions). CAREFUL: This
@@ -1105,6 +1192,23 @@ namespace oomph
     /// to doc the solution during a non-converging iteration, say.
     virtual void actions_after_newton_step() {}
 
+    //FOR PYOOMPH: hook that hands out the raw Newton increment.
+    /// Any actions that are to be performed after the Newton increment has been
+    /// applied to the degrees of freedom (*Dof_pt[l] -= Relaxation_factor*dx[l])
+    /// AND synchronise_all_dofs() has run, but before actions_after_newton_step().
+    /// Unlike actions_after_newton_step() this receives the increment dx itself,
+    /// exactly as the linear solver returned it (i.e. unscaled by
+    /// Relaxation_factor). pyoomph's static condensation needs it: the dofs it
+    /// eliminated from the linear system come back as zeros in dx and have to be
+    /// reconstructed from the retained entries of dx before anything else looks at
+    /// the solution. Only Problem::newton_solve() calls this; the arclength
+    /// continuation solver has its own dof update and deliberately does not.
+    /// Caveat: with the globally convergent (line search) Newton method the
+    /// update is not that formula and dx has been negated and rescaled in place
+    /// by the line search, so dx no longer describes what the dofs did. pyoomph
+    /// refuses to combine static condensation with that method for this reason.
+    virtual void actions_after_newton_dof_update(const DoubleVector& dx) {}
+
     /// Actions that should be performed before each implicit time step.
     /// This is needed when one wants
     /// to solve a steady problem before timestepping and needs to distinguish
@@ -1123,10 +1227,10 @@ namespace oomph
     virtual void actions_after_implicit_timestep_and_error_estimation() {}
 
     /// Actions that should be performed before each explicit time step.
-    virtual void actions_before_explicit_timestep() {}
+    void actions_before_explicit_timestep() override {}
 
     /// Actions that should be performed after each explicit time step.
-    virtual void actions_after_explicit_timestep() {}
+    void actions_after_explicit_timestep() override {}
 
     /// Actions that are to be performed before reading in
     /// restart data for problems involving unstructured bulk meshes.
@@ -1322,7 +1426,7 @@ namespace oomph
     void operator=(const Problem&) = delete;
 
     /// Virtual destructor to clean up memory
-    virtual ~Problem();
+    ~Problem() override;
 
     /// Return a pointer to the global mesh
     Mesh*& mesh_pt()
@@ -1555,13 +1659,13 @@ namespace oomph
     }
 
     /// Return a pointer to the global time object (const version).
-    Time* time_pt() const
+    Time* time_pt() const override
     {
       return Time_pt;
     }
 
     /// Return the current value of continuous time
-    double& time();
+    double& time() override;
 
     /// Return the current value of continuous time (const version)
     double time() const;
@@ -1636,6 +1740,13 @@ namespace oomph
     double& maximum_dt()
     {
       return Maximum_dt;
+    }
+
+    //FOR PYOOMPH: backported from a later oomph-lib (see INFO_oomph-lib).
+    /// Access function to the safety factor in adaptive timestepping
+    double& target_error_safety_factor()
+    {
+      return Target_error_safety_factor;
     }
 
     /// Access function to max Newton iterations before giving up.
@@ -1722,6 +1833,37 @@ namespace oomph
       return Dof_distribution_pt;
     }
 
+    /// FOR PYOOMPH: the row distribution the problem would rather have the Jacobian
+    /// and the linear solve laid out in, instead of the uniform split built by
+    /// default. Leave dist_pt at 0 (as here) to accept the default; the CALLER takes
+    /// ownership of anything assigned. Consulted in
+    /// create_new_linear_algebra_distribution() and in the distributed branch of
+    /// SuperLUSolver::solve(Problem*, DoubleVector&).
+    /// It exists for pyoomph's static condensation, whose whole ownership argument
+    /// is that the rank owning a row of the Jacobian is the rank that can invert
+    /// the element-local block that row belongs to: on a distributed problem that
+    /// means the dof distribution, and on a replicated one a split whose cut points
+    /// do not fall inside such a block. Null everywhere else, so nothing changes.
+    virtual void preferred_linear_solver_distribution(
+      LinearAlgebraDistribution*& dist_pt)
+    {
+      dist_pt = 0;
+    }
+
+    //FOR PYOOMPH: hook to permute the global equation numbering, called from
+    /// assign_eqn_numbers() immediately after Mesh::assign_global_eqn_numbers()
+    /// and before synchronise_eqn_numbers() / the dof distribution is built. An
+    /// override must permute dof_pt and the matching Data::eqn_number() entries
+    /// consistently, and must not change which values are dofs. Everything that
+    /// reads the numbering is built after this point, which is the reason the
+    /// hook is here rather than anywhere else. See the call site for why the same
+    /// implementation serves a distributed and a replicated run.
+    /// It exists for pyoomph's user-selectable dof layouts: a block preconditioner
+    /// wants a node's fields adjacent, and static condensation wants an element's
+    /// dofs adjacent, and neither is what the node-then-element numbering gives.
+    /// A no-op here, so nothing changes for anybody who does not override it.
+    virtual void reorder_global_eqn_numbers(Vector<double*>& dof_pt) {}
+
     /// Return the number of dofs
     unsigned long ndof() const
     {
@@ -1792,28 +1934,28 @@ namespace oomph
 
     /// Return the vector of dofs, i.e. a vector containing the current
     /// values of all unknowns.
-    // FOR_PYOOMPH: made virtual (this is required to patch the missing positional dofs)
-    void get_dofs(DoubleVector& dofs) const;
+    //FOR PYOOMPH: made virtual (this is required to patch the missing positional dofs)
+    void get_dofs(DoubleVector& dofs) const override;
 
     /// Return vector of the t'th history value of all dofs.
-    // FOR_PYOOMPH: made virtual (this is required to patch the missing positional dofs)
-    void get_dofs(const unsigned& t, DoubleVector& dofs) const;
+    //FOR PYOOMPH: made virtual (this is required to patch the missing positional dofs)
+    void get_dofs(const unsigned& t, DoubleVector& dofs) const override;
 
     /// Set the values of the dofs
-    // FOR_PYOOMPH: made virtual (this is required to patch the missing positional dofs)
-    virtual void set_dofs(const DoubleVector& dofs);
+    //FOR PYOOMPH: made virtual (this is required to patch the missing positional dofs)
+    void set_dofs(const DoubleVector& dofs) override;
 
     /// Set the history values of the dofs
-    // FOR_PYOOMPH: made virtual (this is required to patch the missing positional dofs)
+    //FOR PYOOMPH: made virtual (this is required to patch the missing positional dofs)
     virtual void set_dofs(const unsigned& t, DoubleVector& dofs);
 
     /// Set history values of dofs from the type of vector stored in
     /// problem::Dof_pt.
-    // FOR_PYOOMPH: made virtual (this is required to patch the missing positional dofs)
+    //FOR PYOOMPH: made virtual (this is required to patch the missing positional dofs)
     virtual void set_dofs(const unsigned& t, Vector<double*>& dof_pt);
 
     /// Add lambda x incremenet_dofs[l] to the l-th dof
-    void add_to_dofs(const double& lambda, const DoubleVector& increment_dofs);
+    void add_to_dofs(const double& lambda, const DoubleVector& increment_dofs) override;
 
     /// Return a pointer to the dof, indexed by global equation number
     /// which may be haloed or stored locally. If it is haloed, a local copy
@@ -1902,7 +2044,7 @@ namespace oomph
     /// slighty hacky, beware if you have a residual which is non-linear or
     /// implicit in the derivative or if you have overloaded
     /// get_jacobian(...).
-    virtual void get_dvaluesdt(DoubleVector& f);
+    void get_dvaluesdt(DoubleVector& f) override;
 
     /// Return the fully-assembled residuals Vector for the problem:
     /// Virtual so it can be overloaded in for mpi problems
@@ -3032,7 +3174,7 @@ namespace oomph
     /// update global mesh, and re-assign equation numbers.
     /// Return # of refined/unrefined elements. On return from this
     /// function, Problem can immediately be solved again.
-    //PYOOMPH made virtual
+    //FOR PYOOMPH: made virtual
     virtual void adapt(unsigned& n_refined, unsigned& n_unrefined);
 
     /// Adapt problem:
@@ -3164,6 +3306,23 @@ namespace oomph
         maxres(Passed_maxres)
     {
     }
+  };
+
+
+  //=======================================================================
+  //FOR PYOOMPH: thrown once Problem::recover_from_failed_adaptive_resolve has restored a
+  /// consistent state after a Newton failure in an adaptive solve loop, in place of the fatal
+  /// OomphLibError that would otherwise end the run.
+  ///
+  /// Deliberately derived from std::runtime_error and NOT from OomphLibError or NewtonSolverError:
+  /// it has to fly past every catch block in here. In particular steady_newton_solve() wraps
+  /// newton_solve(max_adapt) in catch(NewtonSolverError), so an exception of either of those types
+  /// thrown from the inner loop would simply be converted back into a fatal error one frame up.
+  //=======================================================================
+  class AdaptiveResolveRecovered : public std::runtime_error
+  {
+  public:
+    AdaptiveResolveRecovered(const std::string& what) : std::runtime_error(what) {}
   };
 
 

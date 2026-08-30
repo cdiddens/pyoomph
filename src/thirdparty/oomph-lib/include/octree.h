@@ -115,7 +115,7 @@ namespace oomph
   public:
     /// Destructor. Note: Deleting a octree also deletes the
     /// objects associated with all non-leaf nodes!
-    virtual ~OcTree() {}
+    ~OcTree() override {}
 
 
     /// Broken copy constructor
@@ -128,7 +128,7 @@ namespace oomph
     /// is a specific OcTree and not a general Tree.
     Tree* construct_son(RefineableElement* const& object_pt,
                         Tree* const& father_pt,
-                        const int& son_type)
+                        const int& son_type) override
     {
       OcTree* temp_oc_pt = new OcTree(object_pt, father_pt, son_type);
       return temp_oc_pt;
@@ -928,8 +928,10 @@ namespace oomph
   {
   public:
     /// Constructor for OcTree forest: Pass Vector of
-    /// (pointers to) trees.
-    OcTreeForest(Vector<TreeRoot*>& trees_pt);
+    /// (pointers to) trees. FOR PYOOMPH: skip_init_call suppresses the
+    /// find_neighbours()/construct_up_right_equivalents() calls so a derived forest
+    /// (DynamicOcTreeForest) can run its own (e.g. tet-aware) versions afterwards.
+    OcTreeForest(Vector<TreeRoot*>& trees_pt, bool skip_init_call = false);
 
     /// Default constructor (empty and broken)
     OcTreeForest()
@@ -947,19 +949,19 @@ namespace oomph
 
     /// Destructor: Delete the constituent octrees (and thus
     /// the associated objects!)
-    virtual ~OcTreeForest() {}
+    ~OcTreeForest() override {}
 
 
     /// Document and check all the neighbours of all the nodes
     /// in the forest. DocInfo object specifies the output directory
     /// and file numbers for the various files. If \c doc_info.disable_doc()
     /// has been called, no output is created.
-    void check_all_neighbours(DocInfo& doc_info);
+    void check_all_neighbours(DocInfo& doc_info) override;
 
     /// Open output files that will store any hanging nodes in
     /// the forest and return a vector of the streams.
     void open_hanging_node_files(DocInfo& doc_info,
-                                 Vector<std::ofstream*>& output_stream);
+                                 Vector<std::ofstream*>& output_stream) override;
 
     /// Self-test: Check all neighbours. Return success (0)
     /// if the max. distance between corresponding points in the
@@ -1009,9 +1011,11 @@ namespace oomph
     /// Construct the rotation schemes
     void construct_up_right_equivalents();
 
-  private:
-    /// Construct the neighbour scheme
-    void find_neighbours();
+  protected:
+    /// Construct the neighbour scheme. FOR PYOOMPH: made virtual+protected so a derived
+    /// forest (DynamicOcTreeForest) can override it (e.g. skip it for tetrahedral forests,
+    /// which use geometric node-sharing/hanging instead of the OcTree coordinate descent).
+    virtual void find_neighbours();
   };
 
 } // namespace oomph

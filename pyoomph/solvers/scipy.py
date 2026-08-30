@@ -1,34 +1,35 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
-from .generic import GenericLinearSystemSolver,GenericEigenSolver,DefaultMatrixType,EigenSolverWhich
+from .generic import GenericLinearSystemSolver,GenericEigenSolver,DefaultMatrixType,EigenSolverWhich,SolverError
 import scipy #type:ignore
 import scipy.linalg #type:ignore
-from scipy.sparse import csc_matrix #type:ignore
+from scipy.sparse import csc_matrix,csr_matrix #type:ignore
 import scipy.sparse.linalg #type:ignore
 
 import numpy,numpy.typing
@@ -38,12 +39,75 @@ if TYPE_CHECKING:
     from ..generic.problem import Problem
 
 
+class ScipySolverError(SolverError):
+	"""SuperLU/UMFPACK could not factorise the matrix.
+
+	A SolverError rather than the plain RuntimeError scipy raises, so that an adaptive time step or an
+	arclength step rejects and retries with a smaller one instead of the run ending here.
+	"""
+
+
+def _permutation_is_odd(perm:Any)->bool:
+	"""Parity of a permutation, by counting cycles: parity = (n - number of cycles) mod 2.
+
+	A python loop over n, which is O(n) against the O(nnz*fill) of the factorisation whose sign is being
+	read, so it costs nothing next to the work already done.
+	"""
+	perm=numpy.asarray(perm)
+	n=int(perm.size)
+	seen=numpy.zeros(n,dtype=bool)
+	swaps=0
+	for i in range(n):
+		if seen[i]:
+			continue
+		j=i
+		while not seen[j]:
+			seen[j]=True
+			j=int(perm[j])
+			swaps+=1
+		swaps-=1
+	return bool(swaps&1)
+
+
 @GenericLinearSystemSolver.register_solver()
 class SuperLUSerial(GenericLinearSystemSolver):
 	idname="superlu"
+	# scipy's SuperLU/UMFPACK are serial, but oomph routes every mpirun through the distributed entry
+	# point, so without this a plain `mpirun -n 2` could not solve at all. The base class gathers the
+	# system onto rank 0 and calls solve_serial() below there. solve_serial() issues no collective, as
+	# that flag requires.
+	gathers_to_root_under_mpi=True
+	# The inherited exploit_proven_symmetry flag is a documented no-op here: neither SuperLU nor
+	# UMFPACK offers a symmetric factorization, so there is nothing to switch to and the decision
+	# helper is never consulted.
 	def __init__(self,problem:"Problem",useUmfpack:bool=False):
 		super().__init__(problem)
 		scipy.sparse.linalg.use_solver(useUmfpack=useUmfpack) #type:ignore
+
+	def get_determinant_sign(self)->int | None:
+		"""From the factorisation the last solve already computed, so this costs nothing.
+
+		SuperLU gives ``P_r A P_c = L U`` with a unit-diagonal L, so the sign is that of the product of
+		U's diagonal times the parity of both permutations. Leaving the permutations out - as the
+		commented-out determinant print in this file used to - gives a sign that flips whenever pivoting
+		reorders, i.e. spurious bifurcation detections.
+		"""
+		lu=getattr(self,"_current_LU",None)
+		if lu is None:
+			return None
+		try:
+			diag=lu.U.diagonal()
+		except Exception:
+			return None
+		if len(diag)==0:
+			return None
+		if numpy.any(diag==0):
+			return 0
+		sign=1 if int(numpy.count_nonzero(diag<0))%2==0 else -1
+		for perm in (lu.perm_r,lu.perm_c):
+			if _permutation_is_odd(perm):
+				sign=-sign
+		return sign
 
 	def solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPIntArray,colptr:NPIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
 #		print("SOLVING system N=",n,"nnz=",nnz)
@@ -51,15 +115,6 @@ class SuperLUSerial(GenericLinearSystemSolver):
 		if op_flag==1:
 			A=csc_matrix((values, rowind, colptr), shape=(n, n))
 
-			if False:
-				lu=splu(A)
-				diagL = lu.L.diagonal()
-				diagU = lu.U.diagonal()
-				diagL = diagL.astype(numpy.complex128)
-				diagU = diagU.astype(numpy.complex128)
-				logdet = numpy.log(diagL).sum() + numpy.log(diagU).sum()
-				determ=numpy.exp(logdet)
-				print("MATERIX DET",determ)
 			#arr=A.toarray()
 			#maxzero=0
 			#for l in arr:
@@ -86,27 +141,24 @@ class SuperLUSerial(GenericLinearSystemSolver):
 							if len(crop):
 								maxi=maxi[0:crop[0][0]] #type:ignore
 							nsplead=nspv[maxi] #type:ignore
-							descs=[self.problem.describe_equation(eq) for eq in maxi] #type:ignore
+							descs=[self.problem._describe_equation(eq) for eq in maxi] #type:ignore
 							print(k,nsplead,maxi,":\n\t\t"+"\n\t\t".join(descs)) #type:ignore
+					# Re-raised as a SolverError: a singular factorisation is exactly the state an
+					# adaptive time step or an arclength step should back away from, and scipy's plain
+					# RuntimeError would end the run instead. Any OTHER RuntimeError from splu is a
+					# genuine error and keeps its type.
+					raise ScipySolverError("SuperLU could not factorise the matrix: "+str(re.args[0])) from re
 				raise
 #			print("det","DET",self._current_LU.L.diagonal().prod()*self._current_LU.U.diagonal().prod())
 		elif op_flag==2:
 			self.setup_solver()
-			if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine():
-				sol=self.problem._custom_assembler.custom_solve_routine(lambda rhs : self._current_LU.solve(rhs,"T" if transpose==1 else "N"), b)
-			else:
-				sol=self._current_LU.solve(b,"T" if transpose==1 else "N") #type:ignore
+			# Serial entry point: b is the whole system, so no offset and no reduction.
+			sol=self._solve_newton_step(lambda rhs : self._current_LU.solve(rhs,"T" if transpose==1 else "N"), b) #type:ignore
 			b[:]=sol[:] #type:ignore
 		else:
 			raise RuntimeError("Cannot handle SuperLU mode "+str(op_flag)+" yet")
 			return 666
 		return 0		#TODO: Return sign of Jacobian
-
-	def distributed_possible(self) -> bool:
-		return False
-
-	def solve_distributed(self, op_flag: int, allow_permutations: int, n: int, nnz_local: int, nrow_local: int, first_row: int, values: NPFloatArray, col_index: NPIntArray, row_start: NPIntArray, b: NPFloatArray, nprow: int, npcol: int, doc: int, data: NPUInt64Array, info: NPIntArray)->None:
-		raise RuntimeError("SuperLU solver cannot solve distributed")
 
 @GenericLinearSystemSolver.register_solver()
 class UMFPACKSerial(SuperLUSerial):
@@ -116,7 +168,7 @@ class UMFPACKSerial(SuperLUSerial):
 
 
 class PardisoInvOp(object):
-		def __init__(self,A:DefaultMatrixType,M:Optional[DefaultMatrixType]=None):
+		def __init__(self,A:DefaultMatrixType,M:DefaultMatrixType | None=None):
 			self.A = A
 			self.M = M
 
@@ -144,14 +196,26 @@ class ScipyEigenSolver(GenericEigenSolver):
 	def __init__(self,problem:"Problem"):
 		super().__init__(problem)
 		self.shift=1
-		self.ncv:Optional[int]=None
+		self.ncv:int | None=None
 		self.tol=0
 
-	def get_OPInv(self,M:DefaultMatrixType,J:DefaultMatrixType,shift:Union[float,complex])->Optional[object]:
+	def get_OPInv(self,M:DefaultMatrixType,J:DefaultMatrixType,shift:float | complex)->object | None:
 		return None
 
+	def distributed_possible(self) -> bool:
+		# ARPACK through scipy sees one process' matrices only, so on a distributed problem it would
+		# solve each rank's row block as if it were the whole eigenproblem. It can still be used there,
+		# because solve() below gathers the blocks onto rank 0 first -- serialised, but correct. SLEPc
+		# remains the way to do this in parallel.
+		return True
 
-	def solve(self,neval:int,shift:Optional[Union[float,complex]]=None,sort:bool=True,which:EigenSolverWhich="LM",OPpart:Optional[Literal["r","i"]]=None,v0:Optional[Union[NPComplexArray,NPFloatArray]]=None,target:Optional[complex]=None,custom_J_and_M:Optional[Tuple[DefaultMatrixType]]=None,with_left_eigenvectors:bool=False,quiet:bool=True)->Tuple[NPComplexArray,NPComplexArray,DefaultMatrixType,DefaultMatrixType]:
+	def solve(self,neval:int,shift:float | complex | None=None,sort:bool=True,which:EigenSolverWhich="LM",OPpart:Literal["r", "i"] | None=None,v0:NPComplexArray | NPFloatArray | None=None,target:complex | None=None,custom_J_and_M:tuple[DefaultMatrixType,DefaultMatrixType] | None=None,with_left_eigenvectors:bool=False,quiet:bool=True)->tuple[NPComplexArray,NPComplexArray,DefaultMatrixType,DefaultMatrixType]:
+		# custom_J_and_M is always a whole global matrix, so it never needs gathering -- and the
+		# gathered path itself comes back through here with one.
+		if custom_J_and_M is None and self.get_eigen_row_layout()[3]:
+			return self._solve_gathered_on_root(neval,shift=shift,sort=sort,which=which,OPpart=OPpart,
+												v0=v0,target=target,
+												with_left_eigenvectors=with_left_eigenvectors,quiet=quiet)
 		if shift is None:
 			shift=self.shift
 		if target is not None:
@@ -176,9 +240,30 @@ class ScipyEigenSolver(GenericEigenSolver):
 		if neval <= 0:
 			neval=n
 
+		# Symmetric driver (ARPACK eigsh) only in shift-invert mode: without sigma, eigsh requires M
+		# positive DEFINITE, while shift-invert only needs positive SEMI-definite - and pyoomph mass
+		# matrices are PSD-singular (pressure/pinned rows). PSD does not follow from the symmetry
+		# proof, so it is screened numerically; a symmetric indefinite M (cross-coupled partial_t, as
+		# in the pendulum ODE) has to stay on the general driver. The remaining guards keep the engaged
+		# path exactly equivalent to the eigs call it replaces.
+		use_sym=(self._use_symmetric_eigensolver_now() and shift is not None and numpy.imag(shift)==0
+				 and which=="LM" and OPpart is None
+				 and J.dtype.kind!="c" and M.dtype.kind!="c"
+				 and (v0 is None or not numpy.iscomplexobj(v0)))
+		# collective only when every rank is here. On the gathered path rank 0 re-enters this method
+		# alone, holding the whole assembled system, while the others wait in mpi_share_root_failure.
+		if use_sym and not self._mass_matrix_can_be_positive_semidefinite(M,collective=custom_J_and_M is None):
+			use_sym=False
+			self.last_symmetry_decision_reason="mass matrix is symmetric but not positive semi-definite"
+		self.last_symmetry_decision=use_sym
+
 		if neval>=n-1:
-			
-			evals,evects=scipy.linalg.eig(J.toarray(),b=M.toarray(),left=False) #type:ignore			
+			# Dense path stays scipy.linalg.eig even for a proven-symmetric pencil: generalized eigh
+			# requires a strictly positive definite b, which a singular M violates.
+			if use_sym:
+				self.last_symmetry_decision=False
+				self.last_symmetry_decision_reason="dense path (generalized eigh needs strictly PD M)"
+			evals,evects=scipy.linalg.eig(J.toarray(),b=M.toarray(),left=False) #type:ignore
 			if sort:
 				if target:
 					srt = numpy.argsort(numpy.abs(evals-target))
@@ -197,9 +282,19 @@ class ScipyEigenSolver(GenericEigenSolver):
 			OPInv=self.get_OPInv(M,J,shift)
 			ncv=self.ncv
 			max_retries=3
+			evals=None
+			evects=None
 			for attempt in range(max_retries+1):
 				try:
-					evals,evects=scipy.sparse.linalg.eigs(J,M=M,sigma=shift,return_eigenvectors=True,k=neval,OPinv=OPInv,which=which,OPpart=OPpart,v0=v0,ncv=ncv,tol=self.tol) #type:ignore
+					if use_sym:
+						# Same problem J v = lambda M v, same shift-invert - only the symmetric
+						# Lanczos driver instead of the general Arnoldi one. Cast back to complex so
+						# the return contract (and everything downstream) is unchanged.
+						evals,evects=scipy.sparse.linalg.eigsh(J,M=M,sigma=shift,return_eigenvectors=True,k=neval,OPinv=OPInv,which=which,v0=v0,ncv=ncv,tol=self.tol) #type:ignore
+						evals=evals.astype("complex128") #type:ignore
+						evects=evects.astype("complex128") #type:ignore
+					else:
+						evals,evects=scipy.sparse.linalg.eigs(J,M=M,sigma=shift,return_eigenvectors=True,k=neval,OPinv=OPInv,which=which,OPpart=OPpart,v0=v0,ncv=ncv,tol=self.tol) #type:ignore
 					break
 				except scipy.sparse.linalg.ArpackError:
 					if attempt>=max_retries:
@@ -208,6 +303,7 @@ class ScipyEigenSolver(GenericEigenSolver):
 					ncv=min(ncv,n)
 					if not quiet:
 						print("ARPACK failed to converge, retrying with ncv="+str(ncv)+" (attempt "+str(attempt+1)+"/"+str(max_retries)+")")
+			assert evals is not None and evects is not None
 			if sort:
 				if target:
 					srt = numpy.argsort(numpy.abs(evals-target))
@@ -225,3 +321,6 @@ class ScipyEigenSolver(GenericEigenSolver):
 			return evals, evects,J,M
 			#return evals,numpy.transpose(evects)
 
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

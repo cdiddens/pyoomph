@@ -1,24 +1,25 @@
+#  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -65,9 +66,6 @@ class KSEBifurcationProblem(Problem):
         self.add_equations(eqs@"domain")
 
 
-# slepc eigensolver is more reliable here
-import pyoomph.solvers.petsc # Requires petsc4py, slepc4py. Might not work in Windows
-
 if __name__ == "__main__":
     with KSEBifurcationProblem() as problem:
         problem.initialise()
@@ -76,8 +74,7 @@ if __name__ == "__main__":
         problem.set_initial_condition(ic_name="hexdots") # set the hexdot initial condition
         problem.solve(timestep=10) # One transient step to converge towards the stationary solution
         problem.solve() # stationary solve
-
-        problem.set_eigensolver("slepc") # Set the slepc eigensolver
+        
         # Write eigenvalues to file
         eigenfile=open(os.path.join(problem.get_output_directory(),"hexdots.txt"),"w")
         def output_with_eigen():
@@ -86,7 +83,7 @@ if __name__ == "__main__":
             line=[problem.param_gamma.value,h_rms,eigvals[0].real,eigvals[0].imag] # line to write
             eigenfile.write("\t".join(map(str,line))+"\n") # write to file
             eigenfile.flush()
-            problem.output_at_increased_time() # and write the output
+            problem.output(increase_time_for_PVD=True) # and write the output
 
         # Arclength continuation
         output_with_eigen()

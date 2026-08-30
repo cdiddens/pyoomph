@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -28,10 +29,7 @@
 from ..expressions import Expression
 from ..expressions.units import Expression
 
-from ..expressions import Union
-from ..expressions.units import Union
 from .generic import MixtureGasProperties, MixtureLiquidProperties, PureGasProperties, PureLiquidProperties
-from ..typings import Union
 from ..generic import InterfaceEquations
 from ..expressions import * #Import grad et al
 from ..expressions.units import *
@@ -60,7 +58,7 @@ class MassTransferModelBase:
     def get_mass_transfer_name(self,name:str) -> str:
         return "masstrans_"+name
 
-    def _setup_for_code(self,interf:FiniteElementCodeGenerator,interface_props:"BaseInterfaceProperties",for_lubrication:Union[Literal[False],Dict[str,ExpressionOrNum]]=False):
+    def _setup_for_code(self,interf:FiniteElementCodeGenerator,interface_props:"BaseInterfaceProperties",for_lubrication:Literal[False] | dict[str, ExpressionOrNum]=False):
         self._interface=interf
         self._inside_domain=interf.get_parent_domain()
         self._opposite_interface=cast(FiniteElementCodeGenerator,interf._get_opposite_interface())
@@ -89,18 +87,29 @@ class MassTransferModelBase:
         self._for_lubrication=False
 
     @abstractmethod
-    def identify_transfer_components(self)->Set[str]:
+    def identify_transfer_components(self)->set[str]:
+        # Returns a set, i.e. unordered. Every caller that defines fields, adds residuals or builds
+        # an expression from it must iterate it sorted - see sorted_transfer_components() below.
         raise NotImplementedError("identify_volatile_components")
         #return set()
+
+    def sorted_transfer_components(self)->list[str]:
+        """The transfer components in a fixed order.
+
+        Python randomizes the iteration order of a set of strings per process (PYTHONHASHSEED), so
+        iterating :py:meth:`identify_transfer_components` directly gave the ``masstrans_*`` fields a
+        different nodal index on every run. That changed the dof ordering, the generated C code and
+        hence the JIT cache key, so the same script produced bitwise different results run to run.
+        """
+        return sorted(self.identify_transfer_components())
 
     @abstractmethod
     def get_mass_transfer_rate_of(self, name:str)->Expression:
         raise NotImplementedError("get_mass_transfer_rate_of")
         #return 0
 
-    def get_all_masstransfer_rates(self)->Dict[str,Expression]:
-        vc=self.identify_transfer_components()
-        return {n:self.get_mass_transfer_rate_of(n) for n in vc}
+    def get_all_masstransfer_rates(self)->dict[str,Expression]:
+        return {n:self.get_mass_transfer_rate_of(n) for n in self.sorted_transfer_components()}
 
     def get_latent_heat_flux(self)->Expression:
         raise NotImplementedError("get_latent_heat_flux")
@@ -114,8 +123,8 @@ class ProjectedMassTransferModelBase(MassTransferModelBase):
     def __init__(self):
         super(ProjectedMassTransferModelBase, self).__init__()
         self.rates_as_fields:bool = True # If set, we project the transfer rates
-        self.projection_space:Optional[FiniteElementSpaceEnum]=None
-        self.test_scale:Optional[ExpressionOrNum]=1 / scale_factor("mass_transfer_rate")
+        self.projection_space:FiniteElementSpaceEnum | None=None
+        self.test_scale:ExpressionOrNum | None=1 / scale_factor("mass_transfer_rate")
 
     def get_mass_transfer_space(self,name:str,ieqs:InterfaceEquations) -> FiniteElementSpaceEnum:
         if self.projection_space is None:
@@ -131,17 +140,29 @@ class ProjectedMassTransferModelBase(MassTransferModelBase):
             assert opp_pdom is not None
             space=opp_pdom.get_space_of_field("massfrac_"+name)
             if space=="":
-                for c in self.props_outside.components:
+                # props_outside is only defined on subclasses that actually know the fluid properties on both
+                # sides of the interface (e.g. FluidPropMassTransferModel). Other subclasses (e.g.
+                # PrescribedMassTransfer) never set it, so look it up dynamically here instead of declaring it
+                # on this base class (which would incorrectly widen its type for those other subclasses too).
+                props_outside=getattr(self,"props_outside",None)
+                if props_outside is None:
+                    raise RuntimeError("Cannot find a space for the field "+name+". Please set the projection_space attribute of the mass transfer model.")
+                # sorted: the loop stops at the first component that has a space, so an unordered
+                # set would let the answer depend on the hash seed whenever the spaces differ
+                for c in sorted(props_outside.components):
                     space=opp_pdom.get_space_of_field("massfrac_"+c)
                     if space!="":
                         break
             if space=="":
                 space=pdom.get_space_of_field("massfrac_"+name)
             if space=="":
-                for c in self.props_inside.components:
+                props_inside=getattr(self,"props_inside",None)
+                if props_inside is None:
+                    raise RuntimeError("Cannot find a space for the field "+name+". Please set the projection_space attribute of the mass transfer model.")
+                for c in sorted(props_inside.components):
                     space=pdom.get_space_of_field("massfrac_"+c)
                     if space!="":
-                        break                    
+                        break
             if space=="":
                 raise RuntimeError("Cannot find a space for the field "+name+". Please set the projection_space attribute.")
             space=cast(FiniteElementSpaceEnum,space)
@@ -162,29 +183,26 @@ class ProjectedMassTransferModelBase(MassTransferModelBase):
 
     def define_fields(self, ieqs:InterfaceEquations):
         if self.rates_as_fields:
-            comps = self.identify_transfer_components()
-            for ec in comps:
+            for ec in self.sorted_transfer_components():
                 ieqs.define_scalar_field(self.get_mass_transfer_name(ec), self.get_mass_transfer_space(ec,ieqs))
 
     def define_residuals(self, ieqs:InterfaceEquations):
         if self.rates_as_fields:
-            comps = self.identify_transfer_components()
-            for ec in comps:
+            for ec in self.sorted_transfer_components():
                 rhs = self.get_masstransfer_definition(ec)
                 j, jtest = var_and_test(self.get_mass_transfer_name(ec))
                 ieqs.add_residual(weak(j - rhs, jtest))
 
     def setup_scaling(self, ieqs:InterfaceEquations):
         if self.rates_as_fields:
-            comps = self.identify_transfer_components()
-            kwargs = {}
-            tkwargs = {}
-            for ec in comps:
+            kwargs:dict[str,"ExpressionOrNum | str"] = {}
+            tkwargs:dict[str,"ExpressionOrNum | str"] = {}
+            for ec in self.sorted_transfer_components():
                 kwargs[self.get_mass_transfer_name(ec)] = "mass_transfer_rate"
                 if self.test_scale is not None:
                     tkwargs[self.get_mass_transfer_name(ec)] = self.test_scale
-            ieqs.set_scaling(**kwargs)
-            ieqs.set_test_scaling(**tkwargs)
+            ieqs.set_scaling(kwargs)
+            ieqs.set_test_scaling(tkwargs)
 
 
 
@@ -200,9 +218,9 @@ class PrescribedMassTransfer(ProjectedMassTransferModelBase):
     def __init__(self,**rates:ExpressionOrNum):
         super(PrescribedMassTransfer, self).__init__()
         self.rates=rates.copy()
-        self.latent_heats:Dict[str,ExpressionOrNum]={}
+        self.latent_heats:dict[str,ExpressionOrNum]={}
 
-    def identify_transfer_components(self) -> Set[str]:
+    def identify_transfer_components(self) -> set[str]:
         return set(self.rates.keys())
 
     def get_masstransfer_definition(self,name:str)->Expression:
@@ -249,7 +267,7 @@ class FluidPropMassTransferModel(ProjectedMassTransferModelBase):
             res=JTotal**2*(1/rho_outside-1/rho_inside)                
         return res
 
-    def identify_transfer_components(self) -> Set[str]:
+    def identify_transfer_components(self) -> set[str]:
         if self.props_outside.is_pure:
             couter={self.props_outside.name}
         else:
@@ -291,10 +309,11 @@ class DifferenceDrivenMassTransferModel(FluidPropMassTransferModel):
     def __init__(self,props_inside:"MaterialProperties",props_outside:"MaterialProperties"):
         super(DifferenceDrivenMassTransferModel, self).__init__(props_inside,props_outside)
         #: The factor of proportionality between the driving force and the mass transfer rate.
-        self.default_mass_flux_coefficient=100*kilogram/(meter**2*second)
+        self.default_mass_flux_coefficient:ExpressionOrNum=100*kilogram/(meter**2*second)
 
     def get_mass_flux_coeff_for(self,name:str)->Expression:
-        return self.default_mass_flux_coefficient
+        # a plain number may be given as the coefficient
+        return self.default_mass_flux_coefficient if isinstance(self.default_mass_flux_coefficient,Expression) else Expression(self.default_mass_flux_coefficient)
 
     @abstractmethod
     def get_driving_nondimensional_difference_for(self,name:str)->Expression:
@@ -308,21 +327,19 @@ class DifferenceDrivenMassTransferModel(FluidPropMassTransferModel):
 class LagrangeMultiplierMassTransferModel(FluidPropMassTransferModel):
     def __init__(self,props_inside:"MaterialProperties",props_outside:"MaterialProperties"):
         super(LagrangeMultiplierMassTransferModel, self).__init__(props_inside,props_outside)
-        self.test_scale:Optional[ExpressionOrNum]=None
+        self.test_scale:ExpressionOrNum | None=None
 
     def define_fields(self,ieqs:InterfaceEquations):
-        evaps=self.identify_transfer_components()
-        for ec in evaps:
+        for ec in self.sorted_transfer_components():
             ieqs.define_scalar_field(self.get_mass_transfer_name(ec),self.get_mass_transfer_space(ec,ieqs))
 
     @abstractmethod
     def get_equilibrium_expression(self,name:str)->Expression:
+        # Must be overridden: returns (current - desired)
         raise RuntimeError("IMPLEMENT!")
-        return curr-des #Must be overriden: Returns (current-desired)
 
     def define_residuals(self,ieqs:InterfaceEquations):
-        evaps = self.identify_transfer_components()
-        for ec in evaps:
+        for ec in self.sorted_transfer_components():
             eq=self.get_equilibrium_expression(ec)
             _,ltest=var_and_test(self.get_mass_transfer_name(ec))
             ieqs.add_residual(weak(eq,ltest)) #*(self.test_scale if self.test_scale is not None else 1)
@@ -332,14 +349,16 @@ class LagrangeMultiplierMassTransferModel(FluidPropMassTransferModel):
         return var("masstrans_"+name)
 
 class LagrangeMultiplierMassTransferModelLiquidGas(LagrangeMultiplierMassTransferModel):
-    def __init__(self,props_inside:Union["PureLiquidProperties","MixtureLiquidProperties"],props_outside:Union["PureGasProperties","MixtureGasProperties"]):
+    # Narrower than the base's plain MaterialProperties, which is what the constructor insists on
+    props_inside:"PureLiquidProperties | MixtureLiquidProperties" # type: ignore[assignment]
+    props_outside:"PureGasProperties | MixtureGasProperties" # type: ignore[assignment]
+
+    def __init__(self,props_inside:"PureLiquidProperties | MixtureLiquidProperties",props_outside:"PureGasProperties | MixtureGasProperties"):
         super(LagrangeMultiplierMassTransferModelLiquidGas, self).__init__(props_inside,props_outside)        
         if props_inside.state_of_matter!="liquid":
             raise RuntimeError("This mass transfer model only works for liquids as inner phase")
         if props_outside.state_of_matter!="gas":
             raise RuntimeError("This mass transfer model only works for gases as outer phase")
-        self.props_inside=cast(Union["PureLiquidProperties","MixtureLiquidProperties"],self.props_inside)
-        self.props_outside=cast(Union["PureLiquidProperties","MixtureLiquidProperties"],self.props_outside)
 
 
     def get_mass_transfer_space(self, name:str,ieqs:InterfaceEquations) -> FiniteElementSpaceEnum:
@@ -347,19 +366,19 @@ class LagrangeMultiplierMassTransferModelLiquidGas(LagrangeMultiplierMassTransfe
         assert opp_pdom is not None
         space=opp_pdom.get_space_of_field("massfrac_"+name)
         if space=="":
-            for c in self.props_outside.components:
+            for c in sorted(self.props_outside.components):
                space=opp_pdom.get_space_of_field("massfrac_"+c)
                if space!="":
                    break
         if space=="":
             # This actually happens for a case with only one component. Damn
-            space=ieqs.get_opposite_side_of_interface().get_parent_domain()._coordinate_space
+            space=opp_pdom._coordinate_space
             if space=="":
                 raise RuntimeError("What??")
         space=cast(FiniteElementSpaceEnum,space)
         return space
 
-    def identify_transfer_components(self) -> Set[str]:
+    def identify_transfer_components(self) -> set[str]:
         possible=super(LagrangeMultiplierMassTransferModelLiquidGas, self).identify_transfer_components()
         for n in possible:
             if self.props_inside.get_vapor_pressure_for(n) is None:
@@ -395,18 +414,20 @@ class DifferenceDrivenMassTransferModelLiquidGas(DifferenceDrivenMassTransferMod
         props_inside: The properties of the liquid phase
         props_outside: The properties of the gas phase        
     """
-    def __init__(self,props_inside:Union["PureLiquidProperties","MixtureLiquidProperties"],props_outside:Union["PureGasProperties","MixtureGasProperties"]):
+    # Narrower than the base's plain MaterialProperties, which is what the constructor insists on
+    props_inside:"PureLiquidProperties | MixtureLiquidProperties" # type: ignore[assignment]
+    props_outside:"PureGasProperties | MixtureGasProperties" # type: ignore[assignment]
+
+    def __init__(self,props_inside:"PureLiquidProperties | MixtureLiquidProperties",props_outside:"PureGasProperties | MixtureGasProperties"):
         super(DifferenceDrivenMassTransferModelLiquidGas, self).__init__(props_inside,props_outside)
         if props_inside.state_of_matter!="liquid":
             raise RuntimeError("This mass transfer model only works for liquids as inner phase")
         if props_outside.state_of_matter!="gas":
             raise RuntimeError("This mass transfer model only works for gases as outer phase")
-        self.props_inside=cast(Union["PureLiquidProperties","MixtureLiquidProperties"],self.props_inside)
-        self.props_outside=cast(Union["PureLiquidProperties","MixtureLiquidProperties"],self.props_outside)
 
-    def identify_transfer_components(self) -> Set[str]:
+    def identify_transfer_components(self) -> set[str]:
         possible=super(DifferenceDrivenMassTransferModelLiquidGas, self).identify_transfer_components()
-        res:Set[str]=set()
+        res:set[str]=set()
         for n in possible:
             if self.props_inside.get_vapor_pressure_for(n) is None:
                 print("Cannot find any vapor pressure for "+n+". Hence, the component will be non-volatile.")
@@ -416,7 +437,7 @@ class DifferenceDrivenMassTransferModelLiquidGas(DifferenceDrivenMassTransferMod
 
     def get_driving_nondimensional_difference_for(self,name:str)->Expression:
         if self._for_lubrication:
-            self._for_lubrication=cast(Dict[str,ExpressionOrNum],self._for_lubrication)
+            self._for_lubrication=cast(dict[str,ExpressionOrNum],self._for_lubrication)
             gasbulk=self._inside_domain
             psat = self.props_inside.get_vapor_pressure_for(name)
             if psat is None:
@@ -448,13 +469,15 @@ class DifferenceDrivenMassTransferModelLiquidGas(DifferenceDrivenMassTransferMod
 
 
 class HertzKnudsenSchrageMassTransferModel(DifferenceDrivenMassTransferModelLiquidGas):
-    def __init__(self, props_inside: Union[PureLiquidProperties, MixtureLiquidProperties], props_outside: Union[PureGasProperties, MixtureGasProperties]):
+    def __init__(self, props_inside: PureLiquidProperties | MixtureLiquidProperties, props_outside: PureGasProperties | MixtureGasProperties):
         super().__init__(props_inside, props_outside)
-        self.sticking_coefficient:Union[ExpressionOrNum,Dict[str,ExpressionOrNum]]=0.1
+        self.sticking_coefficient:ExpressionOrNum | dict[str, ExpressionOrNum]=0.1
 
     def get_mass_flux_coeff_for(self,name:str)->Expression:
         from ..expressions.phys_consts import gas_constant
         pc=self.props_inside.get_pure_component(name)
+        if pc is None:
+            raise RuntimeError("Component '"+str(name)+"' is not present in "+str(self.props_inside))
         M=pc.molar_mass
         T=var("temperature")        
         R=gas_constant
@@ -471,15 +494,20 @@ class HertzKnudsenSchrageMassTransferModel(DifferenceDrivenMassTransferModelLiqu
             raise RuntimeError("sticking_coefficient must be either an expression or a dict mapping component names to expressions")
 
 class LLEMassTransferModel(DifferenceDrivenMassTransferModel):
-    def __init__(self, props_inside: MixtureLiquidProperties, props_outside: MixtureLiquidProperties,*,unifac_model:Optional[str]=None,FD_epsilon:Optional[float]=1e-9,mass_transfer_factor:Optional[ExpressionNumOrNone]=None, use_log_approach: bool = False, reference_molar_mass:ExpressionNumOrNone=None):
+    # Narrower than the base's plain MaterialProperties, which is what the constructor insists on
+    props_inside:MixtureLiquidProperties # type: ignore[assignment]
+    props_outside:MixtureLiquidProperties # type: ignore[assignment]
+
+    def __init__(self, props_inside: MixtureLiquidProperties, props_outside: MixtureLiquidProperties,*,unifac_model:str | None=None,FD_epsilon:float | None=1e-9,mass_transfer_factor:ExpressionNumOrNone | None=None, use_log_approach: bool = False, reference_molar_mass:ExpressionNumOrNone=None):
         super().__init__(props_inside, props_outside)
         from .activity import UNIFACMultiReturnExpression
-        if self.props_inside.components != self.props_inside.components:
+        if self.props_inside.components != self.props_outside.components:
             raise RuntimeError("Only works for the same components inside and outside")
         if unifac_model is None:
-            if self.props_inside._unifac_model is None:
+            unifac_model_attr=self.props_inside._unifac_model
+            if unifac_model_attr is None:
                 raise RuntimeError("No UNIFAC model specified in the mixture")
-            unifac_model=self.props_inside._unifac_model
+            unifac_model=unifac_model_attr
         if FD_epsilon is None:
             self.activity_calc=None
             assert isinstance(self.props_inside, MixtureLiquidProperties)
@@ -504,7 +532,10 @@ class LLEMassTransferModel(DifferenceDrivenMassTransferModel):
             muO=log(var("molefrac_"+name,domain="|.")*self.activity_calc.get_activity_coefficient(name,domain="|.")) if self.use_log_approach else var("molefrac_"+name,domain="|.")*self.activity_calc.get_activity_coefficient(name,domain="|.")
         res= (muI-muO)
         if self.reference_molar_mass is not None:
-            res*=self.reference_molar_mass/self.props_inside.get_pure_component(name).molar_mass
+            pc=self.props_inside.get_pure_component(name)
+            if pc is None:
+                raise RuntimeError("Component '"+str(name)+"' is not present in "+str(self.props_inside))
+            res*=self.reference_molar_mass/pc.molar_mass
         return res
     
     def get_mass_flux_coeff_for(self, name: str) -> Expression:
@@ -512,3 +543,7 @@ class LLEMassTransferModel(DifferenceDrivenMassTransferModel):
 
 
 StandardMassTransferModelLiquidGas=DifferenceDrivenMassTransferModelLiquidGas
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

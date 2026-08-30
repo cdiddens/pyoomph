@@ -1,0 +1,632 @@
+# Floquet multipliers of a periodic orbit
+
+Two formulations live side by side in `Problem.get_floquet_multipliers()`
+(`pyoomph/generic/problem.py`), selected by `method=`:
+
+* **`"condensed"`** (default since this work) — `pyoomph/generic/floquet.py`. Condenses the block
+  bidiagonal orbit Jacobian into the monodromy matrix and takes its eigenvalues.
+* **`"periodic_schur"`** — opt-in, same file. Periodic QR: the same condensation, but the transfer
+  matrices are never multiplied. §7.
+* **`"eigenproblem"`** — the original code, kept verbatim as
+  `Problem._get_floquet_multipliers_eigenproblem`. One large singular pencil over all time points.
+
+§1–§4 are the condensation and why it replaced the other; §5 records what was measured; §6 the traps
+that remain; §7 the opt-in periodic Schur; §8 periodic orbits under `--distribute`; §9 where the time
+actually goes and what parallelizes; §10 the open issues.
+
+---
+
+## 1. What the orbit Jacobian looks like
+
+`PeriodicOrbitHandler` numbers the augmented unknowns time-major,
+`global_eqn = Ndof*tindex + base_eqn` (`src/bifurcation.cpp`, `eqn_number()`), giving
+`nT = n_tsteps()` blocks of `nbase` unknowns plus the scalar period `T`.
+
+`floquet_mode` is on for `bspline_order == 0` (`mode="floquet"`) **and** for `bspline_order < -2`
+(`mode="collocation"`, any order) — the constructor sets both. So the default collocation orbits
+already have the explicit end-of-period block and always did; only `central`, `BDF2` and `bspline`
+do not, and `is_floquet_mode()` reports so. `central` and `BDF2` are refused outright; `bspline` is
+answered on a collocation sampling of the orbit, which is what the next subsection is about.
+
+### The B-spline case
+
+`bspline` is worth having - bsplines converge more readily on the step off a Hopf than collocation
+does - and the refusal above is not the end of the road for it.
+
+**Why it has no structure of its own.** In b-spline mode the assembly is *Galerkin*: rows and columns
+run over the same index set, `indices(ie) = {ie+1-k … ie+1} mod nT` (`get_jacobian_bspline_mode`,
+`src/bifurcation.cpp`, and independently `get_sparsity_pattern`). The augmented Jacobian is therefore
+**block-circulant-banded**, half-bandwidth `k` = the spline order, wrapping at the seam - not the
+block-bidiagonal chain of §1. `floquet_mode` is false, so `Tadd` is not grown by the extra
+end-of-period block, there is no `v_{nT-1} - v_0 = 0` row to key off, and
+`get_time_element_node_indices()` returns empty by design. The condensation's `C_ie` needs rows of the
+first `n-1` blocks and columns of all `n`; with equal row and column support there is no `E0` to
+separate.
+
+**What is done instead.** The orbit is a *curve*, not a discretization of one, so it can be handed to
+a discretization that does have the structure. `PeriodicOrbit.get_floquet_multipliers()` samples a
+B-spline orbit onto a collocation one (`_sampled_onto_collocation`), runs the ordinary condensation on
+that, and puts the B-spline orbit back - `_blocks()` / `_install_blocks()` read and write the
+augmented dof vector directly rather than re-sampling, so the restore is exact. The restore is in a
+`finally`: a re-solve that diverges costs the attempt and not the orbit.
+
+`Problem.get_floquet_multipliers()` still refuses, deliberately - it acts on whatever handler is
+installed, and this one has no structure. Only `PeriodicOrbit` knows its own discretization.
+
+**It costs nothing in accuracy.** Measured on the Stuart-Landau oscillator, whose non-trivial
+multiplier is exactly `exp(-4*pi)` (`test_a_bspline_orbit_reports_the_collocation_multipliers`):
+
+| `NT` | via a B-spline orbit | native collocation | relative error of both |
+|---|---|---|---|
+| 24 | 3.5016236022e-06 | 3.5016236023e-06 | 4.095e-03 |
+| 48 | 3.4875630140e-06 | 3.4875630148e-06 | 6.327e-05 |
+| 96 | 3.4873457966e-06 | 3.4873457965e-06 | 9.865e-07 |
+
+i.e. the two agree to ten significant digits and converge identically; what is left is the collocation
+discretization error, not the sampling.
+
+`central` and `BDF2` are left refused. They could be sampled by the same mechanism, but they are
+finite-difference stencils with no accuracy to speak of and nobody continues an orbit with them, so
+the refusal stays a refusal rather than becoming a list of exceptions.
+
+**Two alternatives were considered and rejected**, recorded so they are not re-derived:
+
+* *A companion transfer chain on the band.* The recurrence `sum_j A_j^(i) v_{i+j} = 0` over
+  `j = -k..k` becomes `x_{i+1} = T_i x_i` on the extended state `x_i = [v_{i-k}; …; v_{i+k-1}]`,
+  and the product over `nT` is a monodromy of size `2k*nbase`. It needs `A_{+k}` invertible, costs
+  `(2k)^3` = 216x the eigendecomposition at order 3, and returns `nbase` physical multipliers
+  together with `(2k-1)*nbase` parasitic ones - with no cheap rigorous way to tell them apart.
+* *Assembling the variational problem on a clamped, non-periodic basis.* Mathematically the cleanest:
+  a genuine `v(0) -> v(T)` map, no parasitic roots, and the cost profile of today's route. But it is a
+  new C++ assembly routine, which the sampling makes unnecessary.
+
+The other way round is still available and is a different operation: `PeriodicOrbit.change_sampling()`
+CONVERTS the installed orbit, replacing it. It resamples the installed orbit and reinstalls
+the handler in another mode; the bifurcation GUI exposes it as
+`BifurcationController.change_orbit_discretisation()` ("Apply to this orbit" in the Orbit tab), which
+also rewrites the point's stored cycle and recomputes its multipliers. Measured on the Hopf normal
+form (`tests/test_bifurcation_gui.py::test_an_orbit_can_be_re_discretized_in_place`): the converted
+orbit lands on the same multiplier as one switched onto in collocation from the start, to nine
+digits. Note that the count of time points goes UP by one in the conversion - `NT` is the number of
+samples taken, and collocation/floquet then add the explicit end-of-period block.
+
+### Per element, in the modes that do have the structure
+
+Per element `ie` of the time discretization (Lagrange order `m`; `m = 1` for the plain midpoint
+`mode="floquet"`), `get_jacobian_collocation_mode()` loops `inode < el->nnode()-1` for the
+equations but over all `el->nnode()` for the unknowns. So the element
+
+* writes **row blocks** `ie*m .. ie*m+m-1`,
+* into **column blocks** `ie*m .. ie*m+m`.
+
+Row blocks `0 .. nT-2` are therefore each written by exactly one element, and row block `nT-1` is the
+wrap-around identity `v_{nT-1} - v_0 = 0`. That last block row is what both formulations key off.
+
+`PeriodicOrbitHandler::get_time_element_node_indices()` hands this structure to Python; the
+collocation branch reads it off the time mesh's `TimeNode::get_index()`, and the midpoint branch
+states the same thing as the pairs `(ti, ti+1)`.
+
+## 2. The condensation
+
+Slice the element's sub-block as `[E0 | L]`, `E0` being the first `nbase` columns:
+
+```
+L @ [v_{ie*m+1}; ... ; v_{ie*m+m}]  =  -E0 @ v_{ie*m}
+C_ie := last nbase rows of L^-1 (-E0)         # nbase x nbase transfer
+Mono  = C_{Nelem-1} @ ... @ C_1 @ C_0
+multipliers = eig(Mono)
+```
+
+The rows and columns of an element are contiguous ranges of the CSR matrix (the time mesh gives
+element `ie` the nodes `ie*order + in`), so the sub-block is a plain two-sided slice.
+`_TimeElement.__init__` asserts the consecutiveness rather than assuming it, and
+`check_orbit_jacobian_structure()` verifies that no equation row actually reaches outside its own
+element's columns — the period column being the one legitimate exception, since `dR/dT` is dense down
+the whole matrix and is dropped from the Floquet problem exactly as the eigenproblem formulation
+drops it. Getting the structure wrong yields plausible multipliers rather than an error, which is why
+both checks are on by default.
+
+**The mass matrix is arbitrary, and may be singular.** `M` never appears on its own: it is already
+inside `E0` and `L`, weighted by `dpsi/ds` (collocation) or `±invds` (midpoint). Nothing inverts it,
+which is what a shooting formulation would have to do. `L` stays invertible where `M` has zero rows
+because it carries the `0.5*J` terms.
+
+## 3. Why the old formulation was replaced
+
+`method="eigenproblem"` builds the pencil `J v = mu M v` over the whole `nT*nbase` space, with `M`
+the identity on the last block alone, so the wrap-around row becomes `v_{nT-1} - v_0 = mu v_{nT-1}`
+and `gamma = 1/(1-mu)`. Correct, and the same Fairgrieve–Jepson idea — but:
+
+* The mass matrix has rank `nbase` in an `nT*nbase`-dimensional space, so generically only `nbase`
+  eigenvalues are finite. The rest are infinite and are removed by `valid_threshold=10000`.
+* An infinite `mu` maps to `gamma = 0`, so that threshold cannot distinguish a spurious eigenvalue
+  from a genuinely small multiplier. Small multipliers are discarded wholesale.
+* How many survive depends on the eigensolver, so the **number of returned multipliers varied** —
+  including between a serial run and an `mpirun` of the same script. The Langford tutorial carried
+  an explicit workaround saying so; it has been removed.
+* A shift had to be supplied by hand (`shift=3` in the tutorial).
+* Cost and memory scale with `nT*nbase`, not `nbase`.
+
+The condensation has none of these: no shift, no threshold, exactly `nbase` multipliers.
+`shift` and `valid_threshold` are still accepted for signature compatibility but warn when passed.
+
+## 4. Dense or matrix-free
+
+Forming `Mono` costs one solve per time element with `nbase` right-hand sides. Applying it
+matrix-free costs one solve per time element **per Arnoldi iteration**, so it only pays off while few
+multipliers are wanted — the switch is on `n/nbase`, not on `nbase` alone (`dense_threshold=2000`,
+plus a rule that keeps the dense route when `4n > nbase` up to `_DENSE_MONODROMY_CAP = 4000`).
+
+The first version switched on `nbase` alone and, at `nbase=802` with `n=None`, ran ARPACK with
+`k=800` out of 802 — the worst of both, and it is also the case `eigs` cannot do at all
+(`k < nbase` is required). Hence the `n`-aware rule.
+
+## 5. Measurements
+
+Langford ODE (`nbase=3`, `NT=50`, `order=3`), against the analytical non-trivial multiplier: the
+condensed and the eigenproblem values agree to every printed digit at every continuation step, and
+both track the analytical curve to the accuracy of the time discretization. The condensed method
+returns 3 multipliers at every step; the trivial one sits at `|lambda-1| ~ 1e-15` on a well converged
+orbit. Repeated for `mode="floquet"` and `mode="collocation"` with `order` 1, 2 and 3 — same
+agreement in each, with the expected loss of accuracy at low order.
+
+1D Brusselator PDE orbit (`tests/benchmarks/bench_periodic_orbit_1d.py`), `NT=30`, `order=3`:
+
+| `N` | `nbase` | orbit ndof | dense (all multipliers) | matrix-free (8) | eigenproblem (8) |
+|---|---|---|---|---|---|
+| 40 | 162 | 5023 | 0.57 s | 0.38 s | 0.41 s |
+| 200 | 802 | 24863 | 65 s (802 values) | 277 s (8 values) | 223 s (8 values) |
+
+Dense and matrix-free agree to 3e-13 on the dominant six, the eigenproblem method to 3e-11. Note the
+second row: **the matrix-free route was slower than forming the whole monodromy**, because the
+Brusselator's multipliers are clustered around 0.992 and Arnoldi converges badly on that. It is kept
+for the case where `nbase**2` simply does not fit, not because it is generally faster.
+
+Reproducibility: the multipliers are *not* bit-identical between a serial run and a replicated
+`mpirun`, because the Jacobian assembly itself is not (oomph dispatches to `parallel_sparse_assemble`
+for any `nproc>1`, which sums element contributions in a different order). Measured on an orbit whose
+period agrees to the last bit, the multipliers differ by ~3e-11 relative. What *is* now stable is the
+count.
+
+## 6. What is not fixed
+
+* **The plain product loses the smallest multipliers**, though far less than expected — see §7 for
+  the measurement and for `method="periodic_schur"`, which fixes it.
+* **A DAE's algebraic directions do not give zero multipliers.** Gauss–Legendre collocation is not
+  stiffly accurate: `|R(inf)| = 1`. The perturbation of an algebraic direction is the degree-`order`
+  polynomial vanishing at the `order` Gauss points of the element, and since those points are
+  symmetric about the midpoint its value at the end of the element is `(-1)**order` times its value
+  at the start. Over the orbit that accumulates to exactly `(-1)**(number of time intervals)` —
+  verified to 1e-14 for `order` 1, 2 and 3 at both parities in
+  `tests/test_floquet_multipliers.py::test_dae_algebraic_multiplier_sign`.
+  **With an odd number of intervals this puts a spurious multiplier on `-1`, where a period-doubling
+  bifurcation would be.** It is a property of the discretization, not of the condensation — the
+  eigenproblem method finds the same value, just to six digits fewer — and an even number of
+  intervals moves it next to the trivial `+1` instead. A Radau IIA collocation would put it at 0.
+
+  **`get_floquet_multipliers()` now says so.** The number cannot be fixed without changing the
+  collocation, but it can stop being read as physics, and nothing in the returned array distinguishes
+  the two: `Problem._warn_about_collocation_artefact_multipliers()` warns when a multiplier sits on
+  `-1` to within `floquet_artefact_tolerance` (1e-6; the artefact is exact to 1e-14, so anything that
+  loose is the artefact or is sitting on the bifurcation itself) and the interval count is odd, and
+  tells the reader the discriminating experiment: re-solve with an EVEN number of intervals, where the
+  artefact moves to `+1` and a genuine period doubling stays put.
+
+  It is keyed on the **signature** — a multiplier on `±1` to machine precision, with the matching
+  interval parity — rather than on proving the problem is differential-algebraic. Proving that means
+  asking for a mass matrix, and assembling one while the orbit handler is installed is refused by name
+  ([mpi_eigenproblems.md](mpi_eigenproblems.md) §5a); the signature costs nothing and is what the
+  reader has to act on anyway. The even-parity half warns too, because a doubled `+1` is harmless to a
+  stability verdict but makes the multiplicity of the trivial multiplier look like a bifurcation — and
+  the pre-existing "multiple unity Floquet multipliers" warning used to say exactly that ("except at
+  distinct bifurcations of the orbit"), which is wrong for a DAE. Both messages are corrected.
+
+  Not gated on `quiet`, which suppresses the eigensolver's chatter and the trivial multiplier's
+  accuracy report, not a warning about what the answer means. Pinned by three tests in
+  `tests/test_floquet_multipliers.py`, including a **plain-ODE control at both parities**: a warning's
+  failure mode is not being wrong, it is being noise.
+* **`--distribute` works**, for the orbit, for the multipliers, for `switch_to_hopf_orbit()` and for
+  the transient hand-back when a `with orbit:` block exits — §8, and §10.1 and §10.2 for the last two,
+  which used to be listed here as not working. `refine_eigenfunction()` is the one thing still refused.
+
+
+## 7. `method="periodic_schur"`
+
+### What it does
+
+Subspace iteration run through the chain instead of multiplying it. Starting from an orthonormal
+`Q`, sweeping `V, R_ie = qr(C_ie @ V)` along the orbit gives, exactly and at every sweep,
+
+```
+Mono @ Q_old = Q_new @ S,      S = R_{p-1} ... R_0   (upper triangular)
+```
+
+so with `W = Q_old^H Q_new` the multipliers are `eig(W @ S)`. Subspace iteration drives `W` upper
+triangular at rate `|lambda_{k+1}/lambda_k|` per sweep, and where it is, `W @ S` is upper triangular
+too: `lambda_k = W[k,k] * exp(sum_ie log R_ie[k,k])`. **That sum is where the overflow goes away** —
+the product of the diagonals is accumulated in logs and never formed.
+
+The QR sign freedom is fixed so `R` has a positive real diagonal (`_positive_diagonal_qr`), without
+which the diagonal is not a magnitude and the sweep-to-sweep comparison compares phases.
+
+Indices sharing a modulus — a complex conjugate pair, or the `+1`/`-1` a DAE produces — can never be
+separated: the rate is exactly 1 there. They are left as a diagonal block of `W` and diagonalized
+directly, each factor first divided by the geometric mean of its own diagonal so the block product
+stays O(1) while its scale is carried in logs alongside.
+
+Eigenvectors are not produced in the original basis by this route, so they are recovered afterwards
+by inverse iteration on the dense monodromy — well conditioned precisely because the eigenvalue
+handed to it is accurate.
+
+### Stagnation
+
+The first version ran all 200 sweeps on the DAE cases: `+1` and `-1` have the same modulus, so the
+off-triangular part of `W` stops shrinking and no further sweep can help. Breaking after three
+sweeps without at least a 10% reduction takes those from 200 sweeps to 6 and 7, same answers.
+
+### What it is worth — measured
+
+Against a **120-digit product of the same transfer matrices**, so the comparison isolates the
+product's roundoff from the time discretization. Stuart–Landau plus an upper-triangular stiff chain
+`z_k' = -a_k z_k + c z_{k+1}`, `a = [2,4,8,16,32]`, `NT=48`, `order=3` — spectrum spanning 26 orders
+of magnitude:
+
+| exact (120 digits) | plain product, `c=1` | plain product, `c=1e6` | periodic Schur, `c=1e6` |
+|---|---|---|---|
+| 1.0 | 1.1e-16 | 1.1e-16 | 8.9e-16 |
+| 3.4876e-06 | 4.7e-11 | 4.7e-11 | 3.6e-16 |
+| 3.4872e-06 | 1.2e-16 | 4.9e-16 | 1.1e-15 |
+| 1.2112e-11 | 1.3e-16 | 0 | 5.3e-16 |
+| 8.2843e-14 | 1.5e-16 | 1.1e-15 | 6.4e-15 |
+| 7.2907e-23 | 3.2e-16 | **9.4e-06** | 2.4e-13 |
+| 3.5807e-26 | 1.6e-16 | **1.4e-02** | 2.6e-13 |
+
+(relative errors). Two things to take from this:
+
+* **The plain product is far better than its reputation.** With ordinary coupling it is at machine
+  precision across all 26 decades — LAPACK's balancing inside `numpy.linalg.eig` does the work
+  periodic Schur would. It only breaks down for the bottom two multipliers, and only once the
+  monodromy is made strongly non-normal.
+* **Where it does break down, periodic Schur is eleven orders of magnitude better**, and it is also
+  better on the near-degenerate pair at 3.487e-6 (3.6e-16 against 4.7e-11) in every case.
+
+Worth knowing before reaching for it: for a mode that stiff the *discrete* multiplier has little to
+do with `exp(-a*T)` anyway, because Gauss collocation's stability function tends to `±1` rather than
+0 (§6). So the regime where the accuracy gain matters is narrow. It is opt-in for that reason.
+
+### Cost, and the clustered case
+
+`sweeps * Nelem` matrix products of size `nbase`, i.e. dense-only; refused above
+`_DENSE_MONODROMY_CAP`. On the 1D Brusselator (`N=40`, `nbase=162`) the spectrum is clustered around
+0.992, so it stagnates after 4 sweeps with a single unseparated block of 159 and falls back to what
+is essentially the plain product — 1.4 s against 0.57 s for the default, same answers to 2e-15. That
+degradation is graceful and correct, but it is also the common case for a PDE orbit: **periodic Schur
+buys accuracy on graded spectra, and nothing at all on clustered ones.**
+
+
+## 8. `--distribute`
+
+`PeriodicOrbitHandler` used to be entirely replicated -- `Tadd`, `x0`, `n0`, `du0ds` and `Count` were
+global-`Ndof` `std::vector`s indexed by global equation number, `eqn_number()` returned the naive
+number untranslated, and the dof vector was built non-distributed. It is now written against
+`AugmentedDofDistributionHelper`, the same way the four bifurcation-tracking handlers were
+(`mpi_augmented_systems.md` Part I):
+
+* `Dist_helper.initialise()` first in the constructor, `restore_base_distribution()` in the destructor.
+* `Tadd`, `x0`, `n0`, `du0ds` and `Count` are `DoubleVectorWithHaloEntries` on the base distribution.
+  The element loops read them by BASE equation number through `global_value()`, which degrades to
+  plain `[]` when not distributed -- so one code path serves all three modes.
+* `Count` and the global element count come from `setup_count_and_nelement()` (halo-skipping plus a
+  reduction), so the `1/Count` weights still telescope to 1 across ranks.
+* The naive layout `[u_0 | u_1 | ... | u_{nT-1} | T]` goes to `build_augmented_dofs()` -- it is exactly
+  the historical `Ndof*tindex+eqn` numbering, so `eqn_number()` only has to run its result through
+  `Dist_helper.global_eqn()`.
+* Every `*(GetDofPtr()[glob_eqn])` in the six residual/Jacobian routines became
+  `Problem::global_dof_pt(elem_pt->eqn_number(i))` -- the element's OWN base equation number, not the
+  handler's translated one.
+* `backup_dofs`, `restore_dofs`, `set_dofs_to_interpolated_values` and
+  `update_phase_constraint_information` write the base dofs wholesale rather than through an element,
+  so unlike the assembly loops they cannot use `global_value()` (a row this rank neither owns nor
+  halos has no entry to reach). They loop over owned rows and then push to the halos.
+* A `synchronise()` override refreshes the `Tadd` halos and broadcasts the rank-0-owned period; oomph
+  already calls it from `Problem::synchronise_all_dofs`, so no vendored change was needed.
+* `dof_distribution_helper()` now answers non-NULL, which also makes `BaseDofDistributionScope` work
+  during orbit tracking. The Python-side refusal to eigensolve while an orbit handler is installed
+  stays deliberately -- Floquet multipliers are the right tool there.
+
+Then the Floquet side needed one thing more. **Under `--distribute` the augmented rows are
+interleaved per rank** -- rank 0's base rows, then rank 0's rows of each time block, then rank 1's --
+so a gathered orbit Jacobian is NOT in the time-major order the condensation slices along, and every
+block it cut would be the wrong one. `PeriodicOrbitHandler::get_naive_equation_order()` hands out the
+naive -> augmented translation and `_to_time_major()` applies it to both axes. It returns an empty
+list when not distributed, where the two orders already agree, and the permutation is then skipped.
+
+That the *structure check* caught this rather than the condensation answering wrongly is the reason
+it is on by default; see §2.
+
+### Validation
+
+`tests/test_mpi_floquet.py`, Stuart-Landau kinetics pointwise on a 1D mesh plus diffusion. Its
+spatially uniform state is exactly `u=cos(t)`, `v=sin(t)` with `T=2*pi` (diffusion annihilates a
+uniform field), so the guess handed to the handler is the answer, on a mesh with enough elements to
+distribute -- and no Hopf tracker is needed to get there, which matters because that route is still
+serial (below). Serial against `mpirun -n 4 --distribute`, `N=40`, `NT=24`, `nbase=162`, orbit
+`ndof=4051`:
+
+| | serial | `-n 4 --distribute` |
+|---|---|---|
+| period | 6.2831995733762831 | 6.2831995733762831 (bit-identical) |
+| Floquet multipliers | | agree to 2e-15 .. 4e-14 |
+| 8 sampled orbit states | | bit-identical to 14 digits |
+
+The period comes out bit-identical across serial and 2, 3 and 4 ranks. The multipliers differ only by
+the assembly's summation order, which the partitioning changes.
+
+### What is still refused around it
+
+Both entries that used to stand here are **done**, and are recorded as such in §10.1 and §10.2. They
+are named rather than deleted because the reasons they were refused are the shape of problem that
+recurs, and because the claim survived in this section after being fixed elsewhere in this same file.
+
+* **`switch_to_hopf_orbit()`** -- was refused because the first Lyapunov coefficient came from the
+  Python custom assembler. It does not any more (`dev_docs/hopf_normal_form.md` §4), and works under a
+  plain `mpirun` and under `--distribute`; `tests/test_mpi_hopf_lyapunov.py` covers both.
+* **Leaving a `with orbit:` block** -- was refused because writing history dof values was not
+  implemented when distributed. It is now (§10.2), and the transient hand-back is tested against
+  serial.
+
+What remains refused is `refine_eigenfunction()`, which adapts the mesh to an eigenfunction and needs
+its own validation before its guard comes off.
+
+### The bugs found on the way
+
+Three, and the second and third are the interesting ones.
+
+1. **`T_global_eqn` was a block short.** Set to `Ndof*Tadd.size()` instead of `Ndof*n_tsteps()`,
+   which broke even the serial Newton solve. Anything else indexing the naive layout deserves the
+   same scrutiny.
+2. **`Problem::set_history_dofs` overran the heap** (`src/problem.cpp`). `Problem::set_dofs(t,...)`
+   already refuses when distributed, with a comment explaining that the loops there use global
+   equation numbers against a local vector -- but `set_history_dofs` gets there only *after* its own
+   fill loop, which builds `dofs` on the dof distribution (`nrow_local` entries) and then writes
+   `ndof()` -- the GLOBAL count -- of them into it. At `ndof=162` on 4 ranks that is ~120 doubles
+   past the end of the buffer, three times over. This is pre-existing and was simply unreachable:
+   its only callers are `PeriodicOrbit.__exit__` and `refine_eigenfunction()`, and both used to be
+   refused on the Python side first. The refusal is now hoisted above the fill loop.
+
+   Worth knowing for the next time this shape of bug appears: the corruption surfaced as a glibc
+   "corrupted double-linked list" inside an unrelated `malloc` much later, and PETSc's signal handler
+   then called `MPI_Abort`, which itself allocates -- so the job **hung** on the already-held malloc
+   lock instead of dying. A run that hangs with every rank at 0.2% CPU, with `PetscSignalHandler` and
+   `PMPI_Abort` above `__libc_malloc` in the backtrace, is this and not a missing collective.
+3. **`get_current_dofs()[0][:nbase]` read the wrong entries.** `PeriodicOrbit.__exit__` and
+   `change_sampling()` sliced the first `nbase` entries off the gathered *augmented* vector to get
+   the base state, which is only the base block when the two orderings agree. `_current_base_dofs()`
+   now goes through the same naive ordering the Floquet permutation uses.
+
+
+## 9. Where the time actually goes, and what parallelizes
+
+Profiled on the distributed 1D orbit of §8 scaled up to `nbase=1282` (`N=320`, `NT=24`, orbit
+`ndof=32051` -- the largest these MPI constraints allow), **all ranks pinned to one BLAS thread**.
+
+That pinning is not a detail. The first profile was taken without it, and every rank of a 4-rank run
+had OpenBLAS spawning threads across all cores: the transfer solves read 13.9 s where the same work
+takes 1.34 s on one rank. Every wall-clock number below is with `OMP_NUM_THREADS=1` exported through
+`mpirun -x`, and any future measurement here has to do the same or it is measuring oversubscription.
+
+### The breakdown, one rank
+
+| step | time | note |
+|---|---|---|
+| gather the orbit Jacobian | 0.16 s | 12 MiB |
+| permute to time-major | 0.00 s | |
+| element LUs (`Nelem=8`) | 0.22 s | |
+| transfer solves | 1.34 s | 8 elements x 1282 right-hand sides |
+| matmul chain | 0.52 s | |
+| dense eig | 0.68 s | |
+| eigenfunction reconstruction | **~172 s** | before batching; see below |
+
+### What was fixed
+
+* **The eigenfunction reconstruction was 93% of a full call.** It pushed each eigenvector through the
+  chain on its own, so asking for all 1282 multipliers meant 1282 separate passes of sparse solves:
+  185 s, against 13 s for everything else. `orbit_eigenfunctions()` now pushes them all through
+  together. Same arithmetic per column, 14x on the whole call, and it is a *serial* win as much as a
+  parallel one. `test_eigenfunction_closes_the_orbit` pins the result through the invariant
+  `v(s=1) = lambda*v(s=0)`.
+* **The transfer solves are shared out by column** (`transfer_matrices()`), which is the one piece
+  that genuinely parallelizes: 1.34 s -> 0.72 s -> 0.48 s on 1, 2 and 4 ranks. One `Allgatherv` for
+  all elements together.
+* **The product and the eigendecomposition are done on rank 0 and broadcast.** Every rank used to
+  repeat both. That is not merely wasted work: the redundant `numpy.linalg.eig` went from 0.68 s on
+  one rank to 1.76 s on four as the copies contended for memory bandwidth, which made a 4-rank
+  Floquet solve *slower overall* than a serial one despite its solves being 2.8x faster.
+
+Do **not** replace the per-element transfer matrices with propagating the identity through the whole
+chain, which does the same solves holding one block instead of `Nelem` of them. It looks like a
+strict improvement and is not: the accumulated block enters the next element as the right-hand side
+`E0 @ X` of an ill-conditioned solve, so its rounding is amplified at every stage. On the stiff
+non-normal chain of §7 the two smallest multipliers went from ~1e-15 relative error to 5e+2 and
+4e+4. `test_periodic_schur_beats_the_product_at_the_bottom` catches it.
+
+### End to end, and why it stops there
+
+| | 1 rank | 2 ranks | 4 ranks |
+|---|---|---|---|
+| all 1282 multipliers | 13.1 s | 13.4 s | 16.1 s |
+| the 8 dominant ones | 3.7 s | 3.6 s | 4.7 s |
+
+**Floquet multipliers do not parallelize usefully across MPI ranks at these sizes.** What is left
+after the three fixes is dense linear algebra on `nbase x nbase` objects, and ranks on one node
+contend for the same memory bandwidth rather than adding to it. What MPI buys is the orbit *solve*
+being distributed (§8) and the problem fitting at all -- not a faster multiplier calculation.
+
+### Why the native distributed path was not built
+
+The plan's stage 4 was to stop gathering the orbit Jacobian: extract each time element's blocks as
+distributed PETSc Mats and run SLEPc on a shell matrix with one KSP per element. Two measurements
+rule it out:
+
+* **The gather is 0.16 s of 13 s**, so there is no time in it.
+* **The gathered Jacobian is 12 MiB; the dense monodromy machinery is 1.6 GiB** (peak RSS at
+  `nbase=1282`, dominated by the `nbase x nT*nbase` complex eigenfunction array and the eig
+  workspace). A problem too large to gather the Jacobian is, by two orders of magnitude, already too
+  large to form the monodromy -- so the memory case the native path was meant to serve does not
+  arise before the method itself does.
+
+The route that *would* serve very large `nbase` is the existing matrix-free operator, which needs no
+`nbase x nbase` object at all. Its limit is Arnoldi convergence on clustered spectra (§5), not the
+gather.
+
+
+## 10. Open issues
+
+Nothing here is a defect in what §1–§9 describe; these are the edges that were deliberately left,
+each with what it would take and how it would be checked.
+
+### 10.1 `switch_to_hopf_orbit()` — done
+
+Was the biggest remaining gap here, since it is the normal way people reach an orbit. It now works
+under a plain `mpirun` and under `--distribute`; see `dev_docs/hopf_normal_form.md` §4 for what was in
+the way (an ungathered pencil, a memory-unsafe Hessian contraction, and an arclength walk for a
+finite-difference step) and for the measurement showing the gather it still does is not a bottleneck.
+
+### 10.2 History dof values when distributed — done
+
+`Problem::get_dofs(t,...)` and `set_dofs(t,...)` now work under `--distribute`. oomph-lib's own
+versions build the vector on the dof distribution — this rank's rows — and then index it by *global*
+equation number, which is why they guard themselves with a `PARANOID` throw that vanishes in
+pyoomph's default build. pyoomph does that walk itself now, writing only the rows a rank owns (a halo
+copy's equation number falls outside the range, and the rank owning it writes it) and letting the halo
+exchange carry the rest.
+
+What makes it possible: `Data::add_values_to_vector` loops to `ntstorage()`, so
+`Problem::synchronise_all_dofs()` propagates **every time level**, not just the current one.
+
+Three things it unblocked, all now tested in `tests/test_mpi_hopf_lyapunov.py` against serial:
+arclength continuation of a bifurcation *locus* (previously refused outright), the transient hand-back
+when leaving a `with orbit:` block, and `Problem.set_history_dofs` itself (exact round-trip).
+`refine_eigenfunction()` is still refused — it was on the list for this reason, but it also adapts the
+mesh to an eigenfunction, which needs its own validation before the guard comes off.
+
+### 10.3 The native distributed Floquet path — measured and not built
+
+Extracting each time element's blocks as distributed PETSc Mats and running SLEPc on a shell matrix
+with one KSP per element. §9 has the numbers that rule it out: the gather it removes is 0.16 s of
+13 s and 12 MiB, while the dense monodromy machinery it feeds peaks at 1.6 GiB, so a problem too
+large to gather is already two orders of magnitude too large to form the monodromy.
+
+It only becomes the right answer *together with* 10.4 — i.e. once nothing in the pipeline needs an
+`nbase x nbase` object, at which point the gather really is the binding constraint. Building it
+before then optimises 2% of the runtime.
+
+### 10.4 Matrix-free Arnoldi on clustered spectra — shift-invert
+
+Plain `eigs(..., which="LM")` has the right *target* — stability lives at the largest moduli — but it
+converges badly when the wanted multipliers are clustered, which is the normal case for a PDE orbit.
+On the 1D Brusselator, whose multipliers sit on top of each other around 0.992, eight of them cost
+277 s that way.
+
+Shift-invert is the standard remedy, and the shift is available **exactly, without forming the
+monodromy**. The chain came from a sparse system in the first place: take the orbit Jacobian, keep its
+element rows, and replace the wrap-around row `v_last - v_0 = 0` with `v_last - sigma*v_0 = b`. The
+element rows still force `v_{k+1} = C_k v_k`, so `v_last = Mono v_0` and the last row reads
+
+```
+(Mono - sigma*I) v_0 = b
+```
+
+One solve of a matrix the size of the orbit system is therefore the shift-invert apply, exactly — and
+that matrix is factorized once and reused, at the cost the orbit's own Newton step already pays every
+iteration. `ShiftInvertMonodromyOperator` in `pyoomph/generic/floquet.py`; it is on by default for the
+matrix-free route, with `sigma` defaulting to just outside the unit circle. `shift_invert=False`
+restores plain Arnoldi.
+
+Measured on the Brusselator orbit at `nbase=802` (`nT=31`), eight multipliers, one BLAS thread:
+
+| route | time | accuracy |
+|---|---|---|
+| plain matrix-free Arnoldi | 277 s | — |
+| **shift-inverted matrix-free** | **0.73 s factorize + 17.3 s** | 2.6e-13 |
+| dense monodromy (all 802) | 1.2 s | reference |
+
+So shift-invert is 16x faster than plain Arnoldi and still 15x slower than simply forming the
+monodromy at this size.
+
+### The crossover does not exist, at least not in time
+
+The obvious next question is where forming the monodromy stops being the cheaper option. It was
+measured, on the same Brusselator family, single-threaded, dense timing the whole spectrum and
+shift-invert the eight dominant multipliers:
+
+| `nbase` | orbit ndof | dense form + eig | shift-invert factorize + solve | dense faster by | dense RSS | matrix-free RSS |
+|---|---|---|---|---|---|---|
+| 802 | 24863 | 0.86 + 0.21 s | 0.63 + 12.5 s | 12x | 734 MB | 609 MB |
+| 1602 | 49663 | 4.34 + 1.42 s | 0.76 + 42.7 s | 7.5x | 1809 MB | 1243 MB |
+| 2402 | 74463 | 11.8 + 4.6 s | 0.89 + 178.0 s | 11x | 3527 MB | 2196 MB |
+| 3202 | 99263 | 25.0 + 11.3 s | 1.06 + 526.2 s | 14.5x | 5856 MB | 3443 MB |
+
+**Dense wins at every size, and past `nbase` ~ 1600 the gap widens rather than closes.** The
+factorization shift-invert needs stays trivially cheap throughout (0.6 s to 1.1 s); what explodes is
+the Arnoldi solve, 12 s to 526 s.
+
+The reason is in the spectrum, not the linear algebra. Refining the mesh **tightens the cluster**: the
+dominant multipliers go 0.992, 0.998, 0.9996, 0.9995, with exact degeneracies appearing by
+`nbase=2402` (0.999577391 twice, then 0.999502804 three times to nine digits). Diffusive modes bunch
+towards 1 as the mesh refines, so the iteration count grows faster than the per-iteration saving.
+Chasing that with a bigger Krylov basis does not work either, for the reason above.
+
+**The matrix-free route is therefore justified by memory, not speed** — and even there the margin is
+modest and grows slowly: 1.21x, 1.45x, 1.61x, 1.70x across the four sizes. Note those are whole-process
+figures; the monodromy itself is only 78 MB at `nbase=3202`, so what dense actually costs is the
+`Nelem` transfer matrices, the eigenvector array and LAPACK's workspace, not the monodromy.
+
+Two caveats on reading this table. It is one problem family, and a deliberately unfavourable one: a
+spectrum with well-separated dominant multipliers would let Arnoldi converge in a handful of
+iterations and the picture would invert. And it is single-threaded — with BLAS threads the dense route
+parallelises well (the matmul chain and `eig`) while the sparse triangular solves largely do not, so
+the real-world gap on a multicore box is wider still.
+
+`dense_threshold=2000` and `_DENSE_MONODROMY_CAP=4000` are consequently conservative on time: dense
+was the faster choice at every size measured. They are left where they are because the caps exist to
+stop a machine running out of memory, and 5.9 GB at `nbase=3202` is already a lot to ask.
+
+**Enlarging the Krylov basis was tried first, and is not a substitute.** Same orbit and count, one
+process so the numbers are internally consistent (its dense reference read 1.0 s against the 1.2 s
+above, i.e. the two runs agree to ~15%):
+
+| `ncv` | time | accuracy |
+|---|---|---|
+| default (`max(2k+1, 20)`) | 239 s | 2.8e-13 |
+| 40 | 89 s | 4.7e-14 |
+| 120 | **74 s** | 1.9e-14 |
+| 300 | 506 s | 5.4e-14 |
+
+A 3x win at best, still 4x short of shift-invert, and **non-monotonic** — 300 is worse than the
+default — so there is no safe value to raise the default to. The clustering that causes all this is
+worth quantifying: at the cut, `|lambda_9|/|lambda_8| = 0.9999928`. There is essentially no spectral
+gap where Arnoldi needs one, which no amount of basis is going to manufacture.
+
+### 10.5 Asking for every multiplier costs `nbase x nT x nbase` complex
+
+`_last_eigenvectors` holds the eigenfunction of every returned multiplier over the whole orbit: 657 MB
+at `nbase=1282`, `nT=25`, and `n=None` means *all* multipliers whenever `nbase <= dense_threshold`
+(2000). Batching (§9) made it 14x faster but not smaller.
+
+Nothing guards it. The clean fix is to make the reconstruction lazy — return the multipliers, and
+build the eigenfunctions when `get_last_eigenvectors()` is actually called — but `_last_eigenvectors`
+is a plain attribute several places read directly, so it is a small API change rather than a local
+one. Asking for a specific `n` avoids it entirely today.
+
+### 10.6 What has and has not been run
+
+Validated: `tests/test_floquet_multipliers.py` (21), `tests/test_mpi_floquet.py` (4),
+`tests/test_mpi_orbit_output.py`, `tests/test_mpi_bifurcation_tracking.py`,
+`tests/test_eigen_during_tracking.py`, `tests/test_mpi_eigenvalues.py`, and the Langford tutorial end
+to end (60 continuation steps, ~1e-3 median relative error against the analytical multiplier).
+
+**Not run: the full `tests/` suite and the tutorial harness.** Two of the fixes reach well outside the
+orbit code — the `_change_output_directory` hook rename in `pyoomph/output/generic.py` affects *every*
+outputter, not only `output_orbit()`, and `Problem::set_history_dofs` is shared with
+`refine_eigenfunction()`. Both deserve a full pass before this is merged into main.

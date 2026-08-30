@@ -30,6 +30,7 @@
 #endif
 
 // oomph-lib headers
+//FOR PYOOMPH: multi_domain.h is not part of this build, see INFO_oomph-lib
 #include "mesh.h"
 #include "mesh_as_geometric_object.h"
 

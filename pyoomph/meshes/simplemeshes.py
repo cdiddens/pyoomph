@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -46,11 +47,13 @@ class LineMesh(MeshTemplate):
         left_name: The name of the left boundary.
         right_name: The name of the right boundary.
         nodal_dimension: The nodal dimension of the mesh, can be used to curve the mesh later on.
-        periodic: Whether the mesh is periodic.
+
+    For a periodic line, add :py:class:`~pyoomph.equations.generic.PeriodicBC` to the equations, e.g.
+    ``PeriodicBC("right", offset=[L]) @ "left"``.
     """
 
-    def __init__(self, N: int = 10, size: ExpressionOrNum = 1.0, minimum: ExpressionOrNum = 0.0, name: Union[str, Callable[[float], str]] = "domain", left_name: str = "left", right_name: str = "right",
-                 nodal_dimension: Optional[int] = None, periodic: bool = False):
+    def __init__(self, N: int = 10, size: ExpressionOrNum = 1.0, minimum: ExpressionOrNum = 0.0, name: str | Callable[[float], str] = "domain", left_name: str = "left", right_name: str = "right",
+                 nodal_dimension: int | None = None):
         super(LineMesh, self).__init__()
         self.N = N
         self.size = size
@@ -59,7 +62,6 @@ class LineMesh(MeshTemplate):
         self.left_name = left_name
         self.right_name = right_name
         self.nodal_dimension = nodal_dimension
-        self.periodic = periodic
 
     def define_geometry(self):
         """
@@ -67,7 +69,7 @@ class LineMesh(MeshTemplate):
         """
         if self.N <= 0:
             raise RuntimeError("LineMesh.N must be positive")
-        domain_table: Dict[str, _pyoomph.MeshTemplateElementCollection] = {}  # If self.name is callable
+        domain_table: dict[str, _pyoomph.MeshTemplateElementCollection] = {}  # If self.name is callable
         lastdom = None
         if isinstance(self.name, str):
             domain = self.new_domain(self.name, nodal_dimension=self.nodal_dimension)
@@ -105,8 +107,6 @@ class LineMesh(MeshTemplate):
         self.add_facet_to_boundary(self.left_name, [pleft])
         #self.add_nodes_to_boundary(self.right_name, [pright])
         self.add_facet_to_boundary(self.right_name, [pright])
-        if self.periodic:
-            self.add_periodic_node_pair(pleft, pright)
 
 
 ###################################
@@ -121,24 +121,21 @@ class RectangularQuadMesh(MeshTemplate):
         size: The size of the mesh, either by a single value (for both directions) or by two values (for x and y directions).            
         N: The number of elements in each dimension.. Can be a single value or a list of two values for x and y dimensions respectively.
         lower_left: The coordinates of the lower-left corner of the mesh, i.e. the mesh ranges from ``lower_left[0]`` to ``lower_left[0] + size[0]`` in x-direction and ``lower_left[1]`` to ``lower_left[1] + size[1]]`` in y-direction. Can be set to ``"centered"`` to automatically center the mesh around the origin.            
-        periodic: Whether the mesh is periodic, either in both directions or in x and y directions separately.
         split_in_tris: Split the quadrilateral elements into triangles.
         split_scott_vogelius: Whether to use splitting into Scott-Vogelius elements.
         boundary_names: A dictionary mapping boundary names ``"left"``, ``"right"``, ``"top"``, ``"bottom"`` to their corresponding names. Alternatively a function, which also takes the center coordinates of each element as input, can be used to define the boundary names.            
         nodal_dimension: The nodal dimension of the mesh, can be used to curve the mesh later on.
+
+    For a periodic mesh, add :py:class:`~pyoomph.equations.generic.PeriodicBC` to the equations, e.g.
+    ``PeriodicBC("right", offset=[Lx, 0]) @ "left"``, and likewise for ``"bottom"``/``"top"``.
     """
     
-    def __init__(self, *, name:Union[str,Callable[[float,float],str]]="domain", size:Union[ExpressionOrNum,List[ExpressionOrNum]]=1.0, N:Union[int,List[int]]=10, lower_left:Union[ExpressionOrNum,List[ExpressionOrNum],Literal["centered"]]=[0, 0], periodic:Union[bool,List[bool]]=False, split_in_tris:Literal[False, "alternate_left", "alternate_right", "left", "right", "crossed"]=False,split_scott_vogelius:bool=False, boundary_names:Dict[str,Union[str,Callable[[float],str]]]={},nodal_dimension:Optional[int]=None):
+    def __init__(self, *, name:str | Callable[[float, float], str]="domain", size:ExpressionOrNum | list[ExpressionOrNum]=1.0, N:int | list[int]=10, lower_left:ExpressionOrNum | list[ExpressionOrNum] | Literal["centered"]=[0, 0], split_in_tris:Literal[False, "alternate_left", "alternate_right", "left", "right", "crossed"]=False,split_scott_vogelius:bool=False, boundary_names:dict[str,str | Callable[[float], str]]={},nodal_dimension:int | None=None):
         super().__init__()
-        self.name:Union[str,Callable[[float,float],str]] = name
+        self.name:str | Callable[[float, float], str] = name
         self.size = size
         self.N = N
-        self.lower_left = lower_left
-        
-        if isinstance(periodic, bool):
-            self.periodic = [periodic, periodic]
-        else:
-            self.periodic = periodic
+        self.lower_left:ExpressionOrNum | list[ExpressionOrNum] | Literal["centered"] = lower_left
         self.split_in_tris = split_in_tris
         self.remesher = Remesher2d(self)
         self.boundary_names=boundary_names
@@ -153,7 +150,7 @@ class RectangularQuadMesh(MeshTemplate):
                 raise RuntimeError("nodal_dimension must be at most 3")
 
     def define_geometry(self):
-        dynamic_names:Dict[str,_pyoomph.MeshTemplateElementCollection]={}
+        dynamic_names:dict[str,_pyoomph.MeshTemplateElementCollection]={}
         if not callable(self.name):            
             domain = self.new_domain(self.name)
             if self.nodal_dimension is not None:
@@ -173,7 +170,7 @@ class RectangularQuadMesh(MeshTemplate):
         if not (isinstance(size[1], int) or isinstance(size[1], float)):  #type:ignore
             raise ValueError("Argument size[1] must be a number, but got size=" + str(size))
 
-        size=cast(List[float],size)
+        size=cast(list[float],size)
         assert len(size)==2
         nN = self.N
         if isinstance(nN, int) or isinstance(nN, float):
@@ -196,7 +193,7 @@ class RectangularQuadMesh(MeshTemplate):
             raise ValueError("Mesh size must be a positive integer, but got " + str(nN))
 
         lower_left = self.lower_left
-        if self.lower_left == "centered":
+        if lower_left == "centered":
             lower_left = [-size[0] / 2, -size[1] / 2]
         elif isinstance(lower_left, list) or isinstance(lower_left, tuple) or isinstance(lower_left, numpy.ndarray):
             lower_left=list(lower_left)
@@ -212,7 +209,7 @@ class RectangularQuadMesh(MeshTemplate):
                     "kwarg split_in_tris can only be False,'left', 'right', 'alternate_left', 'alternate_right' or 'crossed'")
 
 
-        def add_to_bound(bn:str,nodes:List[int],centercoord:Optional[float]):
+        def add_to_bound(bn:str,nodes:list[int],centercoord:float | None):
             bnn=self.boundary_names.get(bn,bn)
             if callable(bnn):
                 if centercoord is None:
@@ -311,25 +308,6 @@ class RectangularQuadMesh(MeshTemplate):
                 if iy == 0:  add_to_bound("bottom", [n00, n10],(ix + 0.5) * size[0] / nN[0] + lower_left[0])
                 if iy == nN[1] - 1:  add_to_bound("top", [n01, n11],(ix + 0.5) * size[0] / nN[0] + lower_left[0])
 
-        if self.periodic[0]:
-            xl = lower_left[0]
-            xr = size[0] + lower_left[0]
-            for iy in range(nN[1] + 1):
-                y = iy * size[1] / nN[1] + lower_left[1]
-                nl = self.add_node_unique(xl, y)
-                nr = self.add_node_unique(xr, y)
-                print(y, nl, nr)
-                self.add_periodic_node_pair(nl, nr)
-
-        if self.periodic[1]:
-            yb = lower_left[1]
-            yt = size[1] + lower_left[1]
-            for ix in range(nN[0] + 1):
-                x = ix * size[0] / nN[0] + lower_left[0]
-                nb = self.add_node_unique(x, yb)
-                nt = self.add_node_unique(x, yt)
-                self.add_periodic_node_pair(nb, nt)
-
         if not callable(self.name):
             self._fntrunk = "RectangularQuadMesh_" + self.name
         else:
@@ -353,7 +331,7 @@ class CircularMesh(MeshTemplate):
         with_curved_entities: Whether to create curved entities.
         internal_straight_names: The name of the internal straight interfaces, i.e. interior interfaces from the four directions to the center. Can be a string or a dictionary mapping the default names to new names.
     """
-    def __init__(self, radius:ExpressionOrNum=1, inner_factor:float=0.4, segments:Union[Literal["all"],List[Literal["NW","NE","SW","SE"]]]="all", domain_name:str="domain", outer_interface:str="circumference",straight_interface_name:Optional[Union[str,Dict[str,str],Callable[[str],str]]]=None,with_curved_entities:bool=True,internal_straight_names:Optional[Union[str,Dict[str,str]]]=None):
+    def __init__(self, radius:ExpressionOrNum=1, inner_factor:float=0.4, segments:Literal["all"] | list[Literal["NW", "NE", "SW", "SE"]]="all", domain_name:str="domain", outer_interface:str="circumference",straight_interface_name:str | dict[str, str] | Callable[[str], str] | None=None,with_curved_entities:bool=True,internal_straight_names:str | dict[str, str] | None=None):
         super(CircularMesh, self).__init__()
         self.radius = radius
         self.inner_factor = inner_factor
@@ -362,7 +340,7 @@ class CircularMesh(MeshTemplate):
         self.outer_interface=outer_interface
         self.straight_interface_name=straight_interface_name
         self.internal_straight_names=internal_straight_names
-        self._curved_entities:List[_pyoomph.MeshTemplateCurvedEntityBase]=[]
+        self._curved_entities:list[_pyoomph.MeshTemplateCurvedEntityBase]=[]
         self.with_curved_entities=with_curved_entities
 
     def define_geometry(self):
@@ -379,7 +357,7 @@ class CircularMesh(MeshTemplate):
         elif not isinstance(self.segments,(list,set)):
             raise ValueError("Segements needs to be a list")
         else:
-            segments:List[str]=[]
+            segments:list[str]=[]
             for a in self.segments:
                 if not (a in allsegs):
                     raise ValueError("Segements need to be a subset of " + str(allsegs))
@@ -479,17 +457,15 @@ class CircularMesh(MeshTemplate):
 
 
 class CuboidBrickMesh(MeshTemplate):
-    def __init__(self,*, size:Union[ExpressionOrNum,List[ExpressionOrNum]]=1.0, N:Union[int,List[int]]=10, lower_left:Union[ExpressionOrNum,List[ExpressionOrNum]]=[0, 0, 0],domain_name:str="domain"):
+    def __init__(self,*, size:ExpressionOrNum | list[ExpressionOrNum]=1.0, N:int | list[int]=10, lower_left:ExpressionOrNum | list[ExpressionOrNum]=[0, 0, 0],domain_name:str="domain"):
         super().__init__()
         self.size=size
         self.N=N
         self.lower_left=lower_left
-        self.periodic:bool=False
         self.domain_name=domain_name
 
     def define_geometry(self):
         size = self.nondim_size(self.size)
-        periodic=self.periodic
         N=self.N
         lower_left=self.lower_left
         if isinstance(size, int) or isinstance(size, float):
@@ -505,11 +481,6 @@ class CuboidBrickMesh(MeshTemplate):
         if not (isinstance(size[2], int) or isinstance(size[2], float)): #type:ignore
             raise ValueError("Argument size[2] must be a number, but got size=" + str(size))
 
-
-        if isinstance(periodic, bool): #type:ignore
-            periodic = [periodic, periodic, periodic]
-        if True in periodic:
-            raise RuntimeError("Periodic not implemented")
 
         if isinstance(N, int) :
             N = [N, N, N] #type:ignore
@@ -580,12 +551,13 @@ class SphericalOctantMesh(MeshTemplate):
         domain_name: The name of the domain.
         interface_names: A dictionary mapping the interface names to their corresponding names.
     """
-    def __init__(self, radius:ExpressionOrNum=1, inner_factor:float=0.4,domain_name:str="domain",interface_names:Dict[str,str]={"shell":"shell","plane_x0":"plane_x0","plane_y0":"plane_y0"}):
+    def __init__(self, radius:ExpressionOrNum=1, inner_factor:float=0.4,domain_name:str="domain",interface_names:dict[str,str]={"shell":"shell","plane_x0":"plane_x0","plane_y0":"plane_y0"},with_curved_entities:bool=True):
         super(SphericalOctantMesh, self).__init__()
         self.radius=radius
         self.inner_factor=inner_factor
         self.domain_name=domain_name
         self.interface_names=interface_names
+        self.with_curved_entities=with_curved_entities
 
     def define_geometry(self):
         router = self.nondim_size(self.radius)
@@ -619,14 +591,16 @@ class SphericalOctantMesh(MeshTemplate):
         domain.add_brick_3d_C1(ni00,no00,nii0,ndd0,ni0i,nd0d,niii,nttt)
 
         iname=self.interface_names.get("shell","shell")
-        if iname is not None:            
-            self.add_facet_to_boundary(iname, [nttt,nd0d,n00o,n0dd])
-            self.add_facet_to_boundary(iname, [nttt,ndd0,n0dd,n0o0])
-            self.add_facet_to_boundary(iname, [ndd0,nttt,nd0d,no00])
+        if iname is not None:
+            # Attach the three shell faces to the sphere, so that refinement puts new nodes on it
+            # rather than on the polyhedral approximation. Kept alive on self: the C++ side stores the
+            # entity as a borrowed pointer.
+            ce = self.create_curved_entity("sphere_part", n00o, center=n000) if self.with_curved_entities else None
+            self.add_facet_to_boundary(iname, [nttt,nd0d,n00o,n0dd],[nttt,nd0d,n00o,n0dd],ce)
+            self.add_facet_to_boundary(iname, [nttt,ndd0,n0dd,n0o0],[nttt,ndd0,n0dd,n0o0],ce)
+            self.add_facet_to_boundary(iname, [ndd0,nttt,nd0d,no00],[ndd0,nttt,nd0d,no00],ce)
 
 
-            
-            
         iname = self.interface_names.get("plane_x0","plane_x0")
         if iname is not None:
             self.add_facet_to_boundary(iname, [n000,n0i0,n0ii,n00i])
@@ -643,22 +617,28 @@ class SphericalOctantMesh(MeshTemplate):
             self.add_facet_to_boundary(iname, [nii0,ndd0,n0i0,n0o0])
             self.add_facet_to_boundary(iname, [ndd0,nii0,no00,ni00])
 
-        if False:
-            # TODO: This does not work yet
-            from .. import _pyoomph_core as _pyoomph
-            ce = _pyoomph.CurvedEntitySpherePart(self.get_node_position(n000), self.get_node_position(n00o),[1,0,0])
-            self._ce=ce
-            self.add_facet_to_curve_entity([n00o, n0dd,nd0d,nttt], ce)
-            self.add_facet_to_curve_entity([nd0d, no00, nttt, ndd0], ce)
-            self.add_facet_to_curve_entity([ndd0, nttt, nd0d, ndd0], ce)
 
-
-
-
-# TODO: Add curved entities!
 class CylinderMesh(MeshTemplate):
-    def __init__(self, radius:ExpressionOrNum=1, height:ExpressionOrNum=1, nsegments_h:int=1, inner_factor:float=0.4,  domain_name:str="domain", outer_interface:str="mantle",top_interface:str="top",bottom_interface:str="bottom",zshift:ExpressionOrNum=0):
+    """
+    A cylindrical mesh of brick elements, split into an inner block and four outer segments.
+
+    Args:
+        radius: Radius of the cylinder.
+        height: Height of the cylinder.
+        nsegments_h: Number of element layers along the axis.
+        inner_factor: Radius of the inner (square-ish) block relative to ``radius``.
+        domain_name: Name of the bulk domain.
+        outer_interface: Name of the mantle boundary.
+        top_interface: Name of the top boundary.
+        bottom_interface: Name of the bottom boundary.
+        zshift: Offset of the cylinder's base along the axis.
+        with_curved_entities: Attach the mantle to the exact cylinder, so that nodes created by
+            refinement land on it rather than on the polygonal approximation through the coarse mesh's
+            nodes. On by default; pass ``False`` for the old straight-sided behaviour.
+    """
+    def __init__(self, radius:ExpressionOrNum=1, height:ExpressionOrNum=1, nsegments_h:int=1, inner_factor:float=0.4,  domain_name:str="domain", outer_interface:str="mantle",top_interface:str="top",bottom_interface:str="bottom",zshift:ExpressionOrNum=0,with_curved_entities:bool=True):
         super(CylinderMesh, self).__init__()
+        self.with_curved_entities=with_curved_entities
         self.radius = radius
         self.height=height
         self.nsegments_h=nsegments_h
@@ -713,8 +693,16 @@ class CylinderMesh(MeshTemplate):
                 domain.add_brick_3d_C1(ni0l, no0l, niil, nddl , ni0u, no0u, niiu, nddu)
                 #self.add_nodes_to_boundary(self.outer_interface, [n0ol, nddl,n0ou, nddu])
                 #self.add_nodes_to_boundary(self.outer_interface, [no0l, nddl , no0u, nddu])
-                self.add_facet_to_boundary(self.outer_interface, [n0ol, nddl,n0ou, nddu])
-                self.add_facet_to_boundary(self.outer_interface, [no0l, nddl , no0u, nddu])
+                # The mantle facets lie on the exact cylinder. One entity per facet, since a
+                # CurvedEntityCylinderArc is defined by the arc it spans; both are kept alive on self
+                # because the C++ side stores them as borrowed pointers.
+                ce1 = ce2 = None
+                if self.with_curved_entities:
+                    axis_lower = self.add_node_unique(0, 0, zlower)
+                    ce1 = self.create_curved_entity("cylinder_arc", n0ol, nddl, center=axis_lower)
+                    ce2 = self.create_curved_entity("cylinder_arc", nddl, no0l, center=axis_lower)
+                self.add_facet_to_boundary(self.outer_interface, [n0ol, nddl,n0ou, nddu],[n0ol, nddl,n0ou, nddu],ce1)
+                self.add_facet_to_boundary(self.outer_interface, [no0l, nddl , no0u, nddu],[no0l, nddl , no0u, nddu],ce2)
                 if ns==0:
                     #bottom
                     self.add_facet_to_boundary(self.bottom_interface, [niil,ni0l,norigl,n0il])
@@ -740,3 +728,7 @@ class PointMesh(MeshTemplate):
         dom=self.new_domain(self.domain_name)        
         dom.set_nodal_dimension(self.nodal_dimension)
         dom.add_point_element(self.add_node_unique(0))
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

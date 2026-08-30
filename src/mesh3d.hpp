@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -44,7 +44,7 @@ namespace pyoomph
 
     // Factory used by oomph-lib's tree-refinement code to create a son tree of the correct dynamic type.
     Tree *construct_son(oomph::RefineableElement *const &object_pt,
-                        Tree *const &father_pt, const int &son_type)
+                        Tree *const &father_pt, const int &son_type) override
     {
       DynamicOcTree *temp_Oc_pt = new DynamicOcTree(object_pt, father_pt, son_type);
       return temp_Oc_pt;
@@ -58,6 +58,147 @@ namespace pyoomph
   public:
     DynamicOcTreeRoot(oomph::RefineableElement *const &object_pt) : oomph::Tree(object_pt), oomph::OcTree(object_pt), DynamicTree(object_pt), DynamicOcTree(object_pt), oomph::TreeRoot(object_pt), DynamicTreeRoot(object_pt), oomph::OcTreeRoot(object_pt)
     {
+    }
+  };
+
+  // OcTreeForest specialization that (a) skips oomph's brick compass neighbour finding for
+  // tetrahedral forests -- tets use geometric node-sharing/hanging instead -- while delegating to
+  // it for brick forests, and (b) skips the quad-coordinate neighbour self-test for tets.
+  class DynamicOcTreeForest : public oomph::OcTreeForest
+  {
+  public:
+    DynamicOcTreeForest(oomph::Vector<oomph::TreeRoot *> &trees_pt) : oomph::OcTreeForest(trees_pt, true)
+    {
+      if (trees_pt.size() == 0) return;
+      find_neighbours();
+      // Brick forests need oomph's rotation/orientation equivalents for the compass coordinate descent;
+      // tet forests bypass that descent entirely (shared-node face correspondence + the affine map), so
+      // skip it -- and it assumes brick geometry.
+      if (!(ntree() > 0 && dynamic_cast<oomph::TElementBase *>(Trees_pt[0]->object_pt())))
+        construct_up_right_equivalents();
+    }
+
+    DynamicOcTreeForest(const DynamicOcTreeForest &) : oomph::OcTreeForest()
+    {
+      oomph::BrokenCopy::broken_copy("DynamicOcTreeForest");
+    }
+
+    void operator=(const DynamicOcTreeForest &)
+    {
+      oomph::BrokenCopy::broken_assign("DynamicOcTreeForest");
+    }
+
+    void check_all_neighbours(oomph::DocInfo &doc_info) override
+    {
+      // Tets, wedges and pyramids bypass oomph's brick (hex) compass neighbour self-test: they do not use
+      // the OcTree's compass neighbour structure (tets have their own topological finder; wedges/pyramids
+      // share interface nodes through the registry instead), and the brick test would misread their
+      // 4/5/6-node elements as an 8-node hex.
+      //
+      // The scan must cover EVERY tree, not just Trees_pt[0]: in a mixed forest whose first root happens to
+      // be a brick (e.g. a hex+pyramid box whose cell (0,0,0) is a hex), inspecting only tree 0 lets the
+      // brick self-test run on a forest for which find_neighbours() deliberately set NO neighbour pointers
+      // at all -- it then reports a bogus "Max. error in octree neighbour finding: 1.24 is too big" and
+      // aborts the solve. This mirrors DynamicQuadTreeForest::check_all_neighbours (mesh2d.cpp), which
+      // already loops over all trees. Pure-brick forests still get the full check.
+      for (unsigned i = 0; i < ntree(); i++)
+      {
+        oomph::FiniteElement *o = Trees_pt[i]->object_pt();
+        if (dynamic_cast<oomph::TElementBase *>(o)) return;
+        if (dynamic_cast<oomph::RefineableWedgeElement *>(o)) return;
+        if (dynamic_cast<oomph::RefineablePyramidElement *>(o)) return;
+      }
+      oomph::OcTreeForest::check_all_neighbours(doc_info);
+    }
+
+  protected:
+    void find_neighbours() override
+    {
+      // A MIXED forest (its roots are not all the same element family) shares interface nodes via the
+      // weight-augmented registry and installs 2:1 hanging via the mesh-level post_adapt pass, so NO octree
+      // neighbour pointers are needed -- and oomph's brick compass finder must not run (it would misread a
+      // 5-node pyramid / 6-node wedge as an 8-node hex) nor the tet finder (it throws on a non-tet neighbour).
+      // Skipping here also makes the pure registry mixes (tet+wedge etc.) robust to root ordering.
+      if (ntree() > 1)
+      {
+        oomph::FiniteElement *o0 = Trees_pt[0]->object_pt();
+        const bool b0 = dynamic_cast<oomph::BrickElementBase *>(o0) != nullptr;
+        const bool t0 = dynamic_cast<oomph::TElementBase *>(o0) != nullptr;
+        const bool w0 = dynamic_cast<oomph::RefineableWedgeElement *>(o0) != nullptr;
+        const bool p0 = dynamic_cast<oomph::RefineablePyramidElement *>(o0) != nullptr;
+        for (unsigned i = 1; i < ntree(); i++)
+        {
+          oomph::FiniteElement *oi = Trees_pt[i]->object_pt();
+          if ((dynamic_cast<oomph::BrickElementBase *>(oi) != nullptr) != b0 ||
+              (dynamic_cast<oomph::TElementBase *>(oi) != nullptr) != t0 ||
+              (dynamic_cast<oomph::RefineableWedgeElement *>(oi) != nullptr) != w0 ||
+              (dynamic_cast<oomph::RefineablePyramidElement *>(oi) != nullptr) != p0)
+            return; // mixed forest -> registry node-sharing + mesh-level hanging
+        }
+      }
+      // Tetrahedral forests: topological FACE neighbour finding, the 3d analogue of
+      // DynamicQuadTreeForest::find_neighbours (mesh2d.cpp). Two tet roots are neighbours across a face
+      // iff they share that face's three corner (vertex) nodes; the tet's four faces reuse four of the
+      // six OcTree face slots (L,R,D,U; face f is opposite vertex f). The tet neighbour/hang path bypasses
+      // oomph's compass coordinate descent (shared-node correspondence + the exact affine map), so only
+      // this topological adjacency is needed -- exactly as for triangles.
+      if (ntree() > 0 && dynamic_cast<oomph::TElementBase *>(Trees_pt[0]->object_pt()))
+      {
+        using namespace oomph::OcTreeNames;
+        static const int FACE_SLOT[4] = {L, R, D, U};          // tet face f -> OcTree face slot
+        static const int FACE_CORNER[4][3] = {{1, 2, 3}, {0, 2, 3}, {0, 1, 3}, {0, 1, 2}};
+        const unsigned numtrees = ntree();
+        // Trees sharing a common corner node are potential face neighbours.
+        std::map<oomph::Node *, std::set<unsigned>> tree_at_vertex;
+        for (unsigned i = 0; i < numtrees; i++)
+        {
+          oomph::TElementBase *ti = dynamic_cast<oomph::TElementBase *>(Trees_pt[i]->object_pt());
+          if (!ti) throw_runtime_error("Strange element in tet tree forest");
+          for (unsigned v = 0; v < 4; v++) tree_at_vertex[ti->vertex_node_pt(v)].insert(i);
+        }
+        oomph::Vector<std::set<unsigned>> potential(numtrees);
+        for (auto &kv : tree_at_vertex)
+          for (unsigned a : kv.second)
+            for (unsigned b : kv.second)
+              if (a != b) potential[a].insert(b);
+        for (unsigned i = 0; i < numtrees; i++)
+        {
+          oomph::TElementBase *ti = dynamic_cast<oomph::TElementBase *>(Trees_pt[i]->object_pt());
+          for (unsigned j : potential[i])
+          {
+            oomph::FiniteElement *obj_j = Trees_pt[j]->object_pt();
+            if (!dynamic_cast<oomph::TElementBase *>(obj_j)) throw_runtime_error("Mixed tet/brick neighbours not yet supported");
+            for (int f = 0; f < 4; f++)
+            {
+              bool all = true;
+              for (int c = 0; c < 3 && all; c++)
+                if (obj_j->get_node_number(ti->vertex_node_pt(FACE_CORNER[f][c])) == -1) all = false;
+              if (all) Trees_pt[i]->neighbour_pt(FACE_SLOT[f]) = Trees_pt[j];
+            }
+          }
+        }
+        return;
+      }
+      // Wedge forests: skip neighbour finding for now. Uniform (1->8) wedge refinement stays conforming and
+      // shares new father-boundary nodes via the father-node-keyed registry (RefineableWedgeElement::build),
+      // so no inter-tree neighbour pointers are needed. (Non-uniform 2:1 wedge hanging -- a later milestone --
+      // will need a topological wedge face/edge neighbour finder, as tets have above. oomph's brick compass
+      // find_neighbours below must NOT run on wedges: it would misread the 6-node wedge as an 8-node hex.)
+      if (ntree() > 0 && dynamic_cast<oomph::RefineableWedgeElement *>(Trees_pt[0]->object_pt()))
+      {
+        return;
+      }
+      // Pyramid forests: skip neighbour finding for now (like wedges). Uniform pyramid refinement stays
+      // conforming (the mixed 6-pyr+4-tet offspring share their father-boundary nodes via the cross-shape
+      // registry in RefineablePyramidElement::build_son_from_pyramid_father), so no inter-tree neighbour
+      // pointers are needed. oomph's brick compass find_neighbours must NOT run: it would misread the 5-node
+      // pyramid as an 8-node hex. (Non-uniform pyramid hanging -- a later milestone -- needs a topological
+      // cross-shape face/edge neighbour finder.)
+      if (ntree() > 0 && dynamic_cast<oomph::RefineablePyramidElement *>(Trees_pt[0]->object_pt()))
+      {
+        return;
+      }
+      oomph::OcTreeForest::find_neighbours(); // brick forests keep oomph's compass neighbouring
     }
   };
 
@@ -108,12 +249,24 @@ namespace pyoomph
     }
 
     /// Destructor:
-    virtual ~TemplatedMeshBase3d() {}
+    ~TemplatedMeshBase3d() override {}
 
-    virtual void setup_tree_forest()
+    void setup_tree_forest() override
     {
       setup_octree_forest();
     }
+
+    // After (non-uniform) refinement, install hanging nodes for tetrahedral meshes. A hanging node
+    // lies in the interior of a coarser neighbour's edge; it is constrained by that edge's
+    // interpolation (linear for C1). No-op for pure-brick meshes (oomph-lib handles those). See .cpp.
+    void post_adapt_setup_hanging_nodes() override;
+
+    // Enforce 2:1 refinement balancing for tetrahedral meshes: iteratively refine any leaf tet that
+    // is >1 refinement level coarser than a face/edge neighbour (detected by a node existing at the
+    // quarter point of one of its edges), until the mesh is balanced. This guarantees all hanging is
+    // single-level (edge/face on real coarse corners, no hanging chains), making arbitrary refinement
+    // patterns -- and C2 tet face-interior hanging -- machine-zero. No-op for non-tet meshes. See .cpp.
+    void enforce_refinement_balance() override;
 
     // (Re)build the OcTreeForest. If a forest already exists, this "flattens" it down to the coarsest
     // common refinement level present (min_ref, reduced across MPI ranks if applicable) by promoting
@@ -157,7 +310,7 @@ namespace pyoomph
           oomph::Vector<oomph::TreeRoot *> trees_pt;
 
           // Make a new (empty) Forest
-          this->Forest_pt = new oomph::OcTreeForest(trees_pt);
+          this->Forest_pt = new pyoomph::DynamicOcTreeForest(trees_pt);
 
           return;
         }
@@ -195,10 +348,11 @@ namespace pyoomph
             {
               // Get the sons (if there are any) and store them
               unsigned n_sons = tree_pt->nsons();
-              oomph::Vector<oomph::Tree *> backed_up_sons(n_sons);
+              oomph::Vector<oomph::Tree *> backed_up_sons;
+              backed_up_sons.reserve(n_sons);
               for (unsigned i_son = 0; i_son < n_sons; i_son++)
               {
-                backed_up_sons[i_son] = tree_pt->son_pt(i_son);
+                backed_up_sons.push_back(tree_pt->son_pt(i_son));
               }
 
               // Make the element into a new treeroot
@@ -254,7 +408,7 @@ namespace pyoomph
         delete this->Forest_pt;
 
         // Make a new Forest with the trees_pt roots created earlier
-        this->Forest_pt = new oomph::OcTreeForest(trees_pt);
+        this->Forest_pt = new pyoomph::DynamicOcTreeForest(trees_pt);
       }
       else // Create a new Forest from scratch in the "usual" uniform way
       {
@@ -272,13 +426,13 @@ namespace pyoomph
           trees_pt.push_back(octree_root_pt);
         }
         // Plant OcTreeRoots in OcTreeForest
-        this->Forest_pt = new oomph::OcTreeForest(trees_pt);
+        this->Forest_pt = new pyoomph::DynamicOcTreeForest(trees_pt);
       }
     }
 
     // Populate this mesh's elements, nodes and boundaries from a MeshTemplateElementCollection; see
     // TemplatedMeshBase1d::generate_from_template for the (identical) algorithm description.
-    void generate_from_template(MeshTemplateElementCollection *coll)
+    void generate_from_template(MeshTemplateElementCollection *coll) override
     {
 
       MeshTemplate *templ = coll->get_template();
@@ -326,12 +480,21 @@ namespace pyoomph
       templ->link_periodic_nodes();
 
       setup_facets_from_template(templ,bound_map);
+      // Turn the template's facet records into per-element face boundary tags right away; from here
+      // on the tags are carried (and inherited on refinement) by the elements themselves.
+      seed_face_boundaries_from_facets();
     }
 
     void setup_boundary_element_info_bricks(std::ostream &outfile);
     void setup_boundary_element_info_tris(std::ostream &outfile);
-    void setup_boundary_element_info(std::ostream &outfile);
+    void setup_boundary_element_info(std::ostream &outfile) override;
     void setup_boundary_element_info() override;
+
+    // Interior facets (faces shared by two bulk elements) of a 3d mesh, for DG-type interior-facet
+    // terms and for fields on the "_internal_facets_" skeleton. Conforming meshes only - unlike the
+    // 1d/2d overrides this has no hanging-node branch and throws on a non-conforming (adapted) mesh.
+    // See the .cpp for why it is built on build_facet_adjacency().
+    void fill_internal_facet_buffers(std::vector<BulkElementBase *> &internal_elements, std::vector<int> &internal_face_dir, std::vector<BulkElementBase *> &opposite_elements, std::vector<int> &opposite_face_dir, std::vector<int> &opposite_already_at_index) override;
   };
 
 }

@@ -437,7 +437,7 @@ public:
   void operator=(const BinArray&) = delete;
 
   /// Virtual destructor
-  virtual ~BinArray() {}
+  ~BinArray() override {}
 
   /// Helper function for computing the bin indices of neighbouring bins
   /// at a given "radius" of the specified bin. Final, optional boolean
@@ -477,7 +477,7 @@ public:
   unsigned max_bin_dimension() const;
 
   /// Dimension of the zeta ( =  dim of local coordinate of elements)
-  unsigned ndim_zeta() const
+  unsigned ndim_zeta() const override
   {
     return Dimensions_of_bin_array.size();
   }
@@ -530,7 +530,7 @@ public:
   void operator=(const RefineableBinArray&) = delete;
 
   /// Destructor
-  ~RefineableBinArray()
+  ~RefineableBinArray() override
   {
     unsigned n = Bin_pt.size();
     for (unsigned i = 0; i < n; i++)
@@ -556,7 +556,7 @@ public:
   }
 
   /// Number of bins (not taking recursion into account)
-  unsigned nbin() const
+  unsigned nbin() const override
   {
     return Bin_pt.size();
   }
@@ -568,7 +568,7 @@ public:
   static unsigned Default_n_bin_1d;
 
   /// Compute total number of sample points recursively
-  unsigned total_number_of_sample_points_computed_recursively() const;
+  unsigned total_number_of_sample_points_computed_recursively() const override;
 
   /// Fill the bin array with specified SamplePoints
   void fill_bin_array(const Vector<SamplePoint*>& sample_point_pt)
@@ -629,7 +629,7 @@ public:
   /// sub_geom_object_pt=0 if point can't be found.
   void locate_zeta(const Vector<double>& zeta,
                    GeomObject*& sub_geom_object_pt,
-                   Vector<double>& s);
+                   Vector<double>& s) override;
 
   /// Boundaries of specified bin in each coordinate direction.
   /// *.first = min; *.second = max.
@@ -669,7 +669,7 @@ public:
   }
 
   /// Output bins
-  void output_bins(std::ofstream& outfile)
+  void output_bins(std::ofstream& outfile) override
   {
     /// Loop over bins
     unsigned n_bin = Bin_pt.size();
@@ -683,7 +683,7 @@ public:
   }
 
   /// Output bin vertices (allowing display of bins as zones).
-  void output_bin_vertices(std::ofstream& outfile);
+  void output_bin_vertices(std::ofstream& outfile) override;
 
   /// Output neighbouring bins at given "radius" of the specified bin
   void output_neighbouring_bins(const unsigned& bin_index,
@@ -693,7 +693,7 @@ public:
 
   /// Counter to keep track of how many sample points we've
   /// visited during top level call to locate_zeta
-  unsigned& total_number_of_sample_points_visited_during_locate_zeta_from_top_level()
+  unsigned& total_number_of_sample_points_visited_during_locate_zeta_from_top_level() override
   {
     if (Depth == 0)
     {
@@ -823,7 +823,7 @@ public:
     SamplePointContainerParameters* bin_array_parameters_pt);
 
   /// Destructor:
-  ~NonRefineableBinArray()
+  ~NonRefineableBinArray() override
   {
     flush_bins_of_objects();
   }
@@ -839,10 +839,10 @@ public:
   /// sub_geom_object_pt=0 if point can't be found.
   void locate_zeta(const Vector<double>& zeta,
                    GeomObject*& sub_geom_object_pt,
-                   Vector<double>& s);
+                   Vector<double>& s) override;
 
   /// Total number of bins (empty or not)
-  unsigned nbin() const
+  unsigned nbin() const override
   {
     const unsigned n_lagrangian = ndim_zeta();
     unsigned ntotalbin = Dimensions_of_bin_array[0];
@@ -860,7 +860,7 @@ public:
   static unsigned Default_n_bin_1d;
 
   /// Compute total number of sample points recursively
-  unsigned total_number_of_sample_points_computed_recursively() const;
+  unsigned total_number_of_sample_points_computed_recursively() const override;
 
   /// Number of spirals to be searched in one go const version
   unsigned n_spiral_chunk() const
@@ -905,7 +905,7 @@ public:
   double min_distance(const unsigned& i_bin, const Vector<double>& zeta);
 
   /// Output bin vertices (allowing display of bins as zones).
-  void output_bin_vertices(std::ofstream& outfile);
+  void output_bin_vertices(std::ofstream& outfile) override;
 
   /// Get vector of vectors containing the coordinates of the
   /// vertices of the i_bin-th bin: bin_vertex[j][i] contains the
@@ -949,7 +949,7 @@ public:
 
 
   /// Output bins
-  void output_bins(std::ofstream& outfile);
+  void output_bins(std::ofstream& outfile) override;
 
   /// Output bins
   void output_bins(std::string& filename)

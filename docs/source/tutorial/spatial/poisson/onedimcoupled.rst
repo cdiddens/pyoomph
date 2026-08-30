@@ -17,7 +17,7 @@ subject to :math:`u(-1)=u(1)=0` and :math:`w(-1)=-w(1)=1`. The code just creates
    :start-at: from pyoomph import *
    :end-at: problem.output()  # Write output
 
-Also note how :py:class:`~pyoomph.meshes.bcs.DirichletBC` takes multiple keyword arguments to set multiple boundary values.
+Also note how :py:class:`~pyoomph.equations.generic.DirichletBC` takes multiple keyword arguments to set multiple boundary values.
 
 ..  figure:: coupled_poisson.*
 	:name: figspatialcoupledpoisson

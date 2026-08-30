@@ -41,7 +41,7 @@ Note how the initial condition ``u_init`` depends on time ``t``, which is bound 
 	Traveling wave solution, which is reflected at the boundaries.
 
 
-Without the ``DirichletBC(u=0)`` terms, the :math:`\langle \cdot, \cdot \rangle` terms in :math:numref:`eqpdewaveeqweak` would become relevant. Since we do not add any contributions at the boundaries by some :py:class:`~pyoomph.generic.codegen.InterfaceEquations` or :py:class:`~pyoomph.meshes.bcs.NeumannBC`, the term :math:`\langle c^2\nabla u\cdot\vec{n},w \rangle` is zero. This can only hold for arbitrary :math:`w`, if :math:`\partial_x u=0`. Thereby, the wave will have free ends on both sides. The wave gets reflected, but without changing sign.
+Without the ``DirichletBC(u=0)`` terms, the :math:`\langle \cdot, \cdot \rangle` terms in :math:numref:`eqpdewaveeqweak` would become relevant. Since we do not add any contributions at the boundaries by some :py:class:`~pyoomph.generic.codegen.InterfaceEquations` or :py:class:`~pyoomph.equations.generic.NeumannBC`, the term :math:`\langle c^2\nabla u\cdot\vec{n},w \rangle` is zero. This can only hold for arbitrary :math:`w`, if :math:`\partial_x u=0`. Thereby, the wave will have free ends on both sides. The wave gets reflected, but without changing sign.
 
 
 .. only:: html

@@ -104,7 +104,7 @@ namespace oomph
     void operator=(const LinearSolver&) = delete;
 
     /// Empty virtual destructor
-    virtual ~LinearSolver() {}
+    ~LinearSolver() override {}
 
     /// Enable documentation of solve times
     void enable_doc_time()
@@ -355,7 +355,7 @@ namespace oomph
     void operator=(const DenseLU&) = delete;
 
     /// Destructor, clean up the stored LU factors
-    ~DenseLU()
+    ~DenseLU() override
     {
       clean_up_memory();
     }
@@ -363,30 +363,30 @@ namespace oomph
     /// Solver: Takes pointer to problem and returns the results Vector
     /// which contains the solution of the linear system defined by
     /// the problem's fully assembled Jacobian and residual Vector.
-    void solve(Problem* const& problem_pt, DoubleVector& result);
+    void solve(Problem* const& problem_pt, DoubleVector& result) override;
 
     /// Linear-algebra-type solver: Takes pointer to a matrix and rhs
     /// vector and returns the solution of the linear system.
     void solve(DoubleMatrixBase* const& matrix_pt,
                const DoubleVector& rhs,
-               DoubleVector& result);
+               DoubleVector& result) override;
 
     /// Linear-algebra-type solver: Takes pointer to a matrix and rhs
     /// vector and returns the solution of the linear system.
     void solve(DoubleMatrixBase* const& matrix_pt,
                const Vector<double>& rhs,
-               Vector<double>& result);
+               Vector<double>& result) override;
 
     ///  returns the time taken to assemble the jacobian matrix and
     /// residual vector
-    double jacobian_setup_time() const
+    double jacobian_setup_time() const override
     {
       return Jacobian_setup_time;
     }
 
     /// return the time taken to solve the linear system (needs to be
     /// overloaded for each linear solver)
-    virtual double linear_solver_solution_time() const
+    double linear_solver_solution_time() const override
     {
       return Solution_time;
     }
@@ -402,7 +402,7 @@ namespace oomph
     void backsub(const Vector<double>& rhs, Vector<double>& result);
 
     /// Clean up the stored LU factors
-    void clean_up_memory();
+    void clean_up_memory() override;
 
     /// Jacobian setup time
     double Jacobian_setup_time;
@@ -443,13 +443,13 @@ namespace oomph
     /// Solver: Takes pointer to problem and returns the results Vector
     /// which contains the solution of the linear system defined by
     /// the problem's residual Vector (Jacobian computed by FD approx.)
-    void solve(Problem* const& problem_pt, DoubleVector& result);
+    void solve(Problem* const& problem_pt, DoubleVector& result) override;
 
     /// Linear-algebra-type solver: Takes pointer to a matrix and rhs
     /// vector and returns the solution of the linear system.
     void solve(DoubleMatrixBase* const& matrix_pt,
                const DoubleVector& rhs,
-               DoubleVector& result)
+               DoubleVector& result) override
     {
       DenseLU::solve(matrix_pt, rhs, result);
     }
@@ -460,7 +460,7 @@ namespace oomph
     /// implement it
     void solve(DoubleMatrixBase* const& matrix_pt,
                const Vector<double>& rhs,
-               Vector<double>& result)
+               Vector<double>& result) override
     {
       LinearSolver::solve(matrix_pt, rhs, result);
     }
@@ -531,13 +531,13 @@ namespace oomph
     void operator=(const SuperLUSolver&) = delete;
 
     /// Destructor, clean up the stored matrices
-    ~SuperLUSolver()
+    ~SuperLUSolver() override
     {
       clean_up_memory();
     }
 
     /// function to enable the computation of the gradient
-    void enable_computation_of_gradient()
+    void enable_computation_of_gradient() override
     {
       Compute_gradient = true;
     }
@@ -546,7 +546,7 @@ namespace oomph
     /// /////////////////////
 
     /// Overload disable resolve so that it cleans up memory too
-    void disable_resolve()
+    void disable_resolve() override
     {
       LinearSolver::disable_resolve();
       clean_up_memory();
@@ -555,7 +555,7 @@ namespace oomph
     /// Solver: Takes pointer to problem and returns the results Vector
     /// which contains the solution of the linear system defined by
     /// the problem's fully assembled Jacobian and residual Vector.
-    void solve(Problem* const& problem_pt, DoubleVector& result);
+    void solve(Problem* const& problem_pt, DoubleVector& result) override;
 
     /// Linear-algebra-type solver: Takes pointer to a matrix and rhs
     /// vector and returns the solution of the linear system.
@@ -564,7 +564,7 @@ namespace oomph
     /// matrix_pt->clean_up_memory() will be used to wipe the matrix data.
     void solve(DoubleMatrixBase* const& matrix_pt,
                const DoubleVector& rhs,
-               DoubleVector& result);
+               DoubleVector& result) override;
 
 
     /*  /// Linear-algebra-type solver: Takes pointer to a matrix */
@@ -579,7 +579,7 @@ namespace oomph
     /// Solver: Takes pointer to problem and returns the results Vector
     /// which contains the solution of the linear system defined by
     /// the problem's fully assembled Jacobian and residual Vector.
-    void solve_transpose(Problem* const& problem_pt, DoubleVector& result);
+    void solve_transpose(Problem* const& problem_pt, DoubleVector& result) override;
 
     /// Linear-algebra-type solver: Takes pointer to a matrix and rhs
     /// vector and returns the solution of the linear system.
@@ -588,16 +588,16 @@ namespace oomph
     /// matrix_pt->clean_up_memory() will be used to wipe the matrix data.
     void solve_transpose(DoubleMatrixBase* const& matrix_pt,
                          const DoubleVector& rhs,
-                         DoubleVector& result);
+                         DoubleVector& result) override;
 
     /// Resolve the system defined by the last assembled jacobian
     /// and the specified rhs vector if resolve has been enabled.
     /// Note: returns the global result Vector.
-    void resolve(const DoubleVector& rhs, DoubleVector& result);
+    void resolve(const DoubleVector& rhs, DoubleVector& result) override;
 
     /// Resolve the (transposed) system defined by the last assembled
     /// Jacobian and the specified rhs vector if resolve has been enabled.
-    void resolve_transpose(const DoubleVector& rhs, DoubleVector& result);
+    void resolve_transpose(const DoubleVector& rhs, DoubleVector& result) override;
 
     /// Enable documentation of solver statistics
     void enable_doc_stats()
@@ -613,14 +613,14 @@ namespace oomph
 
     /// returns the time taken to assemble the jacobian matrix and
     /// residual vector
-    double jacobian_setup_time() const
+    double jacobian_setup_time() const override
     {
       return Jacobian_setup_time;
     }
 
     /// return the time taken to solve the linear system (needs to be
     /// overloaded for each linear solver)
-    virtual double linear_solver_solution_time() const
+    double linear_solver_solution_time() const override
     {
       return Solution_time;
     }
@@ -639,7 +639,7 @@ namespace oomph
     void backsub_transpose(const DoubleVector& rhs, DoubleVector& result);
 
     /// Clean up the memory allocated by the solver
-    void clean_up_memory();
+    void clean_up_memory() override;
 
     /// Specify the solve type. Either default, serial or distributed.
     /// See enum SuperLU_solver_type for more details.

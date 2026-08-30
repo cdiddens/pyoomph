@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -36,7 +37,7 @@ import math
 from ..typings import *
 _SympyType=Any
 
-__func_conversion_table:List[Tuple[str,_SympyType,Callable[...,Expression]]]=[
+__func_conversion_table:list[tuple[str,_SympyType,Callable[...,Expression]]]=[
     ("cos",sympy.cos,cos),
     ("sin",sympy.sin,sin),
     ("exp",sympy.exp,exp),
@@ -46,7 +47,7 @@ __func_conversion_table:List[Tuple[str,_SympyType,Callable[...,Expression]]]=[
 __func_conversion_sympy2pyoomph={entry[1]:entry[2] for entry in __func_conversion_table}
 __func_conversion_pyoomph2sympy={entry[0]:entry[1] for entry in __func_conversion_table}
 
-def sympy_to_pyoomph(expr:_SympyType,use_nondim:bool=False,var_map:Dict[str,ExpressionOrNum]={})->ExpressionOrNum:
+def sympy_to_pyoomph(expr:_SympyType,use_nondim:bool=False,var_map:dict[str,ExpressionOrNum]={})->ExpressionOrNum:
     if isinstance(expr,sympy.Mul):
         return math.prod(map(lambda x : sympy_to_pyoomph(x,use_nondim,var_map), expr.args)) #type:ignore
     elif isinstance(expr,sympy.Add):
@@ -157,3 +158,7 @@ def pyoomph_to_sympy(expr:ExpressionOrNum,handle_undefined=None):
         print(typeinfo)
         raise RuntimeError("Cannot convert yet "+str(expr))
     
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

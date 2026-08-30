@@ -3,7 +3,7 @@
 Weakly imposing Dirichlet boundary conditions
 ---------------------------------------------
 
-The last example illustrated how the continuity of the concentration field :math:`c` across the facets can be enforced in a weak sense by adding facet terms. If you use the conventional :py:class:`~pyoomph.meshes.bcs.DirichletBC` on the exterior boundaries, it will enforce the conditions strongly, also in discontinuous Galerkin methods. However, in some cases, you may want to enforce the Dirichlet boundary conditions weakly, i.e. in the same way as the facet terms. In order to easily switch between continuous and discontinuous Galerkin spaces, one can still use the :py:class:`~pyoomph.meshes.bcs.DirichletBC` class, but one has to add the implementation of the weak Dirichlet boundary conditions manually to the equation class. This will be discussed in the following.
+The last example illustrated how the continuity of the concentration field :math:`c` across the facets can be enforced in a weak sense by adding facet terms. If you use the conventional :py:class:`~pyoomph.equations.generic.DirichletBC` on the exterior boundaries, it will enforce the conditions strongly, also in discontinuous Galerkin methods. However, in some cases, you may want to enforce the Dirichlet boundary conditions weakly, i.e. in the same way as the facet terms. In order to easily switch between continuous and discontinuous Galerkin spaces, one can still use the :py:class:`~pyoomph.equations.generic.DirichletBC` class, but one has to add the implementation of the weak Dirichlet boundary conditions manually to the equation class. This will be discussed in the following.
 
 We consider a simple Poisson equation, again implemented for both continuous and discontinuous Galerkin spaces. The facet terms can be directly copied from the diffusion term of the advection-diffusion equation. The only modification we make is adding the keyword argument ``allow_DL_and_D0=True`` to the test for discontinuous spaces via the :py:func:`~pyoomph.expressions.generic.is_DG_space` function. Thereby, we can use the discontinuous spaces without degrees of freedom at the nodes, i.e. ``"DL"`` and ``"D0"``, as well.
 
@@ -12,7 +12,7 @@ We consider a simple Poisson equation, again implemented for both continuous and
    :start-at: class PoissonEquations(Equations):
    :end-at: self.add_interior_facet_residual(facet_terms)
 
-However, we now also add a special function which gives the correct weak terms for weakly imposed Dirichlet boundary conditions. This function must return the weak terms that are necessary to enforce some particular Dirichlet value. These are essentially the same as the facet terms, however, instead of :py:func:`~pyoomph.expressions.generic.jump`, we just take the current value on the boundary minus the prescribed value. The function :py:func:`~pyoomph.expressions.generic.avg` is just replaced by the evaluation of the variable on the boundary. In case we do not provide such a field or the field is continuous, we just return ``None``, advising the :py:class:`~pyoomph.meshes.bcs.DirichletBC` to impose the value strongly:
+However, we now also add a special function which gives the correct weak terms for weakly imposed Dirichlet boundary conditions. This function must return the weak terms that are necessary to enforce some particular Dirichlet value. These are essentially the same as the facet terms, however, instead of :py:func:`~pyoomph.expressions.generic.jump`, we just take the current value on the boundary minus the prescribed value. The function :py:func:`~pyoomph.expressions.generic.avg` is just replaced by the evaluation of the variable on the boundary. In case we do not provide such a field or the field is continuous, we just return ``None``, advising the :py:class:`~pyoomph.equations.generic.DirichletBC` to impose the value strongly:
 
 .. literalinclude:: poisson_weak_dirichlet.py
    :language: python
@@ -26,7 +26,7 @@ The problem is as usual, but we allow the user to select the space and whether w
    :start-at: class PoissonProblem(Problem):
    :end-at: problem.output()
 
-By default, :py:class:`~pyoomph.meshes.bcs.DirichletBC` will impose the conditions weakly whenever the equations in the bulk provide corresponding facet terms by the method :py:meth:`~pyoomph.generic.codegen.Equations.get_weak_dirichlet_terms_for_DG`. If this function returns ``None`` or if the keyword argument ``prefer_weak_for_DG`` in :py:class:`~pyoomph.meshes.bcs.DirichletBC` is set to ``False``, the conditions will be imposed strongly. The output is shown in :numref:`figpoissonweakdirichlet`.
+By default, :py:class:`~pyoomph.equations.generic.DirichletBC` will impose the conditions weakly whenever the equations in the bulk provide corresponding facet terms by the method :py:meth:`~pyoomph.generic.codegen.Equations.get_weak_dirichlet_terms_for_DG`. If this function returns ``None`` or if the keyword argument ``prefer_weak_for_DG`` in :py:class:`~pyoomph.equations.generic.DirichletBC` is set to ``False``, the conditions will be imposed strongly. The output is shown in :numref:`figpoissonweakdirichlet`.
 
 ..  figure:: dg_weak_dbc.*
 	:name: figpoissonweakdirichlet

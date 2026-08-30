@@ -1,3 +1,30 @@
+#  @file
+#  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
+#
+#  @section LICENSE
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+#  The main author may be contacted at c.diddens@utwente.nl
+#
+# ========================================================================
+
 from pyoomph import *
 from pyoomph.equations.navier_stokes import *
 from pyoomph.equations.ALE import *
@@ -26,7 +53,8 @@ class RivuletProblem(Problem):
     def __init__(self):
         super().__init__()
         # Contact angle and slip length
-        self.theta,self.sliplength=self.define_global_parameter(theta=90*degree,sliplength=1) 
+        self.theta=self.define_global_parameter(theta=90*degree)
+        self.sliplength=self.define_global_parameter(sliplength=1)
         
     def define_problem(self):        
         self+=RivuletMesh() # Add a 2d mesh       
@@ -60,8 +88,6 @@ class RivuletProblem(Problem):
 problem=RivuletProblem() # Create the problem
 # Setup the problem for k-stability analysis, we do not need an analytic Hessian, since we don't do any bifurcation tracking
 problem.setup_for_stability_analysis(additional_cartesian_mode=True,analytic_hessian=False) 
-# Use the SLEPc eigensolver with MUMPS
-problem.set_eigensolver("slepc").use_mumps()
 problem.solve() # Solve the base state
 problem.save_state("start.dump") # Save the start case at 90°
 

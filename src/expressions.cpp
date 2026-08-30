@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -26,6 +26,7 @@ The main author may be contacted at c.diddens@utwente.nl
 #include <cassert>
 #include <sstream>
 #include <limits>
+#include <cmath>
 
 using namespace GiNaC;
 
@@ -80,9 +81,12 @@ namespace GiNaC
 		c.s << "<" << sp.cme->get_id_name() << " @" << sp.cme << ">";
 	}
 
-	// When generating C code, a global parameter is not inlined as a literal: it is registered (on first encounter for the
-	// current FiniteElementCode) in a per-code local index table, and the generated code accesses its *current* value
-	// indirectly through the function table pointer so that changing the parameter later does not require recompilation.
+	// When generating C code, a global parameter is not inlined as a literal: the generated code accesses its *current*
+	// value through the function table so that changing the parameter later does not require recompilation. The local
+	// slot is normally registered up front by the print-free screening pass (GlobalParameterFunctionScope in
+	// src/codegen.cpp), which also hoists the value into a const double pyoomph_gparam_<i> local that is referenced
+	// here. Printing paths without such a scope (multi-ret callback bodies, geometric Jacobians) fall back to lazy
+	// first-encounter registration and the self-contained indirect access, which needs no declaration.
 	template <>
 	void GiNaCGlobalParameterWrapper::print(const print_context &c, unsigned) const
 	{
@@ -103,7 +107,14 @@ namespace GiNaC
 				pyoomph::__current_code->local_parameter_symbols.push_back(*this);
 				pyoomph::__current_code->global_parameter_to_local_indices.insert(std::pair<unsigned, unsigned>(sp.cme->get_global_index(), local_index));
 			}
-			c.s << "(*(my_func_table->global_parameters[" << local_index << "]))";
+			if (pyoomph::__current_code->params_declared_in_current_function.count(local_index))
+			{
+				c.s << "pyoomph_gparam_" << local_index;
+			}
+			else
+			{
+				c.s << "(*(my_func_table->global_parameters[" << local_index << "]))";
+			}
 		}
 		else
 		{
@@ -203,6 +214,9 @@ namespace GiNaC
 namespace pyoomph
 {
 
+	unsigned DelayedPythonCallbackExpansion::next_creation_index = 0;
+	unsigned CustomCoordinateSystem::next_creation_index = 0;
+
 	CustomCoordinateSystem __no_coordinate_system;
 	GiNaCCustomCoordinateSystemWrapper __no_coordinate_system_wrapper(&__no_coordinate_system);
 
@@ -226,7 +240,11 @@ namespace pyoomph
 
 	bool operator<(const CustomMathExpressionWrapper &lhs, const CustomMathExpressionWrapper &rhs)
 	{
-		return lhs.cme < rhs.cme;
+		// CustomMathExpressionBase::unique_id is a construction-order counter (see its declaration:
+		// "Required for Parallel processes and missing GiNaC order"), i.e. exactly the stable ordering
+		// key this comparison needs - unlike the raw pointer, which was used here instead (heap-address
+		// order, not reproducible across separate process runs of the exact same input).
+		return lhs.cme->get_unique_id() < rhs.cme->get_unique_id();
 	}
 
 	bool operator==(const CustomMultiReturnExpressionWrapper &lhs, const CustomMultiReturnExpressionWrapper &rhs)
@@ -236,7 +254,7 @@ namespace pyoomph
 
 	bool operator<(const CustomMultiReturnExpressionWrapper &lhs, const CustomMultiReturnExpressionWrapper &rhs)
 	{
-		return lhs.cme < rhs.cme;
+		return lhs.cme->unique_id < rhs.cme->unique_id;
 	}
 
 	bool operator==(const CustomMultiReturnExpressionResultSymbol &lhs, const CustomMultiReturnExpressionResultSymbol &rhs)
@@ -246,7 +264,7 @@ namespace pyoomph
 
 	bool operator<(const CustomMultiReturnExpressionResultSymbol &lhs, const CustomMultiReturnExpressionResultSymbol &rhs)
 	{
-		return (lhs.func < rhs.func) || ((lhs.func == rhs.func) && (lhs.arglist < rhs.arglist)) || ((lhs.func == rhs.func) && (lhs.arglist == rhs.arglist) && (lhs.index < rhs.index));
+		return (lhs.func->unique_id < rhs.func->unique_id) || ((lhs.func == rhs.func) && (lhs.arglist < rhs.arglist)) || ((lhs.func == rhs.func) && (lhs.arglist == rhs.arglist) && (lhs.index < rhs.index));
 	}
 
 	bool operator==(const DelayedPythonCallbackExpansionWrapper &lhs, const DelayedPythonCallbackExpansionWrapper &rhs)
@@ -256,7 +274,7 @@ namespace pyoomph
 
 	bool operator<(const DelayedPythonCallbackExpansionWrapper &lhs, const DelayedPythonCallbackExpansionWrapper &rhs)
 	{
-		return lhs.cme < rhs.cme;
+		return lhs.cme->get_creation_index() < rhs.cme->get_creation_index();
 	}
 
 	bool operator==(const CustomCoordinateSystemWrapper &lhs, const CustomCoordinateSystemWrapper &rhs)
@@ -266,7 +284,7 @@ namespace pyoomph
 
 	bool operator<(const CustomCoordinateSystemWrapper &lhs, const CustomCoordinateSystemWrapper &rhs)
 	{
-		return lhs.cme < rhs.cme;
+		return lhs.cme->get_creation_index() < rhs.cme->get_creation_index();
 	}
 
 	bool operator==(const GlobalParameterWrapper &lhs, const GlobalParameterWrapper &rhs)
@@ -276,7 +294,11 @@ namespace pyoomph
 
 	bool operator<(const GlobalParameterWrapper &lhs, const GlobalParameterWrapper &rhs)
 	{
-		return lhs.cme < rhs.cme;
+		// GlobalParameterDescriptor::global_index is assigned at registration time (see Problem::
+		// define_global_parameter), so it is a stable, reproducible ordering key - unlike the raw
+		// pointer (heap-address order, not reproducible across separate process runs of the exact
+		// same input; see branch deterministic_codegen).
+		return lhs.cme->get_global_index() < rhs.cme->get_global_index();
 	}
 
 	bool operator==(const PlaceHolderResolveInfo &lhs, const PlaceHolderResolveInfo &rhs)
@@ -293,10 +315,17 @@ namespace pyoomph
 
 	bool operator<(const PlaceHolderResolveInfo &lhs, const PlaceHolderResolveInfo &rhs)
 	{
-		if (lhs.code < rhs.code)
-			return true;
-		else if (lhs.code > rhs.code)
-			return false;
+		// Compare by FiniteElementCode::get_creation_index() instead of the raw pointer (heap-address
+		// order, not reproducible across separate process runs of the exact same input; see branch
+		// deterministic_codegen). NULL (no code attached) sorts before any real code.
+		if (lhs.code != rhs.code)
+		{
+			if (lhs.code == NULL)
+				return true;
+			if (rhs.code == NULL)
+				return false;
+			return lhs.code->get_creation_index() < rhs.code->get_creation_index();
+		}
 		if (lhs.tags.size() < rhs.tags.size())
 			return true;
 		else if (lhs.tags.size() > rhs.tags.size())
@@ -331,10 +360,10 @@ namespace pyoomph
 		return (lhs.arg.compare(rhs.arg) < 0) || (lhs.arg.compare(rhs.arg) == 0 && (lhs.dual < rhs.dual));
 	}
 
-	std::map<CustomMathExpressionBase *, int> CustomMathExpressionBase::code_map; // Mapping for indices
+	std::map<CustomMathExpressionBase *, int, CustomMathExpressionBasePtrLess> CustomMathExpressionBase::code_map; // Mapping for indices
 	unsigned CustomMathExpressionBase::unique_counter = 0;
 
-	std::map<CustomMultiReturnExpressionBase *, int> CustomMultiReturnExpressionBase::code_map; // Mapping for indices
+	std::map<CustomMultiReturnExpressionBase *, int, CustomMultiReturnExpressionBasePtrLess> CustomMultiReturnExpressionBase::code_map; // Mapping for indices
 	unsigned CustomMultiReturnExpressionBase::unique_counter = 0;
 
 	std::map<std::string, GiNaC::possymbol> base_units;
@@ -375,7 +404,6 @@ namespace pyoomph
 			return false;
 		}
 
-		int el_dim = -1; // -1 means "not yet set" / element dimension unknown at this point
 
 		// Definitions of the global symbols declared in expressions.hpp. Names passed to the constructors match the
 		// identifiers used in generated C code / pretty-printed output.
@@ -394,7 +422,6 @@ namespace pyoomph
 		potential_real_symbol zeta_coordinate_1("zeta_coordinate_1");
 		potential_real_symbol zeta_coordinate_2("zeta_coordinate_2");
 		potential_real_symbol zeta_coordinate_3("zeta_coordinate_3");
-		potential_real_symbol timefrac_tracer("timefrac_tracer");
 		potential_real_symbol t("t");
 		potential_real_symbol _dt_BDF1("_dt_BDF1");
 		potential_real_symbol _dt_BDF2("_dt_BDF2");
@@ -402,8 +429,6 @@ namespace pyoomph
 		potential_real_symbol __partial_t_mass_matrix("__partial_t_mass_matrix");
 		potential_real_symbol dt("dt");
 		symbol nnode("nnode");
-
-		potential_real_symbol *proj_on_test_function = NULL;
 
 		// Both loop indices range over [0, nnode); which one actually corresponds to the number of shape/test functions used
 		// in a given loop is determined by the code generator's context, not by this declared range
@@ -630,6 +655,66 @@ namespace pyoomph
 						{
 							throw_runtime_error("Should not end up here");
 						}
+					}
+				}
+				else if (is_ex_the_function(cl, expressions::piecewise_geq0))
+				{
+					// piecewise_geq0(cond,a,b): the units of the three arguments are unrelated to each other. Only the
+					// *sign* of cond decides the branch and base units are positive by construction, so cond's unit and
+					// its (nonnegative) scale can be divided out without changing the outcome. The two branch values are
+					// alternatives of the same quantity, so they must agree in units - that unit is the result's unit.
+					GiNaC::ex cfactor = 1, cunits = 1, crest = 1;
+					if (!collect_base_units(cl.op(0), cfactor, cunits, crest))
+					{
+						std::ostringstream oss;
+						oss << "Cannot extract the unit from the condition of " << cl << " , i.e. from " << cl.op(0);
+						throw_runtime_error(oss.str());
+					}
+					// cfactor is numeric here (a symbolic prefactor would have been folded into crest) and only its sign
+					// is relevant, so normalize the condition to O(1) instead of keeping the raw scale
+					GiNaC::ex cond_rest = (cfactor.is_zero() ? GiNaC::ex(0) : GiNaC::ex(crest * cfactor / abs(cfactor)));
+
+					std::vector<GiNaC::ex> branch_rest(2, 1), branch_scale(2, 1);
+					GiNaC::ex common_unit = 0;
+					GiNaC::ex dominant_factor = 0;
+					for (unsigned int i = 0; i < 2; i++)
+					{
+						GiNaC::ex sfactor = 1, sunit = 1, srest = 1;
+						if (!collect_base_units(cl.op(i + 1), sfactor, sunit, srest))
+						{
+							std::ostringstream oss;
+							oss << "Cannot extract the unit from branch " << i + 1 << " of " << cl << " , i.e. from " << cl.op(i + 1);
+							throw_runtime_error(oss.str());
+						}
+						sunit = GiNaC::expand(sunit);
+						if (!sfactor.is_zero()) // a plain zero branch is compatible with any unit
+						{
+							if (common_unit.is_zero())
+								common_unit = sunit;
+							else if (!sunit.is_equal(common_unit))
+							{
+								std::ostringstream oss;
+								oss << "Nonmatching units in the two branches of " << cl << ":  " << common_unit << " vs " << sunit << " in " << cl.op(i + 1) << std::endl;
+								throw_runtime_error(oss.str());
+							}
+						}
+						if (abs(sfactor) > dominant_factor)
+							dominant_factor = abs(sfactor);
+						branch_rest[i] = srest;
+						branch_scale[i] = sfactor;
+					}
+					if (dominant_factor.is_zero())
+					{
+						rest *= 0; // both branches are exactly zero, hence so is the whole expression
+					}
+					else
+					{
+						units *= common_unit;
+						units = GiNaC::expand(units);
+						factor *= dominant_factor;
+						rest *= pyoomph::expressions::piecewise_geq0(cond_rest,
+																	 branch_rest[0] * branch_scale[0] / dominant_factor,
+																	 branch_rest[1] * branch_scale[1] / dominant_factor);
 					}
 				}
 				else if (GiNaC::is_a<GiNaC::function>(cl))
@@ -1390,7 +1475,19 @@ namespace pyoomph
 			return sys->div(v, ndim, edim, _flags);
 		}
 
-		REGISTER_FUNCTION(div, eval_func(div_eval))
+		// Declared commutative on purpose. Without a return type GiNaC infers one from the first
+		// argument, and grad is noncommutative, so a *held* div(grad(c)) - held whenever the argument
+		// still contains an unexpanded placeholder, see need_to_hold - inherited that. GiNaC's
+		// add::eval() then refused to add a number to it: "sum of non-commutative objects has non-zero
+		// numeric term". That made the scalar Laplacian unusable inside any nonlinear expression, e.g.
+		// the sqrt(R^2+eps^2) of a discontinuity-capturing term, even though div(grad(c)) is a scalar
+		// and trace(grad(grad(c))) - the identical quantity - was accepted.
+		// div lowers the rank by one, so commutative is the honest tag for the vector argument. For a
+		// tensor argument the result is a vector and the tag is then a white lie; all it costs is
+		// GiNaC's guard against adding a bare number to an *isolated* tensor divergence, and that
+		// guard survives as soon as the vector is summed with a grad, which is how every strong
+		// residual is built. dot, trace and determinant are declared the same way.
+		REGISTER_FUNCTION(div, eval_func(div_eval).set_return_type(GiNaC::return_types::commutative))
 
 		////////////////
 
@@ -1475,9 +1572,29 @@ namespace pyoomph
 
 		////////////////
 
-		// Dot (inner) product of two column vectors (Nx1 matrices). If the two vectors have different lengths, the shorter
-		// one is implicitly zero-padded (but only if the "extra" trailing components of the longer vector are actually
-		// zero -- otherwise this is an error, since silently dropping nonzero components would be wrong).
+		// Standard single-index contraction of a matrix with a column vector, i.e. the adjacent-index one:
+		//   contract_column=true : (M.v)_i = sum_j M_ij v_j   -- contracts M's column index
+		//   contract_column=false: (v.M)_i = sum_j v_j M_ji   -- contracts M's row index
+		// std::min on the summed extent keeps the zero-padding tolerance that the vector/vector branch of dot_eval and
+		// double_dot already have: a tensor assembled with fill_to_max_vector_dim=False is 2x2 in 2d and meets
+		// three-component padded vectors.
+		static ex matrix_vector_contract(const matrix &m, const matrix &v, bool contract_column)
+		{
+			unsigned int free_n = (contract_column ? m.rows() : m.cols());
+			unsigned int sum_n = std::min(contract_column ? m.cols() : m.rows(), v.rows());
+			std::vector<GiNaC::ex> r(free_n, 0);
+			for (unsigned int i = 0; i < free_n; i++)
+				for (unsigned int j = 0; j < sum_n; j++)
+					r[i] += (contract_column ? m(i, j) * v(j, 0) : v(j, 0) * m(j, i));
+			return 0 + GiNaC::matrix(free_n, 1, GiNaC::lst(r.begin(), r.end()));
+		}
+
+		// Dot (inner) product. Between two column vectors (Nx1 matrices) it is the usual sum_i a_i*b_i; if the two vectors
+		// have different lengths, the shorter one is implicitly zero-padded (but only if the "extra" trailing components of
+		// the longer vector are actually zero -- otherwise this is an error, since silently dropping nonzero components
+		// would be wrong). Between a matrix and a vector it is the standard adjacent-index contraction, A.b = A_ij b_j and
+		// a.B = a_j B_ji, agreeing with matproduct(A,b) and matproduct(transpose(B),a) respectively. Two matrices are
+		// rejected: A*B and A:B are both plausible readings, so the caller has to say which.
 		static ex dot_eval(const ex &a, const ex &b)
 		{
 			if (pyoomph::pyoomph_verbose)
@@ -1487,7 +1604,9 @@ namespace pyoomph
 						  << std::endl;
 			if (need_to_hold(a) || need_to_hold(b))
 				return dot(a, b).hold();
-			// Also stay held if either operand still contains an unresolved grad(...) call, since evalm() cannot expand a gradient's tensor shape yet
+			// Also stay held if either operand still contains an unresolved grad(...) call, since evalm() cannot expand a
+			// gradient's tensor shape yet. Strictly redundant -- need_to_hold above already lists grad -- but kept because
+			// it states the reason locally.
 			if (a.has(grad(wild(), wild(), wild(), wild(), wild())))
 				return dot(a, b).hold();
 			if (b.has(grad(wild(), wild(), wild(), wild(), wild())))
@@ -1503,13 +1622,18 @@ namespace pyoomph
 				matrix ma = ex_to<matrix>(eva);
 				matrix mb = ex_to<matrix>(evb);
 
+				// Mixed matrix/vector: the standard adjacent-index contraction (see matrix_vector_contract above)
+				if (ma.cols() != 1 && mb.cols() == 1)
+					return matrix_vector_contract(ma, mb, true); // A.b
+				if (ma.cols() == 1 && mb.cols() != 1)
+					return matrix_vector_contract(mb, ma, false); // a.B
 				if (ma.cols() != 1 || mb.cols() != 1)
 				{
 					std::ostringstream oss;
 					oss << std::endl
 						<< " a = " << a << std::endl
 						<< " b = " << b << std::endl;
-					throw_runtime_error("dot is only allowed between vectors, but got: " + oss.str());
+					throw_runtime_error("dot between two matrices is ambiguous. Use matproduct(A,B) for the matrix product A*B, or double_dot(A,B) for the full contraction A:B. Got: " + oss.str());
 				}
 				GiNaC::ex ret;
 				if (ma.rows() != mb.rows())
@@ -1645,10 +1769,17 @@ namespace pyoomph
 
 		////
 
-		// Generic index contraction, implementing the "@"/matmul operator for arbitrary vector/matrix combinations:
-		// vector.vector -> dot product; vector.matrix or matrix.vector -> matrix-vector product (returned as a column
-		// vector); matrix.matrix -> double_dot (full Frobenius contraction); scalar.scalar (or any non-matrix operand)
-		// -> plain multiplication.
+		// Generic index contraction, implementing the "@"/matmul operator for arbitrary vector/matrix combinations. It is a
+		// pure dispatcher: anything involving a column vector goes to dot(), two matrices to double_dot(), and a non-matrix
+		// operand to plain multiplication.
+		//
+		// The mixed matrix/vector case used to be hand-written here and contracted the OUTER index, so contract(A,b) was
+		// transpose(A).b and contract(a,B) was B.a -- the standard dot product with the operands swapped. Combined with
+		// grad() being the Jacobian (grad(u)_ij = d u_i/d x_j) the two reversals cancelled, which is why contract(u,grad(u))
+		// came out as the correct advection term u.grad(u) while contract(grad(u),u) -- the order that reads correctly under
+		// a Jacobian grad -- silently gave grad(|u|^2/2). Both now follow dot(), i.e. the standard adjacent-index
+		// convention, so contract(grad(u),u) is the advection term. Delegating rather than duplicating is deliberate: the
+		// two operators had drifted apart precisely because they were implemented twice.
 		static ex contract_eval(const ex &a, const ex &b)
 		{
 			if (pyoomph::pyoomph_verbose)
@@ -1670,53 +1801,15 @@ namespace pyoomph
 			{
 				matrix ma = ex_to<matrix>(evma);
 				matrix mb = ex_to<matrix>(evmb);
-				// std::cout << "COL ROW INFO" << ma.cols() << " " << mb.cols() << "    " << ma.rows() << "  " << mb.rows() << std::endl;
-				if (ma.cols() == 1 && mb.cols() == 1)
-					return dot(evma, evmb);
-				else if (ma.cols() == 1)
-				{
-					std::vector<GiNaC::ex> v(std::min(ma.rows(), mb.rows()), 0);
-					for (unsigned int i = 0; i < v.size(); i++)
-					{
-						for (unsigned int j = 0; j < mb.rows(); j++)
-							v[i] += ma(j, 0) * mb(i, j);
-					}
-					return 0 + GiNaC::matrix(v.size(), 1, GiNaC::lst(v.begin(), v.end()));
-				}
-				else if (mb.cols() == 1)
-				{
-					//				std::cout << "COL ROW INFO" << ma.cols() << " " << mb.cols() << "    " << ma.rows() << "  " << mb.rows() << std::endl;
-					//				std::cout << "a=" << ma << "  " <<"  b=" << mb   << std::endl;
-					std::vector<GiNaC::ex> v(std::min(ma.rows(), mb.rows()), 0);
-					for (unsigned int i = 0; i < v.size(); i++)
-					{
-						for (unsigned int j = 0; j < ma.rows(); j++)
-						{
-							//		      std::cout << "  CONTRIB " << i << "  " << j << "  is " << mb(j,0) << "  " << ma(j,i) << std::endl;
-							v[i] += mb(j, 0) * ma(j, i);
-						}
-						//  				std::cout << "v[" <<i << "] = " << v[i]   << std::endl;
-					}
-
-					return 0 + GiNaC::matrix(v.size(), 1, GiNaC::lst(v.begin(), v.end()));
-				}
+				if (ma.cols() == 1 || mb.cols() == 1)
+					return dot(evma, evmb); // vector.vector, matrix.vector and vector.matrix
 				else
 					return double_dot(evma, evmb);
 			}
-			if (!is_a<matrix>(evma) && !is_a<matrix>(evmb))
-			{
-				return evma * evmb;
-			}
-			else
-			{
-				return evma * evmb;
-			}
-			std::ostringstream oss;
-			oss << std::endl
-				<< " a = " << evma << std::endl
-				<< " b = " << evmb << std::endl;
-			throw_runtime_error("Cannot contract the following:" + oss.str());
-			return 0;
+			// At least one operand is not a matrix, i.e. a scalar: contracting with a scalar is just scaling, whether the
+			// other operand is a scalar, a vector or a tensor. (This used to be two branches with identical bodies,
+			// followed by an unreachable "Cannot contract the following" throw.)
+			return evma * evmb;
 		}
 
 		REGISTER_FUNCTION(contract, eval_func(contract_eval).set_return_type(GiNaC::return_types::commutative))
@@ -2165,7 +2258,7 @@ namespace pyoomph
 		class SubExpressionsToRealAndImag : public GiNaC::map_function
 		{
 		public:
-			GiNaC::ex operator()(const GiNaC::ex & inp)
+			GiNaC::ex operator()(const GiNaC::ex & inp) override
 			{
 				if (is_ex_the_function(inp, expressions::subexpression))
 				{
@@ -2302,7 +2395,7 @@ namespace pyoomph
 		class ReplaceGlobalParamsByCurrentValues : public GiNaC::map_function
 		{
 		public:
-			GiNaC::ex operator()(const GiNaC::ex &inp)
+			GiNaC::ex operator()(const GiNaC::ex &inp) override
 			{
 				if (GiNaC::is_a<GiNaC::GiNaCGlobalParameterWrapper>(inp))
 				{
@@ -2338,15 +2431,16 @@ namespace pyoomph
 			double frac_part;
 			int partial_t_action; // 0: No change, 1: change all partial_t schemes of first order to BDF1
 			bool apply_on_integral_dx; // If true, also apply on the integral_dx symbols (for ALE)
+			bool apply_on_others;      // If true, also on the normal, the element size and the Eulerian shape derivatives
 		public:
-			EvaluateShapeExpansionsInPast(int _index, int tstep_action,bool _apply_on_integral_dx) : index(_index), is_int(true), frac_part(0), partial_t_action(tstep_action), apply_on_integral_dx(_apply_on_integral_dx)
+			EvaluateShapeExpansionsInPast(int _index, int tstep_action,bool _apply_on_integral_dx,bool _apply_on_others=false) : index(_index), is_int(true), frac_part(0), partial_t_action(tstep_action), apply_on_integral_dx(_apply_on_integral_dx), apply_on_others(_apply_on_others)
 			{
 				if (index > 2)
 				{
 					throw_runtime_error("Cannot evaluate earlier in past than two steps");
 				}
 			}
-			EvaluateShapeExpansionsInPast(double frac, int tstep_action,bool _apply_on_integral_dx) : index(std::floor(frac)), is_int(false), frac_part(frac - std::floor(frac)), partial_t_action(tstep_action), apply_on_integral_dx(_apply_on_integral_dx)
+			EvaluateShapeExpansionsInPast(double frac, int tstep_action,bool _apply_on_integral_dx,bool _apply_on_others=false) : index(std::floor(frac)), is_int(false), frac_part(frac - std::floor(frac)), partial_t_action(tstep_action), apply_on_integral_dx(_apply_on_integral_dx), apply_on_others(_apply_on_others)
 			{
 				if (index > 2 || (index > 1 && frac > 0))
 				{
@@ -2364,7 +2458,7 @@ namespace pyoomph
 					index++;
 				}
 			}
-			GiNaC::ex operator()(const GiNaC::ex &inp)
+			GiNaC::ex operator()(const GiNaC::ex &inp) override
 			{
 				if (GiNaC::is_a<GiNaC::GiNaCShapeExpansion>(inp))
 				{
@@ -2396,6 +2490,16 @@ namespace pyoomph
 						return GiNaC::GiNaCShapeExpansion(sp_past);
 					}
 					sp_past.time_history_index = index;
+					// Only with apply_on_others does the EULERIAN shape derivative follow the mesh back in
+					// time as well; on its own, evaluate_in_past moves the nodal values and nothing else.
+					// The flag is set only where it can change anything: at history level 0 the geometry is
+					// the current one anyway, and shapes other than the Eulerian derivative do not depend on
+					// where the nodes are. Setting it more widely would be harmless numerically but would
+					// split every affected interpolation into two identical C variables - and since
+					// time_scheme() asks for apply_on_others at level 0 for the plain BDF schemes, that
+					// would duplicate interpolations throughout ordinary residuals.
+					bool geom_matters = apply_on_others && sp.basis->is_eulerian_deriv();
+					sp_past.history_geometry = geom_matters && (index > 0);
 					if (is_int)
 					{
 						return GiNaC::GiNaCShapeExpansion(sp_past);
@@ -2404,6 +2508,7 @@ namespace pyoomph
 					{
 						ShapeExpansion sp_past1 = sp;
 						sp_past1.time_history_index = index + 1;
+						sp_past1.history_geometry = geom_matters && (index + 1 > 0);
 						return (1 - frac_part) * GiNaC::GiNaCShapeExpansion(sp_past) + frac_part * GiNaC::GiNaCShapeExpansion(sp_past1);
 					}
 				}
@@ -2443,6 +2548,41 @@ namespace pyoomph
 						return (1 - frac_part) * GiNaC::GiNaCSpatialIntegralSymbol(sp_past) + frac_part * GiNaC::GiNaCSpatialIntegralSymbol(sp_past1);
 					}
 				}
+				// The geometry itself also belongs to the configuration the mesh had back then: the normal,
+				// the element size and (through the shape expansions above) the Eulerian shape derivatives.
+				else if (apply_on_others && index > 0 && GiNaC::is_a<GiNaC::GiNaCNormalSymbol>(inp))
+				{
+					pyoomph::NormalSymbol sp_past = GiNaC::ex_to<GiNaC::GiNaCNormalSymbol>(inp).get_struct();
+					if (is_int)
+					{
+						sp_past.history_step = index;
+						return GiNaC::GiNaCNormalSymbol(sp_past);
+					}
+					else
+					{
+						pyoomph::NormalSymbol sp_past1 = sp_past;
+						sp_past.history_step = index;
+						sp_past1.history_step = index + 1;
+						return (1 - frac_part) * GiNaC::GiNaCNormalSymbol(sp_past) + frac_part * GiNaC::GiNaCNormalSymbol(sp_past1);
+					}
+				}
+				else if (apply_on_others && index > 0 && GiNaC::is_a<GiNaC::GiNaCElementSizeSymbol>(inp))
+				{
+					pyoomph::ElementSizeSymbol sp_past = GiNaC::ex_to<GiNaC::GiNaCElementSizeSymbol>(inp).get_struct();
+					if (sp_past.is_lagrangian()) return inp.map(*this); // The Lagrangian size does not move
+					if (is_int)
+					{
+						sp_past.history_step = index;
+						return GiNaC::GiNaCElementSizeSymbol(sp_past);
+					}
+					else
+					{
+						pyoomph::ElementSizeSymbol sp_past1 = sp_past;
+						sp_past.history_step = index;
+						sp_past1.history_step = index + 1;
+						return (1 - frac_part) * GiNaC::GiNaCElementSizeSymbol(sp_past) + frac_part * GiNaC::GiNaCElementSizeSymbol(sp_past1);
+					}
+				}
 				else
 				{
 					return inp.map(*this);
@@ -2472,19 +2612,25 @@ namespace pyoomph
 			}
 			GiNaC::numeric index_n = GiNaC::ex_to<GiNaC::numeric>(index);
 			GiNaC::numeric index_ts = GiNaC::ex_to<GiNaC::numeric>(tstep_action);
-			bool apply_on_integral_dx_bool = !GiNaC::is_zero(apply_on_integral_dx);
+			// The last argument is a bit field rather than a plain bool, so that a second kind of
+			// "move this into the past as well" could be added without changing the arity of
+			// eval_in_past (and hence every held expression already carrying it):
+			//   bit 0 -> the integration measure dx,  bit 1 -> normal, element size, Eulerian shape derivatives
+			int apply_flags = GiNaC::ex_to<GiNaC::numeric>(apply_on_integral_dx).to_int();
+			bool apply_on_integral_dx_bool = (apply_flags & 1);
+			bool apply_on_others_bool = (apply_flags & 2);
 			if (index_n.is_zero() && index_ts.is_zero())
 			{
 				return expr;
 			}
 			else if (index_n.is_pos_integer())
 			{
-				EvaluateShapeExpansionsInPast in_past(index_n.to_int(), index_ts.to_int(),apply_on_integral_dx_bool);
+				EvaluateShapeExpansionsInPast in_past(index_n.to_int(), index_ts.to_int(),apply_on_integral_dx_bool,apply_on_others_bool);
 				return in_past(expr);
 			}
 			else if (!index_n.is_negative())
 			{
-				EvaluateShapeExpansionsInPast in_past(index_n.to_double(), index_ts.to_int(),apply_on_integral_dx_bool);
+				EvaluateShapeExpansionsInPast in_past(index_n.to_double(), index_ts.to_int(),apply_on_integral_dx_bool,apply_on_others_bool);
 				return in_past(expr);
 			}
 			else
@@ -2506,7 +2652,7 @@ namespace pyoomph
 
 		public:
 			EvaluateShapeExpansionsAtExpansionMode(int _index) : index(_index) {}
-			GiNaC::ex operator()(const GiNaC::ex &inp)
+			GiNaC::ex operator()(const GiNaC::ex &inp) override
 			{
 				if (GiNaC::is_a<GiNaC::GiNaCShapeExpansion>(inp))
 				{
@@ -2531,6 +2677,21 @@ namespace pyoomph
 						sp.expansion_mode = index;
 						return GiNaC::GiNaCNormalSymbol(sp);
 					}
+				}
+				// The element size is a pure function of the nodal positions, so it has a first-order
+				// perturbation like any other geometric quantity. Tagging it makes that dh part of the
+				// m!=0 Jacobian (the exact derivative of the discrete residual, which bifurcation
+				// tracking needs); leaving it untagged freezes it, and with it tau, at the base state -
+				// the usual "frozen coefficient" reading, and arguably the more meaningful one, since h
+				// is a Cartesian mesh metric whose azimuthal extent is not represented at all.
+				if (pyoomph::expand_element_size_in_expansion_modes && GiNaC::is_a<GiNaC::GiNaCElementSizeSymbol>(inp))
+				{
+					GiNaC::GiNaCElementSizeSymbol se = GiNaC::ex_to<GiNaC::GiNaCElementSizeSymbol>(inp);
+					ElementSizeSymbol sp = se.get_struct();
+					if (sp.expansion_mode == index)
+						return inp;
+					sp.expansion_mode = index;
+					return GiNaC::GiNaCElementSizeSymbol(sp);
 				}
 				if (GiNaC::is_a<GiNaC::GiNaCSpatialIntegralSymbol>(inp))
 				{
@@ -2621,7 +2782,7 @@ namespace pyoomph
 
 		public:
 			DeactivateJacobianOfExpansionMode(int _index, int _flag) : index(_index), flag(_flag) {}
-			GiNaC::ex operator()(const GiNaC::ex &inp)
+			GiNaC::ex operator()(const GiNaC::ex &inp) override
 			{
 				if (GiNaC::is_a<GiNaC::GiNaCShapeExpansion>(inp))
 				{
@@ -2724,9 +2885,35 @@ namespace pyoomph
 			}
 		}
 
+		// A time-stepping weight is a real number by construction, but since the function always stays held
+		// GiNaC cannot see that: without the hooks below it treats it as potentially complex and leaves
+		// real_part()/imag_part() of it standing. That is fatal for the normal-mode (azimuthal/Cartesian-k)
+		// analysis, which splits the residual into real and imaginary parts: the generated C then calls
+		// imag_part(shapeinfo->timestepper_weights_dt_BDF2[0]), which does not exist and the JIT module
+		// fails to link. It is reached by every time_derivative_of_integral(), i.e. by every add_dweak_dt().
+		static ex time_stepper_weight_real_part(const ex &order, const ex &index, const ex &scheme)
+		{
+			return time_stepper_weight(order, index, scheme).hold();
+		}
+
+		static ex time_stepper_weight_imag_part(const ex &, const ex &, const ex &)
+		{
+			return 0;
+		}
+
+		// Same statement once more, in the form the rest of the codebase uses to declare a quantity real
+		// (see pyginacstruct::conjugate).
+		static ex time_stepper_weight_conjugate(const ex &order, const ex &index, const ex &scheme)
+		{
+			return time_stepper_weight(order, index, scheme).hold();
+		}
+
 		REGISTER_FUNCTION(time_stepper_weight, eval_func(time_stepper_weight_eval)
 												   .print_func<print_csrc_float>(time_stepper_weight_eval_csrc_float)
 												   .print_func<print_csrc_double>(time_stepper_weight_eval_csrc_float)
+												   .real_part_func(time_stepper_weight_real_part)
+												   .imag_part_func(time_stepper_weight_imag_part)
+												   .conjugate_func(time_stepper_weight_conjugate)
 												   .set_return_type(GiNaC::return_types::commutative))
 
 		// heaviside(): the Heaviside step function. Numeric arguments are evaluated directly (with heaviside(0)=1/2, the
@@ -2828,10 +3015,40 @@ namespace pyoomph
 			return arg.diff(deriv_arg) * signum(arg);
 		}
 
+		// |x| is real and non-negative whatever x is, and GiNaC has to be told so explicitly: without
+		// an info_func it treats absolute() as an arbitrary function of unknown reality. That matters
+		// for the azimuthal/normal-mode expansion, which separates real and imaginary parts:
+		// power::real_part() only leaves a fractional power alone when its basis reports
+		// info_flags::nonnegative, and otherwise rewrites it into polar form,
+		// |X|^p*(cos+I*sin)(p*atan2(Im,Re)). The generated element then referenced real_part/imag_part
+		// as if they were C functions and failed to load with "undefined symbol: imag_part".
+		// GiNaC's own abs does exactly this (abs_info in inifcns.cpp).
+		static bool absolute_info(const ex &arg, unsigned inf)
+		{
+			switch (inf)
+			{
+			case info_flags::real:
+			case info_flags::nonnegative:
+				return true;
+			case info_flags::positive:
+				return arg.info(info_flags::positive) || arg.info(info_flags::negative);
+			default:
+				return false;
+			}
+		}
+
+		static ex absolute_real_part(const ex &arg) { return absolute(arg); }
+		static ex absolute_imag_part(const ex &arg) { return 0; }
+		static ex absolute_conjugate(const ex &arg) { return absolute(arg); }
+
 		REGISTER_FUNCTION(absolute, eval_func(absolute_eval)
 										.print_func<print_csrc_float>(absolute_csrc_float)
 										.print_func<print_csrc_double>(absolute_csrc_float)
 										.expl_derivative_func(absolute_expl_derivative)
+										.info_func(absolute_info)
+										.real_part_func(absolute_real_part)
+										.imag_part_func(absolute_imag_part)
+										.conjugate_func(absolute_conjugate)
 										.set_return_type(GiNaC::return_types::commutative))
 
 		// signum(): sign of arg (returns 0 at exactly arg==0), printed as C "signum()"; deliberately differentiates to 0
@@ -2864,10 +3081,27 @@ namespace pyoomph
 			return 0; // TODO: Singularity, but this does not really matter here
 		}
 
+		// Real-valued for the real arguments it is meant for, and GiNaC has to be told, for the same
+		// reason as absolute() above: signum() reaches the azimuthal real/imaginary separation through
+		// d|x| = signum(x) dx, and an unevaluated imag_part(signum(...)) is emitted as a call to a
+		// C function that does not exist.
+		static bool signum_info(const ex &, unsigned inf)
+		{
+			return inf == info_flags::real;
+		}
+
+		static ex signum_real_part(const ex &arg) { return signum(arg); }
+		static ex signum_imag_part(const ex &) { return 0; }
+		static ex signum_conjugate(const ex &arg) { return signum(arg); }
+
 		REGISTER_FUNCTION(signum, eval_func(signum_eval)
 									  .print_func<print_csrc_float>(signum_csrc_float)
 									  .print_func<print_csrc_double>(signum_csrc_float)
 									  .expl_derivative_func(signum_expl_derivative)
+									  .info_func(signum_info)
+									  .real_part_func(signum_real_part)
+									  .imag_part_func(signum_imag_part)
+									  .conjugate_func(signum_conjugate)
 									  .set_return_type(GiNaC::return_types::commutative))
 
 		// minimum()/maximum(): min/max of two arguments, evaluated directly when both are numeric, else held
@@ -2992,7 +3226,9 @@ namespace pyoomph
 									   .evalf_func(maximum_evalf)
 									   .set_return_type(GiNaC::return_types::commutative))
 
-		// piecewise_geq0(cond,a,b): returns a if cond>=0, else b. Relational conditions (cond as a GiNaC::relational, e.g.
+		// piecewise_geq0(cond,a,b): returns a if cond>=0, else b. The zero case used to be decided the other way round here
+		// (by the strict numeric::is_positive()) than in the generated code, so an already numeric cond==0 gave b while the
+		// very same expression gave a once it had passed through code generation. Relational conditions (cond as a GiNaC::relational, e.g.
 		// from Python's <,<=,>,>= comparisons) are not supported here -- see the disabled block below explaining why
 		// (Python operator overloads would need extra work); only a numeric/constant condition is evaluated directly,
 		// otherwise the call stays held and is only resolved at code-generation time via a C ternary (see
@@ -3024,17 +3260,11 @@ namespace pyoomph
 				   case info_flags::relation_greater_or_equal:
 					   return o==greater_or_equal;
 			*/
-			if (GiNaC::is_a<GiNaC::numeric>(cond))
+			if (GiNaC::is_a<GiNaC::numeric>(cond) || GiNaC::is_a<GiNaC::constant>(cond))
 			{
-				//std::cout << "NUMERIC  " << cond << "  " << GiNaC::ex_to<GiNaC::numeric>(cond).is_positive() << std::endl;
-				if (!GiNaC::ex_to<GiNaC::numeric>(cond).is_positive())
-					return b;
-				else
-					return a;
-			}
-			else if (GiNaC::is_a<GiNaC::constant>(cond))
-			{
-				if (!GiNaC::ex_to<GiNaC::numeric>(GiNaC::ex_to<GiNaC::constant>(cond).evalf()).is_positive())
+				// to_double() (the real part of a complex numeric) rather than is_positive()/is_negative(), which are false
+				// for anything not real and would send a complex-typed but real-valued condition down the wrong branch
+				if (GiNaC::to_double(GiNaC::ex_to<GiNaC::numeric>(cond.evalf())) < 0)
 					return b;
 				else
 					return a;
@@ -3065,11 +3295,107 @@ namespace pyoomph
 										 .expl_derivative_func(piecewise_geq0_expl_derivative)
 										 .set_return_type(GiNaC::return_types::commutative))
 
+		// erf()/erfc(): GiNaC has no error function of its own, but C99 does, and GiNaC's generic C printer emits any
+		// function under its own (lowercased) name -- so nothing beyond the derivative and a numerical evaluation is
+		// needed here, and in particular no print_func.
+		//
+		// The real/imaginary part functions assume a real argument, as those of minimum/maximum/heaviside above do:
+		// erf(x+i*y) does not split into elementary functions (it takes the Faddeeva function), and the generated code
+		// calls the C erf(double), which cannot take a complex argument in the first place. Unlike those functions,
+		// however, an argument that visibly carries the imaginary unit -- which is how a normal-mode perturbation
+		// enters -- is rejected instead of silently being declared real.
+		static void erf_assert_real_argument(const ex &arg, const std::string &name)
+		{
+			if (arg.has(GiNaC::I))
+			{
+				std::ostringstream oss;
+				oss << "Cannot split " << name << "(" << arg << ") into real and imaginary parts: only real arguments are supported";
+				throw_runtime_error(oss.str());
+			}
+		}
+		static ex erf_eval(const ex &arg)
+		{
+			// erf(0)=0 is the only argument with an exactly representable value; everything else waits for evalf
+			if (GiNaC::is_a<GiNaC::numeric>(arg) && arg.is_zero())
+				return 0;
+			return erf(arg).hold();
+		}
+
+		static ex erf_evalf(const ex &arg)
+		{
+			if (GiNaC::is_a<GiNaC::numeric>(arg) && GiNaC::ex_to<GiNaC::numeric>(arg).is_real())
+				return GiNaC::numeric(std::erf(GiNaC::ex_to<GiNaC::numeric>(arg).to_double()));
+			return erf(arg).hold();
+		}
+
+		static ex erf_real_part(const ex &arg)
+		{
+			erf_assert_real_argument(arg, "erf");
+			return erf(arg).hold();
+		}
+
+		static ex erf_imag_part(const ex &arg)
+		{
+			erf_assert_real_argument(arg, "erf");
+			return 0;
+		}
+
+		static ex erf_expl_derivative(const ex &arg, const symbol &deriv_arg)
+		{
+			return arg.diff(deriv_arg) * 2 / GiNaC::sqrt(GiNaC::Pi) * GiNaC::exp(-arg * arg);
+		}
+
+		REGISTER_FUNCTION(erf, eval_func(erf_eval).evalf_func(erf_evalf)
+								   .expl_derivative_func(erf_expl_derivative)
+								   .real_part_func(erf_real_part).imag_part_func(erf_imag_part)
+								   .set_return_type(GiNaC::return_types::commutative))
+
+		// erfc() is kept as a function in its own right instead of being rewritten to 1-erf(): for large arguments the
+		// difference is entirely cancellation, and C's erfc() is what retains the accuracy there
+		static ex erfc_eval(const ex &arg)
+		{
+			if (GiNaC::is_a<GiNaC::numeric>(arg) && arg.is_zero())
+				return 1;
+			return erfc(arg).hold();
+		}
+
+		static ex erfc_evalf(const ex &arg)
+		{
+			if (GiNaC::is_a<GiNaC::numeric>(arg) && GiNaC::ex_to<GiNaC::numeric>(arg).is_real())
+				return GiNaC::numeric(std::erfc(GiNaC::ex_to<GiNaC::numeric>(arg).to_double()));
+			return erfc(arg).hold();
+		}
+
+		static ex erfc_real_part(const ex &arg)
+		{
+			erf_assert_real_argument(arg, "erfc");
+			return erfc(arg).hold();
+		}
+
+		static ex erfc_imag_part(const ex &arg)
+		{
+			erf_assert_real_argument(arg, "erfc");
+			return 0;
+		}
+
+		static ex erfc_expl_derivative(const ex &arg, const symbol &deriv_arg)
+		{
+			return -arg.diff(deriv_arg) * 2 / GiNaC::sqrt(GiNaC::Pi) * GiNaC::exp(-arg * arg);
+		}
+
+		REGISTER_FUNCTION(erfc, eval_func(erfc_eval).evalf_func(erfc_evalf)
+									.expl_derivative_func(erfc_expl_derivative)
+									.real_part_func(erfc_real_part).imag_part_func(erfc_imag_part)
+									.set_return_type(GiNaC::return_types::commutative))
+
 		////////////////
 
-		// internal_function_with_element_arg(name,args): calls a named C-implemented internal function that additionally
-		// needs the current element pointer, by looking it up in the generated code's my_func_table and passing
-		// eleminfo->elem_ptr as the first argument, followed by "args"; always stays held except when actually printed as C code
+		// internal_function_with_element_arg(name,args): calls a named function of the code's own JIT
+		// function table that additionally needs the element, passing eleminfo->elem_ptr as its first
+		// argument followed by "args"; always stays held except when actually printed as C code.
+		// Reachable only from Python (GiNaC_internal_function_with_element_arg) and currently unused:
+		// get_element_size was the one such table member and was dead (it threw on its first line), so
+		// there is nothing left for a caller to name until another one is added.
 		static ex internal_function_with_element_arg_eval(const ex &n, const ex &args)
 		{
 			return internal_function_with_element_arg(n, args).hold();
@@ -3573,7 +3899,7 @@ namespace pyoomph
 
 		public:
 			ReplaceFieldsAndSubfields(const std::map<std::string, GiNaC::ex> &_fields, const std::map<std::string, GiNaC::ex> &_nondimfields, const std::map<std::string, GiNaC::ex> &_globalparams) : fields(_fields), nondimfields(_nondimfields), globalparams(_globalparams) {}
-			GiNaC::ex operator()(const GiNaC::ex &inp)
+			GiNaC::ex operator()(const GiNaC::ex &inp) override
 			{
 				if (is_ex_the_function(inp, field))
 				{
@@ -3623,7 +3949,7 @@ namespace pyoomph
 		{
 		protected:
 		public:
-			GiNaC::ex operator()(const GiNaC::ex &inp)
+			GiNaC::ex operator()(const GiNaC::ex &inp) override
 			{
 				if (is_a<GiNaCGlobalParameterWrapper>(inp))
 				{

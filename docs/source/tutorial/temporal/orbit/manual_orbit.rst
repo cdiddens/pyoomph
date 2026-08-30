@@ -5,7 +5,9 @@ So far, we have constructed orbits in the Lorenz system by the emergence at the 
 
 For such cases, one has to manually construct a guess for the periodic orbit. We can do so easily by first performing time integration in the chaotic region. After some transient time integration :math:`[0,t_0)`, we will consider a representative time interval :math:`[t_0,t_0+T)`. Obviously, since we are on a chaotic attractor, the periodicity condition :math:`\vec{x}(t_0)=\vec{x}(t_0+T)` will not be fulfilled. Due to the violated periodicity condition, huge jumps would occur if we just use this representative time dynamics as an initial guess for the orbit solver. This will lead to severe convergence issues when solving for the actual orbit.
 
-Therefore, we will apply a low pass filter to match the start and end point nicely. Huge jumps correspond to high frequencies which then will be filtered out. The evolution after the application of the low pass filter will not fulfil the Lorenz system anymore, but it still constitutes a reasonable guess for the Newton solver.
+It therefore pays off to choose the interval carefully instead of just taking a fixed one. We record a longer stretch of the chaotic dynamics and scan it for the *near-recurrence* which almost satisfies :math:`\vec{x}(t_0)\approx\vec{x}(t_0+T)`, restricting the period :math:`T` to the range of the orbit family we are interested in. This is exactly the region of the attractor which shadows an unstable periodic orbit, so it gives by far the best starting point for the Newton solver. 
+
+Even the best near-recurrence does not close exactly, so we additionally apply a low pass filter to match the start and end point nicely. The remaining jump corresponds to high frequencies which then will be filtered out. The evolution after the application of the low pass filter will not fulfil the Lorenz system anymore, but it still constitutes a reasonable guess for the Newton solver.
 
 Then, we manually start orbit tracking to solve for an initial orbit and subsequently continue it in :math:`\rho`. The corresponding code just reads:
 
@@ -15,7 +17,11 @@ Then, we manually start orbit tracking to solve for an initial orbit and subsequ
                    
 		        
 		        
-As described above, we first start in chaos, then run some initial steps followed by a representative period where we write output. This output is loaded, smoothed by a low-pass filter and subsequently used as a guess for the orbit. To that end, we first use :py:meth:`~pyoomph.generic.problem.Problem.set_current_dofs` to set the starting point of the orbit guess and ship the remaining history values to :py:meth:`~pyoomph.generic.problem.Problem.activate_periodic_orbit_handler`. Afterwards, the continuation is analogous to the previous example.
+As described above, we first start in chaos, then run some initial steps followed by a longer stretch where we write output. This output is loaded, scanned for the best near-recurrence with a period close to :math:`3`, smoothed by a low-pass filter and subsequently used as a guess for the orbit. To that end, we first use :py:meth:`~pyoomph.generic.problem.Problem.set_current_dofs` to set the starting point of the orbit guess and ship the remaining history values to :py:meth:`~pyoomph.generic.problem.Problem.activate_periodic_orbit_handler`. Afterwards, the continuation is analogous to the previous example.
+
+Note that the guess is built on rank 0 alone and broadcast with ``get_mpi_bcast``. Under ``mpirun``, only rank 0 writes ``lorenz.txt`` while every rank would read it back, with nothing synchronising the two: a rank arriving while rank 0 is still writing sees a shorter trajectory, picks a different stretch and hence a different number of history dofs, so the ranks would set up orbit systems of different sizes and hang in the first collective of the subsequent solve.
+
+Since the guess is taken from a chaotic trajectory, which of the infinitely many unstable orbits we land on is decided by roundoff. Running the same script under ``mpirun`` uses a different linear solver than a serial run does, which is enough to end up at a different point of the attractor and therefore at a different orbit of the family. That is a property of the chaos, not of the orbit solver: given the same guess, the orbit solve and the continuation return the same orbit to the last digit, irrespective of the number of ranks.
 
 
 

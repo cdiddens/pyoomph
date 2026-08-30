@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -29,60 +30,93 @@
 import precice
 
 from ..expressions import *
+from ..typings import *
 from ..generic.codegen import EquationTree, ODEStorageMesh, BaseEquations, Equations, ODEEquations
 from ..generic.problem import Problem
+from ..meshes.mesh import AnyMesh
+from .._pyoomph_core import Node
 
-from scipy import spatial
 import gc
+
+# preCICE bookkeeping is attached dynamically to mesh objects at runtime (not part of
+# any mesh class' own declared attributes), so it is accessed through these small
+# typed helpers rather than directly, to avoid it being checked against every member
+# of the AnyMesh union individually.
+def _get_precice_node_to_vertex_id(mesh:"AnyMesh")->dict[Any,int] | None:
+    return mesh._precice_node_to_vertex_id #type:ignore[attr-defined,union-attr] # dynamic on the mesh, see above
+
+def _v2v(mesh:"AnyMesh")->dict[Any,int]:
+    d=_get_precice_node_to_vertex_id(mesh)
+    assert d is not None, "No preCICE node-to-vertex-id mapping set on this mesh. Did you add PreciceProvideMesh?"
+    return d
+
+def _set_precice_node_to_vertex_id(mesh:"AnyMesh",value:dict[Any,int] | None)->None:
+    mesh._precice_node_to_vertex_id=value #type:ignore[attr-defined,union-attr] # dynamic on the mesh, see above
+
+def _get_precice_vertex_ids(mesh:"AnyMesh")->Any:
+    return mesh._precice_vertex_ids #type:ignore[attr-defined,union-attr] # dynamic on the mesh, see above
+
+def _set_precice_vertex_ids(mesh:"AnyMesh",value:Any)->None:
+    mesh._precice_vertex_ids=value #type:ignore[attr-defined,union-attr] # dynamic on the mesh, see above
 
 # This is just a helper class which collects a few methods
 class _PyoomphPreciceAdapater:
     def __init__(self) -> None:
         self._initialized:bool=False
         
-    def initialize_problem(self,problem:Problem):        
-        problem._precice_interface=precice.Participant(problem.precice_participant,problem.precice_config_file,0,1)
+    def initialize_problem(self,problem:Problem):
+        interface=precice.Participant(problem.precice_participant,problem.precice_config_file,0,1)
+        problem._precice_interface=interface
         problem._equation_system._before_precice_initialise()
-        problem._precice_interface.initialize()
+        interface.initialize()
         self._initialized=True
 
-    def coupled_run(self,problem:Problem,maxstep:Optional[float]=None,temporal_error:Optional[float]=None,output_initially:bool=True,fast_dof_backup:bool=False):
+    def coupled_run(self,problem:Problem,maxstep:float | None=None,temporal_error:float | None=None,output_initially:bool=True,fast_dof_backup:bool=False):
         problem._activate_solver_callback()
-        
+        interface=problem._precice_interface
+        assert interface is not None, "preCICE not initialized. Call initialize_problem first."
+
         if output_initially:
             problem.output()
-        while problem._precice_interface.is_coupling_ongoing():
-            if problem._precice_interface.requires_writing_checkpoint():
+        while interface.is_coupling_ongoing():
+            if interface.requires_writing_checkpoint():
                 if fast_dof_backup:
                     raise RuntimeError("Fast dof backup not implemented yet")
                 else:
                     problem.save_state(problem.get_output_directory("precice_checkpoint.dump"))
-                
-            precice_dt = problem._precice_interface.get_max_time_step_size()
+
+            precice_dt = interface.get_max_time_step_size()
             dt=precice_dt
             if maxstep:
                 dt = min(precice_dt, maxstep)
 
             problem._equation_system._before_precice_solve(dt)
-         
+
             if temporal_error is None:
                 problem.unsteady_newton_solve(dt,True)
             else:
                 current_time=problem.get_current_time(as_float=True,dimensional=False)
                 problem.adaptive_unsteady_newton_solve(dt,temporal_error,True)
                 dt=problem.get_current_time(as_float=True,dimensional=False)-current_time
-            
+
+            # This loop drives the C++ solve itself instead of going through Problem.solve(), so it
+            # owns the deferred remesh too: actions_after_newton_solve() only records the request,
+            # because performing it inside the call corrupts the dof snapshot that
+            # adaptive_unsteady_newton_solve() restores from on a rejected step. See
+            # Problem._perform_pending_remesh().
+            problem._perform_pending_remesh()
+
             problem._equation_system._after_precice_solve(dt)
-                                    
-            problem._precice_interface.advance(dt)
-                                    
-            if problem._precice_interface.requires_reading_checkpoint():
+
+            interface.advance(dt)
+
+            if interface.requires_reading_checkpoint():
                 problem.load_state(problem.get_output_directory("precice_checkpoint.dump"))
                 gc.collect()
                 gc.collect()
                 gc.collect() # Just to be sure
-            else:                    
-                if problem._precice_interface.is_time_window_complete():
+            else:
+                if interface.is_time_window_complete():
                     problem.actions_after_newton_solve()
                     problem.output()
             
@@ -92,60 +126,65 @@ class _PyoomphPreciceAdapater:
         root=ET.Element("precice-configuration")        
         
         data_kwargs_default={"waveform-degree":"1"}       
-        mesh_kwargs_default={}
+        mesh_kwargs_default:dict[str,str]={}
         mapping_kwargs_default={"mode":"nearest-neighbor","constraint":"consistent"}
         
-        mesh_read_data={}
-        mesh_write_data={}
-        precice_read_data={}
-        precice_write_data={}
-        provided_meshes=set()
-        received_meshes=set()
-        pyoomph_mesh_name_to_provide_name={}
+        # by pyoomph domain name, respectively by the preCICE mesh name it is provided as
+        mesh_read_data:dict[str,list[str]]={}
+        mesh_write_data:dict[str,list[str]]={}
+        precice_read_data:dict[str,list[str]]={}
+        precice_write_data:dict[str,list[str]]={}
+        # Sets here, but never iterated as such: everything written into the XML below is emitted in
+        # sorted order. A set of strings iterates in an order randomized per process by
+        # PYTHONHASHSEED, which would make each rank - and each run - write a differently ordered
+        # precice config for the same problem.
+        provided_meshes:set[str]=set()
+        received_meshes:set[tuple[str,str,str]]=set() # (preCICE name, participant it comes from, pyoomph domain)
+        pyoomph_mesh_name_to_provide_name:dict[str,str]={}
         def recursive_scan_data(eqtree:EquationTree):
-            if eqtree._equations is not None:
-                read_datas=eqtree._equations.get_equation_of_type(PreciceReadData,always_as_list=True)
+            if eqtree._equations:
+                read_datas=eqtree.get_equations().get_equation_of_type(PreciceReadData,always_as_list=True)
                 for read_data in read_datas:                                 
                     read_data=cast(PreciceReadData,read_data)
                     meshname=eqtree.get_full_path().lstrip("/")
-                    for n,e in read_data.entries.items():                        
+                    for _pyoomph_name,precice_name in read_data.entries.items():                        
                         data_kwargs=data_kwargs_default.copy()
-                        dataentry=ET.SubElement(root,"data"+":"+("scalar" if read_data.vector_dim is None else "vector"),name=e,**data_kwargs)
+                        dataentry=ET.SubElement(root,"data"+":"+("scalar" if read_data.vector_dim is None else "vector"),data_kwargs,name=precice_name)
                         if meshname not in mesh_read_data:
                             mesh_read_data[meshname]=[]                        
-                        mesh_read_data[meshname].append(e)                        
+                        mesh_read_data[meshname].append(precice_name)                        
                         
                 
-                write_datas=eqtree._equations.get_equation_of_type(PreciceWriteData,always_as_list=True)
+                write_datas=eqtree.get_equations().get_equation_of_type(PreciceWriteData,always_as_list=True)
                 for write_data in write_datas:                                 
                     write_data=cast(PreciceWriteData,write_data)
                     meshname=eqtree.get_full_path().lstrip("/")
-                    for n,e in write_data.entries.items():    
+                    for dataname,_expr in write_data.entries.items():    
                         data_kwargs=data_kwargs_default.copy()                    
-                        dataentry=ET.SubElement(root,"data"+":"+("scalar" if write_data.vector_dim is None else "vector"),name=n,**data_kwargs)
+                        dataentry=ET.SubElement(root,"data"+":"+("scalar" if write_data.vector_dim is None else "vector"),data_kwargs,name=dataname)
                         if meshname not in mesh_write_data:
                             mesh_write_data[meshname]=[]
-                        mesh_write_data[meshname].append(n)
+                        mesh_write_data[meshname].append(dataname)
                         
             for path,subeqs in eqtree._children.items():
                 recursive_scan_data(subeqs)    
                         
         def recursive_scan_meshes(eqtree:EquationTree):
-            if eqtree._equations is not None:
-                mesh_provides=eqtree._equations.get_equation_of_type(PreciceProvideMesh,always_as_list=True)
+            if eqtree._equations:
+                mesh_provides=eqtree.get_equations().get_equation_of_type(PreciceProvideMesh,always_as_list=True)
                 for mesh_provide in mesh_provides:                    
                     mesh_provide=cast(PreciceProvideMesh,mesh_provide)
                     meshname=eqtree.get_full_path().lstrip("/")
-                    if eqtree._equations.get_combined_equations()._is_ode() is True:
+                    if eqtree._is_ode() is True:
                         meshdim=2 # Must be 2 for ODEs
                     else:
                         mesh=problem.get_mesh(meshname)
-                        n=next(mesh.nodes())
-                        meshdim=n.ndim()
+                        firstnode=next(mesh.nodes())
+                        meshdim=firstnode.ndim()
                         if meshdim<2:
                             meshdim=2
                     mesh_kwargs=mesh_kwargs_default.copy()
-                    meshentry=ET.SubElement(root,"mesh",name=mesh_provide.name,dimensions=str(meshdim), **mesh_kwargs)
+                    meshentry=ET.SubElement(root,"mesh",mesh_kwargs,name=mesh_provide.name,dimensions=str(meshdim))
                     use_data=[]
                     if meshname in mesh_read_data.keys():                        
                         use_data+=mesh_read_data[meshname]
@@ -156,28 +195,29 @@ class _PyoomphPreciceAdapater:
                     if len(use_data)==0:
                         raise RuntimeError("Provided Mesh "+meshname+" (preCICE name '"+str(mesh_provide.name)+"') has no data to read or write")
                     else:
-                        use_data=set(use_data)
-                        for ud in use_data:
+                        # dict.fromkeys, not set(): deduplicates but keeps the order the data was
+                        # declared in, which a set would randomize per process.
+                        for ud in dict.fromkeys(use_data):
                             ET.SubElement(meshentry,"use-data",name=ud)
                     provided_meshes.add(mesh_provide.name)
                     if meshname in pyoomph_mesh_name_to_provide_name.keys():
                         raise RuntimeError("Mesh "+meshname+" has multiple PreciceProvideMesh entries")
                     pyoomph_mesh_name_to_provide_name[meshname]=mesh_provide.name
                     
-                mesh_receives=eqtree._equations.get_equation_of_type(PreciceReceiveMesh,always_as_list=True)
-                for mesh_receive in mesh_receives:                    
-                    mesh_receive=cast(PreciceProvideMesh,mesh_receive)
+                mesh_receives=eqtree.get_equations().get_equation_of_type(PreciceReceiveMesh,always_as_list=True)
+                for mesh_receive in mesh_receives:
+                    mesh_receive=cast(PreciceReceiveMesh,mesh_receive)
                     meshname=eqtree.get_full_path().lstrip("/")
-                    if eqtree._equations.get_combined_equations()._is_ode() is True:
+                    if eqtree._is_ode() is True:
                         meshdim=2 # Must be 2 for ODEs
                     else:
                         mesh=problem.get_mesh(meshname)
-                        n=next(mesh.nodes())
-                        meshdim=n.ndim()
+                        firstnode=next(mesh.nodes())
+                        meshdim=firstnode.ndim()
                         if meshdim<2:
                             meshdim=2
                     mesh_kwargs=mesh_kwargs_default.copy()
-                    meshentry=ET.SubElement(root,"mesh",name=mesh_receive.name,dimensions=str(meshdim), **mesh_kwargs)
+                    meshentry=ET.SubElement(root,"mesh",mesh_kwargs,name=mesh_receive.name,dimensions=str(meshdim))
                     use_data=[]
                     if meshname in mesh_read_data.keys():                        
                         use_data+=mesh_read_data[meshname]
@@ -186,8 +226,9 @@ class _PyoomphPreciceAdapater:
                     if len(use_data)==0:
                         raise RuntimeError("Received Mesh "+meshname+" (preCICE name '"+str(mesh_receive.name)+"') has no data to read or write")
                     else:
-                        use_data=set(use_data)
-                        for ud in use_data:
+                        # dict.fromkeys, not set(): deduplicates but keeps the order the data was
+                        # declared in, which a set would randomize per process.
+                        for ud in dict.fromkeys(use_data):
                             ET.SubElement(meshentry,"use-data",name=ud)
                     received_meshes.add((mesh_receive.name,mesh_receive.from_participant,meshname))
                     
@@ -200,16 +241,16 @@ class _PyoomphPreciceAdapater:
             raise RuntimeError("Please set a preCICE participant name by the Problem property precice_participant")
         
         participant=ET.SubElement(root,"participant",name=problem.precice_participant)
-        for meshname in provided_meshes:
+        for meshname in sorted(provided_meshes):
             ET.SubElement(participant,"provide-mesh",name=meshname)
-        for entry in received_meshes:
-            ET.SubElement(participant,"receive-mesh",name=entry[0],**{"from":entry[1]})
-        for meshname in provided_meshes:
+        for entry in sorted(received_meshes):
+            ET.SubElement(participant,"receive-mesh",{"from":entry[1]},name=entry[0]) # "from" is a keyword, so it can only go in through the attribute dict
+        for meshname in sorted(provided_meshes):
             for data in precice_write_data.get(meshname,[]):
                 ET.SubElement(participant,"write-data",name=data,mesh=meshname)
             for data in precice_read_data.get(meshname,[]):
                 ET.SubElement(participant,"read-data",name=data,mesh=meshname)
-        for entry in received_meshes:
+        for entry in sorted(received_meshes):
             if entry[2] not in pyoomph_mesh_name_to_provide_name.keys():
                 print("WARNING: Received mesh "+str(entry[0])+" is not provided by this participant")
                 #raise RuntimeError("Received mesh "+str(entry[0])+" is not provided by this participant")
@@ -219,7 +260,7 @@ class _PyoomphPreciceAdapater:
                 mapping_kwargs["from"]=entry[0]
                 mapping_kwargs["to"]=pyoomph_mesh_name_to_provide_name[entry[2]]
                 mode=mapping_kwargs.pop("mode","nearest-neighbor")
-                ET.SubElement(participant,"mapping:"+mode,direction="read",**mapping_kwargs)
+                ET.SubElement(participant,"mapping:"+mode,mapping_kwargs,direction="read")
                 
             
         
@@ -241,18 +282,19 @@ class PreciceProvideMesh(BaseEquations):
         self.name=precice_mesh_name
         self.use_lagrangian_coords=use_lagrangian_coords
 
-    def before_precice_initialise(self,eqtree:"EquationTree"):
+    def _before_precice_initialise(self,eqtree:"EquationTree"):
         mesh=eqtree.get_mesh()
         pr=mesh.get_problem()
         interface=pr._precice_interface
+        assert interface is not None
                                         
         xml_dimension = interface.get_mesh_dimensions(self.name)
         if isinstance(mesh,ODEStorageMesh):
-            mesh._precice_node_to_vertex_id=None # No mapping needed for ODEs
+            _set_precice_node_to_vertex_id(mesh,None) # No mapping needed for ODEs
             grid = numpy.zeros([1, xml_dimension])          
         else:
             my_nodes=[n for n in mesh.nodes()]
-            mesh._precice_node_to_vertex_id={n:i for i,n in enumerate(my_nodes)}    
+            _set_precice_node_to_vertex_id(mesh,{n:i for i,n in enumerate(my_nodes)})    
             
             grid = numpy.zeros([len(my_nodes), xml_dimension])
             if len(my_nodes)==0:
@@ -270,16 +312,16 @@ class PreciceProvideMesh(BaseEquations):
                     for j in range(iterate_dim):
                         grid[i,j] = n.x(j)
             
-        mesh._precice_vertex_ids=interface.set_mesh_vertices(self.name, grid)
-        if not isinstance(mesh._precice_vertex_ids,numpy.ndarray):
-            mesh._precice_vertex_ids=numpy.array(mesh._precice_vertex_ids)
+        _set_precice_vertex_ids(mesh,interface.set_mesh_vertices(self.name, grid))
+        if not isinstance(_get_precice_vertex_ids(mesh),numpy.ndarray):
+            _set_precice_vertex_ids(mesh,numpy.array(_get_precice_vertex_ids(mesh)))
             
         if interface.requires_mesh_connectivity_for(self.name):
             for e in mesh.elements():
                 all_nodes_have_vertex_id=True
                 for ni in range(e.nnode()):
                     n=e.node_pt(ni)
-                    if n not in mesh._precice_node_to_vertex_id:
+                    if n not in _v2v(mesh):
                         all_nodes_have_vertex_id=False
                         break
                 if not all_nodes_have_vertex_id:
@@ -287,63 +329,63 @@ class PreciceProvideMesh(BaseEquations):
                 typus=e.get_meshio_type_index()
                 
                 if typus==2: # LineC2
-                    interface.set_mesh_edge(self.name,mesh._precice_node_to_vertex_id[e.node_pt(0)],mesh._precice_node_to_vertex_id[e.node_pt(1)])
-                    interface.set_mesh_edge(self.name,mesh._precice_node_to_vertex_id[e.node_pt(1)],mesh._precice_node_to_vertex_id[e.node_pt(2)])                    
+                    interface.set_mesh_edge(self.name,_v2v(mesh)[e.node_pt(0)],_v2v(mesh)[e.node_pt(1)])
+                    interface.set_mesh_edge(self.name,_v2v(mesh)[e.node_pt(1)],_v2v(mesh)[e.node_pt(2)])                    
                 elif typus==1: # LineC1
-                    interface.set_mesh_edge(self.name,mesh._precice_node_to_vertex_id[e.node_pt(0)],mesh._precice_node_to_vertex_id[e.node_pt(1)])
+                    interface.set_mesh_edge(self.name,_v2v(mesh)[e.node_pt(0)],_v2v(mesh)[e.node_pt(1)])
                 elif typus==0: # Points have no edges
                     pass 
                 elif typus==3: # TriC1
-                    interface.set_mesh_triangle(self.name,mesh._precice_node_to_vertex_id[e.node_pt(0)],mesh._precice_node_to_vertex_id[e.node_pt(1)],mesh._precice_node_to_vertex_id[e.node_pt(2)])
+                    interface.set_mesh_triangle(self.name,_v2v(mesh)[e.node_pt(0)],_v2v(mesh)[e.node_pt(1)],_v2v(mesh)[e.node_pt(2)])
                 elif typus==9: # TriC2
-                    interface.set_mesh_triangle(self.name,mesh._precice_node_to_vertex_id[e.node_pt(3)],mesh._precice_node_to_vertex_id[e.node_pt(4)],mesh._precice_node_to_vertex_id[e.node_pt(5)])                    
-                    interface.set_mesh_triangle(self.name,mesh._precice_node_to_vertex_id[e.node_pt(0)],mesh._precice_node_to_vertex_id[e.node_pt(5)],mesh._precice_node_to_vertex_id[e.node_pt(3)])                    
+                    interface.set_mesh_triangle(self.name,_v2v(mesh)[e.node_pt(3)],_v2v(mesh)[e.node_pt(4)],_v2v(mesh)[e.node_pt(5)])                    
+                    interface.set_mesh_triangle(self.name,_v2v(mesh)[e.node_pt(0)],_v2v(mesh)[e.node_pt(5)],_v2v(mesh)[e.node_pt(3)])                    
                     # Strange order, no matter how I permute the nodes, it is always backface in preCICE vtu out
-                    interface.set_mesh_triangle(self.name,mesh._precice_node_to_vertex_id[e.node_pt(4)],mesh._precice_node_to_vertex_id[e.node_pt(5)],mesh._precice_node_to_vertex_id[e.node_pt(2)])                                        
-                    interface.set_mesh_triangle(self.name,mesh._precice_node_to_vertex_id[e.node_pt(3)],mesh._precice_node_to_vertex_id[e.node_pt(4)],mesh._precice_node_to_vertex_id[e.node_pt(1)])                                        
+                    interface.set_mesh_triangle(self.name,_v2v(mesh)[e.node_pt(4)],_v2v(mesh)[e.node_pt(5)],_v2v(mesh)[e.node_pt(2)])                                        
+                    interface.set_mesh_triangle(self.name,_v2v(mesh)[e.node_pt(3)],_v2v(mesh)[e.node_pt(4)],_v2v(mesh)[e.node_pt(1)])                                        
                 elif typus==99: # TriC2TB
-                    interface.set_mesh_triangle(self.name,mesh._precice_node_to_vertex_id[e.node_pt(0)],mesh._precice_node_to_vertex_id[e.node_pt(3)],mesh._precice_node_to_vertex_id[e.node_pt(6)])                                        
-                    interface.set_mesh_triangle(self.name,mesh._precice_node_to_vertex_id[e.node_pt(1)],mesh._precice_node_to_vertex_id[e.node_pt(4)],mesh._precice_node_to_vertex_id[e.node_pt(6)])                                        
-                    interface.set_mesh_triangle(self.name,mesh._precice_node_to_vertex_id[e.node_pt(2)],mesh._precice_node_to_vertex_id[e.node_pt(5)],mesh._precice_node_to_vertex_id[e.node_pt(6)])                                                            
+                    interface.set_mesh_triangle(self.name,_v2v(mesh)[e.node_pt(0)],_v2v(mesh)[e.node_pt(3)],_v2v(mesh)[e.node_pt(6)])                                        
+                    interface.set_mesh_triangle(self.name,_v2v(mesh)[e.node_pt(1)],_v2v(mesh)[e.node_pt(4)],_v2v(mesh)[e.node_pt(6)])                                        
+                    interface.set_mesh_triangle(self.name,_v2v(mesh)[e.node_pt(2)],_v2v(mesh)[e.node_pt(5)],_v2v(mesh)[e.node_pt(6)])                                                            
                     # Strange order, no matter how I permute the nodes, it is always backface in preCICE vtu out
-                    interface.set_mesh_triangle(self.name,mesh._precice_node_to_vertex_id[e.node_pt(1)],mesh._precice_node_to_vertex_id[e.node_pt(6)],mesh._precice_node_to_vertex_id[e.node_pt(3)])                    
-                    interface.set_mesh_triangle(self.name,mesh._precice_node_to_vertex_id[e.node_pt(2)],mesh._precice_node_to_vertex_id[e.node_pt(4)],mesh._precice_node_to_vertex_id[e.node_pt(6)])                                                            
-                    interface.set_mesh_triangle(self.name,mesh._precice_node_to_vertex_id[e.node_pt(0)],mesh._precice_node_to_vertex_id[e.node_pt(5)],mesh._precice_node_to_vertex_id[e.node_pt(6)])                                                                                
+                    interface.set_mesh_triangle(self.name,_v2v(mesh)[e.node_pt(1)],_v2v(mesh)[e.node_pt(6)],_v2v(mesh)[e.node_pt(3)])                    
+                    interface.set_mesh_triangle(self.name,_v2v(mesh)[e.node_pt(2)],_v2v(mesh)[e.node_pt(4)],_v2v(mesh)[e.node_pt(6)])                                                            
+                    interface.set_mesh_triangle(self.name,_v2v(mesh)[e.node_pt(0)],_v2v(mesh)[e.node_pt(5)],_v2v(mesh)[e.node_pt(6)])                                                                                
                 elif typus==66: # TriC1TB
-                    interface.set_mesh_triangle(self.name,mesh._precice_node_to_vertex_id[e.node_pt(0)],mesh._precice_node_to_vertex_id[e.node_pt(1)],mesh._precice_node_to_vertex_id[e.node_pt(3)])                                        
-                    interface.set_mesh_triangle(self.name,mesh._precice_node_to_vertex_id[e.node_pt(1)],mesh._precice_node_to_vertex_id[e.node_pt(2)],mesh._precice_node_to_vertex_id[e.node_pt(3)])                                        
-                    interface.set_mesh_triangle(self.name,mesh._precice_node_to_vertex_id[e.node_pt(2)],mesh._precice_node_to_vertex_id[e.node_pt(0)],mesh._precice_node_to_vertex_id[e.node_pt(3)])                                                            
+                    interface.set_mesh_triangle(self.name,_v2v(mesh)[e.node_pt(0)],_v2v(mesh)[e.node_pt(1)],_v2v(mesh)[e.node_pt(3)])                                        
+                    interface.set_mesh_triangle(self.name,_v2v(mesh)[e.node_pt(1)],_v2v(mesh)[e.node_pt(2)],_v2v(mesh)[e.node_pt(3)])                                        
+                    interface.set_mesh_triangle(self.name,_v2v(mesh)[e.node_pt(2)],_v2v(mesh)[e.node_pt(0)],_v2v(mesh)[e.node_pt(3)])                                                            
                     
                     
                 elif typus==8: # QuadC2
                     if xml_dimension==3:
                         def _add_quad(i1,i2,i3,i4):
-                            interface.set_mesh_quad(self.name,mesh._precice_node_to_vertex_id[e.node_pt(i1)],mesh._precice_node_to_vertex_id[e.node_pt(i2)],mesh._precice_node_to_vertex_id[e.node_pt(i3)],mesh._precice_node_to_vertex_id[e.node_pt(i4)])
+                            interface.set_mesh_quad(self.name,_v2v(mesh)[e.node_pt(i1)],_v2v(mesh)[e.node_pt(i2)],_v2v(mesh)[e.node_pt(i3)],_v2v(mesh)[e.node_pt(i4)])
                         _add_quad(0,1,3,4)
                         _add_quad(1,2,4,5)
                         _add_quad(3,4,6,7)
                         _add_quad(4,5,7,8)
                         
                     else:
-                        interface.set_mesh_triangle(self.name,mesh._precice_node_to_vertex_id[e.node_pt(0)],mesh._precice_node_to_vertex_id[e.node_pt(1)],mesh._precice_node_to_vertex_id[e.node_pt(3)])
-                        interface.set_mesh_triangle(self.name,mesh._precice_node_to_vertex_id[e.node_pt(1)],mesh._precice_node_to_vertex_id[e.node_pt(3)],mesh._precice_node_to_vertex_id[e.node_pt(4)])                        
-                        interface.set_mesh_triangle(self.name,mesh._precice_node_to_vertex_id[e.node_pt(1)],mesh._precice_node_to_vertex_id[e.node_pt(2)],mesh._precice_node_to_vertex_id[e.node_pt(5)])                                                
-                        interface.set_mesh_triangle(self.name,mesh._precice_node_to_vertex_id[e.node_pt(1)],mesh._precice_node_to_vertex_id[e.node_pt(4)],mesh._precice_node_to_vertex_id[e.node_pt(5)])                                                                        
-                        interface.set_mesh_triangle(self.name,mesh._precice_node_to_vertex_id[e.node_pt(3)],mesh._precice_node_to_vertex_id[e.node_pt(7)],mesh._precice_node_to_vertex_id[e.node_pt(6)])
-                        interface.set_mesh_triangle(self.name,mesh._precice_node_to_vertex_id[e.node_pt(7)],mesh._precice_node_to_vertex_id[e.node_pt(4)],mesh._precice_node_to_vertex_id[e.node_pt(3)])
-                        interface.set_mesh_triangle(self.name,mesh._precice_node_to_vertex_id[e.node_pt(7)],mesh._precice_node_to_vertex_id[e.node_pt(5)],mesh._precice_node_to_vertex_id[e.node_pt(8)])
-                        interface.set_mesh_triangle(self.name,mesh._precice_node_to_vertex_id[e.node_pt(7)],mesh._precice_node_to_vertex_id[e.node_pt(5)],mesh._precice_node_to_vertex_id[e.node_pt(4)])
+                        interface.set_mesh_triangle(self.name,_v2v(mesh)[e.node_pt(0)],_v2v(mesh)[e.node_pt(1)],_v2v(mesh)[e.node_pt(3)])
+                        interface.set_mesh_triangle(self.name,_v2v(mesh)[e.node_pt(1)],_v2v(mesh)[e.node_pt(3)],_v2v(mesh)[e.node_pt(4)])                        
+                        interface.set_mesh_triangle(self.name,_v2v(mesh)[e.node_pt(1)],_v2v(mesh)[e.node_pt(2)],_v2v(mesh)[e.node_pt(5)])                                                
+                        interface.set_mesh_triangle(self.name,_v2v(mesh)[e.node_pt(1)],_v2v(mesh)[e.node_pt(4)],_v2v(mesh)[e.node_pt(5)])                                                                        
+                        interface.set_mesh_triangle(self.name,_v2v(mesh)[e.node_pt(3)],_v2v(mesh)[e.node_pt(7)],_v2v(mesh)[e.node_pt(6)])
+                        interface.set_mesh_triangle(self.name,_v2v(mesh)[e.node_pt(7)],_v2v(mesh)[e.node_pt(4)],_v2v(mesh)[e.node_pt(3)])
+                        interface.set_mesh_triangle(self.name,_v2v(mesh)[e.node_pt(7)],_v2v(mesh)[e.node_pt(5)],_v2v(mesh)[e.node_pt(8)])
+                        interface.set_mesh_triangle(self.name,_v2v(mesh)[e.node_pt(7)],_v2v(mesh)[e.node_pt(5)],_v2v(mesh)[e.node_pt(4)])
                 elif typus==6: # QuadC1
                     if xml_dimension==3:
-                        interface.set_mesh_quad(self.name,mesh._precice_node_to_vertex_id[e.node_pt(0)],mesh._precice_node_to_vertex_id[e.node_pt(1)],mesh._precice_node_to_vertex_id[e.node_pt(2)],mesh._precice_node_to_vertex_id[e.node_pt(3)])                        
+                        interface.set_mesh_quad(self.name,_v2v(mesh)[e.node_pt(0)],_v2v(mesh)[e.node_pt(1)],_v2v(mesh)[e.node_pt(2)],_v2v(mesh)[e.node_pt(3)])                        
                     else:
-                        interface.set_mesh_triangle(self.name,mesh._precice_node_to_vertex_id[e.node_pt(0)],mesh._precice_node_to_vertex_id[e.node_pt(1)],mesh._precice_node_to_vertex_id[e.node_pt(2)])                                        
-                        interface.set_mesh_triangle(self.name,mesh._precice_node_to_vertex_id[e.node_pt(2)],mesh._precice_node_to_vertex_id[e.node_pt(1)],mesh._precice_node_to_vertex_id[e.node_pt(3)])                                                            
+                        interface.set_mesh_triangle(self.name,_v2v(mesh)[e.node_pt(0)],_v2v(mesh)[e.node_pt(1)],_v2v(mesh)[e.node_pt(2)])                                        
+                        interface.set_mesh_triangle(self.name,_v2v(mesh)[e.node_pt(2)],_v2v(mesh)[e.node_pt(1)],_v2v(mesh)[e.node_pt(3)])                                                            
                 #elif typus==11: # BrickC1
-                    #interface.set_mesh_tetrahedron(self.name,mesh._precice_node_to_vertex_id[e.node_pt(0)],mesh._precice_node_to_vertex_id[e.node_pt(1)],mesh._precice_node_to_vertex_id[e.node_pt(2)],mesh._precice_node_to_vertex_id[e.node_pt(4)])
-                    #interface.set_mesh_tetrahedron(self.name,mesh._precice_node_to_vertex_id[e.node_pt(4)],mesh._precice_node_to_vertex_id[e.node_pt(7)],mesh._precice_node_to_vertex_id[e.node_pt(3)],mesh._precice_node_to_vertex_id[e.node_pt(2)])
-                    #interface.set_mesh_tetrahedron(self.name,mesh._precice_node_to_vertex_id[e.node_pt(2)],mesh._precice_node_to_vertex_id[e.node_pt(7)],mesh._precice_node_to_vertex_id[e.node_pt(6)],mesh._precice_node_to_vertex_id[e.node_pt(4)])
-                    #interface.set_mesh_tetrahedron(self.name,mesh._precice_node_to_vertex_id[e.node_pt(1)],mesh._precice_node_to_vertex_id[e.node_pt(2)],mesh._precice_node_to_vertex_id[e.node_pt(3)],mesh._precice_node_to_vertex_id[e.node_pt(4)])
+                    #interface.set_mesh_tetrahedron(self.name,_v2v(mesh)[e.node_pt(0)],_v2v(mesh)[e.node_pt(1)],_v2v(mesh)[e.node_pt(2)],_v2v(mesh)[e.node_pt(4)])
+                    #interface.set_mesh_tetrahedron(self.name,_v2v(mesh)[e.node_pt(4)],_v2v(mesh)[e.node_pt(7)],_v2v(mesh)[e.node_pt(3)],_v2v(mesh)[e.node_pt(2)])
+                    #interface.set_mesh_tetrahedron(self.name,_v2v(mesh)[e.node_pt(2)],_v2v(mesh)[e.node_pt(7)],_v2v(mesh)[e.node_pt(6)],_v2v(mesh)[e.node_pt(4)])
+                    #interface.set_mesh_tetrahedron(self.name,_v2v(mesh)[e.node_pt(1)],_v2v(mesh)[e.node_pt(2)],_v2v(mesh)[e.node_pt(3)],_v2v(mesh)[e.node_pt(4)])
                 else:
                     raise RuntimeError("Mesh elements are only supported for points, lines, triangle and quads, not yet for e.g. 3d elements. Got type index "+str(typus))
                 
@@ -356,15 +398,17 @@ class PreciceProvideMesh(BaseEquations):
         if self.get_combined_equations()._is_ode():
             return # All fine for ODEs
         mesh=eqtree.get_mesh()
+        assert not isinstance(mesh,ODEStorageMesh)
         pr=mesh.get_problem()
         interface=pr._precice_interface
+        assert interface is not None
         if not hasattr(mesh,"_precice_vertex_ids") or not hasattr(mesh,"_precice_node_to_vertex_id"):
             raise ValueError("Something strange. Did you remesh? This does not work with preCICE")
         my_nodes=[n for n in mesh.nodes()]
-        if len(my_nodes)!=len(mesh._precice_node_to_vertex_id):
-            raise ValueError("Number of nodes mismatch: "+str(len(my_nodes))+" vs. "+str(len(mesh._precice_node_to_vertex_id))+". Did you remesh? This does not work with preCICE")
+        if len(my_nodes)!=len(_v2v(mesh)):
+            raise ValueError("Number of nodes mismatch: "+str(len(my_nodes))+" vs. "+str(len(_v2v(mesh)))+". Did you remesh? This does not work with preCICE")
         for n in my_nodes:
-            if n not in mesh._precice_node_to_vertex_id:
+            if n not in _v2v(mesh):
                 raise ValueError("Node not in preCICE mesh. Did you remesh? This does not work with preCICE")
         
 
@@ -394,7 +438,7 @@ class PreciceWriteData(BaseEquations):
         vector_dim: The dimension of the vector field. If None, a scalar field is assumed.
         kwargs: The data to be written. The keys are the names of the data in preCICE, the values are the expressions.
     """
-    def __init__(self,scaling:ExpressionNumOrNone=None,by_projection:bool=False,projection_space:Optional[FiniteElementSpaceEnum]=None,vector_dim:Optional[int]=None,**kwargs:ExpressionOrNum):
+    def __init__(self,scaling:ExpressionNumOrNone=None,by_projection:bool=False,projection_space:FiniteElementSpaceEnum | None=None,vector_dim:int | None=None,**kwargs:ExpressionOrNum):
         super().__init__()
         self.entries=kwargs.copy()
         self.by_projection=by_projection
@@ -405,9 +449,9 @@ class PreciceWriteData(BaseEquations):
     def _sanitize_name(self,name:str):
         return "_precice_write_proj_"+name.replace(" ","_").replace("-","_").replace("/","_")
 
-    def define_scalar_field(self,name:str,space:FiniteElementSpaceEnum,scale:Optional[ExpressionNumOrNone]=None,testscale:Optional[ExpressionNumOrNone]=None):
+    def define_scalar_field(self,name:str,space:FiniteElementSpaceEnum,scale:ExpressionNumOrNone | None=None,testscale:ExpressionNumOrNone | None=None):
         # This is a bit dirty, but I cannot see how it can be done differently, except for providing different classes for ODEEquations and Equations
-        return Equations.define_scalar_field(self,name,space,scale=scale,testscale=testscale)
+        return Equations.define_scalar_field(self,name,space,scale=scale,testscale=testscale) #type:ignore
 
     def define_fields(self):
         if self.get_combined_equations()._is_ode():
@@ -425,9 +469,9 @@ class PreciceWriteData(BaseEquations):
                 if self.scaling is not None:
                     testscale=1/self.scaling
                 if self.vector_dim is None:
-                    Equations.define_scalar_field(self,self._sanitize_name(name),space,scale=self.scaling,testscale=testscale)
+                    Equations.define_scalar_field(self,self._sanitize_name(name),space,scale=self.scaling,testscale=testscale) #type:ignore
                 else:
-                    Equations.define_vector_field(self,self._sanitize_name(name),space,scale=self.scaling,dim=self.vector_dim,testscale=testscale)                    
+                    Equations.define_vector_field(self,self._sanitize_name(name),space,scale=self.scaling,dim=self.vector_dim,testscale=testscale) #type:ignore
 
     def define_residuals(self):
         if self.get_combined_equations()._is_ode():
@@ -447,59 +491,68 @@ class PreciceWriteData(BaseEquations):
         if not hasattr(mesh,"_precice_vertex_ids"):
             raise ValueError("PreciceProvideMesh not set, please add it before PreciceWriteData")
         interface=mesh.get_problem()._precice_interface
-        provider=self.get_combined_equations().get_equation_of_type(PreciceProvideMesh,always_as_list=True)
-        if len(provider)!=1:
+        assert interface is not None
+        providers=self.get_combined_equations().get_equation_of_type(PreciceProvideMesh,always_as_list=True)
+        if len(providers)!=1:
             raise ValueError("PreciceProvideMesh not set or set multiple times on this domain, please add a single one")
-        provider=provider[0]
+        provider=providers[0]
         assert isinstance(provider,PreciceProvideMesh)
-        vertex_ids=mesh._precice_vertex_ids
+        vertex_ids=_get_precice_vertex_ids(mesh)
                 
         if self.by_projection:            
             for write_name in self.entries.keys():
                 pyoomph_name=self._sanitize_name(write_name)
                 
+                mynodes:"list[Node | None]"
                 if self.get_combined_equations()._is_ode():
-                    mynodes=[None]
+                    mynodes=[None] # an ODE contributes one value, not one per node
                 else:
+                    assert not isinstance(mesh,ODEStorageMesh)
                     mynodes=[n for n in mesh.nodes()]
-                
+
                 if self.vector_dim is None:
-                
+
                     buffer=numpy.zeros([len(mynodes)])
                     if self.get_combined_equations()._is_ode():
                         index=mesh.get_code_gen().get_code().get_elemental_field_indices()[pyoomph_name]
                         buffer[0]=mesh.element_pt(0).internal_data_pt(index).value(0)
                     else:
+                        assert not isinstance(mesh,ODEStorageMesh)
                         if mesh.has_interface_dof_id(pyoomph_name)>=0:
                             index=mesh.has_interface_dof_id(pyoomph_name)
                             for i,n in enumerate(mynodes):
-                                buffer[mesh._precice_node_to_vertex_id[n]]=n.value(n.additional_value_index(index))
+                                assert n is not None
+                                buffer[_v2v(mesh)[n]]=n.value(n.additional_value_index(index))
                         else:
                             index=mesh.get_nodal_field_indices()[pyoomph_name]
                             if index<0:
                                 raise ValueError("Field "+pyoomph_name+" not found in mesh. TODO: Elemental fields")
                             for i,n in enumerate(mynodes):
-                                buffer[mesh._precice_node_to_vertex_id[n]]=n.value(index,buffer)
+                                assert n is not None
+                                buffer[_v2v(mesh)[n]]=n.value(index)
                 else:
-                    buffer=[]
+                    assert not isinstance(mesh,ODEStorageMesh)
+                    rows:list[NPFloatArray]=[]
                     for vindex in range(self.vector_dim):
                         buffer_row=numpy.zeros([len(mynodes)])
                         component_name=pyoomph_name+"_"+["x","y","z"][vindex]
                         if mesh.has_interface_dof_id(component_name)>=0:
                             index=mesh.has_interface_dof_id(component_name)
                             for i,n in enumerate(mynodes):
-                                buffer_row[mesh._precice_node_to_vertex_id[n]]=n.value(n.additional_value_index(index))
+                                assert n is not None
+                                buffer_row[_v2v(mesh)[n]]=n.value(n.additional_value_index(index))
                         else:
                             index=mesh.get_nodal_field_indices()[component_name]
                             for i,n in enumerate(mynodes):
-                                buffer_row[mesh._precice_node_to_vertex_id[n]]=n.value(index,buffer)
-                        buffer.append(buffer_row)
-                    buffer=numpy.array(buffer).T
+                                assert n is not None
+                                buffer_row[_v2v(mesh)[n]]=n.value(index)
+                        rows.append(buffer_row)
+                    buffer=numpy.array(rows).T
                                 
                 interface.write_data(provider.name, write_name, vertex_ids, buffer)                                    
         else:
             nodemap=mesh.fill_node_index_to_node_map()
-            inds=numpy.array([mesh._precice_node_to_vertex_id[n] for n in nodemap])            
+            inds=numpy.array([_v2v(mesh)[n] for n in nodemap])            
             for write_name in self.entries.keys():
                 if self.vector_dim is None:
                     expr_index=mesh.list_local_expressions().index("_precice_write_"+write_name)
@@ -508,28 +561,28 @@ class PreciceWriteData(BaseEquations):
                     if self.get_combined_equations()._is_ode():
                         expr=mesh.element_pt(0).evaluate_local_expression_at_midpoint(expr_index)
                         buffer=numpy.array([expr])
-                        #print("WRITE DATA",write_name,mesh._precice_vertex_ids,buffer)
-                        interface.write_data(provider.name, write_name, mesh._precice_vertex_ids, buffer)
+                        #print("WRITE DATA",write_name,_get_precice_vertex_ids(mesh),buffer)
+                        interface.write_data(provider.name, write_name, _get_precice_vertex_ids(mesh), buffer)
                     else:                    
                         interface.write_data(provider.name, write_name, vertex_ids[inds], buffer)
                 else:                    
                     directs=["x","y","z"]
-                    buffer=[]
+                    exprrows:list[NPFloatArray]=[]
                     for vindex in range(self.vector_dim):                    
                         expr_index=mesh.list_local_expressions().index("_precice_write_"+write_name+"_"+directs[vindex])
-                        buffer_row=mesh.evaluate_local_expression_at_nodes(expr_index,True,False)                
-                        buffer_row=numpy.array(buffer_row)                                        
-                        buffer.append(buffer_row)
-                    buffer=numpy.array(buffer).T                
+                        exprrows.append(numpy.array(mesh.evaluate_local_expression_at_nodes(expr_index,True,False)))
+                    buffer=numpy.array(exprrows).T                
                     interface.write_data(provider.name, write_name, vertex_ids[inds], buffer)
 
    
-    def before_precice_initialise(self, eqtree: "EquationTree"):
-        if self.get_problem()._precice_interface.requires_initial_data():
+    def _before_precice_initialise(self, eqtree: "EquationTree"):
+        interface=self.get_problem()._precice_interface
+        assert interface is not None
+        if interface.requires_initial_data():
             self._do_write_data(0)
         
 
-    def after_precice_solve(self, eqtree: "EquationTree",precice_dt:float):
+    def _after_precice_solve(self, eqtree: "EquationTree",precice_dt:float):
         self._do_write_data(precice_dt)
 
             
@@ -546,7 +599,7 @@ class PreciceReadData(BaseEquations):
         vector_dim: The dimension of the vector field. If None, a scalar field is assumed.
         kwargs: The data to be read. The keys are the names of the data in pyoomph, the values are the names of the fields in preCICE.
     """
-    def __init__(self,*,scaling:ExpressionNumOrNone=None,vector_dim:Optional[int]=None,**kwargs:str):
+    def __init__(self,*,scaling:ExpressionNumOrNone=None,vector_dim:int | None=None,**kwargs:str):
         super().__init__()
         self.entries=kwargs.copy()
         for n,e in self.entries.items():
@@ -555,12 +608,12 @@ class PreciceReadData(BaseEquations):
         self.scaling=scaling
         self.vector_dim=vector_dim
 
-    def define_scalar_field(self,name:str,space:FiniteElementSpaceEnum,scale:Optional[ExpressionNumOrNone]=None):
+    def define_scalar_field(self,name:str,space:FiniteElementSpaceEnum,scale:ExpressionNumOrNone | None=None):
         # This is a bit dirty, but I cannot see how it can be done differently, except for providing different classes for ODEEquations and Equations
-        return Equations.define_scalar_field(self,name,space,scale=scale)
+        return Equations.define_scalar_field(self,name,space,scale=scale) #type:ignore
     
-    def _internal_define_scalar_field(self,name:str,space:FiniteElementSpaceEnum,scale:Optional[ExpressionNumOrNone]=None,testscale:Optional[ExpressionNumOrNone]=None,discontinuous_refinement_exponent:Optional[int]=None,allow_scales_with_fields:bool=False):
-        return Equations._internal_define_scalar_field(self,name,space,scale=scale,testscale=testscale,discontinuous_refinement_exponent=discontinuous_refinement_exponent,allow_scales_with_fields=allow_scales_with_fields)
+    def _internal_define_scalar_field(self,name:str,space:FiniteElementSpaceEnum,scale:ExpressionNumOrNone | None=None,testscale:ExpressionNumOrNone | None=None,discontinuous_refinement_exponent:int | None=None,allow_scales_with_fields:bool=False):
+        return Equations._internal_define_scalar_field(self,name,space,scale=scale,testscale=testscale,discontinuous_refinement_exponent=discontinuous_refinement_exponent,allow_scales_with_fields=allow_scales_with_fields) #type:ignore
 
     def define_fields(self):
         if self.get_combined_equations()._is_ode():
@@ -569,14 +622,14 @@ class PreciceReadData(BaseEquations):
             else:
                 for name in self.entries.keys():
                     # This is a bit dirty, but I cannot see how it can be done differently, except for providing different classes for ODEEquations and Equations
-                    ODEEquations.define_ode_variable(self,name,scale=self.scaling)
+                    ODEEquations.define_ode_variable(self,name,scale=self.scaling) #type:ignore
         else:
             for name in self.entries.keys():
                 # This is a bit dirty, but I cannot see how it can be done differently, except for providing different classes for ODEEquations and Equations
                 if self.vector_dim is None:
-                    Equations.define_scalar_field(self,name,self.get_current_code_generator()._coordinate_space,scale=self.scaling)
+                    Equations.define_scalar_field(self,name,self.get_current_code_generator()._coordinate_space,scale=self.scaling) #type:ignore
                 else:
-                    Equations.define_vector_field(self,name,self.get_current_code_generator()._coordinate_space,scale=self.scaling,dim=self.vector_dim)
+                    Equations.define_vector_field(self,name,self.get_current_code_generator()._coordinate_space,scale=self.scaling,dim=self.vector_dim) #type:ignore
 
     def define_residuals(self):
         for name in self.entries.keys():
@@ -592,12 +645,13 @@ class PreciceReadData(BaseEquations):
         if not hasattr(mesh,"_precice_vertex_ids"):
             raise ValueError("PreciceProvideMesh not set, please add it before PreciceReadData")
         interface=mesh.get_problem()._precice_interface
-        provider=self.get_combined_equations().get_equation_of_type(PreciceProvideMesh,always_as_list=True)
-        if len(provider)!=1:
+        assert interface is not None
+        providers=self.get_combined_equations().get_equation_of_type(PreciceProvideMesh,always_as_list=True)
+        if len(providers)!=1:
             raise ValueError("PreciceProvideMesh not set or set multiple times on this domain, please add a single one")
-        provider=provider[0]
+        provider=providers[0]
         assert isinstance(provider,PreciceProvideMesh)
-        vertex_ids=mesh._precice_vertex_ids        
+        vertex_ids=_get_precice_vertex_ids(mesh)        
                 
         for pyoomph_name,precice_name in self.entries.items():
             buffer=interface.read_data(provider.name, precice_name, vertex_ids, precice_dt)
@@ -609,17 +663,19 @@ class PreciceReadData(BaseEquations):
                     #print("READ DATA",pyoomph_name,index,buffer[0])
                     mesh.element_pt(0).internal_data_pt(index).set_value(0,buffer[0])                    
                 else:
+                    assert not isinstance(mesh,ODEStorageMesh)
                     if mesh.has_interface_dof_id(pyoomph_name)>=0:
                         index=mesh.has_interface_dof_id(pyoomph_name)
-                        for i,n in enumerate(mesh.nodes()):                    
-                            n.set_value(n.additional_value_index(index) ,buffer[mesh._precice_node_to_vertex_id[n]])
+                        for i,n in enumerate(mesh.nodes()):
+                            n.set_value(n.additional_value_index(index) ,buffer[_v2v(mesh)[n]])
                     else:
                         index=mesh.get_nodal_field_indices()[pyoomph_name]
                         if index<0:
                             raise RuntimeError("TODO: Elemental fields?")
                         for i,n in enumerate(mesh.nodes()):
-                            n.set_value(index,buffer[mesh._precice_node_to_vertex_id[n]])
+                            n.set_value(index,buffer[_v2v(mesh)[n]])
             else:
+                assert not isinstance(mesh,ODEStorageMesh)
                 if len(buffer.shape)==1:
                     raise RuntimeError("Expected vector, got scalar")
                 if buffer.shape[1]!=self.vector_dim:
@@ -628,14 +684,14 @@ class PreciceReadData(BaseEquations):
                 for vindex in range(self.vector_dim):
                     if mesh.has_interface_dof_id(pyoomph_name+"_"+directs[vindex])>=0:
                         index=mesh.has_interface_dof_id(pyoomph_name+"_"+directs[vindex])
-                        for i,n in enumerate(mesh.nodes()):                    
-                            n.set_value(n.additional_value_index(index) ,buffer[mesh._precice_node_to_vertex_id[n],vindex])
+                        for i,n in enumerate(mesh.nodes()):
+                            n.set_value(n.additional_value_index(index) ,buffer[_v2v(mesh)[n],vindex])
                     else:
                         index=mesh.get_nodal_field_indices()[pyoomph_name+"_"+directs[vindex]]
                         for i,n in enumerate(mesh.nodes()):
-                            n.set_value(index,buffer[mesh._precice_node_to_vertex_id[n],vindex])
+                            n.set_value(index,buffer[_v2v(mesh)[n],vindex])
 
-    def before_precice_solve(self, eqtree: EquationTree, precice_dt: float):
+    def _before_precice_solve(self, eqtree: EquationTree, precice_dt: float):
         self._do_read_data(precice_dt)
              
 
@@ -649,3 +705,6 @@ def get_pyoomph_precice_adapter():
     return _pyoomph_precice_adapter
     
 
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

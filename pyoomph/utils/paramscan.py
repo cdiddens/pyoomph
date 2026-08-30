@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -44,12 +45,12 @@ from ..typings import *
 
 #Sorts an array [0,1,2,3,4] like this [0,4,2,1,3]
 #Useful to for parameter scans: First do the extremes and the center, then gradually refine the spaces in between
-def alternate_sorting(inp:List[float])->List[float]:
+def alternate_sorting(inp:list[float])->list[float]:
     if len(inp) < 3:
         return inp
     centrali = len(inp) // 2
     res = [inp[0], inp[-1], inp[centrali]]
-    sublist:List[List[float]] = []
+    sublist:list[list[float]] = []
     if centrali > 1:
         sublist.append(inp[1:centrali])
     if centrali + 1 < len(inp):
@@ -79,7 +80,7 @@ class SimulationNamespace:
     Otherwise, nested properties cannot be set.
     """
 
-    def _INTERNAL_add_to_arglist(self,argnames:List[str],trunk:str)->None:
+    def _INTERNAL_add_to_arglist(self,argnames:list[str],trunk:str)->None:
         for x in dir(self):
             if x.startswith("_INTERNAL_") or x.startswith("__"):
                 continue
@@ -111,14 +112,14 @@ class SingleParallelParameterSimulation:
         sim.droplet=SimulationNamespace()
         sim.droplet.contact_angle=...
     """
-    def __init__(self,subdir:Optional[str],additional_args:List[str]):
+    def __init__(self,subdir:str | None,additional_args:list[str]):
         self._INTERNAL_subdir=subdir
         self._INTERNAL_additional_args=additional_args
-        self._INTERNAL_pararunner:Optional["ParallelParameterScan"]=None
-        self._INTERNAL_script:Optional[str]=None
+        self._INTERNAL_pararunner:"ParallelParameterScan | None"=None
+        self._INTERNAL_script:str | None=None
 
-    def _INTERNAL_assemble_args(self) -> List[str]:
-        argnames:List[str]=[]
+    def _INTERNAL_assemble_args(self) -> list[str]:
+        argnames:list[str]=[]
         for x in dir(self):
             if x[0]=="_":
                 continue
@@ -151,7 +152,7 @@ class SingleParallelParameterSimulation:
         args += self._INTERNAL_additional_args
         return args
 
-def _para_sim_call(args:List[str],logfilename:str,env:Dict[str,str]) -> bool:
+def _para_sim_call(args:list[str],logfilename:str,env:dict[str,str]) -> bool:
     print("STARTING ",args)
     #p = subprocess.Popen(args,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,shell=0)
     if logfilename is not None:
@@ -174,10 +175,13 @@ class ParallelParameterScan:
         output_dir (Optional[str]): The output directory for the parameter simulations. If not provided, a default directory will be created based on the script's name.
         max_procs (Optional[int]): The maximum number of processes to use for parallel execution. Defaults to the number of CPUs in the system.
         single_threaded_childs (bool): Whether to run each child process in single-threaded mode. Defaults to True.
+            This pins the linear solver's internal threading through the environment and pyoomph's own
+            element loop through ``--omp 1``, so that ``max_procs`` simulations do not each open their
+            own pool of threads on top of each other.
         interpreter (str): The path to the Python interpreter to use. Defaults to the system's default interpreter.
     
     """
-    def __init__(self,script_to_call:str,output_dir:Optional[str]=None,max_procs:Optional[int]=os.cpu_count(),single_threaded_childs:bool=True,interpreter:str=sys.executable):
+    def __init__(self,script_to_call:str,output_dir:str | None=None,max_procs:int | None=os.cpu_count(),single_threaded_childs:bool=True,interpreter:str=sys.executable):
         self._script=script_to_call
         self._interpreter=interpreter
         if output_dir is None:
@@ -187,10 +191,10 @@ class ParallelParameterScan:
         self._output_dir=output_dir
         self._max_procs=max_procs   #0 means Nprocs of system
         self._single_threaded_childs=single_threaded_childs
-        self._sims:List[SingleParallelParameterSimulation]=[]
-        self._donefile:Optional[IO[str]]=None
+        self._sims:list[SingleParallelParameterSimulation]=[]
+        self._donefile:IO[str] | None=None
 
-    def mark_as_done(self,sim:SingleParallelParameterSimulation,args:List[str])->None:
+    def mark_as_done(self,sim:SingleParallelParameterSimulation,args:list[str])->None:
         if self._donefile is None:
             self._donefile=open(os.path.join(self._output_dir,"DONE_SIMS.txt"),"a")
         if self.already_done(args):
@@ -199,7 +203,7 @@ class ParallelParameterScan:
         self._donefile.flush()
 
     #only_by_script_and_outdir is important, since passed expressions might be differently ordered!
-    def already_done(self,args:List[str],only_by_script_and_outdir:bool=True)->bool:
+    def already_done(self,args:list[str],only_by_script_and_outdir:bool=True)->bool:
         try:
             _donefile = open(os.path.join(self._output_dir, "DONE_SIMS.txt"), "r")
             if only_by_script_and_outdir:
@@ -220,7 +224,7 @@ class ParallelParameterScan:
         return False
 
 
-    def new_sim(self, subdir: Optional[str] = None, additional_args: List[str] = []) -> SingleParallelParameterSimulation:
+    def new_sim(self, subdir: str | None = None, additional_args: list[str] = []) -> SingleParallelParameterSimulation:
         """
         Create a new simulation. You can set the parameters of the simulation by setting attributes of the returned instance.
 
@@ -266,6 +270,12 @@ class ParallelParameterScan:
         with concurrent.futures.ThreadPoolExecutor(max_workers=self._max_procs) as executor:
             for s in self._sims:
                 args = [self._interpreter] + s._INTERNAL_assemble_args()  # type: ignore
+                if self._single_threaded_childs and "--omp" not in args:
+                    # The scan is already running max_procs simulations at once, so a child that also
+                    # threads its element loop oversubscribes the machine by max_procs x N. The env
+                    # vars above pin the solver's internal threading; this pins pyoomph's own, which
+                    # takes its count from --omp / set_num_threads rather than from the environment.
+                    args += ["--omp", "1"]
                 s._args = args  # type: ignore
                 if skip_done:
                     if self.already_done(args):
@@ -285,3 +295,6 @@ class ParallelParameterScan:
 #sim.paramB=100
 #para.run_all()
 
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

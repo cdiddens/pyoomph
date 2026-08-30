@@ -1,24 +1,25 @@
+#  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -41,8 +42,15 @@ if __name__ == "__main__":
         problem.solve() # stationary solve
 
         # from the previous example we know that the fold bifurcation happens close to 0.28
-        problem.param_gamma.value=0.28
+        problem.go_to_param(gamma=0.28,startstep=0.01)
         problem.solve() # solve at gamma=0.28
+
+        # Solve for the critical eigenvector first. It is the guess the fold tracker starts from:
+        # serially it can construct one itself, but that construction is a serial linear solve on a
+        # replicated dof vector, so with --distribute an explicit guess is required. shift=0 selects
+        # the mode that is crossing zero at the fold, not the fastest-decaying one.
+        # Eigensolver left to the autodetection (SLEPc where available, else Spectra)
+        problem.solve_eigenproblem(1,shift=0)
 
         # Activate bifurcation tracking
         problem.activate_bifurcation_tracking(problem.param_gamma,"fold")
@@ -55,7 +63,7 @@ if __name__ == "__main__":
             line = [problem.param_gamma.value, problem.param_delta.value,h_rms]  # line to write
             hexfold_file.write("\t".join(map(str, line)) + "\n")  # write to file
             hexfold_file.flush()
-            problem.output_at_increased_time()  # and write the output
+            problem.output(increase_time_for_PVD=True)  # and write the output
 
         output_with_params()
         ds = 0.025

@@ -17,7 +17,7 @@ A potential driver code could read
 .. literalinclude:: mesh_helical_line.py
    :language: python
    :start-at: class MeshTestProblem(Problem):
-   :end-at: problem.output_at_increased_time()
+   :end-at: problem.output(increase_time_for_PVD=True)
 
 ..  figure:: helix.*
 	:name: figspatialmeshtemplate2

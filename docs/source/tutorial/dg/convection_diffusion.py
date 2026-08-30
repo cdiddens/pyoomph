@@ -1,24 +1,25 @@
+#  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -26,7 +27,7 @@
 
 
 from pyoomph import *
-from pyoomph.equations.SUPG import * # To calculate the element size
+from pyoomph.expressions import *
 
 
 class ConvectionDiffusionEquation(Equations):
@@ -59,8 +60,8 @@ class ConvectionDiffusionEquation(Equations):
             
             # Assemble the facet terms:
             facet_terms=weak(self.D*(self.alpha_DG/h_avg)*jump(c),jump(ctest))
-            facet_terms=-weak(self.D*jump(c)*n,avg(grad(ctest)))
-            facet_terms=-weak(self.D*avg(grad(c)),jump(ctest)*n)
+            facet_terms+=-weak(self.D*jump(c)*n,avg(grad(ctest)))
+            facet_terms+=-weak(self.D*avg(grad(c)),jump(ctest)*n)
             facet_terms+=weak( jump(un_upwind*c,at_facet=True) ,jump(ctest))
 
             # And add them to the skeleton mesh of the facets

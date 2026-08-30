@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -60,7 +61,7 @@ class LubricationEquations(Equations):
       pfactor (ExpressionOrNum): Multiplicative factor for pressure. Default is 1.
       use_subexpressions (bool): Use subexpressions to speed up. Might be incompatible with some features. Default is True.
    """
-   def __init__(self, *, space:FiniteElementSpaceEnum="C2", mu:ExpressionOrNum=1.0, disjoining_pressure:Union[ExpressionNumOrNone,Dict[str,ExpressionOrNum]]=None, sigma:ExpressionOrNum=1, fluid_props:Optional[AnyLiquidProperties]=None,use_exact_pressure:bool=False,height_source:ExpressionOrNum=0,dt_h_factor:ExpressionOrNum=1,mu0:ExpressionNumOrNone=None,sigma0:ExpressionNumOrNone=None,swap_test_functions:bool=False,scheme:TimeSteppingScheme="BDF2", pfactor:ExpressionOrNum=1,use_subexpressions:bool=True):
+   def __init__(self, *, space:FiniteElementSpaceEnum="C2", mu:ExpressionOrNum=1.0, disjoining_pressure:ExpressionNumOrNone | dict[str, ExpressionOrNum]=None, sigma:ExpressionOrNum=1, fluid_props:AnyLiquidProperties | None=None,use_exact_pressure:bool=False,height_source:ExpressionOrNum=0,dt_h_factor:ExpressionOrNum=1,mu0:ExpressionNumOrNone=None,sigma0:ExpressionNumOrNone=None,swap_test_functions:bool=False,scheme:TimeSteppingScheme="BDF2", pfactor:ExpressionOrNum=1,use_subexpressions:bool=True):
       super().__init__()
       self.space:FiniteElementSpaceEnum = space
       self.mu = mu
@@ -68,12 +69,12 @@ class LubricationEquations(Equations):
       self._use_exact_pressure=use_exact_pressure
       self.height_source=height_source
       self.dt_h_factor=dt_h_factor
-      self.scheme=scheme
+      self.scheme:TimeSteppingScheme=scheme
       self.pfactor=pfactor
       self.use_subexpressions=use_subexpressions
 
       if fluid_props is not None:
-         self.fluid_props = fluid_props
+         self.fluid_props:AnyLiquidProperties | None = fluid_props
          sigm=fluid_props.default_surface_tension["gas"]
          assert sigm is not None
          self.sigma =sigm 
@@ -84,7 +85,7 @@ class LubricationEquations(Equations):
 
       
       if isinstance(disjoining_pressure, dict):
-         self.disjoining_pressure = self.build_disjoining_pressure(**disjoining_pressure)
+         self.disjoining_pressure:ExpressionNumOrNone = self.build_disjoining_pressure(**disjoining_pressure) #type:ignore
       else:
          self.disjoining_pressure = disjoining_pressure
 
@@ -94,7 +95,7 @@ class LubricationEquations(Equations):
 
    def __define_scaling(self):
       super().define_scaling()
-      scaling:Dict[str,ExpressionOrNum]={}
+      scaling:dict[str,ExpressionOrNum]={}
       if self.sigma0 is not None:
          scaling["surface_tension"] = self.sigma0
       elif self.fluid_props is not None:
@@ -104,8 +105,7 @@ class LubricationEquations(Equations):
       elif self.fluid_props is not None:
          scaling["dynamic_viscosity"] = self.fluid_props.evaluate_at_condition(self.mu,self.fluid_props.initial_condition)
       scaling["pressure"] = self.get_scaling("surface_tension") * self.get_scaling("height") / self.get_scaling("spatial") ** 2  # Laplace pressure scale
-      problem=self.get_current_code_generator()._problem 
-      assert problem is not None
+      problem=self.get_current_code_generator().get_problem()
       if not ("temporal" in problem.scaling.keys()):
          problem.scaling["temporal"] = 3 * self.get_scaling("dynamic_viscosity") * self.get_scaling("spatial") ** 4 / (self.get_scaling("surface_tension") * self.get_scaling("height") ** 3)
 
@@ -168,7 +168,7 @@ class LubricationBoundary(InterfaceEquations):
    """
 
    required_parent_type = LubricationEquations
-   def __init__(self,*,sigma:ExpressionNumOrNone=None,use_exact_pressure:Optional[bool]=None):
+   def __init__(self,*,sigma:ExpressionNumOrNone=None,use_exact_pressure:bool | None=None):
       super().__init__()
       self.sigma=sigma
       self._use_exact_pressure=use_exact_pressure
@@ -198,6 +198,7 @@ class LubricationBoundaryByLagrange(InterfaceEquations):
    required_parent_type = LubricationEquations
    def define_fields(self):
       lubric=self.get_parent_domain().get_equations().get_equation_of_type(LubricationEquations)
+      assert isinstance(lubric,LubricationEquations)
       if lubric.swap_test_functions:
          scal=1/(test_scale_factor("height")*scale_factor("spatial"))
       else:
@@ -206,6 +207,7 @@ class LubricationBoundaryByLagrange(InterfaceEquations):
 
    def define_residuals(self):
       lubric=self.get_parent_domain().get_equations().get_equation_of_type(LubricationEquations)
+      assert isinstance(lubric,LubricationEquations)
       p,ptest=var_and_test("pressure",domain="..")
       h,htest=var_and_test("height",domain="..")
       if lubric.swap_test_functions:
@@ -255,11 +257,11 @@ class LubricationVelocityAtH(Equations):
          name (str): Name of the velocity field. Default is "velocity".
    """
       
-   def __init__(self,at_height=var("height"),space:Optional[FiniteElementSpaceEnum]="C2",name="velocity"):
+   def __init__(self,at_height=var("height"),space:FiniteElementSpaceEnum | None="C2",name="velocity"):
       super().__init__()
       self.at_height=at_height
       self.name=name
-      self.space=space
+      self.space:FiniteElementSpaceEnum | None=space
 
    def define_fields(self):
       if self.space is not None:
@@ -267,6 +269,7 @@ class LubricationVelocityAtH(Equations):
 
    def define_residuals(self):
       lubric=self.get_combined_equations().get_equation_of_type(LubricationEquations)
+      assert isinstance(lubric,LubricationEquations)
       mu=lubric.mu
       h,p=var(["height","pressure"])
       sigma=lubric.sigma
@@ -303,7 +306,7 @@ class LubricationBulkField(Equations):
       self.diffusion=diffusion
       self.sigma=sigma
       self.height_multiplied=height_multiplied
-      self.scheme=scheme
+      self.scheme:TimeSteppingScheme=scheme
 
    def define_fields(self):
       if self.height_multiplied:
@@ -425,3 +428,5 @@ class LubricationEquationOnNavierStokes(Equations):
          self.add_residual((1 / P) * dot(-tang_shear, tang_test) * dx)  # Shear connection
 
 
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

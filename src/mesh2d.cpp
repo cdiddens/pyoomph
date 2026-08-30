@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -26,11 +26,20 @@ The main author may be contacted at c.diddens@utwente.nl
 #include "meshtemplate.hpp"
 #include "problem.hpp"
 #include "elements.hpp"
+#include "elements_concrete.hpp"
 #include "mesh2d.hpp"
 
 #include "Telements.h"
 #include "unstructured_two_d_mesh_geometry_base.h"
 #include <array>
+#include <functional>
+#include <map>
+#include <set>
+#include <string>
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <iostream>
 namespace pyoomph
 {
 
@@ -51,7 +60,7 @@ namespace pyoomph
     using namespace oomph::QuadTreeNames;
 
     // Setup the neighbours
-    find_neighbours();
+    DynamicQuadTreeForest::find_neighbours(); // qualified: called from the constructor
 
     // Construct the rotation scheme, note that all neighbour pointers must
     // be set before the constructor is called
@@ -141,71 +150,86 @@ namespace pyoomph
       for (std::set<unsigned>::iterator it = potentially_neighb_tree[i].begin(); it != potentially_neighb_tree[i].end(); it++)
       {
         unsigned j = (*it);
+        // The neighbour tests below key purely on SHARED CORNER NODES (get_node_number on the neighbour
+        // object), so they resolve quad<->quad, tri<->tri AND mixed quad<->tri roots uniformly -- the
+        // neighbour object's own shape is irrelevant to whether it contains element i's edge corners.
+        oomph::FiniteElement *obj_j = Trees_pt[j]->object_pt();
         if (dynamic_cast<oomph::QuadElementBase *>(Trees_pt[i]->object_pt()))
         {
-          if (dynamic_cast<oomph::QuadElementBase *>(Trees_pt[j]->object_pt()))
-          {
-            // is it the Northern neighbour ?
-            bool is_N_neighbour =
-                ((Trees_pt[j]->object_pt()->get_node_number(
-                      Trees_pt[i]->object_pt()->node_pt(n * (n - 1))) != -1) &&
-                 (Trees_pt[j]->object_pt()->get_node_number(
-                      Trees_pt[i]->object_pt()->node_pt(n * n - 1)) != -1));
-
-            // is it the Southern neighbour ?
-            bool is_S_neighbour =
-                ((Trees_pt[j]->object_pt()->get_node_number(
-                      Trees_pt[i]->object_pt()->node_pt(0)) != -1) &&
-                 (Trees_pt[j]->object_pt()->get_node_number(
-                      Trees_pt[i]->object_pt()->node_pt(n - 1)) != -1));
-
-            // is it the Eastern neighbour ?
-            bool is_E_neighbour =
-                ((Trees_pt[j]->object_pt()->get_node_number(
-                      Trees_pt[i]->object_pt()->node_pt(n - 1)) != -1) &&
-                 (Trees_pt[j]->object_pt()->get_node_number(
-                      Trees_pt[i]->object_pt()->node_pt(n * n - 1)) != -1));
-
-            // is it the Western neighbour ?
-            bool is_W_neighbour =
-                ((Trees_pt[j]->object_pt()->get_node_number(
-                      Trees_pt[i]->object_pt()->node_pt(0)) != -1) &&
-                 (Trees_pt[j]->object_pt()->get_node_number(
-                      Trees_pt[i]->object_pt()->node_pt(n * (n - 1))) != -1));
-
-            if (is_N_neighbour)
-              Trees_pt[i]->neighbour_pt(N) = Trees_pt[j];
-            if (is_S_neighbour)
-              Trees_pt[i]->neighbour_pt(S) = Trees_pt[j];
-            if (is_E_neighbour)
-              Trees_pt[i]->neighbour_pt(E) = Trees_pt[j];
-            if (is_W_neighbour)
-              Trees_pt[i]->neighbour_pt(W) = Trees_pt[j];
-          }
-          else
-          {
-            throw_runtime_error("Check tri neighbors of quads");
-          }
+          // Quad edges via oomph's compass corner indices (n = nnode_1d): corners 0, n-1, n(n-1), n^2-1.
+          bool is_N_neighbour =
+              ((obj_j->get_node_number(Trees_pt[i]->object_pt()->node_pt(n * (n - 1))) != -1) &&
+               (obj_j->get_node_number(Trees_pt[i]->object_pt()->node_pt(n * n - 1)) != -1));
+          bool is_S_neighbour =
+              ((obj_j->get_node_number(Trees_pt[i]->object_pt()->node_pt(0)) != -1) &&
+               (obj_j->get_node_number(Trees_pt[i]->object_pt()->node_pt(n - 1)) != -1));
+          bool is_E_neighbour =
+              ((obj_j->get_node_number(Trees_pt[i]->object_pt()->node_pt(n - 1)) != -1) &&
+               (obj_j->get_node_number(Trees_pt[i]->object_pt()->node_pt(n * n - 1)) != -1));
+          bool is_W_neighbour =
+              ((obj_j->get_node_number(Trees_pt[i]->object_pt()->node_pt(0)) != -1) &&
+               (obj_j->get_node_number(Trees_pt[i]->object_pt()->node_pt(n * (n - 1))) != -1));
+          if (is_N_neighbour) Trees_pt[i]->neighbour_pt(N) = Trees_pt[j];
+          if (is_S_neighbour) Trees_pt[i]->neighbour_pt(S) = Trees_pt[j];
+          if (is_E_neighbour) Trees_pt[i]->neighbour_pt(E) = Trees_pt[j];
+          if (is_W_neighbour) Trees_pt[i]->neighbour_pt(W) = Trees_pt[j];
+        }
+        else if (oomph::TElementBase *ti = dynamic_cast<oomph::TElementBase *>(Trees_pt[i]->object_pt()))
+        {
+          // Triangle root neighbours are found topologically by shared edges (a pair of shared vertex
+          // nodes), reusing the QuadTree edge slots S/E/W for the triangle's three edges (consistent with
+          // the Father_bound table: E=v0-v1, W=v1-v2, S=v2-v0). N is unused for triangles.
+          oomph::Node *v0 = ti->vertex_node_pt(0);
+          oomph::Node *v1 = ti->vertex_node_pt(1);
+          oomph::Node *v2 = ti->vertex_node_pt(2);
+          bool has0 = (obj_j->get_node_number(v0) != -1);
+          bool has1 = (obj_j->get_node_number(v1) != -1);
+          bool has2 = (obj_j->get_node_number(v2) != -1);
+          if (has0 && has1) Trees_pt[i]->neighbour_pt(E) = Trees_pt[j];
+          if (has1 && has2) Trees_pt[i]->neighbour_pt(W) = Trees_pt[j];
+          if (has2 && has0) Trees_pt[i]->neighbour_pt(S) = Trees_pt[j];
         }
         else
         {
-          throw_runtime_error("Check neighbors of tris");
+          throw_runtime_error("Strange element in tree forest neighbour finding");
         }
       }
     }
   }
+
+  // Skip oomph's quad-coordinate neighbour self-test for triangle forests (their node-sharing and
+  // hanging are done geometrically, not via the QuadTree coordinate descent); fall through to the
+  // base check for quad forests.
+  void DynamicQuadTreeForest::check_all_neighbours(oomph::DocInfo &doc_info)
+  {
+    // oomph's self-test verifies neighbours via the QUAD coordinate descent, which is meaningless once
+    // any triangle root is present (tris/mixed forests use topological shared-node neighbouring). Skip it
+    // whenever ANY tree is a triangle (pure-tri OR mixed quad+tri); pure-quad forests still get the check.
+    for (unsigned i = 0; i < ntree(); i++)
+      if (dynamic_cast<oomph::TElementBase *>(Trees_pt[i]->object_pt())) return;
+    oomph::QuadTreeForest::check_all_neighbours(doc_info);
+  }
+
 
   // True only if every element in the mesh is a quad (h-refinement via a QuadTreeForest is only
   // implemented for pure-quad meshes). Also issues a one-off warning (per mesh) if adaptive
   // refinement was requested but the mesh contains non-quad (e.g. triangular) elements.
   bool TemplatedMeshBase2d::refinement_possible()
     {
-      bool allquads = true;
+      // h-refinement via the (Dynamic)QuadTreeForest is implemented for pure-quad, pure-triangle AND
+      // MIXED quad+tri meshes: every element (quad or tri) refines 1->4 on the shared QuadTree 4-son
+      // bookkeeping, and DynamicQuadTreeForest::find_neighbours resolves quad<->tri root neighbours
+      // topologically (shared corner nodes). Any OTHER element type disables adaptation.
+      // One cast per element, not one per element per shape family: element_family() is cached on the
+      // element, whereas each dynamic_cast here walks the virtual-inheritance diamond (~1500 cycles).
+      bool all_refineable = true;
       for (unsigned int i = 0; i < this->nelement(); i++)
       {
-        allquads = allquads && (dynamic_cast<oomph::QuadElementBase *>(this->element_pt(i)) != NULL);
+        pyoomph::BulkElementBase *be = dynamic_cast<pyoomph::BulkElementBase *>(this->element_pt(i));
+        BulkElementBase::ElementFamily fam = (be ? be->element_family() : BulkElementBase::EF_OTHER);
+        if (fam != BulkElementBase::EF_QUAD && fam != BulkElementBase::EF_SIMPLEX) { all_refineable = false; break; }
       }
-      if (allquads)
+      if (all_refineable)
       {
         return true;
       }
@@ -213,7 +237,7 @@ namespace pyoomph
       {
         if (this->max_refinement_level() && issued_tri_refinement_warning==false && !this->problem->is_quiet())
         {
-          std::cout << "WARNING: Found a tri or something in the mesh "<< this->domainname << " -> cannot be adaptive right now. Requires to implement a good tree for mixed meshes" << std::endl;
+          std::cout << "WARNING: Mesh "<< this->domainname << " contains a non-quad/tri element -> cannot be adaptive." << std::endl;
           issued_tri_refinement_warning = true;
         }
         return false;
@@ -225,7 +249,7 @@ namespace pyoomph
   void TemplatedMeshBase2d::setup_tree_forest()
     {
       if (refinement_possible())  setup_quadtree_forest();
-      else {        
+      else {
         if (issued_tri_refinement_warning==false && !this->problem->is_quiet())
         {
           std::cout << "WARNING: Found a tri or something in the mesh "<< this->domainname << " -> cannot be adaptive right now. Requires to implement a good tree for mixed meshes" << std::endl;
@@ -234,6 +258,80 @@ namespace pyoomph
         this->disable_adaptation();
       }
     }
+
+  // Enforce 2:1 balancing across a MIXED quad<->tri interface (see header). Cross-shape hanging is only
+  // implemented for a single-level jump, so any quad+tri edge whose finer side is >=2 levels finer (detected
+  // by a DIFFERENT-shape node at the t=1/2^nnode_1d edge fraction, exactly as the tet balancer detects >=2
+  // finer) triggers refinement of the coarser element. Iterated to a fixed point. No-op on pure meshes.
+  void TemplatedMeshBase2d::enforce_refinement_balance()
+  {
+    bool has_quad = false, has_tri = false;
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+    {
+      if (dynamic_cast<oomph::QuadElementBase *>(this->element_pt(ie))) has_quad = true;
+      else if (dynamic_cast<oomph::TElementBase *>(this->element_pt(ie))) has_tri = true;
+    }
+    if (!(has_quad && has_tri)) return; // only mixed meshes need cross-shape balancing
+
+    const double scale = 1e8;
+    const int max_rounds = 40; // convergence bounded by max_refinement_level()
+    for (int round = 0; round < max_rounds; round++)
+    {
+      auto qpos = [&](oomph::Node *nd) { return std::array<long long, 2>{(long long)std::llround(nd->x(0) * scale), (long long)std::llround(nd->x(1) * scale)}; };
+      // Quantized node position -> bitmask of element shapes touching it (1=quad, 2=tri).
+      std::map<std::array<long long, 2>, int> shapes_at;
+      for (unsigned ie = 0; ie < this->nelement(); ie++)
+      {
+        oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(this->element_pt(ie));
+        const int shp = dynamic_cast<oomph::QuadElementBase *>(fe) ? 1 : (dynamic_cast<oomph::TElementBase *>(fe) ? 2 : 0);
+        if (!shp) continue;
+        for (unsigned k = 0; k < fe->nnode(); k++) shapes_at[qpos(fe->node_pt(k))] |= shp;
+      }
+      oomph::Vector<unsigned> to_refine;
+      for (unsigned ie = 0; ie < this->nelement(); ie++)
+      {
+        oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(this->element_pt(ie));
+        oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(this->element_pt(ie));
+        const int myshp = dynamic_cast<oomph::QuadElementBase *>(fe) ? 1 : (dynamic_cast<oomph::TElementBase *>(fe) ? 2 : 0);
+        if (!myshp || !re) continue;
+        if (re->refinement_level() >= this->max_refinement_level()) continue;
+        // Vertex nodes + the element's edges (quad: SW,SE,NW,NE = 0,1,2,3; tri: 0,1,2).
+        std::vector<oomph::Node *> vtx;
+        std::vector<std::pair<int, int>> edges;
+        if (myshp == 1)
+        {
+          oomph::QuadElementBase *q = dynamic_cast<oomph::QuadElementBase *>(fe);
+          for (unsigned j = 0; j < 4; j++) vtx.push_back(q->vertex_node_pt(j));
+          edges = {{0, 1}, {1, 3}, {2, 3}, {0, 2}};
+        }
+        else
+        {
+          oomph::TElementBase *t = dynamic_cast<oomph::TElementBase *>(fe);
+          for (unsigned j = 0; j < 3; j++) vtx.push_back(t->vertex_node_pt(j));
+          edges = {{0, 1}, {1, 2}, {2, 0}};
+        }
+        const int otherbit = 3 & ~myshp; // the OTHER shape's bit
+        const double frac = 1.0 / (double)(1u << fe->nnode_1d());
+        const double fracs[2] = {frac, 1.0 - frac};
+        bool imbalanced = false;
+        for (const auto &e : edges)
+        {
+          if (imbalanced) break;
+          oomph::Node *Va = vtx[e.first], *Vb = vtx[e.second];
+          for (int fi = 0; fi < 2 && !imbalanced; fi++)
+          {
+            std::array<long long, 2> q = {(long long)std::llround((Va->x(0) + fracs[fi] * (Vb->x(0) - Va->x(0))) * scale),
+                                          (long long)std::llround((Va->x(1) + fracs[fi] * (Vb->x(1) - Va->x(1))) * scale)};
+            auto it = shapes_at.find(q);
+            if (it != shapes_at.end() && (it->second & otherbit)) imbalanced = true; // other-shape node >=2 levels finer
+          }
+        }
+        if (imbalanced) to_refine.push_back(ie);
+      }
+      if (to_refine.size() == 0) break;
+      this->refine_selected_elements(to_refine);
+    }
+  }
 
   // Overload used by the generic (oomph-lib) interface: discards the documentation output.
   void TemplatedMeshBase2d::setup_boundary_element_info()
@@ -246,9 +344,8 @@ namespace pyoomph
   // Used for local subdivision of triangular meshes (which cannot be tree-refined, see refinement_possible()).
   unsigned TemplatedMeshBase2d::add_tri_C1(Node* & n1, Node* & n2, Node* & n3)
   {
-    BulkElementBase::__CurrentCodeInstance = codeinst;
+    BulkElementBase::JITCodeScope __jit_scope1(jitcode);
     unsigned res=this->add_new_element(new BulkElementTri2dC1(),{n1,n2,n3});
-    BulkElementBase::__CurrentCodeInstance = NULL;
     return res;
   }
 
@@ -259,10 +356,10 @@ namespace pyoomph
   // sub-triangles sharing this new node.
   unsigned TemplatedMeshBase2d::add_tri_C1TB(Node* & n1, Node* & n2, Node* & n3, Node* & n4)
   {
-    BulkElementBase::__CurrentCodeInstance = codeinst;
+    BulkElementBase::JITCodeScope __jit_scope2(jitcode);
     if (!n4)
     {
-      auto * functable=codeinst->get_func_table();
+      auto * functable=jitcode->get_func_table();
       unsigned ntot = functable->total_num_fields_basebulk;
       n4=new pyoomph::BoundaryNode(n1->time_stepper_pt(),n1->nlagrangian(), n1->nlagrangian_type(), n1->ndim(), n1->nposition_type(), ntot);
       for (unsigned t=0;t<n1->time_stepper_pt()->ntstorage();t++)
@@ -279,20 +376,21 @@ namespace pyoomph
       this->add_node_pt(n4);
     }
     unsigned res=this->add_new_element(new BulkElementTri2dC1TB(),{n1,n2,n3,n4});
-    BulkElementBase::__CurrentCodeInstance = NULL;
     return res;
   }
 
   // Build Boundary_element_pt / Face_index_at_boundary for a (possibly mixed quad/tri) 2d mesh.
-  // For adaptive, pure-quad meshes, delegates to the generic facet-based TemplatedMeshBase
-  // implementation (identication_of_boundary_elements_by_facets), which is robust under refinement.
-  // Otherwise (non-adaptive or mixed meshes), uses the quad- and tri-specific helpers below and then
-  // does a cleanup pass that drops any recorded boundary element/face whose face nodes are not
-  // actually flagged as lying on that boundary (defensive check against mismatches at mixed corners).
+  // Normally this is the single, shape-neutral identification from the per-element face boundary
+  // tags (TemplatedMeshBase::setup_boundary_element_info_from_face_tags), which is exact on
+  // arbitrarily refined meshes. Only meshes that never received tags -- no facet information in the
+  // template, or an element set built outside the template/refinement path -- fall back to
+  // the legacy per-shape reconstruction from nodal boundary membership below, followed by a cleanup
+  // pass that drops any recorded boundary element/face whose face nodes are not actually flagged as
+  // lying on that boundary.
   void TemplatedMeshBase2d::setup_boundary_element_info(std::ostream &outfile)
   {
-    
-   
+
+
     unsigned nbound = nboundary();
 
     Boundary_element_pt.clear();
@@ -300,16 +398,9 @@ namespace pyoomph
     Boundary_element_pt.resize(nbound);
     Face_index_at_boundary.resize(nbound);
 
-    if (identication_of_boundary_elements_by_facets)
+    if (face_boundary_tags_valid)
     {
-      if (is_adaptation_enabled() &&refinement_possible() )
-      {
-        identication_of_boundary_elements_by_facets=false; // For adaptive meshes, we find the facets conventionally, but for non-adaptive meshes we can use the facet information from the mesh template which is always accurate, even at mixed corners
-      } 
-    }
-    if (identication_of_boundary_elements_by_facets)
-    {
-      TemplatedMeshBase::setup_boundary_element_info(outfile);
+      setup_boundary_element_info_from_face_tags();
       Lookup_for_elements_next_boundary_is_setup = true;
       return;
     }
@@ -505,6 +596,11 @@ namespace pyoomph
   // (checked pairwise per edge: (0,1)->face 2, (0,2)->face 1, (1,2)->face 0).
   void TemplatedMeshBase2d::setup_interior_boundary_elements(unsigned bindex)
   {
+    // With per-face boundary tags an interior boundary is nothing special: the template records its
+    // facets like any other boundary, both incident elements get tagged, and
+    // setup_boundary_element_info_from_face_tags has already registered both of them. Running the
+    // scan below on top of that would add every element a second time.
+    if (face_boundary_tags_valid) return;
     unsigned nel = nelement();
     for (unsigned int ie = 0; ie < nel; ie++)
     {
@@ -1010,8 +1106,11 @@ namespace pyoomph
           {
             BulkElementBase* be=dynamic_cast<BulkElementBase*>(this->element_pt(ie));
             oomph::RefineableQElement<2>* beq=dynamic_cast<oomph::RefineableQElement<2>*>(be);
-            if (!beq) 
+            if (!beq)
             {
+             // Only the quadtree neighbour walk is quad-specific. The shape-neutral way out is
+             // TemplatedMeshBase::build_facet_adjacency() (what the 3d override is built on), extended
+             // with the 2:1 bookkeeping this branch does via opposite_already_at_index.
              throw_runtime_error("Mixed meshes here");
             }
             for (unsigned edge_counter = 0; edge_counter < 4; edge_counter++)
@@ -1024,32 +1123,51 @@ namespace pyoomph
 					neigh_pt = beq->quadtree_pt()->gteq_edge_neighbour(edges[edge_counter], translate_s, s_lo_neigh, s_hi_neigh, neigh_edge, diff_level, in_neighbouring_tree);
 					if (neigh_pt != nullptr && neigh_pt->is_leaf())
 					{
-					 
+
 					 BulkElementBase * adj=dynamic_cast<BulkElementBase *>(neigh_pt->object_pt());
+
+					 // A leaf whose object has been flushed. Mesh::distribute() and
+					 // prune_halo_elements_and_nodes() call Tree::flush_object() on every element they
+					 // delete but leave the tree standing, so gteq_edge_neighbour() still hands back a
+					 // leaf with a null object. Only elements OUTSIDE the retained halo layer are
+					 // deleted, so the neighbour of a non-halo element is always still here: a null
+					 // neighbour means both sides of this facet belong to another rank, and skipping it
+					 // drops nothing that would be assembled here. A null one next to a NON-halo element
+					 // would mean the halo layer itself is incomplete, which is not something to work
+					 // around silently.
+					 if (!adj)
+					 {
+					   if (!element_is_halo(be)) throw_runtime_error("Interior facet of a non-halo element has no neighbouring element: the halo layer is incomplete");
+					   continue;
+					 }
 
 					 if (!constructed_facets.count(be)) constructed_facets[be]={-1,-1,-1,-1};
 					 if (!constructed_facets.count(adj)) constructed_facets[adj]={-1,-1,-1,-1};
 					 int neigh_edge_counter=revedges[neigh_edge];
 
-                oomph::Vector<double> mp1=be->get_Eulerian_midpoint_from_local_coordinate();
-				    oomph::Vector<double> mp2=adj->get_Eulerian_midpoint_from_local_coordinate();
-//					 std::cout << "NEIGHT PT " << ie << "  : " << be << "("<<mp1[0] << ", " << mp1[1]<<") , " << edge_counter << "  and  " << adj << "("<<mp2[0] << ", " << mp2[1]<<") ,  " << neigh_edge_counter << "  DL " << diff_level << std::endl;
-					 					 
 					 if (diff_level==0)
 					 {
 					   if (constructed_facets[adj][neigh_edge_counter]<0)
 					   {
-							if (constructed_facets[be][edge_counter]>=0) 
+							if (constructed_facets[be][edge_counter]>=0)
 		               {
 		                  throw_runtime_error("Facet was already constructed before, this should not happen");
 		               }
 		               constructed_facets[be][edge_counter]=opposite_elements.size();
-		               constructed_facets[adj][neigh_edge_counter]=opposite_elements.size();		               
-		               internal_elements.push_back(be);
-		               internal_face_dir.push_back(edge_to_face_dir[edge_counter]);		               
-		               opposite_elements.push_back(adj);
-		               opposite_face_dir.push_back(edge_to_face_dir[neigh_edge_counter]);
-                     opposite_already_at_index.push_back(-1);       		               
+		               constructed_facets[adj][neigh_edge_counter]=opposite_elements.size();
+		               // Same-level facet, so which of the two is the near side is a free choice - and
+		               // therefore one that must come out the same on every rank, see the note in the
+		               // node-based branch below. (Where the levels differ it is not free: the facet
+		               // belongs to the finer side, which is always be, since gteq_edge_neighbour()
+		               // only ever returns a neighbour at the same or a coarser level.)
+		               BulkElementBase *nearel=be, *farel=adj;
+		               int neardir=edge_to_face_dir[edge_counter], fardir=edge_to_face_dir[neigh_edge_counter];
+		               if (Mesh::compare_structural_order(be,adj)>0) { std::swap(nearel,farel); std::swap(neardir,fardir); }
+		               internal_elements.push_back(nearel);
+		               internal_face_dir.push_back(neardir);
+		               opposite_elements.push_back(farel);
+		               opposite_face_dir.push_back(fardir);
+                     opposite_already_at_index.push_back(-1);
 					   }
 					   else if (constructed_facets[be][edge_counter]<0) 
 					   {
@@ -1091,10 +1209,12 @@ namespace pyoomph
     }
         
 
-    std::map<std::pair<oomph::Node*,oomph::Node*>,std::vector<std::pair<BulkElementBase*,int>>> nodemap;
-    for (unsigned int ie=0;ie<this->nelement();ie++)
-    {     
-     BulkElementBase* be=dynamic_cast<BulkElementBase*>(this->element_pt(ie));
+    // The two vertex nodes of a face identify it uniquely, so a face listed by two elements is an
+    // interior facet. Walked twice - once to group, once to emit - so the key derivation lives in
+    // one place.
+    auto faces_of_element = [](BulkElementBase *be)
+    {
+     std::vector<std::pair<int,std::pair<oomph::Node*,oomph::Node*>>> res;
      std::set<oomph::Node*> elem_vertices;
      for (unsigned int ivn=0;ivn<be->nvertex_node();ivn++) elem_vertices.insert(be->vertex_node_pt(ivn));
      std::vector<int> face_dirs;
@@ -1106,11 +1226,11 @@ namespace pyoomph
      {
        face_dirs={1,-1,2,-2};
      }
-     else 
+     else
      {
       throw_runtime_error("Should not enter here");
      }
-     
+
      for (auto face_dir : face_dirs)
      {
        unsigned nnode_on_face=be->nnode_on_face();
@@ -1126,35 +1246,59 @@ namespace pyoomph
         throw_runtime_error("Expected 2 vertex nodes on face, but got "+std::to_string(face_verts.size()));
        }
        for (unsigned int i=0;i<face_verts.size();i++) if (face_verts[i]->is_a_copy()) face_verts[i]=face_verts[i]->copied_node_pt();
-       std::sort(face_verts.begin(),face_verts.end());
-       std::pair<oomph::Node*,oomph::Node*> key={face_verts[0],face_verts[1]};
-       if (!nodemap.count(key))
-       {
-        nodemap[key]={std::make_pair(be,face_dir)};
-       }
-       else
-       {
-        nodemap[key].push_back(std::make_pair(be,face_dir));
-       }
+       std::sort(face_verts.begin(),face_verts.end()); // Only to canonicalise the key, the order in it carries no meaning
+       res.push_back({face_dir,{face_verts[0],face_verts[1]}});
      }
+     return res;
+    };
+
+    std::map<std::pair<oomph::Node*,oomph::Node*>,std::vector<std::pair<BulkElementBase*,int>>> nodemap;
+    for (unsigned int ie=0;ie<this->nelement();ie++)
+    {
+     BulkElementBase* be=dynamic_cast<BulkElementBase*>(this->element_pt(ie));
+     for (const auto & f : faces_of_element(be)) nodemap[f.second].push_back(std::make_pair(be,f.first));
     }
-    
+
     for (const auto & nm : nodemap)
     {
      if (nm.second.size()>2)
      {
       throw_runtime_error("Found a facet with "+std::to_string(nm.second.size())+" attached elements");
      }
-     else if (nm.second.size()==2)
+    }
+
+    // Emit in element/face order rather than by iterating nodemap. nodemap is keyed on node POINTERS,
+    // so its iteration order follows heap addresses and therefore differs from process to process.
+    // That does not matter in serial, but oomph-lib's parallel assembly of a NON-distributed problem
+    // splits the global element list by index and assumes every rank sees the same list: with a
+    // rank-dependent facet order each rank assembled a different subset of the interior facets, so
+    // under a plain mpirun some DG facet contributions were counted twice and others dropped. The
+    // wrong Jacobian then also broke Newton convergence, and the extra step deadlocked in the PETSc
+    // solver once the ranks disagreed about whether the sparsity pattern could be reused.
+    for (unsigned int ie=0;ie<this->nelement();ie++)
+    {
+     BulkElementBase* be=dynamic_cast<BulkElementBase*>(this->element_pt(ie));
+     for (const auto & f : faces_of_element(be))
      {
-       internal_elements.push_back(nm.second[0].first);
-       internal_face_dir.push_back(nm.second[0].second);
-       opposite_elements.push_back(nm.second[1].first);
-       opposite_face_dir.push_back(nm.second[1].second);      
-       opposite_already_at_index.push_back(-1);       
+       const auto & attached=nodemap.at(f.second);
+       if (attached.size()!=2) continue; // Exterior facet
+       // Which of the two is the NEAR side (the one the facet element is attached to, and whose
+       // outward normal the facet terms are written for) has to be decided identically on every rank:
+       // distributed, the two elements can live on different ranks and neither asks the other. Local
+       // element order alone would do that only because Mesh::distribute() happens to re-add the
+       // retained elements in their original order; ordering by the structural index says it outright.
+       // While the mesh is whole the two coincide, so this changes nothing serially.
+       unsigned nearside = (Mesh::compare_structural_order(attached[0].first,attached[1].first)>0 ? 1 : 0);
+       const auto & near=attached[nearside]; const auto & far=attached[1-nearside];
+       if (near.first!=be || near.second!=f.first) continue; // Emitted from the other side
+       internal_elements.push_back(near.first);
+       internal_face_dir.push_back(near.second);
+       opposite_elements.push_back(far.first);
+       opposite_face_dir.push_back(far.second);
+       opposite_already_at_index.push_back(-1);
      }
     }
-    
+
     std::cout << "Number of internal facets to be constructed: " << internal_elements.size() << std::endl;
     
   }

@@ -8,4 +8,6 @@ Here, we provide an overview of the defined mathematical functions, differential
    :hidden:
 
    math/elementary.rst
+   math/diffops.rst
+   math/coordsys.rst   
    math/keywords.rst

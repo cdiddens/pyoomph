@@ -19,7 +19,8 @@ __pycache__
 *.txt
 !CMakeLists.txt
 !docs/requirements.txt
-!pyoomph/jitbridge/NOTE_FOR_WINDOWS.txt
+# Copied from src/jitbridge.h by CMake at configure time (see CMakeLists.txt)
+pyoomph/jitbridge/jitbridge.h
 *.c
 *.so
 *.o
@@ -51,6 +52,11 @@ _pyoomph_run_.txt
 *.mp4
 *.mpg
 *.csv
+# Material data read at runtime by default_materials.py. These are tracked
+# (force-added past the rule above), but scikit-build-core copies the pyoomph
+# package into the wheel with .gitignore applied, so without this exception the
+# blanket *.csv rule silently dropped them from every published wheel and sdist.
+!pyoomph/materials/csv_data/*.csv
 *.rar
 *.exe
 *.avi
@@ -88,3 +94,5 @@ src/thirdparty/tinycc/tccdefs_.h
 typings/_pyoomph-stubs/__init__.pyi
 pyoomph/NO_MPI
 citools/pyoomph_tutorial_scripts/
+/valgrind.*
+Scratchpad/

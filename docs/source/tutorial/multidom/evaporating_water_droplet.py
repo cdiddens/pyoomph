@@ -1,24 +1,25 @@
+#  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -31,10 +32,10 @@ from pyoomph.equations.navier_stokes import * # Flow
 from pyoomph.expressions.units import * # units
 from pyoomph.utils.dropgeom import  * # utils to calculate droplet contact angle from height and radius, etc.
 from pyoomph.equations.advection_diffusion import * # for the gas diffusion
-from pyoomph.meshes.remesher import * # to remesh at large distortions
 
 
 # A mesh of an axisymmetric droplet surrounded by gas
+# Remeshing is done by recreation, i.e. define_geometry is called again for each remeshing event
 class DropletWithGasMesh(GmshTemplate):
     def __init__(self,droplet_radius,droplet_height,gas_radius,cl_resolution_factor=0.1,gas_resolution_factor=50):
         super(DropletWithGasMesh, self).__init__()
@@ -49,9 +50,18 @@ class DropletWithGasMesh(GmshTemplate):
         res_gas=self.gas_resolution_factor*self.default_resolution
         # droplet
         p00=self.point(0,0) # origin
-        pr0 = self.point(self.droplet_radius, 0,size=res_cl) # contact line
-        p0h=self.point(0,self.droplet_height) # zenith
-        self.circle_arc(pr0,p0h,through_point=self.point(-self.droplet_radius,0),name="droplet_gas") # curved interface
+        if self.is_remeshing():
+            # Remeshing: the droplet has evaporated meanwhile, so we rebuild the interface from the current mesh.
+            # It is a single connected curve, which we sort from the contact line to the zenith
+            interface_coords=self.get_boundary_coordinates("droplet/droplet_gas",sort_along_axis="x-")[0]
+            pr0=self.point(*interface_coords[0],size=res_cl) # contact line, still with the fine resolution
+            interface_pts=[pr0]+[self.point(x,y) for x,y in interface_coords[1:]]
+            self.spline(interface_pts,name="droplet_gas") # reconstructed interface
+            p0h=interface_pts[-1] # zenith
+        else:
+            pr0 = self.point(self.droplet_radius, 0,size=res_cl) # contact line
+            p0h=self.point(0,self.droplet_height) # zenith
+            self.circle_arc(pr0,p0h,through_point=self.point(-self.droplet_radius,0),name="droplet_gas") # curved interface
         self.create_lines(p0h,"droplet_axisymm",p00,"droplet_substrate",pr0)
         self.plane_surface("droplet_gas","droplet_axisymm","droplet_substrate",name="droplet") # droplet domain
         # gas dome
@@ -99,9 +109,7 @@ class EvaporatingDroplet(Problem):
         self.set_scaling(c_vap=self.c_sat)
 
         # Add the mesh
-        mesh=DropletWithGasMesh(self.droplet_radius,self.droplet_height,self.gas_radius)
-        mesh.remesher=Remesher2d(mesh) # add remeshing possibility
-        self.add_mesh(mesh)
+        self.add_mesh(DropletWithGasMesh(self.droplet_radius,self.droplet_height,self.gas_radius))
 
         # Calculate the contact angle if not set
         if self.contact_angle is None:

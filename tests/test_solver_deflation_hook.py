@@ -1,0 +1,160 @@
+#  @file
+#  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
+#
+#  @section LICENSE
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+#  The main author may be contacted at c.diddens@utwente.nl
+#
+# ========================================================================
+
+# Every linear-solver backend must post-process the Newton increment.
+#
+# A deflation operator does not change the matrix or the right-hand side: it turns the solved
+# increment into the deflated one by a scalar rescale, applied through
+# GenericLinearSystemSolver._postprocess_newton_step (or _solve_newton_step, which wraps it). A
+# backend that returns the raw solution therefore does not fail, or warn, or produce a wrong matrix -
+# it silently takes the UNDEFLATED Newton step, and deflation does nothing at all.
+#
+# Which is exactly what the Accelerate backend did. On macOS arm64 - Apple silicon without
+# PETSc/MUMPS, i.e. the default there - all three deflation tests failed while the same tests passed
+# on Intel, which reaches MKL Pardiso. The wheel runs of 29th August 2026 established that W, U, R, J,
+# M and G were identical to Linux's to the last digit, and the first deflated step still went to -41.6
+# instead of +0.55: the ingredients were right and the rescale was never applied.
+#
+# The bug is invisible to any test that runs one backend, since the backends are chosen by what the
+# machine has installed. It is equally invisible to one that IMPORTS them: pyoomph.solvers.accelerate
+# does not import off a Mac, so a registry-based check ran green on Linux with the bug reintroduced -
+# measured, not assumed. So this reads the source files instead, which every platform can do for every
+# backend. Crude, but it is the shape of the defect: a missing call, not a wrong number.
+
+"""Backend invariants that only source inspection can check across platforms."""
+
+import ast
+import os
+import re
+
+import pytest
+
+import pyoomph.solvers
+
+
+# Two things are installed on top of a plain solve, and a backend has to honour BOTH:
+#   * a deflation OPERATOR rescales the increment            -> _postprocess_newton_step
+#   * a custom assembler with has_custom_solve_routine() (the augmented trackers, and the
+#     DeflationAssemblyHandler shell) is handed the solve as a callable -> _custom_solve_routine_active
+# _solve_newton_step does both, which is why naming it alone is enough.
+#
+# The first version of this file accepted either name, and that hole cost a round trip: Accelerate was
+# given _postprocess_newton_step, this test went green, and the two handler-based deflation tests went
+# on failing on arm64 with a trajectory identical to before the fix, the solve never having been handed
+# to the handler at all.
+# Matched as CALLS, not as substrings: the first version of this check looked for the bare name and a
+# COMMENT naming the hook satisfied it - measured, while verifying that reverting the fix fails the
+# test, which it then did not.
+_HOOKS = (r"self\._solve_newton_step\s*\(",)
+_HOOK_ALTERNATIVES = (r"self\._postprocess_newton_step\s*\(", r"self\._custom_solve_routine_active\s*\(")
+# The entry points oomph calls to get a solved increment back.
+_ENTRY_POINTS = ("solve_serial", "solve_distributed")
+_SOLVER_DIR = os.path.dirname(os.path.abspath(pyoomph.solvers.__file__))
+# generic.py is where the hooks are defined, so it names them for a different reason.
+_SKIP_FILES = {"generic.py", "__init__.py"}
+
+
+def _backends():
+    """(file, class name, entry points it defines, its source) for every backend, by reading."""
+    out = []
+    for filename in sorted(os.listdir(_SOLVER_DIR)):
+        if not filename.endswith(".py") or filename in _SKIP_FILES:
+            continue
+        path = os.path.join(_SOLVER_DIR, filename)
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            defines = [n.name for n in node.body
+                       if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in _ENTRY_POINTS]
+            if defines:
+                out.append((filename, node.name, defines, ast.get_source_segment(text, node) or ""))
+    return out
+
+
+def test_there_are_backends_to_check():
+    """Guards the guard: a wrong directory would otherwise make this file vacuously green."""
+    found = _backends()
+    assert len(found) >= 3, found
+    names = {f for f, _, _, _ in found}
+    assert "accelerate.py" in names and "pardiso.py" in names, sorted(names)
+
+
+@pytest.mark.parametrize("filename,classname",
+                         [(f, c) for f, c, _, _ in _backends()],
+                         ids=[f"{f}:{c}" for f, c, _, _ in _backends()])
+def test_the_backend_applies_the_deflation_rescale(filename, classname):
+    entry = next(b for b in _backends() if b[0] == filename and b[1] == classname)
+    _, _, defines, source = entry
+    covers_both = (any(re.search(h, source) for h in _HOOKS)
+                   or all(re.search(h, source) for h in _HOOK_ALTERNATIVES))
+    assert covers_both, (
+        "%s in %s implements %s but does not honour both post-solve hooks: it must CALL "
+        "_solve_newton_step, or else both of the others. Without the first, a deflated solve silently takes the "
+        "UNDEFLATED Newton step; without the second, an augmented handler never receives the solve "
+        "it is supposed to drive - both of which Accelerate did on macOS arm64."
+        % (classname, filename, "/".join(defines)))
+
+
+# --------------------------------------------------------------------------------------------
+# A symmetric factorization must be a PIVOTED one.
+#
+# Apple's SparseFactorizationLDLT is the unpivoted LDL^T, valid only for a definite matrix, while
+# _use_symmetric_factorisation_now() proves symmetry and nothing more. Every saddle point pyoomph
+# assembles - an interface Lagrange multiplier, a constraint, an augmented tracker - is symmetric
+# INDEFINITE, and there an unpivoted factorization meets a zero pivot and returns nonsense while
+# reporting success: measured at 1600 dofs with 128 negative eigenvalues, Newton went from a residual
+# of 0.118 to inf in one step on a linear problem. Checked by reading the source for the same reason
+# as the hook above: accelerate.py does not import off a Mac.
+# --------------------------------------------------------------------------------------------
+
+_UNPIVOTED = ('"ldlt"', "'ldlt'", '"ldlt_unpivoted"', "'ldlt_unpivoted'", '"cholesky"', "'cholesky'")
+_PIVOTED = ("ldlt_sbk", "ldlt_tpp")
+
+
+def test_the_symmetric_path_picks_a_pivoted_factorization():
+    import os
+    path = os.path.join(_SOLVER_DIR, "accelerate.py")
+    if not os.path.exists(path):
+        pytest.skip("no accelerate backend in this tree")
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    # The one line that chooses: `method = <something> if self._use_symmetric_factorisation_now()`
+    chooser = [l for l in text.splitlines() if "_use_symmetric_factorisation_now()" in l and "method" in l]
+    assert chooser, "accelerate.py no longer chooses its method from _use_symmetric_factorisation_now()"
+    line = chooser[0]
+    assert any(p in line for p in _PIVOTED), (
+        "the symmetric path picks a factorization that is not pivoted: %s\n"
+        "Only %s are safe for the symmetric INDEFINITE systems pyoomph assembles."
+        % (line.strip(), " or ".join(_PIVOTED)))
+    assert not any(u in line for u in _UNPIVOTED), (
+        "the symmetric path still mentions an unpivoted factorization: %s" % (line.strip(),))

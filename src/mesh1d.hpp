@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -40,11 +40,18 @@ namespace pyoomph
       this->Father_pt = father_pt;
       this->Son_type = son_type;
       Level = father_pt->level() + 1;
+      // Trees are virtual bases here, so the one that actually runs is oomph::Tree(object_pt) - the
+      // ROOT form, which sets Root_pt to 0 and leaves it to the TreeRoot constructor. A son therefore
+      // has to inherit it from its father explicitly, exactly as the 2d and 3d versions do
+      // (mesh2d.hpp, mesh3d.hpp). Without this every refined 1d element reported root_pt()==NULL:
+      // oomph-lib's own binary tree neighbour finding reads it (binary_tree.cc), and anything asking
+      // a refined 1d element for its root element segfaulted.
+      this->Root_pt = father_pt->root_pt();
     }
 
     // Factory used by oomph-lib's tree-refinement code to create a son tree of the correct dynamic type.
     oomph::Tree *construct_son(oomph::RefineableElement *const &object_pt,
-                               Tree *const &father_pt, const int &son_type)
+                               Tree *const &father_pt, const int &son_type) override
     {
       DynamicBinaryTree *temp_binary_pt = new DynamicBinaryTree(object_pt, father_pt, son_type);
       return temp_binary_pt;
@@ -90,9 +97,9 @@ namespace pyoomph
     }
 
     /// Destructor:
-    virtual ~TemplatedMeshBase1d() {}
+    ~TemplatedMeshBase1d() override {}
 
-    virtual void setup_tree_forest()
+    void setup_tree_forest() override
     {
       setup_binary_tree_forest();
     }
@@ -122,7 +129,7 @@ namespace pyoomph
     // template node with an already-created oomph node, add it to Node_pt and register it on whichever
     // boundaries it belongs to (remapping template boundary indices to compact per-mesh indices via
     // bound_map, since only boundaries actually touched by this collection are kept).
-    void generate_from_template(MeshTemplateElementCollection *coll)
+    void generate_from_template(MeshTemplateElementCollection *coll) override
     {
 
       MeshTemplate *templ = coll->get_template();
@@ -169,10 +176,21 @@ namespace pyoomph
       }
       templ->link_periodic_nodes();
       setup_facets_from_template(templ,bound_map);
+      // Turn the template's facet records into per-element face boundary tags right away; from here
+      // on the tags are carried (and inherited on refinement) by the elements themselves.
+      seed_face_boundaries_from_facets();
     }
 
-    void setup_boundary_element_info(std::ostream &outfile);
+    void setup_boundary_element_info(std::ostream &outfile) override;
     void setup_boundary_element_info() override;
+
+    // Deliberate no-ops. In 1d the boundary elements are reconstructed FROM nodal boundary membership
+    // (setup_boundary_element_info below never looks at the face tags), so the nodes are the authority
+    // here and correcting them against the tags would be circular. It would also be pointless: a face
+    // of a line element is a single vertex, so the "boundaries shared by both end nodes" rule that
+    // over-marks in 2d and 3d has nothing to over-mark.
+    void reconcile_boundary_node_membership_locally() override {}
+    void reconcile_boundary_node_membership_across_processes() override {}
 	 void fill_internal_facet_buffers(std::vector<BulkElementBase*> & internal_elements, std::vector<int> & internal_face_dir,std::vector<BulkElementBase*> & opposite_elements,std::vector<int> & opposite_face_dir,std::vector<int> & opposite_already_at_index) override;
   };
 

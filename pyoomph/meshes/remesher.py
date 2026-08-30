@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -28,6 +29,7 @@
 
 
 import math
+import warnings
 
 from ..typings import *
 import numpy
@@ -36,18 +38,20 @@ import numpy
 from .. import _pyoomph_core as _pyoomph
 
 from .gmsh import GmshTemplate, Point, Line,Spline
-from .mesh import MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d,MeshTemplate
+from .mesh import MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d,MeshTemplate,MeshedMeshTemplate
+from ..generic.mpi import get_mpi_nproc, get_mpi_world_comm
 
 from ..typings import *
 if TYPE_CHECKING:
     from ..expressions import ExpressionOrNum
+    from ..generic.problem import Problem
 
 class RemesherPointEntry:
     def __init__(self,x:float,y:float,z:float,size:float):
         self.x,self.y,self.z,self.size=x,y,z,size
-        self.set_sizes:List[float]=[] # Sizes can be modified
+        self.set_sizes:list[float]=[] # Sizes can be modified
         #self.on_bounds=set()
-        self.gmsh_point:Optional[Point]=None
+        self.gmsh_point:Point | None=None
 
     def get_size(self) -> float:
         if len(self.set_sizes)==0:
@@ -58,23 +62,45 @@ class RemesherPointEntry:
 
 
 class RemesherLineEntry:
-    def __init__(self,ptlist:List[RemesherPointEntry],mode:str,bname:str):
+    def __init__(self,ptlist:list[RemesherPointEntry],mode:str,bname:str):
         self.ptlist=ptlist
         self.mode=mode
-        self.gmsh_line:Optional[Union[Line,Spline]]=None
+        self.gmsh_line:Line | Spline | None=None
         self.bname=bname
 
 
 
 class RemesherBase:
+    #: What this remesher still gets wrong on a distributed (``--distribute``) problem, quoted by the
+    #: refusal in :py:meth:`~pyoomph.generic.problem.Problem.force_remesh`, or ``None`` if it works.
+    #: It only names what is specific to *this* remesher; the limitations that hold for all of them
+    #: are added there. See dev_docs/distributed_remeshing.md.
+    distributed_limitation:str | None="it rebuilds the mesh from this rank's part of the problem only"
+
     def __init__(self,template:"MeshTemplate"):
         self.template=template
         self._cnt:int=0        
         #self._point_entries = {}
-        self._line_entries:List[RemesherLineEntry] = []
-        self._unique_pts:List[RemesherPointEntry]=[]
-        self._old_meshes:Dict[str,Union[MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d]]={}
+        self._line_entries:list[RemesherLineEntry] = []
+        self._unique_pts:list[RemesherPointEntry]=[]
+        self._old_meshes:dict[str,MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d]={}
         #self._domain_points={} # access the points via domain names
+
+    @property
+    def problem(self) -> "Problem":
+        # Resolved live from the template, never stored: a Python-level attribute holding the
+        # Problem here closed a cycle that the garbage collector cannot break, because one of
+        # its edges is a nb::keep_alive record and thus invisible to gc:
+        #   Problem -(keep_alive from add_sub_mesh)-> mesh -> _templatemesh -> MeshTemplate
+        #   -> remesher -> Problem.
+        # Nothing then made the Problem collectible, so its __del__/release() never ran and
+        # every remeshing script leaked its whole Problem (meshes, nodes, elements, equations)
+        # - reported at shutdown as "nanobind: leaked N instances". Problem.force_remesh() only
+        # breaks this for the *superseded* meshes (_destroy_superseded_mesh(), see
+        # generic/problem.py); the replacement mesh must keep its _templatemesh, so the edge has
+        # to be removed on this side. get_problem() is the same non-owning C++-side lookup that
+        # the meshes and code generators use for exactly this reason.
+        return self.template.get_problem()
 
     def add_point_entry(self,x:float,y:float,z:float,size:float) -> RemesherPointEntry:
         for p in self._unique_pts:
@@ -85,17 +111,23 @@ class RemesherBase:
             self._unique_pts.append(res)
             return res
 
-    def add_line_entry(self,ptlist:List[RemesherPointEntry],mode:str,bname:str):
+    def add_line_entry(self,ptlist:list[RemesherPointEntry],mode:str,bname:str):
         self._line_entries.append(RemesherLineEntry(ptlist,mode,bname))
 
-    def _get_points_by_phys_name(self,name:str)->List[List[RemesherPointEntry]]:
+    def _get_points_by_phys_name(self,name:str)->list[list[RemesherPointEntry]]:
         raise RuntimeError("Implement")
 
     def actions_after_remeshing(self):
         self._line_entries = []
         self._unique_pts = []
+        # Everything gathered from the mesh being replaced must go here, at the end of the
+        # remeshing process: right after this, Problem.force_remesh() destroys the superseded
+        # meshes for good (_destroy_superseded_mesh(), see generic/problem.py), so any Node,
+        # element or mesh wrapper still cached here would be left pointing into freed C++
+        # memory until the next remesh happens to overwrite it - and merely touching one from
+        # a script (or a debugger) segfaults.
+        self._old_meshes={}
         #self._domain_points:Dict[str,Dict[str,List[Node]]] = {}
-        pass
 
     def remesh(self):
         pass
@@ -119,23 +151,52 @@ class GmshRemesher2d(GmshTemplate):
             self.mesh_mode=self.remesher.template.mesh_mode #TODO: Optionally also copy other props
             self.use_macro_elements=self.remesher.template.use_macro_elements
             self.gmsh_options=self.remesher.template.gmsh_options.copy()
+            self.kernel=self.remesher.template.kernel
         self.remesher._define_geometry() 
 
+class RemeshBoundaryPoint:
+    """A point of a boundary of the mesh being replaced, addressed by its position.
+
+    The remesher used to walk the ``Node`` objects of the local mesh directly. Under ``--distribute``
+    each rank holds only its share of every boundary, so the curves have to be stitched together from
+    all of them - and a node pointer means nothing on another rank, while its position is the same
+    everywhere. The element sizes that set the local resolution are accumulated here as well, since
+    the elements around a point on the partition cut are split over several ranks.
+    """
+    __slots__=("_x","_y","sum_initial","sum_current","count")
+
+    def __init__(self,x:float,y:float):
+        self._x,self._y=x,y
+        self.sum_initial=0.0
+        self.sum_current=0.0
+        self.count=0.0
+
+    def x(self,i:int)->float:
+        return self._x if i==0 else self._y
+
+    def element_size(self)->float:
+        """The resolution the old mesh had here: the mean of the initial and the current element
+        size, averaged over the boundary elements around the point - all of them, not just this
+        rank's."""
+        if self.count<=0:
+            return 1.0
+        return (self.sum_initial/self.count+self.sum_current/self.count)/2
+
+
 class Remesher2dBoundaryLineCollection:
-    def __init__(self,boundname:str,remesher:"Remesher2d",point_size_func:Optional[Callable[[float,float],float]]=None):
+    def __init__(self,boundname:str,remesher:"Remesher2d",point_size_func:Callable[[float, float], float] | None=None):
         super(Remesher2dBoundaryLineCollection, self).__init__()
         self.name=boundname
-        self.parts=[]
-        self.oldnodes:Dict[Tuple[_pyoomph.Node,_pyoomph.Node],List[_pyoomph.Node]]= {} #Dict mapping from a pair of vertex nodes to the non-vertex nodes in between
-        self.curves:List[List[_pyoomph.Node]]=[]
-        self._node_to_bound_elems:Dict[_pyoomph.Node,Set[_pyoomph.OomphGeneralisedElement]] = {}
+        self.parts:list[list[RemeshBoundaryPoint]]=[]
+        self.oldnodes:dict[tuple[RemeshBoundaryPoint,RemeshBoundaryPoint],list[RemeshBoundaryPoint]]= {} #Dict mapping from a pair of vertex points to the non-vertex points in between
+        self.curves:list[list[RemeshBoundaryPoint]]=[]
         self.point_size_func=point_size_func
         self.remesher=remesher
 
 
     def split_into_curves(self): #A boundary may contain more than one subcurve
         self.curves = []
-        neighb_connects:Dict[_pyoomph.Node,List[_pyoomph.Node]]={} # A dict mapping to a list of node neighbors
+        neighb_connects:dict[RemeshBoundaryPoint,list[RemeshBoundaryPoint]]={} # A dict mapping to a list of point neighbors
         #print("OLDNODES",self.oldnodes)
         for n1,n2 in self.oldnodes.keys():
             neighb_connects.setdefault(n1, []).append(n2)
@@ -144,12 +205,12 @@ class Remesher2dBoundaryLineCollection:
         while len(neighb_connects)>0:
             for n,neighs in neighb_connects.items():
                 if len(neighs)==1:
-                    startnode:_pyoomph.Node=n
+                    startnode:RemeshBoundaryPoint=n
                     break
             else:
-                startnode:_pyoomph.Node=next(iter(neighb_connects.keys())) #type:ignore #Just any node. Seems to be looped
+                startnode:RemeshBoundaryPoint=next(iter(neighb_connects.keys())) #Just any point. Seems to be looped
 
-            currentcurve:List[_pyoomph.Node]=[]
+            currentcurve:list[RemeshBoundaryPoint]=[]
             currentnode=startnode
 
             while len(neighb_connects)>0:
@@ -164,7 +225,7 @@ class Remesher2dBoundaryLineCollection:
                         else:
                             if len(neighb_connects) == 0:
                                 break
-                            startnode = next(iter(neighb_connects.keys())) #type:ignore # Just any node. Seems to be looped
+                            startnode = next(iter(neighb_connects.keys())) # Just any point. Seems to be looped
                         #print("ADD MODE 1",len(currentcurve))
                         self.curves.append(currentcurve)
                         currentcurve = []
@@ -191,31 +252,16 @@ class Remesher2dBoundaryLineCollection:
                 currentcurve = []
 
 
-    def get_size_at_point(self,p:_pyoomph.Node) -> float:
+    def get_size_at_point(self,p:RemeshBoundaryPoint) -> float:
         if self.point_size_func is not None:
             if callable(self.point_size_func):
                 return self.point_size_func(p.x(0),p.x(1))
             else:
                 return self.point_size_func
-        elif p in self.remesher._ptsizes.keys():
-            return self.remesher._ptsizes[p]
-        elif p in self._node_to_bound_elems.keys():
-            avg_i=0.0
-            avg_c = 0.0
-            cnt=0
-            for e in self._node_to_bound_elems[p]:
-                lvl=e.refinement_level()
-                scal:int=2**lvl
-                avg_i+=math.sqrt(e.get_initial_cartesian_nondim_size())*scal
-                avg_c+=math.sqrt(e.get_current_cartesian_nondim_size())*scal
-                cnt+=1
-            assert cnt!=0
-            avg_i/=cnt
-            avg_c /= cnt
-            #print("AVG",avg_c,avg_i)
-            return 1*(avg_i+avg_c)/2 #* 2 # Again *2 if refine is used to generate the quads
-            #return math.sqrt(avg_i)
-        return 1.0
+        # The element sizes were accumulated while the points were collected - see
+        # RemeshBoundaryPoint - rather than looked up through a node-to-element map here, because the
+        # elements around a point can live on several ranks.
+        return p.element_size()
 
 
 
@@ -277,6 +323,20 @@ class Remesher2dBoundaryLineCollection:
                 # TODO: Check size variations and possibliy add multiple lines
                 plst = [self.remesher.add_point_entry(c[i].x(0), c[i].x(1),0, size=sizes[i]) for i in [0, len(c) - 1]]
                 self.remesher.add_line_entry(plst, "line",self.name)
+            elif c[0] == c[-1] and len(c) >= 5:
+                # A closed curve must NOT go to gmsh as one spline with its first point repeated.
+                # Such a spline has a seam, and the element that straddles it gets its second-order
+                # mid-side node from the average of its endpoints' curve parameters - which at the
+                # seam averages t~1 and t~0 to t~0.5, placing the node HALFWAY AROUND THE LOOP.
+                # The result is one bulk element per closed boundary with a mid-side node at the
+                # antipode of where it belongs, on the boundary and at the right radius, so nothing
+                # downstream notices; it silently distorts that element and destroys any
+                # arclength-based boundary parameterisation. Emitting two open splines instead
+                # leaves no seam. See dev_docs/mesh_point_locator.md.
+                half = len(c) // 2
+                for seq in (range(0, half + 1), range(half, len(c))):
+                    plst = [self.remesher.add_point_entry(c[i].x(0), c[i].x(1), 0, size=sizes[i]) for i in seq]
+                    self.remesher.add_line_entry(plst, "spline", self.name)
             else:
                 plst = [self.remesher.add_point_entry(c[i].x(0), c[i].x(1),0, size=sizes[i]) for i in range(len(c))]
                 self.remesher.add_line_entry(plst, "spline",self.name)
@@ -292,23 +352,25 @@ class Remesher2d(RemesherBase):
     You must set an instance of this class to the :py:attr:`~pyoomph.meshes.mesh.MeshTemplate.remesher` attribute of the :py:class:`~pyoomph.meshes.mesh.MeshTemplate`.
     
     Args:
-        template: The mesh template to be remeshed. 
+        template: The mesh template to be remeshed.
     """
+    # Works distributed since stage 4 of dev_docs/distributed_remeshing.md: the boundary curves are
+    # stitched together from every rank's share before the geometry is described.
+    distributed_limitation=None
+
     def __init__(self,template:MeshTemplate):
         super(Remesher2d, self).__init__(template)
         self._old_meshes={}
-        self._boundary_nodes:Dict[str,Remesher2dBoundaryLineCollection]={}
-        self.problem=None
-        self.gmsh=GmshRemesher2d(self)
-        self._meshbounds={}
-        self._ptsizes:Dict[_pyoomph.Node,float]={}
-        self._boundary_point_size_funcs:Dict[str,Callable[[float,float],float]]={}
+        self._boundary_nodes:dict[str,Remesher2dBoundaryLineCollection]={}
+        self.gmsh:GmshTemplate=GmshRemesher2d(self)
+        self._meshbounds:dict[str,list[str]]={}
+        self._boundary_point_size_funcs:dict[str,Callable[[float,float],float]]={}
         self.use_corner_sizes=True
         self._corner_size_map=None
         self._mesh_size_callback=None
-        self._holes_info:Dict[str,List[List[str]]]={}
+        self._holes_info:dict[str,list[list[str]]]={}
 
-    def set_holes(self,domain:str,holes:List[List[str]]):
+    def set_holes(self,domain:str,holes:list[list[str]]):
         self._holes_info[domain]=holes
 
     def set_boundary_point_size(self,**kwargs:Callable[[float,float],float]):
@@ -319,9 +381,13 @@ class Remesher2d(RemesherBase):
     def actions_after_remeshing(self):
         super(Remesher2d, self).actions_after_remeshing()
         self.gmsh = GmshRemesher2d(self) #Recreate the intenral gmsh remesher
-        self._old_meshes={}
-        self._meshbounds:Dict[str,List[str]]={}
+        self._meshbounds={}
         self._unique_pts = []
+        # The per-boundary node/element bookkeeping of the mesh just replaced - see the base
+        # class for why none of it may outlive the remeshing process. All of it is rebuilt from
+        # scratch by the next remesh() anyway.
+        self._boundary_nodes={}
+        self._corner_size_map = None
 
     def get_new_template(self)->MeshTemplate:
         return self.gmsh
@@ -340,30 +406,135 @@ class Remesher2d(RemesherBase):
         #print(mesh.get_boundary_names())
         #print(dir(mesh))
 
-    def _define_boundaries_for_domain(self,n:str):
+    def _collect_local_boundary_edges(self,n:str)->dict[str,tuple[list[list[float]],list[tuple[int,int,list[int]]]]]:
+        """This rank's share of every boundary of domain ``n``, as positions rather than as nodes.
+
+        Per boundary: a point table of ``[x, y, sum sqrt(initial size), sum sqrt(current size),
+        element count]`` and the edges of the boundary as index triples ``(first, last, in between)``.
+        Both are position-based on purpose, since they are merged across the ranks afterwards.
+        """
         mesh=self._old_meshes[n]
-        self._meshbounds[n]=[]
+        distributed=bool(mesh.is_mesh_distributed())
+        local:dict[str,tuple[list[list[float]],list[tuple[int,int,list[int]]]]]={}
         for bn in mesh.get_boundary_names():
             ind=mesh.get_boundary_index(bn)
-            nelem=mesh.nboundary_element(ind)
-            if nelem==0: #TODO: These bounds could still be relevant
+            if mesh.nboundary_element(ind)==0: #TODO: These bounds could still be relevant
                 continue
+            pts:list[list[float]]=[]
+            index_of:dict[_pyoomph.Node,int]={}
+            edges:list[tuple[int,int,list[int]]]=[]
+            for be,dir in mesh.boundary_elements(bn,with_directions=True):
+                # A halo element is a copy of one that another rank owns, and the boundary lookup
+                # keeps it. Letting it contribute would give its nodes the element twice, which is
+                # not what the size average means.
+                if distributed and be.is_halo():
+                    continue
+                scal:int=2**be.refinement_level()
+                size_i=math.sqrt(be.get_initial_cartesian_nondim_size())*scal
+                size_c=math.sqrt(be.get_current_cartesian_nondim_size())*scal
+                idx:list[int]=[]
+                for i in range(be.nnode_1d()):
+                    nd=be.boundary_node_pt(dir,i)
+                    k=index_of.get(nd)
+                    if k is None:
+                        k=len(pts)
+                        index_of[nd]=k
+                        pts.append([nd.x(0),nd.x(1),0.0,0.0,0.0])
+                    pts[k][2]+=size_i
+                    pts[k][3]+=size_c
+                    pts[k][4]+=1.0
+                    idx.append(k)
+                edges.append((idx[0],idx[-1],idx[1:-1]))
+            local[bn]=(pts,edges)
+        return local
 
-            self._meshbounds[n].append(bn)
-            #if n not in self._domain_points.keys():
-            #    self._domain_points[n] = {}
-            #if bn not in self._domain_points[n].keys():
-            #    self._domain_points[n][bn]={}
+    def _merge_boundary_edges(self,local:dict[str,tuple[list[list[float]],list[tuple[int,int,list[int]]]]],order:list[str]):
+        """Stitch every rank's share of the boundaries into the whole ones.
 
-            if not (bn in self._boundary_nodes.keys()):
-                self._boundary_nodes[bn]=Remesher2dBoundaryLineCollection(bn,self,point_size_func=self._boundary_point_size_funcs.get(bn,None))
-                bnd = self._boundary_nodes[bn]
-                for be,dir in mesh.boundary_elements(bn,with_directions=True):
-                    internodes=[be.boundary_node_pt(dir,i) for i in range(be.nnode_1d())]
-                    bnd.oldnodes[(internodes[0],internodes[-1],)]=internodes[1:-1]
-                    for inode in internodes:
-                        bnd._node_to_bound_elems.setdefault(inode, set()).add(be) #type:ignore
-                bnd.split_into_curves()
+        Collective on a distributed mesh, and a no-op otherwise - the merging below is a fixed point
+        for a single contribution, so serial and distributed take the same path.
+
+        Every rank ends up with the same result rather than only rank 0: the geometry is described by
+        every rank (only rank 0's ``.msh`` is kept, but the others have to describe *something* that
+        closes), so what they describe had better be the same thing. `allgather` and a deterministic
+        merge give that without a second broadcast.
+        """
+        contributions=[local]
+        if get_mpi_nproc()>1 and any(m.is_mesh_distributed() for m in self._old_meshes.values()):
+            comm=get_mpi_world_comm()
+            assert comm is not None
+            contributions=comm.allgather(local)
+        merged:dict[str,tuple[list[RemeshBoundaryPoint],list[tuple[int,int,list[int]]]]]={}
+        # In the mesh's own order of boundary names rather than in the order this rank happens to
+        # hold them: it is the same list everywhere, and it is the order a serial run uses, which the
+        # gmsh entity numbering - and through it the mesh gmsh produces - depends on.
+        present={b for c in contributions for b in c.keys()}
+        for bn in [b for b in order if b in present]:
+            allpts:list[list[float]]=[]
+            alledges:list[tuple[int,int,list[int]]]=[]
+            for c in contributions:
+                if bn not in c:
+                    continue
+                pts,edges=c[bn]
+                off=len(allpts)
+                allpts.extend(pts)
+                alledges.extend((a+off,b+off,[i+off for i in inb]) for a,b,inb in edges)
+            merged[bn]=self._fuse_boundary_points(allpts,alledges)
+        return merged
+
+    def _fuse_boundary_points(self,allpts:list[list[float]],alledges:list[tuple[int,int,list[int]]]):
+        """Make one point out of the copies of a node that several ranks contributed.
+
+        By position, not by index: the copies come from different ranks and carry no common
+        numbering. They are the same node, so they coincide to the last bits - the tolerance is only
+        there so that a difference in the last bits does not tear the curve apart at the partition
+        cut, and is far below any distance between two genuinely distinct nodes.
+        """
+        if not allpts:
+            return [],[]
+        from scipy.spatial import cKDTree
+        coords=numpy.array([[p[0],p[1]] for p in allpts])
+        extent=max(float(numpy.amax(numpy.abs(coords))),1.0)
+        tol=1e-10*extent
+        tree=cKDTree(coords)
+        # The lowest index within the tolerance represents the cluster. With copies of one node that
+        # is unambiguous, and it makes the numbering below independent of how many ranks contributed.
+        rep=numpy.arange(len(coords))
+        # p=2 (Euclidean) is the runtime default; spelled out because scipy's stub declares it without one.
+        for i,neighbours in enumerate(tree.query_ball_point(coords,r=tol,p=2)):
+            rep[i]=min(neighbours)
+        order={}
+        points:list[RemeshBoundaryPoint]=[]
+        for i,r in enumerate(rep):
+            r=int(r)
+            if r not in order:
+                order[r]=len(points)
+                points.append(RemeshBoundaryPoint(allpts[r][0],allpts[r][1]))
+            p=points[order[r]]
+            p.sum_initial+=allpts[i][2]
+            p.sum_current+=allpts[i][3]
+            p.count+=allpts[i][4]
+        remap=[order[int(r)] for r in rep]
+        edges=[(remap[a],remap[b],[remap[i] for i in inb]) for a,b,inb in alledges]
+        # By position, so that the order does not depend on how many ranks contributed and in which
+        # order they were concatenated. It is not cosmetic: split_into_curves() starts its walk at the
+        # first edge it meets, which fixes the direction of the curve and with it the order the gmsh
+        # points are created in - and gmsh gives a different mesh for a differently numbered geometry.
+        edges.sort(key=lambda e:(points[e[0]].x(0),points[e[0]].x(1),points[e[1]].x(0),points[e[1]].x(1)))
+        return points,edges
+
+    def _define_boundaries_for_domain(self,n:str):
+        merged=self._merge_boundary_edges(self._collect_local_boundary_edges(n),
+                                          self._old_meshes[n].get_boundary_names())
+        self._meshbounds[n]=[bn for bn in merged.keys() if merged[bn][0]]
+        for bn,(points,edges) in merged.items():
+            if not points or bn in self._boundary_nodes.keys():
+                continue
+            bnd=Remesher2dBoundaryLineCollection(bn,self,point_size_func=self._boundary_point_size_funcs.get(bn,None))
+            self._boundary_nodes[bn]=bnd
+            for a,b,inb in edges:
+                bnd.oldnodes[(points[a],points[b],)]=[points[i] for i in inb]
+            bnd.split_into_curves()
 
 
     def _mesh_domain(self,n:str):
@@ -374,11 +545,14 @@ class Remesher2d(RemesherBase):
                 for iname in hole:
                     if iname in mshbounds:
                         mshbounds.remove(iname)
-        self.gmsh.plane_surface(*mshbounds,name=n,holes=holes)
+        self.gmsh.plane_surface(*mshbounds,name=n,holes=holes) #type:ignore #holes is list[list[str]], which is a valid (but invariance-incompatible) special case of list[Sequence[str|Line|Spline|BSpline|CircleArc]]
 
 
     def _define_geometry(self):
         mesh=self.gmsh
+        # _define_boundaries_for_domain is collective on a distributed mesh, so the ranks have to
+        # enter it for the same domains in the same order. _old_meshes follows Problem._meshdict,
+        # which is built identically everywhere, so its own order already is that order.
         for n in self._old_meshes.keys():
             self._define_boundaries_for_domain(n)
 
@@ -403,9 +577,11 @@ class Remesher2d(RemesherBase):
                 p0=l.ptlist[0].gmsh_point
                 p1 = l.ptlist[-1].gmsh_point
                 assert p0 is not None and p1 is not None
-                l.gmsh_line=mesh.line(p0,p1,name=l.bname)
+                newline=mesh.line(p0,p1,name=l.bname) # Called with exactly 2 points, so this can only return a Line or None, never a list[Line]
+                assert newline is None or isinstance(newline,Line)
+                l.gmsh_line=newline
             elif l.mode=="spline":
-                pts:List[Point] = []
+                pts:list[Point] = []
                 for p in l.ptlist:
                     assert p.gmsh_point  is not None
                     pts.append(p.gmsh_point)
@@ -430,7 +606,6 @@ class Remesher2d(RemesherBase):
 
 
     def remesh(self):
-        self.problem=self.template._problem 
         assert self.problem is not None
         self._identify_domains()
         self._boundary_nodes={}
@@ -452,11 +627,11 @@ class Remesher2d(RemesherBase):
             print("SETTING MESH SIZE CALLBACK",self._mesh_size_callback)
         self.gmsh._do_define_geometry(self.problem,fnformat.format(self._cnt)) 
         self.template._meshfile=self.gmsh._meshfile 
-        self.template.get_template()._meshfile=self.gmsh._meshfile 
+        self.template._get_template()._meshfile=self.gmsh._meshfile 
         self._cnt+=1
 
 
-    def _get_points_by_phys_name(self,name:str) -> List[List[RemesherPointEntry]]:
+    def _get_points_by_phys_name(self,name:str) -> list[list[RemesherPointEntry]]:
         splt=name.split("/")
         if len(splt)<2:
             raise RuntimeError("Cannot identify remeshed mesh points by a 2d domain")
@@ -465,7 +640,7 @@ class Remesher2d(RemesherBase):
             raise RuntimeError("Cannot find an interface named "+splt[1]+" to remesh on domain "+splt[0]+"\n"+"Available interfaces: "+str(self._meshbounds[dn]))
         #boundline=self._boundary_nodes[splt[1]]
         if len(splt)==2:
-            respts:List[List[RemesherPointEntry]]=[]
+            respts:list[list[RemesherPointEntry]]=[]
             for l in self._line_entries:
                 if l.bname==splt[1]:
                     respts.append(l.ptlist)
@@ -473,8 +648,8 @@ class Remesher2d(RemesherBase):
         elif len(splt)==3:
             if splt[1]==splt[2]:
                 raise RuntimeError("Cannot find intersections between the same lines")
-            pset1:Set[RemesherPointEntry]=set()
-            pset2:Set[RemesherPointEntry]=set()
+            pset1:set[RemesherPointEntry]=set()
+            pset2:set[RemesherPointEntry]=set()
             for l in self._line_entries:
                 if l.bname == splt[1]:
                     for p in l.ptlist:
@@ -493,6 +668,16 @@ class Remesher2d(RemesherBase):
 
 
 class RemesherViaRecreation(RemesherBase):
+    """
+    Remesher of a :py:class:`~pyoomph.meshes.mesh.MeshedMeshTemplate`, which just calls the
+    :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.define_geometry` method of the template again. It is attached by
+    default to any :py:class:`~pyoomph.meshes.mesh.MeshedMeshTemplate`, i.e. also to any
+    :py:class:`~pyoomph.meshes.gmsh.GmshTemplate`, so it usually does not have to be created manually.
+    """
+    # Works distributed since stage 1 of dev_docs/distributed_remeshing.md: get_boundary_coordinates()
+    # merges the boundary across the ranks, so every rank describes the same geometry again.
+    distributed_limitation=None
+
     def __init__(self,template:MeshTemplate):
         super().__init__(template)
         self.base_trunk=None
@@ -503,18 +688,24 @@ class RemesherViaRecreation(RemesherBase):
     def remesh(self):
         if self.base_trunk is None:
             self.base_trunk=self.template._fntrunk
+        if self.base_trunk is None:
+            # A backend that writes no files of its own never sets a trunk (only the GmshTemplate does, for its
+            # .msh files). The trunk is merely the base name of whatever files the recreated mesh may produce, so
+            # deriving one from the class name is enough to keep the rounds apart.
+            self.base_trunk=type(self.template).__name__
         fnformat:str=self.base_trunk+"_REMESH_{:06d}"
-        
-                
-        self._old_meshes={}        
-        for k,m in self.template._problem._meshdict.items():
+
+
+        self._old_meshes={}
+        for k,m in self.template.get_problem()._meshdict.items():
             if isinstance(m,(MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d)):
                 if self.template.has_domain(k):
                     self._old_meshes[k]=m
-                    
+
         self.template._reset()
-        self.template._do_define_geometry(self.template._problem,fnformat.format(self._cnt))                 
-        self._cnt+=1        
+        assert isinstance(self.template,MeshedMeshTemplate) # Only a MeshedMeshTemplate recreates its geometry, and only its _do_define_geometry accepts the extra filename_trunk argument
+        self.template._do_define_geometry(self.template.get_problem(),fnformat.format(self._cnt))
+        self._cnt+=1
         
         
 
@@ -529,7 +720,6 @@ class ParametricGmshMeshRemesher2d(Remesher2d):
         
     def remesh(self):
         
-        self.problem=self.template._problem 
         assert self.problem is not None
         self.gmsh._meshfile=None 
         self.gmsh._loaded_from_mesh_file = None 
@@ -550,67 +740,23 @@ class ParametricGmshMeshRemesher2d(Remesher2d):
         self.gmsh._geom = None        
         self.gmsh._do_define_geometry(self.problem,fnformat.format(self._cnt)) 
         self.template._meshfile=self.gmsh._meshfile 
-        self.template.get_template()._meshfile=self.gmsh._meshfile 
+        self.template._get_template()._meshfile=self.gmsh._meshfile 
         self._cnt+=1
 
 
 
 class RemeshableGmshTemplate2d(GmshTemplate):
     """
-    An upgrade GmshTemplate, which allows remeshing via recreation. In the define_geometry() method, you will define both the initial mesh (if is_first_time() is False) and your remeshed mesh (is_first_time() is False).
-    For the latter case, you can obtain the previous boundary coordinates by get_boundary_coordinates(), etc.
-    
+    .. deprecated::
+        Just use a plain :py:class:`~pyoomph.meshes.gmsh.GmshTemplate` instead. Remeshing via recreation, together with
+        :py:meth:`~pyoomph.meshes.mesh.MeshedMeshTemplate.is_remeshing` and
+        :py:meth:`~pyoomph.meshes.mesh.MeshedMeshTemplate.get_boundary_coordinates`, is the default of any
+        :py:class:`~pyoomph.meshes.mesh.MeshedMeshTemplate` by now, so this class does not add anything anymore.
     """
-    def __init__(self,loaded_from_mesh_file:Optional[str]=None):
+    def __init__(self,loaded_from_mesh_file:str | None=None):
         super().__init__(loaded_from_mesh_file=loaded_from_mesh_file)
-        self.remesher=RemesherViaRecreation(self)
-    
-    def is_first_time(self):
-        """Will return True, if the mesh is being generated for the first time. Otherwise, it will return False, which means that the mesh is being remeshed. You can use this to define different geometries for the initial mesh and the remeshed mesh.
+        warnings.warn("RemeshableGmshTemplate2d is deprecated. Use a plain GmshTemplate instead, which remeshes by recreation by default.",DeprecationWarning,stacklevel=2)
 
-        Returns:
-            Whether it is the first time the mesh is generated or not. True means first time, False means remeshing.
-        """
-        return not self.get_problem().is_initialised()
-    
-    def get_boundary_coordinates(self,name:str,sort_along_axis:Optional[Literal["x+","x-","y+","y-"]]=None,start_near_point:Optional[Tuple["ExpressionOrNum","ExpressionOrNum"]]=None,nondimensional:bool=False)->List[List[Tuple[float,float]]]:        
-        """Returns a list of boundary segments, which are lists of (x,y) coordinates (dimensional or not can be controlled by the nondimensional argument). The segments are sorted and reversed based on the sort_along_axis or start_near_point arguments. If both are None, the order is arbitrary.
 
-        Args:
-            name: Name of the boundary, e.g. "domain1/boundary1"
-            sort_along_axis: Sort the segments along a given axis, e.g. "x+" means sort along x in increasing order, "y-" means sort along y in decreasing order. Defaults to None.
-            start_near_point: Start near point for sorting segments. Defaults to None.
-            nondimensional: Whether to return nondimensional coordinates. Defaults to False.
-        
-        Returns:
-            A list of boundary segments, which are each a list of (x,y) coordinates.
-        """
-        if self.is_first_time():
-            raise RuntimeError("Cannot get boundary coordinates before the first mesh is generated")
-        data=self.get_problem().get_cached_mesh_data(name,nondimensional=True)
-        pts=data.get_coordinates()
-        segs,_=data.get_interface_line_segments()
-        
-         # Sort and reverse the segments based on the settings
-        if sort_along_axis is not None:
-            index,sign=({"x+":(0,1),"x-":(0,-1),"y+":(1,1),"y-":(1,-1)})[sort_along_axis]
-            for i,seg in enumerate(segs):
-                diff=pts[index,seg[-1]]-pts[index,seg[0]]
-                if diff*sign<0:
-                    segs[i]=list(reversed(seg))
-            segs=sorted(segs,key=lambda s: sign*pts[index,s[0]])
-        elif start_near_point is not None:
-            stp=start_near_point
-            for i,seg in enumerate(segs):
-                d1=(pts[0,seg[0]]-stp[0])**2+(pts[1,seg[0]]-stp[1])**2
-                d2=(pts[0,seg[-1]]-stp[0])**2+(pts[1,seg[-1]]-stp[1])**2
-                if d2>d1:
-                    segs[i]=list(reversed(seg))
-            segs=sorted(segs,key=lambda s: (pts[0,s[0]]-stp[0])**2+(pts[1,s[0]]-stp[1])**2 )
-        
-        res=[]
-        
-        SS=1 if nondimensional else self.get_problem().get_scaling("spatial")        
-        for seg in segs:
-            res.append([(pts[0,i]*SS,pts[1,i]*SS) for i in seg])
-        return res
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

@@ -11,6 +11,7 @@ Submodules
    pyoomph.solvers.pardiso
    pyoomph.solvers.precice_adapter   
    pyoomph.solvers.scipy
+   pyoomph.solvers.spectra
 
 Module contents
 ---------------

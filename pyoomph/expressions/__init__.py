@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -33,6 +34,7 @@ import  pyoomph._pyoomph_core as _pyoomph
 
 from .generic import *
 from .coordsys import *
+from .coordsys import BaseCoordinateSystem
 from .cb import *
 
 from ..typings import *
@@ -61,6 +63,8 @@ def sin(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the sine of the input expression or number.
 
+	The argument must be dimensionless.
+
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
 
@@ -77,6 +81,8 @@ def cos(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the cosine of the input expression or number.
 
+	The argument must be dimensionless.
+
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
 
@@ -91,6 +97,8 @@ def cos(x:ExpressionOrNum) -> Expression:
 def sinh(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the hyperbolic sine of the input expression or number.
+
+	The argument must be dimensionless.
 
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
@@ -107,6 +115,8 @@ def cosh(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the hyperbolic cosine of the input expression or number.
 
+	The argument must be dimensionless.
+
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
 
@@ -122,6 +132,8 @@ def tan(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the tangent of the input expression or number.
 
+	The argument must be dimensionless. Nothing guards against the poles at odd multiples of pi/2.
+
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
 
@@ -135,6 +147,8 @@ def tan(x:ExpressionOrNum) -> Expression:
 def tanh(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the hyperbolic tangent of the input expression or number.
+
+	The argument must be dimensionless.
 
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
@@ -151,6 +165,8 @@ def atan(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the inverse tangent of the input expression or number.
 
+	The argument must be dimensionless.
+
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
 
@@ -165,6 +181,11 @@ def atan(x:ExpressionOrNum) -> Expression:
 def atan2(y:ExpressionOrNum,x:ExpressionOrNum) -> Expression:
 	"""
 	Compute atan2(y,x) of the input expression or number.
+
+	Unlike atan(y/x), this resolves the quadrant from the signs of both arguments and stays finite at x=0.
+
+	Both arguments must be dimensionless - a common unit is not divided out automatically, so pass e.g.
+	``atan2(y/(1*meter),x/(1*meter))`` rather than ``atan2(y,x)`` for dimensional coordinates.
 
 	Parameters:
 		y (ExpressionOrNum): First argument, expression or number.
@@ -183,6 +204,8 @@ def asin(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the inverse sine of the input expression or number.
 
+	The argument must be dimensionless and, for a real-valued result, within [-1,1].
+
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
 
@@ -197,6 +220,8 @@ def acos(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the inverse cosine of the input expression or number.
 
+	The argument must be dimensionless and, for a real-valued result, within [-1,1].
+
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
 
@@ -204,12 +229,96 @@ def acos(x:ExpressionOrNum) -> Expression:
 		Expression: The inverse cosine of the input.
 
 	"""
-	x=x if isinstance(x,_pyoomph.Expression) else _pyoomph.Expression(x) 	
+	x=x if isinstance(x,_pyoomph.Expression) else _pyoomph.Expression(x)
 	return _pyoomph.GiNaC_acos(x)
+
+def asinh(x:ExpressionOrNum) -> Expression:
+	"""
+	Compute the inverse hyperbolic sine of the input expression or number.
+
+	The argument must be dimensionless.
+
+	Parameters:
+		x (ExpressionOrNum): The input expression or number.
+
+	Returns:
+		Expression: The inverse hyperbolic sine of the input.
+
+	"""
+	x=x if isinstance(x,_pyoomph.Expression) else _pyoomph.Expression(x)
+	return _pyoomph.GiNaC_asinh(x)
+
+def acosh(x:ExpressionOrNum) -> Expression:
+	"""
+	Compute the inverse hyperbolic cosine of the input expression or number.
+
+	The argument must be dimensionless and, for a real-valued result, at least 1. Its derivative diverges at exactly 1, which can stall a Newton step starting there.
+
+	Parameters:
+		x (ExpressionOrNum): The input expression or number.
+
+	Returns:
+		Expression: The inverse hyperbolic cosine of the input.
+
+	"""
+	x=x if isinstance(x,_pyoomph.Expression) else _pyoomph.Expression(x)
+	return _pyoomph.GiNaC_acosh(x)
+
+def atanh(x:ExpressionOrNum) -> Expression:
+	"""
+	Compute the inverse hyperbolic tangent of the input expression or number.
+
+	The argument must be dimensionless and, for a real-valued result, within (-1,1).
+
+	Parameters:
+		x (ExpressionOrNum): The input expression or number.
+
+	Returns:
+		Expression: The inverse hyperbolic tangent of the input.
+
+	"""
+	x=x if isinstance(x,_pyoomph.Expression) else _pyoomph.Expression(x)
+	return _pyoomph.GiNaC_atanh(x)
+
+def erf(x:ExpressionOrNum) -> Expression:
+	"""
+	Compute the error function of the input expression or number.
+
+	The argument must be dimensionless and is assumed to be real-valued. Differentiates to
+	``2/sqrt(pi)*exp(-x**2)``, so it can be used in residuals without further ado.
+
+	Parameters:
+		x (ExpressionOrNum): The input expression or number.
+
+	Returns:
+		Expression: The error function of the input.
+
+	"""
+	x=x if isinstance(x,_pyoomph.Expression) else _pyoomph.Expression(x)
+	return _pyoomph.GiNaC_erf(x)
+
+def erfc(x:ExpressionOrNum) -> Expression:
+	"""
+	Compute the complementary error function, i.e. 1-erf(x), of the input expression or number.
+
+	Prefer it over writing 1-erf(x) by hand: for large arguments, the latter is entirely
+	cancellation, whereas erfc retains its accuracy.
+
+	Parameters:
+		x (ExpressionOrNum): The input expression or number.
+
+	Returns:
+		Expression: The complementary error function of the input.
+
+	"""
+	x=x if isinstance(x,_pyoomph.Expression) else _pyoomph.Expression(x)
+	return _pyoomph.GiNaC_erfc(x)
 
 def exp(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the exponential of the input expression or number.
+
+	The argument must be dimensionless.
 
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
@@ -225,6 +334,8 @@ def log(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the logarithm of the input expression or number.
 
+	The argument must be dimensionless and, for a real-valued result, positive.
+
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
 
@@ -239,6 +350,9 @@ def absolute(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the absolute of the input expression or number.
 
+	The argument may carry any unit, which the result inherits. Differentiates as ``signum(x)*dx``, i.e. as if it were
+	smooth, and hence has no delta contribution at x=0.
+
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
 
@@ -252,7 +366,11 @@ def absolute(x:ExpressionOrNum) -> Expression:
 
 def signum(x:ExpressionOrNum) -> Expression:
 	"""
-	Compute the signum of the input expression or number.
+	Compute the signum of the input expression or number, i.e. 1 for x>0, -1 for x<0 and exactly 0 at x=0.
+
+	The argument may carry any unit (only its sign matters), the result is dimensionless. Like
+	:py:func:`~pyoomph.expressions.heaviside`, it differentiates to zero everywhere, i.e. the jump at the origin does
+	not enter the Jacobian.
 
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
@@ -271,6 +389,9 @@ def maximum(x:ExpressionOrNum,y:ExpressionOrNum) -> Expression:
 	"""
 	Compute the maximum of both input expressions or numbers.
 
+	Both arguments must agree in units, which are then the units of the result; a plain 0 is accepted irrespective of
+	the unit of the other argument. Differentiates branch-wise, as ``dx*heaviside(x-y)+dy*heaviside(y-x)``.
+
 	Parameters:
 		x (ExpressionOrNum): First argument, expression or number.
   		y (ExpressionOrNum): Second argument. expression or number.
@@ -278,7 +399,7 @@ def maximum(x:ExpressionOrNum,y:ExpressionOrNum) -> Expression:
 	Returns:
 		Expression: max(x,y).
 
-	"""	
+	"""
 	x=x if isinstance(x,_pyoomph.Expression) else _pyoomph.Expression(x) 	  	
 	y=y if isinstance(y,_pyoomph.Expression) else _pyoomph.Expression(y) 	
 	return _pyoomph.GiNaC_maximum(x,y)
@@ -288,6 +409,9 @@ def minimum(x:ExpressionOrNum,y:ExpressionOrNum) -> Expression:
 	"""
 	Compute the minimum of both input expressions or numbers.
 
+	Both arguments must agree in units, which are then the units of the result; a plain 0 is accepted irrespective of
+	the unit of the other argument. Differentiates branch-wise, as ``dx*heaviside(y-x)+dy*heaviside(x-y)``.
+
 	Parameters:
 		x (ExpressionOrNum): First argument, expression or number.
   		y (ExpressionOrNum): Second argument. expression or number.
@@ -295,7 +419,7 @@ def minimum(x:ExpressionOrNum,y:ExpressionOrNum) -> Expression:
 	Returns:
 		Expression: min(x,y).
 
-	"""	
+	"""
 	x=x if isinstance(x,_pyoomph.Expression) else _pyoomph.Expression(x) 	  	
 	y=y if isinstance(y,_pyoomph.Expression) else _pyoomph.Expression(y) 	
 	return _pyoomph.GiNaC_minimum(x,y)
@@ -304,15 +428,23 @@ def imaginary_i():
 	"""
 	Return the imaginary unit i.
 
+	Residuals themselves must be real-valued; the imaginary unit is meant for the complex-valued expressions of e.g.
+	an eigenmode or a Helmholtz problem, which are split into their real and imaginary parts before the code is
+	generated. Use :py:func:`~pyoomph.expressions.real_part` and :py:func:`~pyoomph.expressions.imag_part` to do that
+	splitting by hand.
+
 	Returns:
 		Expression: The imaginary unit i.
 
-	"""	
+	"""
 	return _pyoomph.GiNaC_imaginary_i()
 
 def real_part(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the real part of the input expression or number.
+
+	Units are kept, i.e. the real part of a length is a length. Note that this assumes every field to be real-valued,
+	so that only an explicit :py:func:`~pyoomph.expressions.imaginary_i` makes a term imaginary.
 
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
@@ -328,13 +460,16 @@ def imag_part(x:ExpressionOrNum)->Expression:
     """
 	Compute the imaginary part of the input expression or number.
 
+	Units are kept, i.e. the imaginary part of a length is a length. Note that this assumes every field to be
+	real-valued, so that only an explicit :py:func:`~pyoomph.expressions.imaginary_i` makes a term imaginary.
+
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
 
 	Returns:
 		Expression: The imaginary part of the input.
 
-	"""	
+	"""
     x=x if isinstance(x,_pyoomph.Expression) else _pyoomph.Expression(Expression(1)*x) 	
     return _pyoomph.GiNaC_get_imag_part(x)
     
@@ -343,7 +478,11 @@ def imag_part(x:ExpressionOrNum)->Expression:
 
 def square_root(what:ExpressionOrNum, order:int=2) -> Expression:
 	"""
-	Calculates the square root of the given expression or number.
+	Calculates the square root, or with ``order`` the ``order``-th root, of the given expression or number.
+
+	The argument may carry a unit, which is raised to the power 1/order along with it, i.e. the root of an area is a
+	length. It is just a shorthand for ``what**rational_num(1,order)``, hence an exact rational exponent rather than a
+	floating point one, which matters for the unit bookkeeping.
 
 	Parameters:
 		what (ExpressionOrNum): The expression or number to calculate the square root of.
@@ -370,16 +509,17 @@ def square_root(what:ExpressionOrNum, order:int=2) -> Expression:
 
 def heaviside(x:ExpressionOrNum):
     """
-	Returns a piecewise function that evaluates to `iftrue` when `cond` is greater than or equal to zero,
-	and evaluates to `iffalse` otherwise.
-	
+	Heaviside step function, i.e. ``1`` for ``x>0``, ``0`` for ``x<0`` and ``1/2`` for ``x=0``.
+
+	The argument may carry any unit (its scale and unit are divided out), the result is always dimensionless.
+	Note that it differentiates to zero everywhere, i.e. the delta contribution at the jump is not
+	added to the Jacobian.
+
 	Parameters:
-		cond (ExpressionOrNum): The condition to check.
-		iftrue (ExpressionOrNum): The value to return if `cond` is greater than or equal to zero.
-		iffalse (ExpressionOrNum): The value to return if `cond` is less than zero.
-	
+		x (ExpressionOrNum): The argument of the step function.
+
 	Returns:
-		Expression: The resulting piecewise function.
+		Expression: The step function of the input.
 	"""
     x=x if isinstance(x,_pyoomph.Expression) else _pyoomph.Expression(x)
     return _pyoomph.GiNaC_heaviside(x)
@@ -388,12 +528,16 @@ def piecewise_geq0(cond:ExpressionOrNum,iftrue:ExpressionOrNum,iffalse:Expressio
 	"""
 	Returns a piecewise function that evaluates to `iftrue` when `cond` is greater than or equal to zero,
 	and evaluates to `iffalse` otherwise.
-	
+
+	All three arguments may carry units: `cond` only decides the branch, so its unit is arbitrary and
+	divided out, whereas `iftrue` and `iffalse` must agree in units, which then are the units of the
+	result. A plain 0 is accepted as a branch irrespective of the unit of the other branch.
+
 	Parameters:
 		cond (ExpressionOrNum): The condition to check.
 		iftrue (ExpressionOrNum): The value to return if `cond` is greater than or equal to zero.
 		iffalse (ExpressionOrNum): The value to return if `cond` is less than zero.
-	
+
 	Returns:
 		Expression: The resulting piecewise function.
 	"""
@@ -451,7 +595,7 @@ def inverse_matrix(M:Expression,n:int=0,use_subexpression_for_det:bool=True,fill
 	return _pyoomph.GiNaC_inverse_matrix(M,Expression(n),Expression(flags))
 
 
-def var_and_test(n: str, tag: List[str] = [], domain: Union[None, str, "FiniteElementCodeGenerator"] = None) -> Tuple[Expression, Expression]:
+def var_and_test(n: str, tag: list[str] = [], domain: "None | str | FiniteElementCodeGenerator" = None) -> tuple[Expression, Expression]:
 	"""
 	Bind a variable of an unknown field the corresponding test function for a given name.
 
@@ -483,6 +627,10 @@ def partial_x(f:ExpressionOrNum, order:int=1) -> Expression:
 	"""
 	Compute the partial derivative of a given expression with respect to the x-coordinate.
 
+	It differentiates with respect to the independent Eulerian coordinate ``"coordinate_x"``, i.e. it is a
+	shorthand for :py:func:`~pyoomph.expressions.generic.diff` with respect to that coordinate. On a moving mesh,
+	use :py:func:`~pyoomph.expressions.generic.grad` instead if you want the mesh coordinates to be used.
+
 	Parameters:
 		f (ExpressionOrNum): The expression to differentiate.
 		order (int): The order of differentiation (default is 1).
@@ -505,6 +653,10 @@ def partial_y(f:ExpressionOrNum,order:int=1)->Expression:
 	"""
 	Compute the partial derivative of a given expression with respect to the y-coordinate.
 
+	It differentiates with respect to the independent Eulerian coordinate ``"coordinate_y"``, i.e. it is a
+	shorthand for :py:func:`~pyoomph.expressions.generic.diff` with respect to that coordinate. On a moving mesh,
+	use :py:func:`~pyoomph.expressions.generic.grad` instead if you want the mesh coordinates to be used.
+
 	Parameters:
 		f (ExpressionOrNum): The expression to differentiate.
 		order (int): The order of differentiation (default is 1).
@@ -524,7 +676,11 @@ def partial_y(f:ExpressionOrNum,order:int=1)->Expression:
 
 def partial_z(f:ExpressionOrNum,order:int=1)->Expression:
 	"""
-	Compute the partial derivative of a given expression with respect to the y-coordinate.
+	Compute the partial derivative of a given expression with respect to the z-coordinate.
+
+	It differentiates with respect to the independent Eulerian coordinate ``"coordinate_z"``, i.e. it is a
+	shorthand for :py:func:`~pyoomph.expressions.generic.diff` with respect to that coordinate. On a moving mesh,
+	use :py:func:`~pyoomph.expressions.generic.grad` instead if you want the mesh coordinates to be used.
 
 	Parameters:
 		f (ExpressionOrNum): The expression to differentiate.
@@ -546,7 +702,7 @@ def partial_z(f:ExpressionOrNum,order:int=1)->Expression:
 
 
 
-def div(arg:ExpressionOrNum,lagrangian:bool=False,matrix:Optional[bool]=None,nondim:bool=False,coordsys:Optional["BaseCoordinateSystem"]=None) -> Expression:
+def div(arg:ExpressionOrNum,lagrangian:bool=False,matrix:bool | None=None,nondim:bool=False,coordsys:"BaseCoordinateSystem | None"=None) -> Expression:
 	"""
 	Compute the divergence of the given argument. On surfaces, i.e. with a co-dimension, it is the surface divergence.	
 
@@ -563,9 +719,17 @@ def div(arg:ExpressionOrNum,lagrangian:bool=False,matrix:Optional[bool]=None,non
 	Notes:
 		if you calculate div(u) on a boundary, you will get the surface divergence, even if u is defined in the bulk.
 		To get the bulk divergence at the boundary, use div(var("u",domain="..")) instead.
+
+		Index order: for a rank-2 tensor, ``div(T)[i]`` is :math:`\\partial_j T_{ij}`, contracting the second index. This
+		makes ``div`` the adjoint of :py:func:`~pyoomph.expressions.generic.grad` (which stores
+		:math:`\\partial u_i/\\partial x_j`) and ``div(T)`` the
+		integration-by-parts partner of ``weak(T,grad(v))`` together with the traction ``matproduct(T,n)``. For symmetric
+		tensors, i.e. every usual stress tensor, the distinction does not matter. Note that a flux tensor has to be
+		assembled accordingly: the momentum flux carrying :math:`\\vec{u}` along :math:`\\rho\\vec{q}` is
+		``dyadic(u,rho*q)``, so that :math:`F_{ij}=\\rho u_i q_j`.
 	"""
 	
-	if isinstance(arg,float) or isinstance(arg,int):
+	if isinstance(arg,float) or isinstance(arg,int) or isinstance(arg,_pyoomph.GiNaC_GlobalParam):
 		return Expression(0)
 	with_scaling=not nondim
 	flag=(1 if with_scaling else 0)+(0 if matrix is None else (2 if matrix==False else 4) ) + (8 if lagrangian else 0) #Code the flag
@@ -576,7 +740,7 @@ def div(arg:ExpressionOrNum,lagrangian:bool=False,matrix:Optional[bool]=None,non
 	return _pyoomph.GiNaC_div(arg,_pyoomph.Expression(-1),_pyoomph.Expression(-1),coordsysE,_pyoomph.Expression(flag))
 
 
-def time_derivative_of_integral(expr:ExpressionOrNum,scheme:Literal["BDF1","BDF2","Newmark2","BDF2_degr","Newmark2_degr","TPZ","MPT","Simpson","Boole","trapezoidal","Kepler","Milne","midpoint"]="BDF2_degr")->Expression:
+def time_derivative_of_integral(expr:ExpressionOrNum,scheme:Literal["BDF1","BDF2","Newmark2","BDF2_degr","Newmark2_degr","TPZ","MPT","Simpson","Boole","trapezoidal","Kepler","Milne","midpoint"]="BDF2_degr",apply_on_others:bool=True)->Expression:
     """
     Computes the time derivative of an integral expression using a given time stepping scheme.
     For moving meshes, this can be different, i.e. ``weak(partial_t(u),v) != d_by_dt_of_integral(weak(u,v))``.
@@ -585,6 +749,7 @@ def time_derivative_of_integral(expr:ExpressionOrNum,scheme:Literal["BDF1","BDF2
     Args:
         expr: The expression to differentiate.
         scheme: The time stepping scheme to apply ("BDF1","BDF2","Newmark2","BDF2_degr","Newmark2_degr"). Defaults to "BDF2_degr", "_degr" means that the time derivative is approximated with a lower order scheme in the first step, since initial conditions might not have history values.
+        apply_on_others: Whether the history evaluations also take the normal, the Eulerian element sizes and the Eulerian spatial derivatives in grad/div from the mesh of the corresponding history step. Defaults to True: this is a derivative of the integral over the moving element, so each history term belongs to the configuration the element had then. Has no effect unless the mesh moves.
     """        
     if scheme in ["TPZ","MPT","Simpson","Boole","trapezoidal","Kepler","Milne","midpoint"]:
         scheme="BDF1" # These schemes are not supported for time derivatives of integrals, since they are not linear multistep methods. We just use BDF1 instead, which is the same as the trapezoidal rule for linear functions.    
@@ -594,5 +759,19 @@ def time_derivative_of_integral(expr:ExpressionOrNum,scheme:Literal["BDF1","BDF2
     res:ExpressionOrNum=0
     # Time derivatives are just approximated as d/dt(expr) = sum_i weight_i * expr(t=t_i), where t0=t, t1=t-dt_0, t2=t1-dt_1, etc. The weights are given by the timestepper_weight function.
     for i in range(numterms[scheme]):
-        res+=timestepper_weight(1,i,scheme=cast("TimeSteppingScheme",scheme))*evaluate_in_past(expr,i,apply_on_integral_dx=True)
+        res+=timestepper_weight(1,i,scheme=cast("TimeSteppingScheme",scheme))*evaluate_in_past(expr,i,apply_on_integral_dx=True,apply_on_others=apply_on_others)
+    # The finite difference above is a difference of integrals, not a partial_t of a field, so the code
+    # generator would find no mass-matrix contribution in it whatsoever: the __partial_t_mass_matrix probe
+    # only responds to derived first-order time derivatives, and history terms differentiate to zero.
+    # The marker term supplies it. d/dt I(U) = sum_j dI/dU_j * dU_j/dt, hence d(residual)/d(dU/dt) = dI/dU,
+    # and that is exactly what differentiating the marked expression by every unknown gives - including
+    # the mesh positions (through dx) and, if the density is a field, its dofs. The marker term is
+    # substituted by zero in the residual and in the Jacobian, so it changes neither. It sits inside the
+    # same division by the temporal scale as the difference, so that the mass matrix stays consistent with
+    # the residual it belongs to.
+    res+=_pyoomph.GiNaC_mass_matrix_marker()*expr
     return res/scale_factor("temporal") # And we divide by the temporal scaling, since the time derivative is scaled with the temporal scaling
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

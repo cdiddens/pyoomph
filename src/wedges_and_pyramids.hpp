@@ -1,11 +1,123 @@
+/*================================================================================
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
+Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+The main author may be contacted at c.diddens@utwente.nl
+
+================================================================================*/
+
 #pragma once
 
 #include "oomph_lib.hpp"
 #include "exception.hpp"
 // Wedges and pyramids are not supported by oomph-lib, but the basic Element classes are defined in the oomph namespace here,
 // they are adjusted for pyoomph in the elements.{cpp,hpp} files.
+namespace pyoomph
+{
+  class BulkElementBase; // pyoomph bulk element base (referenced by the pyramid mixed-son builder below)
+}
 namespace oomph
 {
+
+// ---------------------------------------------------------------------------------------------
+// Minimal forward-mode second-order dual number over the three local coordinates, used only to
+// build the d2shape_local implementations further down.
+//
+// The wedge bases are tensor products and could be differentiated by hand, but the 14-node pyramid
+// is *rational* - each shape function is a product of up to four linear/quadratic factors divided
+// by (s2-1) or (s2-1)^2 - and its second derivatives written out by hand would be neither readable
+// nor checkable by inspection. Assembling the same expressions the shape() functions already use,
+// but in D2Jet arithmetic, makes the derivatives exact by construction: there is only one place
+// (the operators below) where a differentiation rule can be wrong, and that place is trivial.
+//
+// This is straight-line arithmetic evaluated per integration point, and only when second spatial
+// derivatives were actually requested, so the cost is irrelevant next to the rest of the fill.
+// ---------------------------------------------------------------------------------------------
+struct D2Jet
+{
+  double v;
+  double g[3];
+  double h[3][3];
+
+  D2Jet() : v(0.0)
+  {
+    for (unsigned a = 0; a < 3; a++) { g[a] = 0.0; for (unsigned b = 0; b < 3; b++) h[a][b] = 0.0; }
+  }
+  D2Jet(double c) : D2Jet() { v = c; }
+  // The independent variable s_index
+  static D2Jet var(unsigned index, double value)
+  {
+    D2Jet r; r.v = value; r.g[index] = 1.0; return r;
+  }
+};
+
+inline D2Jet operator+(const D2Jet &a, const D2Jet &b)
+{
+  D2Jet r; r.v = a.v + b.v;
+  for (unsigned i = 0; i < 3; i++) { r.g[i] = a.g[i] + b.g[i]; for (unsigned j = 0; j < 3; j++) r.h[i][j] = a.h[i][j] + b.h[i][j]; }
+  return r;
+}
+inline D2Jet operator-(const D2Jet &a, const D2Jet &b)
+{
+  D2Jet r; r.v = a.v - b.v;
+  for (unsigned i = 0; i < 3; i++) { r.g[i] = a.g[i] - b.g[i]; for (unsigned j = 0; j < 3; j++) r.h[i][j] = a.h[i][j] - b.h[i][j]; }
+  return r;
+}
+inline D2Jet operator*(const D2Jet &a, const D2Jet &b)
+{
+  D2Jet r; r.v = a.v * b.v;
+  for (unsigned i = 0; i < 3; i++) r.g[i] = a.g[i] * b.v + a.v * b.g[i];
+  for (unsigned i = 0; i < 3; i++)
+    for (unsigned j = 0; j < 3; j++)
+      r.h[i][j] = a.h[i][j] * b.v + a.g[i] * b.g[j] + a.g[j] * b.g[i] + a.v * b.h[i][j];
+  return r;
+}
+inline D2Jet operator*(double c, const D2Jet &a)
+{
+  D2Jet r; r.v = c * a.v;
+  for (unsigned i = 0; i < 3; i++) { r.g[i] = c * a.g[i]; for (unsigned j = 0; j < 3; j++) r.h[i][j] = c * a.h[i][j]; }
+  return r;
+}
+// 1/a, from d(1/a) = -a_i/a^2 and d2(1/a) = 2 a_i a_j/a^3 - a_ij/a^2
+inline D2Jet inv(const D2Jet &a)
+{
+  D2Jet r;
+  const double ia = 1.0 / a.v, ia2 = ia * ia, ia3 = ia2 * ia;
+  r.v = ia;
+  for (unsigned i = 0; i < 3; i++) r.g[i] = -a.g[i] * ia2;
+  for (unsigned i = 0; i < 3; i++)
+    for (unsigned j = 0; j < 3; j++)
+      r.h[i][j] = 2.0 * a.g[i] * a.g[j] * ia3 - a.h[i][j] * ia2;
+  return r;
+}
+inline D2Jet operator/(const D2Jet &a, const D2Jet &b) { return a * inv(b); }
+
+// Writes one D2Jet into oomph-lib's Shape/DShape triple for a 3d element, i.e. with the second
+// derivatives in the N2deriv packing {00,11,22,01,02,12}.
+inline void store_d2jet_3d(unsigned l, const D2Jet &f, Shape &psi, DShape &dpsids, DShape &d2psids)
+{
+  psi[l] = f.v;
+  for (unsigned a = 0; a < 3; a++) dpsids(l, a) = f.g[a];
+  d2psids(l, 0) = f.h[0][0];
+  d2psids(l, 1) = f.h[1][1];
+  d2psids(l, 2) = f.h[2][2];
+  d2psids(l, 3) = f.h[0][1];
+  d2psids(l, 4) = f.h[0][2];
+  d2psids(l, 5) = f.h[1][2];
+}
 
 // Gauss-Legendre quadrature for the C1 wedge element, with 6 points (2 in each direction)
 class WedgeGaussC1 : public Integral
@@ -17,9 +129,9 @@ class WedgeGaussC1 : public Integral
     WedgeGaussC1(){};
     WedgeGaussC1(const WedgeGaussC1& dummy) = delete;
     void operator=(const WedgeGaussC1&) = delete;
-    unsigned nweight() const    {   return Npts;   }
-    double knot(const unsigned& i, const unsigned& j) const   {    return Knot[i][j];  }
-    double weight(const unsigned& i) const   {   return Weight[i];   }
+    unsigned nweight() const override    {   return Npts;   }
+    double knot(const unsigned& i, const unsigned& j) const override   {    return Knot[i][j];  }
+    double weight(const unsigned& i) const override   {   return Weight[i];   }
  };
 
  // Gauss-Legendre quadrature for the C2 wedge element, with 18 points (3 in each direction)
@@ -34,25 +146,25 @@ public:
     WedgeGaussC2(const WedgeGaussC2&) = delete;
     void operator=(const WedgeGaussC2&) = delete;
 
-    unsigned nweight() const { return Npts; }
-    double knot(const unsigned& i, const unsigned& j) const { return Knot[i][j]; }
-    double weight(const unsigned& i) const { return Weight[i]; }
+    unsigned nweight() const override { return Npts; }
+    double knot(const unsigned& i, const unsigned& j) const override { return Knot[i][j]; }
+    double weight(const unsigned& i) const override { return Weight[i]; }
 };
 
 // Gauss-Legendre quadrature for the C1 pyramid element, with 5 points (2 in each direction)
 
 class PyramidGaussC1 : public Integral
   {
-  private:    
-    static const unsigned Npts = 12;
-    static const double Knot[12][3], Weight[12];
+  private:
+    static const unsigned Npts = 27;
+    static const double Knot[27][3], Weight[27];
   public:    
     PyramidGaussC1(){};
     PyramidGaussC1(const PyramidGaussC1& dummy) = delete;
     void operator=(const PyramidGaussC1&) = delete;
-    unsigned nweight() const    {   return Npts;   }
-    double knot(const unsigned& i, const unsigned& j) const   {    return Knot[i][j];  }
-    double weight(const unsigned& i) const   {   return Weight[i];   }
+    unsigned nweight() const override    {   return Npts;   }
+    double knot(const unsigned& i, const unsigned& j) const override   {    return Knot[i][j];  }
+    double weight(const unsigned& i) const override   {   return Weight[i];   }
  };
 
   // Gauss-Legendre quadrature for the C2 pyramid element, with 14 points (3 in each direction)
@@ -67,9 +179,9 @@ public:
     PyramidGaussC2(const PyramidGaussC2&) = delete;
     void operator=(const PyramidGaussC2&) = delete;
 
-    unsigned nweight() const { return Npts; }
-    double knot(const unsigned& i, const unsigned& j) const { return Knot[i][j]; }
-    double weight(const unsigned& i) const { return Weight[i]; }
+    unsigned nweight() const override { return Npts; }
+    double knot(const unsigned& i, const unsigned& j) const override { return Knot[i][j]; }
+    double weight(const unsigned& i) const override { return Weight[i]; }
 };
 
 // Linear (C1) shape functions for the 6-node wedge/prism element, expressed in the
@@ -133,6 +245,25 @@ class WedgeElementShapeC1
         dpsids(4,2) =  s0;
         dpsids(5,2) =  s1;
     }
+
+    // Second local derivatives, in oomph-lib's N2deriv packing {00,11,22,01,02,12}. Built with
+    // D2Jet so the product rule is applied by the arithmetic rather than by hand.
+    static void d2shape_local(const Vector<double>& s, Shape& psi, DShape& dpsids, DShape& d2psids)
+    {
+        const D2Jet s0 = D2Jet::var(0, s[0]);
+        const D2Jet s1 = D2Jet::var(1, s[1]);
+        const D2Jet s2 = D2Jet::var(2, s[2]);
+        const D2Jet l1 = D2Jet(1.0) - s0 - s1;
+        const D2Jet w0 = D2Jet(1.0) - s2;   // lower layer
+        const D2Jet w1 = s2;                // upper layer
+
+        const D2Jet T[3] = {l1, s0, s1};
+        const D2Jet L[2] = {w0, w1};
+        for (unsigned m = 0; m < 2; m++)
+            for (unsigned k = 0; k < 3; k++)
+                store_d2jet_3d(3*m + k, T[k] * L[m], psi, dpsids, d2psids);
+    }
+
 };
 
 
@@ -210,6 +341,27 @@ class PyramidElementShapeC1
         dpsids(3,2) = - s0s1 * iw2;
         dpsids(4,2) = 1.0;
     }
+
+    // Second local derivatives, in oomph-lib's N2deriv packing {00,11,22,01,02,12}. The 1/(1-s2)
+    // factor makes this element rational, so the derivatives are built with D2Jet rather than
+    // written out (see the D2Jet comment at the top of this file).
+    static void d2shape_local(const Vector<double>& s, Shape& psi, DShape& dpsids, DShape& d2psids)
+    {
+        const D2Jet s0 = D2Jet::var(0, s[0]);
+        const D2Jet s1 = D2Jet::var(1, s[1]);
+        const D2Jet s2 = D2Jet::var(2, s[2]);
+        const D2Jet w  = D2Jet(1.0) - s2;
+        const D2Jet iw = inv(w);
+        const D2Jet w_s0 = w - s0;
+        const D2Jet w_s1 = w - s1;
+
+        store_d2jet_3d(0, w_s0 * w_s1 * iw, psi, dpsids, d2psids);
+        store_d2jet_3d(1, s0   * w_s1 * iw, psi, dpsids, d2psids);
+        store_d2jet_3d(2, s0   * s1   * iw, psi, dpsids, d2psids);
+        store_d2jet_3d(3, w_s0 * s1   * iw, psi, dpsids, d2psids);
+        store_d2jet_3d(4, s2,               psi, dpsids, d2psids);
+    }
+
 };
 
 class WedgeElementShapeC2
@@ -401,6 +553,30 @@ class WedgeElementShapeC2
         dpsids(14,2) = T2*dL2ds2;  dpsids(15,2) = T3*dL2ds2;
         dpsids(16,2) = T4*dL2ds2;  dpsids(17,2) = T5*dL2ds2;
     } 
+
+    // Second local derivatives, in oomph-lib's N2deriv packing {00,11,22,01,02,12}. Same basis as
+    // shape()/dshape_local() above, assembled with D2Jet.
+    static void d2shape_local(const Vector<double>& s, Shape& psi, DShape& dpsids, DShape& d2psids)
+    {
+        const D2Jet s0 = D2Jet::var(0, s[0]);
+        const D2Jet s1 = D2Jet::var(1, s[1]);
+        const D2Jet s2 = D2Jet::var(2, s[2]);
+        const D2Jet l  = D2Jet(1.0) - s0 - s1;
+
+        const D2Jet T[6] = { l  * (2.0*l  - D2Jet(1.0)),
+                             s0 * (2.0*s0 - D2Jet(1.0)),
+                             s1 * (2.0*s1 - D2Jet(1.0)),
+                             4.0 * (s0 * l),
+                             4.0 * (s1 * l),
+                             4.0 * (s0 * s1) };
+        const D2Jet L[3] = { (D2Jet(1.0) - s2) * (D2Jet(1.0) - 2.0*s2),
+                             4.0 * (s2 * (D2Jet(1.0) - s2)),
+                             s2 * (2.0*s2 - D2Jet(1.0)) };
+        for (unsigned m = 0; m < 3; m++)
+            for (unsigned k = 0; k < 6; k++)
+                store_d2jet_3d(6*m + k, T[k] * L[m], psi, dpsids, d2psids);
+    }
+
 };
 
 class PyramidElementShapeC2
@@ -740,6 +916,49 @@ class PyramidElementShapeC2
             dpsids(13, 2) = (dN13d2 * den1 - 2.0 * N13) / den1c;
         }
     }
+
+    // Second local derivatives, in oomph-lib's N2deriv packing {00,11,22,01,02,12}. This element is
+    // rational (see the shape() comment above): each basis function is a product of up to four
+    // factors over (s2-1) or (s2-1)^2. Differentiating that twice by hand would be unreadable and
+    // unverifiable, so the very same expressions as in shape() are re-evaluated in D2Jet arithmetic.
+    static void d2shape_local(const Vector<double>& s, Shape& psi, DShape& dpsids, DShape& d2psids)
+    {
+        const D2Jet s0 = D2Jet::var(0, s[0]);
+        const D2Jet s1 = D2Jet::var(1, s[1]);
+        const D2Jet s2 = D2Jet::var(2, s[2]);
+
+        const D2Jet px = s0 + s2 - D2Jet(1.0);
+        const D2Jet py = s1 + s2 - D2Jet(1.0);
+        const D2Jet qx = 2.0*s0 + s2 - D2Jet(1.0);
+        const D2Jet qy = 2.0*s1 + s2 - D2Jet(1.0);
+
+        const D2Jet C0 = 4.0*(s0*s1) + 2.0*(s0*s2) - 2.0*s0 + 2.0*(s1*s2)
+                        - 2.0*s1 + 2.0*(s2*s2) - 3.0*s2 + D2Jet(1.0);
+        const D2Jet C1 = 4.0*(s0*s1) + 2.0*(s0*s2) - 2.0*s0 + 2.0*(s1*s2)
+                        - 2.0*s1 - s2 + D2Jet(1.0);
+
+        const D2Jet iden1 = inv(s2 - D2Jet(1.0));
+        const D2Jet iden2 = iden1 * iden1;
+
+        store_d2jet_3d(0,  px * py * C0 * iden2, psi, dpsids, d2psids);
+        store_d2jet_3d(1,  s0 * py * C1 * iden2, psi, dpsids, d2psids);
+        store_d2jet_3d(2,  s0 * s1 * C0 * iden2, psi, dpsids, d2psids);
+        store_d2jet_3d(3,  s1 * px * C1 * iden2, psi, dpsids, d2psids);
+        store_d2jet_3d(4,  s2 * (2.0*s2 - D2Jet(1.0)), psi, dpsids, d2psids);
+
+        store_d2jet_3d(5,  -4.0 * (s0 * px * py * qy * iden2), psi, dpsids, d2psids);
+        store_d2jet_3d(6,  -4.0 * (s0 * s1 * qx * py * iden2), psi, dpsids, d2psids);
+        store_d2jet_3d(7,  -4.0 * (s0 * s1 * px * qy * iden2), psi, dpsids, d2psids);
+        store_d2jet_3d(8,  -4.0 * (s1 * px * qx * py * iden2), psi, dpsids, d2psids);
+
+        store_d2jet_3d(9,  -4.0 * (s2 * px * py * iden1), psi, dpsids, d2psids);
+        store_d2jet_3d(10,  4.0 * (s0 * s2 * py * iden1), psi, dpsids, d2psids);
+        store_d2jet_3d(11, -4.0 * (s0 * s1 * s2 * iden1), psi, dpsids, d2psids);
+        store_d2jet_3d(12,  4.0 * (s1 * s2 * px * iden1), psi, dpsids, d2psids);
+
+        store_d2jet_3d(13, 16.0 * (s0 * s1 * px * py * iden2), psi, dpsids, d2psids);
+    }
+
 };
 
 // Common (non-refineable) interface shared by all wedge elements: facet/vertex
@@ -758,9 +977,9 @@ class WedgeElementBase :  public virtual FiniteElement
     BulkCoordinateDerivativesFctPt bulk_coordinate_derivatives_fct_pt(const int& face_index) const override ;
     // Sign of the outer unit normal on the given facet (needed since the facet parametrisation is not guaranteed to be outward-oriented)
     int face_outer_unit_normal_sign(const int&) const override;
-    double s_min() const    { return 0.0; }
-    double s_max() const    { return 1.0; }
-    unsigned nvertex_node() const { return 6; }
+    double s_min() const override    { return 0.0; }
+    double s_max() const override    { return 1.0; }
+    unsigned nvertex_node() const override { return 6; }
     Node* vertex_node_pt(const unsigned& j) const override
     {
       if (j > 5)
@@ -802,16 +1021,31 @@ class RefineableWedgeElement : public virtual RefineableElement, public virtual 
     }
 
     // Empty (non-broken) destructor
-    virtual ~RefineableWedgeElement()
+    ~RefineableWedgeElement() override
     {
     }
 
-    // Number of sons created upon refinement -- not yet implemented (wedge refinement is TODO)
-    unsigned required_nsons() const
-    {
-      throw_runtime_error("TODO"); // Here, nothing is do be done for now
-      return 4;
-    }
+    // A wedge (triangular prism) refines 1->8: the triangular cross-section splits 1->4 (three corner
+    // sub-triangles + the inverted middle one, as for a 2d triangle) and the extrusion direction splits 1->2.
+    // All eight offspring are wedges, so wedge refinement is shape-closed.
+    unsigned required_nsons() const override { return 8; }
+
+    // The 6 vertices (in the FATHER's local coordinates) of son `son_type` (0..7): son_type % 4 selects the
+    // cross-section sub-triangle (0=corner v0, 1=corner v1, 2=corner v2, 3=middle), son_type / 4 the extrusion
+    // half (0=lower s2 in [0,0.5], 1=upper [0.5,1]). Used by build() (son->father affine map).
+    static void son_vertices_in_father(int son_type, Vector<Vector<double>> &verts);
+
+    // Per-refinement-round registry of nodes created on a father edge/face, keyed by the (father node,
+    // rounded father-shape weight) pairs that generate the node. The weights are essential for C2: the bare
+    // positive-node set is NOT a unique position identifier (e.g. the two distinct interior tri points
+    // (0.25,0.25) and (0.25,0.5) both have positive weights on exactly the three tri edge-mid nodes), so
+    // keying on the set alone over-merges distinct nodes and collapses the cross-section quadratic space.
+    // Including the rounded weight distinguishes them, while a node on a shared father face/edge still gets
+    // identical (node,weight) pairs from every adjacent father (shape functions of off-face nodes vanish on
+    // the face), so it is shared, not duplicated. Cleared each round (mesh.hpp).
+    typedef std::set<std::pair<Node *, long long>> SharedNodeKey;
+    static std::map<SharedNodeKey, Node *> Shared_node_registry;
+    static void clear_shared_node_registry() { Shared_node_registry.clear(); }
 
     // Not yet implemented: see RefineableElement interface for semantics
     virtual Node *node_created_by_neighbour(const Vector<double> &s_fraction, bool &is_periodic);
@@ -823,10 +1057,10 @@ class RefineableWedgeElement : public virtual RefineableElement, public virtual 
     }
 
     // Not yet implemented: builds the element's nodes from its father during refinement (see RefineableElement interface)
-    virtual void build(Mesh *&mesh_pt, Vector<Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file);
+    void build(Mesh *&mesh_pt, Vector<Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file) override;
 
     // Not yet implemented: checks inter-element continuity of nodal positions/values
-    void check_integrity(double &max_error);
+    void check_integrity(double &max_error) override;
 
     // Not yet implemented: debug output of the element's corner nodes
     void output_corners(std::ostream &outfile, const std::string &colour) const;
@@ -836,10 +1070,10 @@ class RefineableWedgeElement : public virtual RefineableElement, public virtual 
     OcTree *octree_pt() const { return dynamic_cast<OcTree *>(Tree_pt); }
 
     // Not yet implemented: sets up the hanging-node scheme for all continuously-interpolated values
-    void setup_hanging_nodes(Vector<std::ofstream *> &output_stream);
+    void setup_hanging_nodes(Vector<std::ofstream *> &output_stream) override;
 
     /// Pure virtual: element-specific hook for further hanging node setup, must be overloaded by derived elements
-    virtual void further_setup_hanging_nodes() = 0;
+    void further_setup_hanging_nodes() override = 0;
 
   protected:
     /// Static matrix encoding, for each refinement pattern, which son nodes coincide with which father boundaries
@@ -883,9 +1117,9 @@ class PyramidElementBase :  public virtual FiniteElement
     BulkCoordinateDerivativesFctPt bulk_coordinate_derivatives_fct_pt(const int& face_index) const override ;
     // Sign of the outer unit normal on the given facet
     int face_outer_unit_normal_sign(const int&) const override;
-    double s_min() const    { return 0.0; }
-    double s_max() const    { return 1.0; }
-    unsigned nvertex_node() const   { return 5; }
+    double s_min() const override    { return 0.0; }
+    double s_max() const override    { return 1.0; }
+    unsigned nvertex_node() const override   { return 5; }
     Node* vertex_node_pt(const unsigned& j) const override
     {
       if (j > 4)
@@ -925,16 +1159,79 @@ class RefineablePyramidElement : public virtual RefineableElement, public virtua
     }
 
     // Empty (non-broken) destructor
-    virtual ~RefineablePyramidElement()
+    ~RefineablePyramidElement() override
     {
     }
 
-    // Number of sons created upon refinement -- not yet implemented (pyramid refinement is TODO)
-    unsigned required_nsons() const
+    // Pyramid refinement is NOT shape-closed: a pyramid red-splits into 6 sub-pyramids + 4 tetrahedra
+    // (10 mixed children). The son count/types come from PyramidMixedRefinementPattern (see
+    // refinement_pattern() on the concrete BulkElementPyramid3dC1); required_nsons() just reports the total.
+    unsigned required_nsons() const override { return 10; }
+
+    // The son's vertices, in FATHER local coordinates, for son index son_type in [0,10). son_type 0..5 are
+    // the sub-pyramids (5 vertices each, in pyramid local node order: base 0-3 then apex 4); son_type 6..9
+    // are the tetrahedra (4 vertices each). This is the geometric description of the red split and doubles as
+    // the son->father coordinate map source in build_son_from_pyramid_father(). Static: the map depends only
+    // on the (single) pyramid split scheme.
+    static void son_vertices_in_father(int son_type, Vector<Vector<double>> &verts);
+
+    // True iff son son_type is one of the 4 tetrahedra (the last 4 children); the first 6 are sub-pyramids.
+    static bool son_is_tet(int son_type) { return son_type >= 6; }
+
+    // The generic C1 builder that fills a son of a pyramid father lives on pyoomph::BulkElementBase
+    // (build_as_pyramid_son), because it must call the protected construct_node()/construct_boundary_node()
+    // on the son itself (this) -- which works for BOTH a pyramid son and a tet son. It consumes the geometry
+    // above (son_vertices_in_father) and the shared-node registry below.
+
+    // Per-round shared-node registry for the whole mixed pyramid forest, keyed TOPOLOGICALLY on the SET of
+    // father Node pointers a new node is built from (its positive-father-shape-weight nodes -- e.g. the two
+    // endpoints of an edge it bisects, or the four base corners for the base centre). Every element that
+    // creates the same geometric node keys on the same shared father pointers, so it is created once. This
+    // is the SAME mechanism the tri/tet/wedge builds use (RefineableTElement<3>::Shared_edge_node_registry),
+    // NOT a physical-position map: it is purely topological and therefore MPI-safe (across-rank interface
+    // nodes are reconciled by the halo machinery, exactly as for tets). Crucially the ORDINARY tet build
+    // uses THIS registry too when its forest root is a pyramid (RefineableTElement<3>::in_pyramid_forest),
+    // so at refinement level >= 2 a sub-pyramid and an adjacent tet-of-pyramid, sharing a triangular face,
+    // both key that face's edge-midpoints on the same two shared father vertex pointers -> one node, no tear.
+    // Cleared each round. The key is (father node, rounded father-shape weight) PAIRS, not a bare node set:
+    // for C1 the positive-node set alone is a unique position identifier, but for C2 two distinct interior
+    // points can share the same positive-node set (e.g. the 1/4 and 3/4 points of a father edge both have
+    // positive weight on exactly its two vertices and its edge-mid node), so keying on the set alone
+    // over-merges them and tears the mesh. The rounded weight distinguishes them, while a node on a shared
+    // father face/edge still gets identical (node,weight) pairs from every adjacent father (off-face node
+    // shapes vanish on the face) so it is shared, not duplicated -- exactly the C2-wedge approach. The
+    // ORDINARY tet build uses THIS registry too when its forest root is a pyramid
+    // (RefineableTElement<3>::in_pyramid_forest), producing matching (node,weight) pairs from its father
+    // shape, so a sub-pyramid and an adjacent tet-of-pyramid sharing a triangular face key on the same pairs.
+    typedef std::set<std::pair<Node *, long long>> SharedNodeKey;
+    static std::map<SharedNodeKey, Node *> Shared_node_registry;
+    static void clear_shared_node_registry() { Shared_node_registry.clear(); }
+
+    // CROSS-ROUND counterpart of the registry above: the same key, but rebuilt at the start of every
+    // refinement round from the keys the live nodes carry (pyoomph::Node::refinement_generating_key),
+    // so a node built rounds ago -- notably by a neighbour that was refined earlier -- is still found.
+    // The registry above only ever sees what THIS round built. Purely topological; it replaced a
+    // start-of-round snapshot of node POSITIONS, which broke as soon as a hanging node's cached
+    // position went stale. Populated by Mesh::split_elements_if_required (mesh.hpp).
+    static std::map<SharedNodeKey, Node *> Shared_node_snapshot;
+    static void clear_shared_node_snapshot() { Shared_node_snapshot.clear(); }
+    static void register_node_in_snapshot(oomph::Node *n);
+    static Node *find_node_in_snapshot(const SharedNodeKey &key)
     {
-      throw_runtime_error("TODO"); // Here, nothing is do be done for now
-      return 4;
+      if (Shared_node_snapshot.empty()) return 0;
+      std::map<SharedNodeKey, Node *>::iterator it = Shared_node_snapshot.find(key);
+      return (it != Shared_node_snapshot.end()) ? it->second : 0;
     }
+
+    // True during the refinement of a MIXED 3d mesh (>=2 of {tet,wedge,pyramid} present). When set, the tet,
+    // wedge and pyramid builds all route their new interface nodes into THIS registry with the weight-augmented
+    // key (RefineableWedgeElement::SharedNodeKey and SharedNodeKey are the same underlying type), so a tet and
+    // an adjacent wedge sharing a triangular face key that face's nodes on the same (father node, rounded
+    // weight) pairs -- one shared node, not a torn pair. Set once per round by Mesh::split_elements_if_required
+    // (mesh.hpp). For a PURE single-family mesh it stays false and each family keeps its own registry
+    // (pure-tet/-wedge/-pyramid meshes are validated as-is); a pure-pyramid mesh routes its tet offspring via
+    // in_pyramid_forest() instead, which targets this same registry.
+    static bool Mixed_forest_active;
 
     // Not yet implemented: see RefineableElement interface for semantics
     virtual Node *node_created_by_neighbour(const Vector<double> &s_fraction, bool &is_periodic);
@@ -946,10 +1243,10 @@ class RefineablePyramidElement : public virtual RefineableElement, public virtua
     }
 
     // Not yet implemented: builds the element's nodes from its father during refinement
-    virtual void build(Mesh *&mesh_pt, Vector<Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file);
+    void build(Mesh *&mesh_pt, Vector<Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file) override;
 
     // Not yet implemented: checks inter-element continuity of nodal positions/values
-    void check_integrity(double &max_error);
+    void check_integrity(double &max_error) override;
 
     // Not yet implemented: debug output of the element's corner nodes
     void output_corners(std::ostream &outfile, const std::string &colour) const;
@@ -959,10 +1256,10 @@ class RefineablePyramidElement : public virtual RefineableElement, public virtua
     OcTree *octree_pt() const { return dynamic_cast<OcTree *>(Tree_pt); }
 
     // Not yet implemented: sets up the hanging-node scheme for all continuously-interpolated values
-    void setup_hanging_nodes(Vector<std::ofstream *> &output_stream);
+    void setup_hanging_nodes(Vector<std::ofstream *> &output_stream) override;
 
     /// Pure virtual: element-specific hook for further hanging node setup, must be overloaded by derived elements
-    virtual void further_setup_hanging_nodes() = 0;
+    void further_setup_hanging_nodes() override = 0;
 
   protected:
     /// Static matrix encoding, for each refinement pattern, which son nodes coincide with which father boundaries
@@ -1037,7 +1334,7 @@ class WedgeElementC1 :  public virtual RefineableWedgeElement
  private:
     static WedgeGaussC1 Default_integration_scheme;
  public:    
-    unsigned nnode_1d() const { return 2;}
+    unsigned nnode_1d() const override { return 2;}
 
     WedgeElementC1() : WedgeElementBase() 
     {
@@ -1046,7 +1343,7 @@ class WedgeElementC1 :  public virtual RefineableWedgeElement
         set_integration_scheme(&Default_integration_scheme);
     }
     WedgeElementC1(const WedgeElementC1&) = delete;
-    ~WedgeElementC1() {}
+    ~WedgeElementC1() override {}
 
     unsigned int get_bulk_node_number(const int & face_index, const unsigned int& i) const override;
         
@@ -1060,8 +1357,14 @@ class WedgeElementC1 :  public virtual RefineableWedgeElement
         WedgeElementShapeC1::dshape_local(s, psi, dpsids);
     }
 
-    inline void local_coordinate_of_node(const unsigned& j,Vector<double>& s) const
+    void d2shape_local(const Vector<double>& s,Shape& psi,DShape& dpsids,DShape& d2psids) const override
     {
+        WedgeElementShapeC1::d2shape_local(s, psi, dpsids, d2psids);
+    }
+
+    inline void local_coordinate_of_node(const unsigned& j,Vector<double>& s) const override
+    {
+      s.resize(3); // oomph's get_node_at_local_coordinate passes an empty Vector to be sized here
       if (j==0) { s[0] = 0.0; s[1] = 0.0; s[2] = 0.0;}
       else if (j==1) { s[0] = 1.0; s[1] = 0.0; s[2] = 0.0;}
       else if (j==2) { s[0] = 0.0; s[1] = 1.0; s[2] = 0.0;}
@@ -1119,7 +1422,7 @@ Index : Local coordinates (s0,s1,s2)
  private:
     static PyramidGaussC1 Default_integration_scheme; 
  public:    
-    unsigned nnode_1d() const { return 2;}
+    unsigned nnode_1d() const override { return 2;}
 
     PyramidElementC1() : PyramidElementBase() 
     {
@@ -1128,7 +1431,7 @@ Index : Local coordinates (s0,s1,s2)
         set_integration_scheme(&Default_integration_scheme);
     }
     PyramidElementC1(const PyramidElementC1&) = delete;
-    ~PyramidElementC1() {}
+    ~PyramidElementC1() override {}
 
     unsigned int get_bulk_node_number(const int & face_index, const unsigned int& i) const override;
         
@@ -1142,8 +1445,14 @@ Index : Local coordinates (s0,s1,s2)
         PyramidElementShapeC1::dshape_local(s, psi, dpsids);
     }
 
-    inline void local_coordinate_of_node(const unsigned& j,Vector<double>& s) const
+    void d2shape_local(const Vector<double>& s,Shape& psi,DShape& dpsids,DShape& d2psids) const override
     {
+        PyramidElementShapeC1::d2shape_local(s, psi, dpsids, d2psids);
+    }
+
+    inline void local_coordinate_of_node(const unsigned& j,Vector<double>& s) const override
+    {
+      s.resize(3); // oomph's get_node_at_local_coordinate passes an empty Vector to be sized here
       if (j==0) { s[0] = 0.0; s[1] = 0.0; s[2] = 0.0;}
       else if (j==1) { s[0] = 1.0; s[1] = 0.0; s[2] = 0.0;}
       else if (j==2) { s[0] = 1.0; s[1] = 1.0; s[2] = 0.0;}
@@ -1293,7 +1602,7 @@ class WedgeElementC2 : public virtual RefineableWedgeElement
     static WedgeGaussC2 Default_integration_scheme;
 
  public:
-    unsigned nnode_1d() const { return 3; }
+    unsigned nnode_1d() const override { return 3; }
 
     WedgeElementC2() : WedgeElementBase()
     {
@@ -1302,7 +1611,7 @@ class WedgeElementC2 : public virtual RefineableWedgeElement
         set_integration_scheme(&Default_integration_scheme);
     }
     WedgeElementC2(const WedgeElementC2&) = delete;
-    ~WedgeElementC2() {}
+    ~WedgeElementC2() override {}
 
     Node* vertex_node_pt(const unsigned& j) const override
     {           
@@ -1315,7 +1624,7 @@ class WedgeElementC2 : public virtual RefineableWedgeElement
       return node_pt((j<3 ? j : j+9)); // vertex nodes are the first 3, then a gap of 9 to skip the mid-edge nodes, then the last 3 vertex nodes at the end of the numbering
     }
     unsigned nnode_on_face() const override { throw_runtime_error("nnode_on_face cannot be implemented for a Wedge, damn."); }
-    virtual unsigned nnode_on_face_by_index(const int& face_index) const  { return (face_index<2) ? 6 : 9; }
+    unsigned nnode_on_face_by_index(const int& face_index) const override  { return (face_index<2) ? 6 : 9; }
 
     // ---------------------------------------------------------------
     // get_bulk_node_number
@@ -1333,7 +1642,7 @@ class WedgeElementC2 : public virtual RefineableWedgeElement
     //   face 1 (s2=1) uses forward  winding (12,13,14) with midpoints
     //                  (15,16,17).
     // ---------------------------------------------------------------
-    unsigned get_bulk_node_number(const int& face_index,const unsigned int& i) const;
+    unsigned get_bulk_node_number(const int& face_index,const unsigned int& i) const override;
 
     void shape(const Vector<double>& s, Shape& psi) const override
     {
@@ -1343,6 +1652,11 @@ class WedgeElementC2 : public virtual RefineableWedgeElement
     void dshape_local(const Vector<double>& s,Shape& psi,DShape& dpsids) const override
     {
         WedgeElementShapeC2::dshape_local(s, psi, dpsids);
+    }
+
+    void d2shape_local(const Vector<double>& s,Shape& psi,DShape& dpsids,DShape& d2psids) const override
+    {
+        WedgeElementShapeC2::d2shape_local(s, psi, dpsids, d2psids);
     }
     
 
@@ -1358,8 +1672,9 @@ class WedgeElementC2 : public virtual RefineableWedgeElement
     //     3 -> (0.5, 0  )   4 -> (0,   0.5)   5 -> (0.5, 0.5)
     // ---------------------------------------------------------------
     inline void local_coordinate_of_node(const unsigned& j,
-                                          Vector<double>& s) const
+                                          Vector<double>& s) const override
     {
+        s.resize(3); // oomph's get_node_at_local_coordinate passes an empty Vector to be sized here
         if (j >= 18)
         {
             std::ostringstream error_message;
@@ -1486,7 +1801,7 @@ class PyramidElementC2 : public virtual RefineablePyramidElement
     static PyramidGaussC2 Default_integration_scheme;
 
  public:
-    unsigned nnode_1d() const { return 3; }
+    unsigned nnode_1d() const override { return 3; }
 
     PyramidElementC2() : PyramidElementBase()
     {
@@ -1495,7 +1810,7 @@ class PyramidElementC2 : public virtual RefineablePyramidElement
         set_integration_scheme(&Default_integration_scheme);
     }
     PyramidElementC2(const PyramidElementC2&) = delete;
-    ~PyramidElementC2() {}
+    ~PyramidElementC2() override {}
 
     Node* vertex_node_pt(const unsigned& j) const override
     {           
@@ -1508,7 +1823,7 @@ class PyramidElementC2 : public virtual RefineablePyramidElement
       return node_pt(j); // ordering same as in C1 pyramid
     }
     unsigned nnode_on_face() const override { throw_runtime_error("nnode_on_face cannot be implemented for a Pyramid, damn."); }
-    virtual unsigned nnode_on_face_by_index(const int& face_index) const  { return (face_index==4) ? 9 : 6; }
+    unsigned nnode_on_face_by_index(const int& face_index) const override  { return (face_index==4) ? 9 : 6; }
 
     // ---------------------------------------------------------------
     // get_bulk_node_number
@@ -1520,7 +1835,7 @@ class PyramidElementC2 : public virtual RefineablePyramidElement
     // Quadrilateral faces (5) : 9 nodes each,
     //   ordered as: 4 corners, 4 edge midpoints, 1 centre.
     // ---------------------------------------------------------------
-    unsigned get_bulk_node_number(const int& face_index,const unsigned int& i) const;
+    unsigned get_bulk_node_number(const int& face_index,const unsigned int& i) const override;
 
     void shape(const Vector<double>& s, Shape& psi) const override
     {
@@ -1531,6 +1846,11 @@ class PyramidElementC2 : public virtual RefineablePyramidElement
     {
         PyramidElementShapeC2::dshape_local(s, psi, dpsids);
     }
+
+    void d2shape_local(const Vector<double>& s,Shape& psi,DShape& dpsids,DShape& d2psids) const override
+    {
+        PyramidElementShapeC2::d2shape_local(s, psi, dpsids, d2psids);
+    }
     
 
     // ---------------------------------------------------------------
@@ -1538,8 +1858,9 @@ class PyramidElementC2 : public virtual RefineablePyramidElement
     // ---------------------------------------------------------------
     // Return the local coordinate s of node j.
     inline void local_coordinate_of_node(const unsigned& j,
-                                          Vector<double>& s) const
+                                          Vector<double>& s) const override
     {
+        s.resize(3); // oomph's get_node_at_local_coordinate passes an empty Vector to be sized here
         if (j >= 14)
         {
             std::ostringstream error_message;

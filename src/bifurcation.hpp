@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -28,6 +28,7 @@ This file is strongly based  on the oomph-lib library (see thirdparty/oomph-lib/
 #pragma once
 
 #include "assembly_handler.h"
+#include "double_vector_with_halo.h"
 #include <set>
 #include <complex>
 #include "mesh.h"
@@ -35,7 +36,210 @@ This file is strongly based  on the oomph-lib library (see thirdparty/oomph-lib/
 namespace pyoomph
 {
   class Problem;
-  class DynamicBulkElementCode; // Forward decl.
+  class DynamicJITCode; // Forward decl.
+
+  // A description of an augmented elemental block in terms of the patterns it is MADE of.
+  //
+  // A bifurcation-tracking assembly handler presents an elemental block several times larger than the
+  // element's own dof count -- 2*raw+1 for a fold, 3*raw+2 for a Hopf -- and fills it by hand. The
+  // frozen-sparsity machinery describes an elemental block from the element's FIELD structure, which
+  // only covers raw_ndof dofs, so it cannot describe such a block at all and refuses (see
+  // Problem::sparsity_mask_for_element). That refusal costs bifurcation tracking the whole frozen
+  // assembly path.
+  //
+  // It does not have to be described from scratch, though: every sub-block of every tracker is one of
+  // a handful of things, and all of them are already known to the element.
+  //
+  // Hessian-contracted sub-blocks are a SUBSET of the Jacobian -- d2R_i/du_j du_k != 0 implies
+  // dR_i/du_j is not identically zero -- but calling them Jacobian-patterned, as this first did, is
+  // far too loose: every LINEAR term of the residual contributes to J and nothing to the Hessian. On
+  // Kuramoto-Sivashinsky, where the biharmonic and Laplacian carry most of J, the contracted block is
+  // four times sparser, and using J for it accounted for 96% of the excess nonzeros. Hence its own
+  // kind, backed by contributes_to_hessian.
+  //
+  // The orientation is the other thing the caller cannot guess: a tracker working on a LEFT
+  // eigenvector assembles the transposed product, whose pattern is the transpose.
+  class AugmentedBlockSpec
+  {
+  public:
+    enum Kind
+    {
+      Empty = 0,    // structurally absent
+      Jacobian,     // the base Jacobian pattern
+      JacobianT,    // its transpose (left-eigenvector products)
+      MassMatrix,   // the base mass-matrix pattern
+      MassMatrixT,  // its transpose
+      Hessian,      // a Hessian contracted with a vector: d2R/du du, which is a SUBSET of the Jacobian
+      HessianT,     // its transpose (left-eigenvector products)
+      Dense,        // a border row/column: the parameter column, a normalisation row
+      Diagonal      // the diagonal of a square block only: an identity written over a constrained row
+    };
+
+    // The augmented dofs partition into consecutive groups, each either a full copy of the element's
+    // raw dof set or a single scalar (the parameter, a normalisation multiplier).
+    // One block can be built from SEVERAL patterns at once, so each carries a list of terms that are
+    // OR'd together. Pitchfork needs it: with improved_pitchfork_tracking_on_unstructured_meshes the
+    // base block is the base Jacobian PLUS a Hessian of the symmetry residual.
+    //
+    // Each term also names which RESIDUAL its pattern comes from; -1 means "the one currently being
+    // assembled". Fold and Hopf use -1 throughout, since every block of theirs comes from one residual.
+    // The azimuthal and pitchfork trackers do not -- they hold {base, real azimuthal, imaginary
+    // azimuthal} and {base, mass-matrix residual} live at the same time, and a spec that could not name
+    // which one a block belongs to would silently describe them all with whichever happened to be active.
+    struct Term
+    {
+      Kind kind = Empty;
+      int residual = -1;
+      Term() {}
+      Term(Kind k, int r) : kind(k), residual(r) {}
+    };
+
+    std::vector<bool> group_is_scalar;
+    std::vector<std::vector<Term>> block_terms; // n_groups * n_groups, row-major; empty list = Empty
+
+    unsigned n_groups() const { return (unsigned)group_is_scalar.size(); }
+    void resize(unsigned n)
+    {
+      group_is_scalar.assign(n, false);
+      block_terms.assign((size_t)n * n, std::vector<Term>());
+    }
+    // Replaces whatever the block had.
+    void set(unsigned r, unsigned c, Kind k, int residual_index = -1)
+    {
+      block_terms[(size_t)r * n_groups() + c] = std::vector<Term>(1, Term(k, residual_index));
+    }
+    // ORs another pattern into the block.
+    void add(unsigned r, unsigned c, Kind k, int residual_index = -1)
+    {
+      block_terms[(size_t)r * n_groups() + c].push_back(Term(k, residual_index));
+    }
+    const std::vector<Term> &terms_at(unsigned r, unsigned c) const { return block_terms[(size_t)r * n_groups() + c]; }
+  };
+
+  class AugmentedDofDistributionHelper; // Forward decl. for dof_distribution_helper() below
+
+  // Mixin giving an assembly handler the chance to describe its augmented block. The default says
+  // "cannot describe it", so a handler that does not override behaves exactly as before.
+  class AugmentedSparsityProvider
+  {
+  public:
+    virtual ~AugmentedSparsityProvider() {}
+    virtual bool get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const { return false; }
+    // The handler's dof bookkeeping, or NULL if it does not use AugmentedDofDistributionHelper.
+    // Problem::BaseDofDistributionScope needs it to present the BASE dof distribution during an
+    // eigenproblem assembly, so a handler answering NULL (PeriodicOrbitHandler, which manages
+    // GetDofPtr() itself) keeps eigensolving refused while it is installed.
+    virtual AugmentedDofDistributionHelper *dof_distribution_helper() { return NULL; }
+  };
+
+  // The dof-bookkeeping half of a bifurcation-tracking handler, shared by all of them. A handler
+  // appends its extra unknowns (eigenvector components, the parameter, Omega/Sigma) to the
+  // problem's dof vector; how that has to happen depends on whether the problem is DISTRIBUTED:
+  //
+  //  - serial / plain mpirun (replicated): every rank holds all base dofs, so every rank pushes
+  //    the parameter and all Ndof eigenvector pointers, and the augmented distribution is built
+  //    non-distributed IN PLACE -- exactly the historical behavior (see the long comment in
+  //    MyFoldHandler's constructor about why non-distributed is essential there).
+  //
+  //  - distributed (--distribute): modeled on upstream oomph-lib's distributed PitchForkHandler
+  //    (assembly_handler.cc). Each rank pushes only its OWN rows of each eigenvector block, the
+  //    scalars live on rank 0 alone, and the naive augmented numbering (base | blocks offset by
+  //    k*Ndof) is translated through a per-rank interleaved table so that each rank's augmented
+  //    rows are contiguous: [rank0: base | scalars/eigen rows ... | rank1: base | eigen rows ...].
+  //    The problem's dof distribution is then POINTER-swapped to a new augmented distribution
+  //    rather than rebuilt in place: the dof halo scheme (used by Problem::global_dof_pt and the
+  //    handlers' halo vectors) keeps a raw pointer to the distribution object it was built
+  //    against, so the base object must stay alive and untouched.
+  class AugmentedDofDistributionHelper
+  {
+  public:
+    // One group of the handler's naive augmented dof layout, in naive order: either a single
+    // scalar unknown (the parameter, Omega, Sigma) or a full base-sized eigenvector block.
+    class Block
+    {
+    public:
+      double *scalar_pt = NULL;
+      oomph::DoubleVectorWithHaloEntries *vec = NULL;
+      static Block scalar(double *s)
+      {
+        Block b;
+        b.scalar_pt = s;
+        return b;
+      }
+      static Block vector(oomph::DoubleVectorWithHaloEntries *v)
+      {
+        Block b;
+        b.vec = v;
+        return b;
+      }
+    };
+
+    // Must be called FIRST in every handler constructor, before any dof is pushed and while the
+    // DEFAULT assembly handler is still installed: snapshots the base distribution and (when
+    // distributed) rebuilds the problem's dof halo scheme against the base equations.
+    void initialise(Problem *problem);
+
+    // Halo-skipping count of how many elements contribute to each base equation (summed across
+    // ranks when distributed) plus the GLOBAL number of non-halo elements. 'count' must already be
+    // built via build_base_vector(). Non-distributed this reproduces the historical loops exactly.
+    void setup_count_and_nelement(oomph::DoubleVectorWithHaloEntries &count, unsigned &nelement) const;
+
+    // Builds 'v' on the base dof distribution (all Ndof rows when replicated, the local rows when
+    // distributed) and attaches the problem's halo scheme when distributed.
+    void build_base_vector(oomph::DoubleVectorWithHaloEntries &v) const;
+
+    // Pushes the dof pointers of the given naive layout (owned rows of vector blocks; scalars on
+    // rank 0 only when distributed), builds the naive->distributed equation translation table and
+    // installs the augmented dof distribution (in place when replicated, pointer swap when
+    // distributed). Also drops the sparse-assembly allocation cache, as every layout change must.
+    void build_augmented_dofs(const std::vector<Block> &naive_layout);
+
+    // Naive augmented equation number (the historical k*Ndof+m scheme) -> actual augmented
+    // equation number. Identity unless distributed.
+    inline unsigned long global_eqn(unsigned long naive) const
+    {
+      return Global_eqn_number.empty() ? naive : Global_eqn_number[naive];
+    }
+
+    // Broadcast the values of the rank-0-owned scalar unknowns to all ranks (no-op unless
+    // distributed); the handlers call this from their synchronise() override after each Newton
+    // update, since only rank 0's Dof_pt holds these entries.
+    void synchronise_scalars(std::initializer_list<double *> scalars) const;
+
+    // Destructor path: resize the dof vector back to the base length and restore the base
+    // distribution (in-place rebuild when replicated, pointer swap-back when distributed).
+    void restore_base_distribution();
+
+    // Reversible version of the above, for the eigenproblem assembly: present the BASE distribution
+    // to the problem while the handler stays installed, then put the augmented one back. Unlike
+    // restore_base_distribution() these do NOT touch Dof_pt -- the eigen assembly reads element and
+    // node data rather than the dof vector, and leaving it alone keeps every handler dof pointer
+    // (and hence the tracked state) valid across the eigensolve.
+    void install_base_distribution();
+    void restore_augmented_distribution();
+
+    // Global reductions over per-rank partial results (identity unless distributed), used by the
+    // eigenvector rescaling below.
+    double allreduce_max(double local) const;
+    double allreduce_sum(double local) const;
+
+    bool distributed() const { return Distributed; }
+    unsigned base_nrow() const;
+    unsigned base_nrow_local() const;
+    unsigned base_first_row() const;
+    oomph::LinearAlgebraDistribution *base_dist_pt();
+
+  private:
+    Problem *Problem_pt = NULL;
+    bool Distributed = false;
+    // Replicated mode: a value snapshot to rebuild in place from. Distributed mode: the problem's
+    // original distribution OBJECT (not owned), kept alive across the pointer swap.
+    oomph::LinearAlgebraDistribution Base_distribution_copy;
+    oomph::LinearAlgebraDistribution *Base_distribution_pt = NULL;
+    oomph::LinearAlgebraDistribution *Augmented_distribution_pt = NULL; // owned, distributed mode only
+    unsigned long Augmented_nrow = 0;                                   // total augmented rows, to rebuild the replicated distribution
+    std::vector<unsigned long> Global_eqn_number;                       // empty unless distributed
+  };
 
   // Reimplementation of the Hopf-Handler with some changes
   // Assembly handler that augments the original residuals R(u,p) (p being the bifurcation
@@ -50,7 +254,7 @@ namespace pyoomph
   //   C . Phi - 1                   = 0                     (normalization, prevents Phi=Psi=0)
   //   C . Psi                       = 0
   // where C is a fixed vector picked so the normalization equations are non-degenerate.
-  class MyHopfHandler : public oomph::AssemblyHandler
+  class MyHopfHandler : public oomph::AssemblyHandler, public AugmentedSparsityProvider
   {
   protected:
     unsigned Solve_which_system;   // Selects which sub-block of the augmented system is currently assembled (full, standard, or complex block; see solve_*_system())
@@ -58,11 +262,22 @@ namespace pyoomph
     double *Parameter_pt;          // The control parameter being varied to locate/track the Hopf point
     unsigned Ndof;                 // Number of dofs of the original (non-augmented) problem
     double Omega;                  // Unknown angular frequency of the oscillation at the bifurcation
-    oomph::Vector<double> Phi;     // Real part of the critical (null) eigenvector
-    oomph::Vector<double> Psi;     // Imaginary part of the critical (null) eigenvector
-    oomph::Vector<double> C;       // Fixed normalization vector enforcing non-triviality of (Phi,Psi)
-    oomph::Vector<int> Count;      // Number of elements contributing to each global equation, used to distribute/normalize shared equations
+    // Phi/Psi are UNKNOWNS of the augmented system (their rows are distributed and carry halo
+    // entries when --distribute); C is a read-only constant set from an everywhere-identical
+    // guess, so it stays fully replicated -- same reasoning as MyFoldHandler's Phi.
+    oomph::DoubleVectorWithHaloEntries Phi;   // Real part of the critical (null) eigenvector
+    oomph::DoubleVectorWithHaloEntries Psi;   // Imaginary part of the critical (null) eigenvector
+    oomph::Vector<double> C;                  // Fixed normalization vector enforcing non-triviality of (Phi,Psi)
+    oomph::DoubleVectorWithHaloEntries Count; // Number of elements contributing to each global equation, used to distribute/normalize shared equations
+    unsigned Nelement;             // GLOBAL number of (non-halo) elements, for the normalization constant
     double eigenweight;            // Scaling weight applied to the eigenvector equations relative to the base residuals
+    // Right-hand side of the normalisation constraint C.Phi = Normalization_rhs*eigenweight; 1.0
+    // unless apply_maxabs_normalization() replaced it.
+    double Normalization_rhs = 1.0;
+    AugmentedDofDistributionHelper Dist_helper; // Dof bookkeeping shared by all trackers (see its comment)
+  public:
+    AugmentedDofDistributionHelper *dof_distribution_helper() override { return &Dist_helper; }
+  protected:
 
   public:
     bool call_param_change_handler;
@@ -78,23 +293,23 @@ namespace pyoomph
                   const double &omega, const oomph::DoubleVector &phi,
                   const oomph::DoubleVector &psi);
 
-    ~MyHopfHandler();
+    ~MyHopfHandler() override;
 
     void set_eigenweight(double ew);
     unsigned get_problem_ndof() { return Ndof; }
     // Number of dofs of the augmented element: original element dofs plus its contribution
     // to Phi, Psi and (for one designated element) Omega.
-    unsigned ndof(oomph::GeneralisedElement *const &elem_pt);
+    unsigned ndof(oomph::GeneralisedElement *const &elem_pt) override;
 
     // Maps a local dof index of the augmented element to its global equation number in the
     // augmented system, distinguishing between original-, Phi-, Psi- and Omega-dofs.
     unsigned long eqn_number(oomph::GeneralisedElement *const &elem_pt,
-                             const unsigned &ieqn_local);
+                             const unsigned &ieqn_local) override;
 
     // Assembles the augmented residual vector (original residuals plus the eigenvector and
     // normalization equations described in the class comment above) for one element.
     void get_residuals(oomph::GeneralisedElement *const &elem_pt,
-                       oomph::Vector<double> &residuals);
+                       oomph::Vector<double> &residuals) override;
 
     // Assembles the augmented Jacobian, i.e. the derivatives of all augmented residuals
     // (base + eigen-equations + normalization) with respect to all augmented dofs
@@ -102,35 +317,35 @@ namespace pyoomph
     // since J and M themselves depend on u.
     void get_jacobian(oomph::GeneralisedElement *const &elem_pt,
                       oomph::Vector<double> &residuals,
-                      oomph::DenseMatrix<double> &jacobian);
+                      oomph::DenseMatrix<double> &jacobian) override;
 
     // Derivative of the augmented residuals with respect to the bifurcation parameter,
     // needed for arclength continuation of the Hopf point.
     void get_dresiduals_dparameter(oomph::GeneralisedElement *const &elem_pt,
                                    double *const &parameter_pt,
-                                   oomph::Vector<double> &dres_dparam);
+                                   oomph::Vector<double> &dres_dparam) override;
 
     void get_djacobian_dparameter(oomph::GeneralisedElement *const &elem_pt,
                                   double *const &parameter_pt,
                                   oomph::Vector<double> &dres_dparam,
-                                  oomph::DenseMatrix<double> &djac_dparam);
+                                  oomph::DenseMatrix<double> &djac_dparam) override;
 
     void get_hessian_vector_products(oomph::GeneralisedElement *const &elem_pt,
                                      oomph::Vector<double> const &Y,
                                      oomph::DenseMatrix<double> const &C,
-                                     oomph::DenseMatrix<double> &product);
+                                     oomph::DenseMatrix<double> &product) override;
 
     // Compares the analytically assembled Jacobian entries against a finite-difference
     // approximation (step size eps) for the given element, printing mismatches; a debugging aid.
     void debug_analytical_filling(oomph::GeneralisedElement *elem_pt, double eps);
-    int bifurcation_type() const { return 3; }
+    int bifurcation_type() const override { return 3; }
 
-    double *bifurcation_parameter_pt() const
+    double *bifurcation_parameter_pt() const override
     {
       return Parameter_pt;
     }
 
-    void get_eigenfunction(oomph::Vector<oomph::DoubleVector> &eigenfunction);
+    void get_eigenfunction(oomph::Vector<oomph::DoubleVector> &eigenfunction) override;
 
     // Returns the complex eigenfunction Phi+i*Psi after rotating it in the complex plane
     // (multiplying by a unit-modulus phase) to a canonical, reproducible orientation, since
@@ -151,6 +366,30 @@ namespace pyoomph
     void solve_full_system();
 
     void realign_C_vector(); // Reset the C-vector (which enforces the non-triviality of the eigenvector)
+
+    // Opt-in rescaling of the normalisation constraint, requested from Python by
+    // activate_bifurcation_tracking(..., eigenvector_scaling="auto").
+    //
+    // By default the eigenvector guess is normalised to unit LENGTH and the constraint reads
+    // c.y = 1. On a large problem a unit-length vector has entries of order 1/sqrt(N): the
+    // eigenvector unknowns are then tiny, and so are the constraint row's Jacobian entries
+    // c_i/Count_i, while the residual it is compared against is O(1). This instead normalises the
+    // guess by its LARGEST entry, so the unknowns are O(1) whatever N is, and sets the constraint's
+    // right-hand side to c.c -- which the rescaled guess satisfies exactly, so the starting point is
+    // no worse than before. The located bifurcation is unchanged; only the eigenfunction's
+    // amplitude, which was always arbitrary, comes out differently.
+    void apply_maxabs_normalization();
+
+#ifdef OOMPH_HAS_MPI
+    // Refresh the halo copies of Phi/Psi and broadcast the rank-0-owned parameter and Omega after
+    // a Newton update (called from Problem::synchronise_all_dofs; no-op unless distributed).
+    void synchronise() override;
+    // Push this rank's freshly written base dofs out to the other ranks' halo copies.
+    void synchronise_base_dofs();
+#endif
+
+    // Describes the augmented block for the frozen sparsity machinery; see AugmentedBlockSpec.
+    bool get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const override;
   };
 
   //////////////////////////////////////////////////////////
@@ -163,9 +402,9 @@ namespace pyoomph
   class PitchForkResidualContributionList
   {
   public:
-    DynamicBulkElementCode *code;
+    DynamicJITCode *code;
     std::vector<int> residual_indices; // index 0 is base state, 1 is mass matrix residual
-    PitchForkResidualContributionList(DynamicBulkElementCode *_code, int _base, int _massmat) : code(_code) { residual_indices = {_base, _massmat}; }
+    PitchForkResidualContributionList(DynamicJITCode *_code, int _base, int _massmat) : code(_code) { residual_indices = {_base, _massmat}; }
     PitchForkResidualContributionList() {}
   };
 
@@ -181,21 +420,31 @@ namespace pyoomph
   // where Psi is a fixed symmetry (anti-symmetry) vector distinguishing the symmetric branch
   // from the bifurcating asymmetric one, and Sigma measures the amplitude of the broken-symmetry
   // component of u (Sigma=0 on the symmetric branch, at the pitchfork itself).
-  class MyPitchForkHandler : public oomph::AssemblyHandler
+  class MyPitchForkHandler : public oomph::AssemblyHandler, public AugmentedSparsityProvider
   {
   protected:
     Problem *Problem_pt;
     unsigned Ndof;                 // Number of dofs of the original (non-augmented) problem
     double Sigma;                  // Amplitude of the symmetry-breaking component of u (unknown, tracked as part of the augmented system)
-    oomph::Vector<double> Y;       // Null eigenvector of the Jacobian at the pitchfork point
-    oomph::Vector<double> Psi;     // Fixed vector defining the (anti-)symmetry constraint on u
-    oomph::Vector<double> C;       // Fixed normalization vector enforcing non-triviality of Y
-    oomph::Vector<int> Count;      // Number of elements contributing to each global equation
+    // Y is an UNKNOWN (distributed rows + halo entries under --distribute); Psi and C are
+    // read-only constants set from an everywhere-identical symmetry vector, so they stay fully
+    // replicated -- same reasoning as MyFoldHandler's Phi.
+    oomph::DoubleVectorWithHaloEntries Y;     // Null eigenvector of the Jacobian at the pitchfork point
+    oomph::Vector<double> Psi;                // Fixed vector defining the (anti-)symmetry constraint on u
+    oomph::Vector<double> C;                  // Fixed normalization vector enforcing non-triviality of Y
+    oomph::DoubleVectorWithHaloEntries Count; // Number of elements contributing to each global equation
     double *Parameter_pt;          // The control parameter being varied to locate/track the pitchfork
     double eigenweight, symmetryweight; // Scaling weights for the eigenvector- and symmetry-constraint equations, respectively
-    unsigned Nelement;
+    unsigned Nelement;             // GLOBAL number of (non-halo) elements, for the normalization constant
+    // Right-hand side of the normalisation constraint C.Y = Normalization_rhs*eigenweight; 1.0
+    // unless apply_maxabs_normalization() replaced it.
+    double Normalization_rhs = 1.0;
+    AugmentedDofDistributionHelper Dist_helper; // Dof bookkeeping shared by all trackers (see its comment)
+  public:
+    AugmentedDofDistributionHelper *dof_distribution_helper() override { return &Dist_helper; }
+  protected:
     // Per generated-code lookup of which residual-assembly variant is the base state vs. mass matrix
-    std::map<const pyoomph::DynamicBulkElementCode *, PitchForkResidualContributionList> residual_contribution_indices;
+    std::map<const pyoomph::DynamicJITCode *, PitchForkResidualContributionList> residual_contribution_indices;
     // Builds residual_contribution_indices by inspecting all generated element codes once up front.
     void setup_U_times_Psi_residual_indices();
     // Computes the element-local contribution to the integral of U.Psi (used to fill in the
@@ -212,25 +461,40 @@ namespace pyoomph
     // Constructs the handler; symmetry_vector defines the fixed Psi used in the symmetry
     // constraint. The eigenvector Y and Sigma are initialized internally.
     MyPitchForkHandler(Problem *const &problem_pt, double *const &parameter_pt, const oomph::DoubleVector &symmetry_vector);
-    ~MyPitchForkHandler();
+    ~MyPitchForkHandler() override;
     void set_eigenweight(double ew);
     unsigned get_problem_ndof() { return Ndof; }
     // Number of dofs of the augmented element: original element dofs plus its contribution to Y and Sigma.
-    unsigned ndof(oomph::GeneralisedElement *const &elem_pt);
-    unsigned long eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local);
+    unsigned ndof(oomph::GeneralisedElement *const &elem_pt) override;
+    unsigned long eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local) override;
     // Assembles the augmented residual vector (original residuals plus the null-eigenvector,
     // normalization and symmetry-constraint equations) for one element.
-    void get_residuals(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals);
+    void get_residuals(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals) override;
     // Assembles the augmented Jacobian for all augmented dofs (u, Y, Sigma).
-    void get_jacobian(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian);
-    void get_dresiduals_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam);
-    void get_djacobian_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam, oomph::DenseMatrix<double> &djac_dparam);
-    void get_hessian_vector_products(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> const &Y, oomph::DenseMatrix<double> const &C, oomph::DenseMatrix<double> &product);
-    int bifurcation_type() const { return 2; }
-    double *bifurcation_parameter_pt() const { return Parameter_pt; }
-    void get_eigenfunction(oomph::Vector<oomph::DoubleVector> &eigenfunction);
+    void get_jacobian(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian) override;
+    void get_dresiduals_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam) override;
+    void get_djacobian_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam, oomph::DenseMatrix<double> &djac_dparam) override;
+    void get_hessian_vector_products(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> const &Y, oomph::DenseMatrix<double> const &C, oomph::DenseMatrix<double> &product) override;
+    int bifurcation_type() const override { return 2; }
+    double *bifurcation_parameter_pt() const override { return Parameter_pt; }
+    void get_eigenfunction(oomph::Vector<oomph::DoubleVector> &eigenfunction) override;
     // Switches back to assembling the full augmented system (see MyHopfHandler::solve_full_system for the analogous pattern).
     void solve_full_system();
+
+    // See the shared comment on MyHopfHandler::apply_maxabs_normalization. Rescales Y and C only;
+    // the symmetry vector Psi, which defines a different constraint, is left alone.
+    void apply_maxabs_normalization();
+
+#ifdef OOMPH_HAS_MPI
+    // Refresh the halo copies of Y and broadcast the rank-0-owned parameter and Sigma after a
+    // Newton update (called from Problem::synchronise_all_dofs; no-op unless distributed).
+    void synchronise() override;
+    // Push this rank's freshly written base dofs out to the other ranks' halo copies.
+    void synchronise_base_dofs();
+#endif
+
+    // Describes the augmented block for the frozen sparsity machinery; see AugmentedBlockSpec.
+    bool get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const override;
   };
 
   //////////////////////////////////////////////////////////
@@ -245,7 +509,7 @@ namespace pyoomph
   // where Phi is a fixed vector chosen so the normalization is non-degenerate. Unlike Hopf/
   // pitchfork tracking, no oscillation frequency or symmetry constraint is needed here since
   // a fold has a single real critical eigenvalue crossing zero.
-  class MyFoldHandler : public oomph::AssemblyHandler
+  class MyFoldHandler : public oomph::AssemblyHandler, public AugmentedSparsityProvider
   {
     // Selects which part of the augmented system get_residuals()/get_jacobian() currently
     // assemble: the full augmented system, only the plain Jacobian block (for a Newton step
@@ -260,11 +524,21 @@ namespace pyoomph
     unsigned Solve_which_system;   // Current mode, one of the enum values above
     Problem *Problem_pt;
     unsigned Ndof;                 // Number of dofs of the original (non-augmented) problem
-    oomph::Vector<double> Phi;     // Fixed normalization vector enforcing non-triviality of Y
-    oomph::Vector<double> Y;       // Null eigenvector of the Jacobian at the fold point
-    oomph::Vector<int> Count;      // Number of elements contributing to each global equation
+    // Phi is a read-only constant after construction and set from a guess that is identical on
+    // every rank, so it stays fully replicated (Ndof doubles per rank) even when distributed --
+    // that removes any synchronisation obligation for it. Y and Count are indexed by global
+    // equation number inside the element loops, so when distributed they carry halo entries.
+    oomph::Vector<double> Phi;              // Fixed normalization vector enforcing non-triviality of Y
+    oomph::DoubleVectorWithHaloEntries Y;     // Null eigenvector of the Jacobian at the fold point (unknown)
+    oomph::DoubleVectorWithHaloEntries Count; // Number of elements contributing to each global equation
+    unsigned Nelement;             // GLOBAL number of (non-halo) elements, for the normalization constant
     double *Parameter_pt;          // The control parameter being varied to locate/track the fold
     double eigenweight;            // Scaling weight applied to the eigenvector equations relative to the base residuals
+    // Right-hand side of the normalisation constraint Phi.Y = Normalization_rhs*eigenweight. 1.0,
+    // i.e. the historical behaviour, unless apply_maxabs_normalization() replaced it; see there.
+    double Normalization_rhs = 1.0;
+    AugmentedDofDistributionHelper Dist_helper; // Dof bookkeeping shared by all trackers (see its comment)
+    AugmentedDofDistributionHelper *dof_distribution_helper() override { return &Dist_helper; }
 
   public:
     unsigned get_problem_ndof() { return Ndof; }
@@ -278,32 +552,32 @@ namespace pyoomph
     MyFoldHandler(Problem *const &problem_pt, double *const &parameter_pt, const oomph::DoubleVector &eigenvector);
     // Constructs the handler with an explicit eigenvector guess and normalization vector Phi.
     MyFoldHandler(Problem *const &problem_pt, double *const &parameter_pt, const oomph::DoubleVector &eigenvector, const oomph::DoubleVector &normalisation);
-    ~MyFoldHandler();
+    ~MyFoldHandler() override;
 
     void set_eigenweight(double ew);
 
     // Number of dofs of the augmented element: original element dofs plus its contribution to Y.
-    unsigned ndof(oomph::GeneralisedElement *const &elem_pt);
+    unsigned ndof(oomph::GeneralisedElement *const &elem_pt) override;
 
-    unsigned long eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local);
+    unsigned long eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local) override;
 
     // Assembles the augmented residual vector (original residuals plus the null-eigenvector
     // and normalization equations) for one element, depending on Solve_which_system.
-    void get_residuals(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals);
+    void get_residuals(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals) override;
 
     // Assembles the augmented Jacobian for the dofs selected by Solve_which_system.
-    void get_jacobian(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian);
+    void get_jacobian(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian) override;
 
-    void get_dresiduals_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam);
-    void get_djacobian_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam, oomph::DenseMatrix<double> &djac_dparam);
+    void get_dresiduals_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam) override;
+    void get_djacobian_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam, oomph::DenseMatrix<double> &djac_dparam) override;
 
-    void get_hessian_vector_products(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> const &Y, oomph::DenseMatrix<double> const &C, oomph::DenseMatrix<double> &product);
+    void get_hessian_vector_products(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> const &Y, oomph::DenseMatrix<double> const &C, oomph::DenseMatrix<double> &product) override;
 
-    int bifurcation_type() const { return 1; }
+    int bifurcation_type() const override { return 1; }
 
-    double *bifurcation_parameter_pt() const { return Parameter_pt; }
+    double *bifurcation_parameter_pt() const override { return Parameter_pt; }
 
-    void get_eigenfunction(oomph::Vector<oomph::DoubleVector> &eigenfunction);
+    void get_eigenfunction(oomph::Vector<oomph::DoubleVector> &eigenfunction) override;
 
     // Sets Solve_which_system = Block_augmented_J (eigenvector block + parameter equation only).
     void solve_augmented_block_system();
@@ -312,6 +586,22 @@ namespace pyoomph
     // Sets Solve_which_system = Full_augmented (assemble the complete augmented system).
     void solve_full_system();
     void realign_C_vector(); // Reset the C-vector (which enforces the non-triviality of the eigenvector)
+
+    // Rescale the eigenvector guess by its largest entry and set the constraint's right-hand side
+    // to Phi.Phi, so that the guess satisfies the constraint exactly while its entries stay O(1).
+    // See the shared comment on MyHopfHandler::apply_maxabs_normalization.
+    void apply_maxabs_normalization();
+
+#ifdef OOMPH_HAS_MPI
+    // Refresh the halo copies of Y and broadcast the rank-0-owned parameter after a Newton update
+    // (called from Problem::synchronise_all_dofs; no-op unless distributed).
+    void synchronise() override;
+    // Push this rank's freshly written base dofs out to the other ranks' halo copies.
+    void synchronise_base_dofs();
+#endif
+
+    // Describes the augmented block for the frozen sparsity machinery; see AugmentedBlockSpec.
+    bool get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const override;
   };
 
   //////////////////////////////
@@ -320,19 +610,22 @@ namespace pyoomph
   class AzimuthalSymmetryBreakingResidualContributionList
   {
   public:
-    DynamicBulkElementCode *code;
+    DynamicJITCode *code;
     std::vector<int> residual_indices; // index 0 is base state(axisymm), 1 is real azimuthal and 2 is imag azimuthal
-    AzimuthalSymmetryBreakingResidualContributionList(DynamicBulkElementCode *_code, int _base, int _real, int _imag) : code(_code) { residual_indices = {_base, _real, _imag}; }
+    AzimuthalSymmetryBreakingResidualContributionList(DynamicJITCode *_code, int _base, int _real, int _imag) : code(_code) { residual_indices = {_base, _real, _imag}; }
     AzimuthalSymmetryBreakingResidualContributionList() {}
   };
 
   // Actual assembly handler class for axial symmetry breaking systems
-  class AzimuthalSymmetryBreakingHandler : public oomph::AssemblyHandler
+  class AzimuthalSymmetryBreakingHandler : public oomph::AssemblyHandler, public AugmentedSparsityProvider
   {
     Problem *Problem_pt;                    // Pointer to the problem class
     unsigned Ndof;                          // Degrees of freedom of the original problem (non-augmented)
-    oomph::Vector<double> real_eigenvector; // Storage for the real and imaginary eigenvector (which will be a part of the unknowns)
-    oomph::Vector<double> imag_eigenvector;
+    // The eigenvector parts are UNKNOWNS of the augmented system (distributed rows + halo entries
+    // under --distribute); the normalization vector is a read-only constant set from an
+    // everywhere-identical guess and stays fully replicated -- same reasoning as MyFoldHandler's Phi.
+    oomph::DoubleVectorWithHaloEntries real_eigenvector; // Storage for the real and imaginary eigenvector (which will be a part of the unknowns)
+    oomph::DoubleVectorWithHaloEntries imag_eigenvector;
 
     // A vector used to normalize the eigenvector (i.e. to prevent that real_eigenvector=0,
     // which trivially solves the eigenproblem with eigenvalue 0)
@@ -342,12 +635,15 @@ namespace pyoomph
     // The contributions to the normalization constraints will be hence added multiple times for these degrees
     // of freedom by different elements. Therefore, we have to normalize by the number of elements contributing
     // to each equation
-    oomph::Vector<int> Count;
+    oomph::DoubleVectorWithHaloEntries Count;
+    unsigned Nelement;    // GLOBAL number of (non-halo) elements, for the normalization constant
     double Omega;         // Imaginary part of the eigenvalue to be determined
     double *Parameter_pt; // Pointer to the critical parameter to find by this bifurcation analysis
+    AugmentedDofDistributionHelper Dist_helper; // Dof bookkeeping shared by all trackers (see its comment)
+    AugmentedDofDistributionHelper *dof_distribution_helper() override { return &Dist_helper; }
 
     // Each generated C code has three residual forms: These are stored in this mapping
-    std::map<const pyoomph::DynamicBulkElementCode *, AzimuthalSymmetryBreakingResidualContributionList>
+    std::map<const pyoomph::DynamicJITCode *, AzimuthalSymmetryBreakingResidualContributionList>
         residual_contribution_indices;
     // We setup this mapping in beforehand
 
@@ -366,7 +662,10 @@ namespace pyoomph
                                                // indices are the base equations, not the indices of the eigendegrees!).
                                                // For e.g. m=1, equation of velocity_x at axis is part of base_dofs_forced_zero,
                                                // but not of eigen_dofs_forced_zero
-    double eigenweight=1.0;                                               
+    double eigenweight=1.0;
+    // Right-hand side of the normalisation constraint normalization_vector.Re(v) =
+    // Normalization_rhs*eigenweight; 1.0 unless apply_maxabs_normalization() replaced it.
+    double Normalization_rhs = 1.0;
   public:
     unsigned get_problem_ndof() { return Ndof; } // Returning the degrees of freedom of the original system (non-augmented)
     void set_eigenweight(double ew);
@@ -389,7 +688,7 @@ namespace pyoomph
     // Constructors. We must pass a problem, a parameter to optimize (i.e. to change in order to get Re(eigenvalue)=0) and a guess of the eigenvector and the imaginary part of the eigenvector
     AzimuthalSymmetryBreakingHandler(Problem *const &problem_pt, double *const &parameter_pt, const oomph::DoubleVector &real_eigen, const oomph::DoubleVector &imag_eigen, const double &Omega_guess,bool has_imag);
     // Destructor (used for cleaning up memory)
-    ~AzimuthalSymmetryBreakingHandler();
+    ~AzimuthalSymmetryBreakingHandler() override;
 
     // Pyoomph has different residual contributions. The original residual along with its
     // jacobian and the real and imag part of the azimuthal Jacobian and mass matrix.
@@ -400,36 +699,50 @@ namespace pyoomph
     // This will return the degrees of freedom of a single element of the augmented system
     // We will have to take the degrees of freedom of the original element and add a few more
     // for the eigenvector values (Re and Im)
-    unsigned ndof(oomph::GeneralisedElement *const &elem_pt);
+    unsigned ndof(oomph::GeneralisedElement *const &elem_pt) override;
 
     // This will cast the local equation number of an element to a global equation number.
     // Again, we have to consider the additional equations for the unknown eigenvector (Re and Im)
-    unsigned long eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local);
+    unsigned long eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local) override;
 
     // This will calculate the residual contribution of the original weak form by calling the function of the element
     // However, we will also have to add the contributions to the augmented residual form, i.e. the ones determining the eigenvector and critical parameter
-    void get_residuals(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals);
+    void get_residuals(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals) override;
 
     // Same for the Jacobian: We must add the contributions for the augmented system
-    void get_jacobian(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian);
+    void get_jacobian(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian) override;
 
     // Derivative of the augmented residuals with respect to the parameter
-    void get_dresiduals_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam);
+    void get_dresiduals_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam) override;
     // Derivative of the augmented Jacobian with respect to the parameter
-    void get_djacobian_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam, oomph::DenseMatrix<double> &djac_dparam);
+    void get_djacobian_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam, oomph::DenseMatrix<double> &djac_dparam) override;
 
-    int bifurcation_type() const { return 3; } // Internally used in oomph-lib. I assume it is best to return 3 (Hopf), since we have real and imag parts
+    int bifurcation_type() const override { return 3; } // Internally used in oomph-lib. I assume it is best to return 3 (Hopf), since we have real and imag parts
 
     // Function to access the bifurcation parameter
-    double *bifurcation_parameter_pt() const { return Parameter_pt; }
+    double *bifurcation_parameter_pt() const override { return Parameter_pt; }
 
     // Get the eigenfunction
-    void get_eigenfunction(oomph::Vector<oomph::DoubleVector> &eigenfunction);
+    void get_eigenfunction(oomph::Vector<oomph::DoubleVector> &eigenfunction) override;
     const double &omega() const { return Omega; } // and the value of the imaginary part of the eigenvalue
 
     void solve_full_system();
 
+    // See the shared comment on MyHopfHandler::apply_maxabs_normalization.
+    void apply_maxabs_normalization();
+
+#ifdef OOMPH_HAS_MPI
+    // Refresh the halo copies of the eigenvector parts and broadcast the rank-0-owned parameter
+    // and Omega after a Newton update (called from Problem::synchronise_all_dofs; no-op unless distributed).
+    void synchronise() override;
+    // Push this rank's freshly written base dofs out to the other ranks' halo copies.
+    void synchronise_base_dofs();
+#endif
+
     //  void realign_C_vector(); //Reset the C-vector (which enforces the non-triviality of the eigenvector)
+
+    // Describes the augmented block for the frozen sparsity machinery; see AugmentedBlockSpec.
+    bool get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const override;
   };
 
 
@@ -454,18 +767,27 @@ namespace pyoomph
   // constraint fixes the phase/translation invariance of the orbit along time (T_constraint_mode
   // selects either a Poincare-plane constraint through (x0,n0,d_plane) or a period constraint),
   // and T itself is an unknown solved for as part of the augmented system.
-  class PeriodicOrbitHandler : public oomph::AssemblyHandler
+  class PeriodicOrbitHandler : public oomph::AssemblyHandler, public AugmentedSparsityProvider
   {
   protected:
     Problem *Problem_pt;                    // Pointer to the problem class
+    // Dof bookkeeping, shared with the bifurcation-tracking handlers: the naive augmented layout
+    // [u_0 | u_1 | ... | u_{nT-1} | T] is exactly the historical Ndof*tindex+eqn numbering, so the
+    // helper's translation table serves it unchanged. See AugmentedDofDistributionHelper.
+    AugmentedDofDistributionHelper Dist_helper;
     unsigned Ndof;                          // Degrees of freedom of the original problem (non-augmented)
-    std::vector<std::vector<double>> Tadd;  // Additional time steps
-    std::vector<double> x0;                 // Start point for the periodic orbit
-    std::vector<double> n0;                 // Start normal for the periodic orbit
+    // The per-time-point unknowns and the orbit's reference data are all indexed by BASE equation
+    // number inside the element loops, i.e. by numbers this rank owns or halos. DoubleVectorWithHalo-
+    // Entries::global_value() serves exactly that, and degrades to plain [] when not distributed, so
+    // one code path covers serial, replicated mpirun and --distribute.
+    std::vector<oomph::DoubleVectorWithHaloEntries> Tadd;  // Additional time steps
+    oomph::DoubleVectorWithHaloEntries x0;  // Start point for the periodic orbit
+    oomph::DoubleVectorWithHaloEntries n0;  // Start normal for the periodic orbit
     double d_plane;                         // Plane offset for the Poincare section
     double T;                               // Period of the periodic orbit
-    unsigned T_global_eqn, n_element;
-    oomph::Vector<int> Count;
+    unsigned T_global_eqn;                  // Equation number of the period T in the naive [u_0|...|T] ordering
+    unsigned n_element;                     // Non-halo element count, summed over all ranks; the constant of the plane constraint is divided by it, since every element adds into the same shared T row
+    oomph::DoubleVectorWithHaloEntries Count;
     PeriodicBSplineBasis *basis = NULL;     // If nonzero, we use a B-spline basis, otherwise BDF2, central FD between the nodes or
     bool floquet_mode;                      // if this is true (and basis==NULL), we use the Floquet mode, where we explictly have dofs for the periodic time point at s=1
     std::vector<double> s_knots;
@@ -473,7 +795,7 @@ namespace pyoomph
     // When we do not have a spline basis, we do finite differences. Here, we store the coefficients and indices
     unsigned FD_ds_order;
     unsigned T_constraint_mode;             // 0: Plane constraint, 1: Period constraint
-    std::vector<std::vector<double>> du0ds; // Derivatives of the start orbit for the phase constraint
+    std::vector<oomph::DoubleVectorWithHaloEntries> du0ds; // Derivatives of the start orbit for the phase constraint
 
     oomph::Mesh *time_mesh;
     oomph::Integral *collocation_gl;
@@ -497,6 +819,29 @@ namespace pyoomph
     void update_phase_constraint_information();
     unsigned get_problem_ndof() { return Ndof; } // Returning the degrees of freedom of the original system (non-augmented)
     bool is_floquet_mode() { return floquet_mode; }
+    AugmentedDofDistributionHelper *dof_distribution_helper() override { return &Dist_helper; }
+#ifdef OOMPH_HAS_MPI
+    // Refresh the halo entries of the time-point unknowns and broadcast the rank-0-owned period
+    // after each Newton update. oomph calls this at the end of Problem::synchronise_all_dofs().
+    // Guarded because the base-class synchronise() it overrides only exists in an MPI build
+    // (oomph::AssemblyHandler, assembly_handler.h) - without the guard 'override' does not compile.
+    void synchronise() override;
+#endif
+    // Push this rank's freshly written base dofs out to the other ranks' halo copies. Unlike the
+    // other handlers' version this one stays unguarded: backup_dofs() calls it unconditionally,
+    // and it compiles to an empty body without MPI.
+    void synchronise_base_dofs();
+    // Time-block (knot) indices of each element of the time discretization, in order. Element ie
+    // writes the equations of its first entries but reads all of them, i.e. it fills the orbit
+    // Jacobian rows of indices [0..n-2] of the returned list from the columns of all n indices.
+    // This is the block bidiagonal structure the Floquet condensation slices along; returns an
+    // empty list in the modes that have no such structure (central/BDF2/B-spline, which are not
+    // floquet_mode anyway and for which no Floquet multipliers are defined here).
+    std::vector<std::vector<unsigned>> get_time_element_node_indices();
+    // The augmented equation number of each naive [u_0 | u_1 | ... | u_{nT-1} | T] row, i.e. the
+    // permutation that puts a gathered global orbit Jacobian back into time-major order. Empty when
+    // the problem is not distributed, where the two orders are already the same.
+    std::vector<unsigned long> get_naive_equation_order();
     std::vector<std::tuple<double, double>> get_s_integration_samples(); // Returns tuples of (s,w), so that integral_0^1(f(U(s))*ds) ~= sum( f(U(s_i))*w_i )
     // Constructs the handler for an orbit of the given initial 'period' guess, discretized either
     // via a B-spline basis of order bspline_order (if >=0), or via nodal/Floquet finite differences
@@ -505,16 +850,19 @@ namespace pyoomph
     // T_constraint selects the phase-fixing constraint (0: plane, 1: period; see T_constraint_mode).
     PeriodicOrbitHandler(Problem *const &problem_pt, const double &period, const std::vector<std::vector<double>> &tadd, int bspline_order, int gl_order, std::vector<double> knots, unsigned T_constraint);
     // Destructor (used for cleaning up memory)
-    ~PeriodicOrbitHandler();
+    ~PeriodicOrbitHandler() override;
     unsigned n_tsteps() const { return 1 + Tadd.size(); }
-    unsigned long eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local);
-    unsigned ndof(oomph::GeneralisedElement *const &elem_pt);
+
+    // Describes the augmented block for the frozen sparsity machinery; see AugmentedBlockSpec.
+    bool get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const override;
+    unsigned long eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local) override;
+    unsigned ndof(oomph::GeneralisedElement *const &elem_pt) override;
     // Dispatches to the residual assembly routine matching the active discretization mode.
-    void get_residuals(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals);
+    void get_residuals(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals) override;
     // Dispatches to the Jacobian assembly routine matching the active discretization mode.
-    void get_jacobian(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian);
-    void get_dresiduals_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam);
-    void get_djacobian_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam, oomph::DenseMatrix<double> &djac_dparam);
+    void get_jacobian(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian) override;
+    void get_dresiduals_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam) override;
+    void get_djacobian_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam, oomph::DenseMatrix<double> &djac_dparam) override;
     // Saves/restores the augmented dof vector, e.g. around trial evaluations that must not
     // permanently perturb the current orbit (used together with set_dofs_to_interpolated_values()).
     void backup_dofs();
@@ -533,9 +881,9 @@ namespace pyoomph
   class CustomMultiAssembleHandlerContributionList
   {
   public:
-    DynamicBulkElementCode *code;
+    DynamicJITCode *code;
     std::vector<int> residual_indices; // index 0 is base state, 1 is mass matrix residual
-    CustomMultiAssembleHandlerContributionList(DynamicBulkElementCode *_code, const std::vector<int> &resinds) : code(_code) { residual_indices = resinds; }
+    CustomMultiAssembleHandlerContributionList(DynamicJITCode *_code, const std::vector<int> &resinds) : code(_code) { residual_indices = resinds; }
     CustomMultiAssembleHandlerContributionList() {}
   };
 
@@ -582,7 +930,7 @@ namespace pyoomph
     std::vector<CustomMultiAssembleReturnIndexInfo> contribution_return_indices; // Output-slot bookkeeping, one entry per unique_contributions
     unsigned nmatrix, nvector;                                           // Total number of matrix-valued / vector-valued outputs to allocate
     int resolve_assembled_residual(oomph::GeneralisedElement *const &elem_pt, int residual_mode);
-    std::map<const pyoomph::DynamicBulkElementCode *, CustomMultiAssembleHandlerContributionList> residual_contribution_indices;
+    std::map<const pyoomph::DynamicJITCode *, CustomMultiAssembleHandlerContributionList> residual_contribution_indices;
     // Builds residual_contribution_indices by inspecting all generated element codes once up front.
     void setup_residual_contribution_map();
 
@@ -592,14 +940,14 @@ namespace pyoomph
     // filled with, for each entry of 'what', the resolved slot index into the output arrays
     // (or a derived negative encoding for Hessian-related requests; see the .cpp for details).
     CustomMultiAssembleHandler(Problem *const &problem_pt, std::vector<std::string> &_what, std::vector<std::string> &_contributions, std::vector<std::string> &_params, std::vector<std::vector<double>> &_hessian_vectors, std::vector<unsigned> &_hessian_vector_indices, std::vector<int> &return_indices);
-    ~CustomMultiAssembleHandler() {}
-    unsigned ndof(oomph::GeneralisedElement *const &elem_pt);
-    unsigned long eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local);
-    void get_residuals(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals);
-    void get_jacobian(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian);
+    ~CustomMultiAssembleHandler() override {}
+    unsigned ndof(oomph::GeneralisedElement *const &elem_pt) override;
+    unsigned long eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local) override;
+    void get_residuals(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals) override;
+    void get_jacobian(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian) override;
     // Assembles all requested vector- and matrix-valued quantities for one element in a single
     // pass, placing each into 'vec'/'matrix' at the slot index determined by the constructor.
-    void get_all_vectors_and_matrices(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<oomph::Vector<double>> &vec, oomph::Vector<oomph::DenseMatrix<double>> &matrix);
+    void get_all_vectors_and_matrices(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<oomph::Vector<double>> &vec, oomph::Vector<oomph::DenseMatrix<double>> &matrix) override;
     unsigned n_matrix() const { return nmatrix; }
     unsigned n_vector() const { return nvector; }
   };

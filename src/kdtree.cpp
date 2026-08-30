@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -134,6 +134,7 @@ namespace pyoomph
 		virtual void addIndices(unsigned start, unsigned end) = 0;
 		virtual int point_present(double x, double y, double z, double epsilon = 1e-8) = 0;
 		virtual int nearest_point(double x, double y, double z, double *distret) = 0;
+		virtual unsigned k_nearest(unsigned k, double x, double y, double z, std::vector<uint32_t> &indices) = 0;
 		virtual std::vector<std::pair<uint32_t, double>> radius_search(double radius, double x, double y, double z) = 0;
 	};
 
@@ -154,7 +155,8 @@ namespace pyoomph
 		{
 			if (cloud.pts.size())
 			{
-				addIndices(0, cloud.pts.size() - 1);
+				// Qualified: called from the constructor, where an override could not run.
+				DynamicImplementedKDTreeNDIM::addIndices(0, cloud.pts.size() - 1);
 			}
 		}
 		void addIndex(unsigned index) override { tree.addPoints(index, index); }
@@ -186,18 +188,25 @@ namespace pyoomph
 			if (cloud.pts.empty())
 				return -1;
 			const size_t num_results = 1;
-			size_t ret_index;
-			num_t out_dist_sqr;
+			// Initialised, and the search result checked: findNeighbors leaves both untouched when it
+			// returns nothing, which would otherwise be returned as a garbage node index.
+			size_t ret_index = 0;
+			num_t out_dist_sqr = 0.0;
 			nanoflann::KNNResultSet<num_t> resultSet(num_results);
 			resultSet.init(&ret_index, &out_dist_sqr);
 			num_t query_pt[3] = {x, y, z};
-			tree.findNeighbors(resultSet, query_pt, {10});
+			if (!tree.findNeighbors(resultSet, query_pt, {10}))
+				return -1;
 			if (distret)
 				*distret = sqrt(out_dist_sqr);
 			return ret_index;
 		}
 
 		// nanoflann's dynamic adaptor does not implement radius queries, so this always throws;
+		unsigned k_nearest(unsigned, double, double, double, std::vector<uint32_t> &) override
+		{
+			throw_runtime_error("Cannot perform a k_nearest search on a dynamic KDTree");
+		}
 		// use a static tree (built from a fixed coordinate array) for radius_search.
 		std::vector<std::pair<uint32_t, double>> radius_search(double, double, double, double) override
 		{
@@ -245,15 +254,41 @@ namespace pyoomph
 			if (cloud.pts.empty())
 				return -1;
 			const size_t num_results = 1;
-			size_t ret_index;
-			num_t out_dist_sqr;
+			// Initialised, and the search result checked: findNeighbors leaves both untouched when it
+			// returns nothing, which would otherwise be returned as a garbage node index.
+			size_t ret_index = 0;
+			num_t out_dist_sqr = 0.0;
 			nanoflann::KNNResultSet<num_t> resultSet(num_results);
 			resultSet.init(&ret_index, &out_dist_sqr);
 			num_t query_pt[3] = {x, y, z};
-			tree.findNeighbors(resultSet, query_pt, {10});
+			if (!tree.findNeighbors(resultSet, query_pt, {10}))
+				return -1;
 			if (distret)
 				*distret = sqrt(out_dist_sqr);
 			return ret_index;
+		}
+		// The k nearest points, nearest first. Used by MeshPointLocator to widen its candidate set
+		// gradually: a radius_search needs a radius chosen up front, and getting that wrong either
+		// misses the answer or returns most of the mesh (which is what MeshKDTree::find_element's
+		// mesh-wide max_search_radius did).
+		unsigned k_nearest(unsigned k, double x, double y, double z, std::vector<uint32_t> &indices) override
+		{
+			indices.clear();
+			if (cloud.pts.empty() || !k)
+				return 0;
+			if (k > cloud.pts.size())
+				k = cloud.pts.size();
+			std::vector<size_t> ret_index(k);
+			std::vector<num_t> out_dist_sqr(k);
+			nanoflann::KNNResultSet<num_t> resultSet(k);
+			resultSet.init(&ret_index[0], &out_dist_sqr[0]);
+			num_t query_pt[3] = {x, y, z};
+			tree.findNeighbors(resultSet, query_pt, {10});
+			const unsigned found = (unsigned)resultSet.size();
+			indices.reserve(found);
+			for (unsigned i = 0; i < found; i++)
+				indices.push_back((uint32_t)ret_index[i]);
+			return found;
 		}
 		std::vector<std::pair<uint32_t, double>> radius_search(double radius, double x, double y, double z) override
 		{
@@ -296,6 +331,15 @@ namespace pyoomph
 	void KDTree::reset(unsigned _dim)
 	{
 		delete tree;
+		first_deferred_point = -1;
+		// dim must follow the tree we build here, and static_tree the fact that it is a dynamic one.
+		// add_point() upgrades the tree to 2d/3d only while dim is still lower, so leaving a stale
+		// (higher) dim behind means every subsequent point silently lands in this 1d tree, where
+		// point_present() matches anything sharing its x coordinate: MeshTemplate::reset() resets to
+		// dimension 1, so a 2d template rebuilt afterwards (which is what remeshing by recreation does,
+		// see RemesherViaRecreation) collapsed every add_node_unique() of a vertical line onto one node.
+		dim = _dim;
+		static_tree = false;
 		if (_dim == 3)
 			tree = new DynamicImplementedKDTree3d();
 		else if (_dim == 2)
@@ -338,6 +382,7 @@ namespace pyoomph
 			//   tree->cloud=oldtree->cloud;
 			delete oldtree;
 			dim = 3;
+			first_deferred_point = -1; // the upgrade constructor re-indexes the entire cloud
 		}
 		else if (y && dim < 2)
 		{
@@ -347,6 +392,7 @@ namespace pyoomph
 			// tree->cloud=oldtree->cloud;
 			delete oldtree;
 			dim = 2;
+			first_deferred_point = -1; // the upgrade constructor re-indexes the entire cloud
 		}
 		unsigned index = tree->cloud.pts.size();
 		tree->cloud.pts.push_back({x, y, z});
@@ -354,6 +400,37 @@ namespace pyoomph
 		tree->addIndex(index);
 
 		return index;
+	}
+
+	// Append a point to the cloud without adding it to the index. Every query below calls
+	// index_deferred_points() first, so this is only ever a deferral, never an omission - it exists
+	// because nanoflann's dynamic adaptor rebuilds a sub-index on each addPoints() call, so adding
+	// n points one at a time costs far more than adding them as one range. Use it when many points
+	// are known to be coming and nothing will query the tree in between (see
+	// MeshTemplate::get_or_create_intermediate_node, which creates one node per element edge).
+	unsigned KDTree::add_point_deferred(double x, double y, double z)
+	{
+		if (static_tree)
+			throw_runtime_error("Cannot add a point to a static tree");
+		// A dimension upgrade has to happen here as well, and it indexes the whole cloud, so let
+		// add_point() handle that case rather than duplicating the rebuild.
+		if ((z && dim < 3) || (y && dim < 2))
+			return add_point(x, y, z);
+		unsigned index = tree->cloud.pts.size();
+		tree->cloud.pts.push_back({x, y, z});
+		if (first_deferred_point < 0)
+			first_deferred_point = (long)index;
+		return index;
+	}
+
+	void KDTree::index_deferred_points()
+	{
+		if (first_deferred_point < 0)
+			return;
+		const unsigned start = (unsigned)first_deferred_point;
+		first_deferred_point = -1;
+		if (tree->cloud.pts.size() > start)
+			tree->addIndices(start, tree->cloud.pts.size() - 1);
 	}
 
 	// Return the coordinates of the point previously stored at `index` (as returned by
@@ -375,6 +452,7 @@ namespace pyoomph
 	// so those cases are rejected up front without even querying the underlying tree.
 	int KDTree::point_present(double x, double y, double z, double epsilon)
 	{
+		index_deferred_points();
 		if (dim < 3 && fabs(z) > epsilon)
 			return -1;
 		if (dim < 2 && fabs(y) > epsilon)
@@ -384,6 +462,7 @@ namespace pyoomph
 
 	int KDTree::nearest_point(double x, double y, double z, double *distret)
 	{
+		index_deferred_points();
 		// std::cout << "CALLING NEAREST POINT ON " << tree << std::endl;
 		return tree->nearest_point(x, y, z, distret);
 	}
@@ -402,7 +481,14 @@ namespace pyoomph
 
 	std::vector<std::pair<uint32_t, double>> KDTree::radius_search(double radius, double x, double y, double z)
 	{
+		index_deferred_points();
 		return tree->radius_search(radius, x, y, z);
+	}
+
+	unsigned KDTree::k_nearest(unsigned k, double x, double y, double z, std::vector<uint32_t> &indices)
+	{
+		index_deferred_points();
+		return tree->k_nearest(k, x, y, z, indices);
 	}
 
 }

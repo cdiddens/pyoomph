@@ -28,3 +28,34 @@
 .framed img { border: 1px solid black;}
 
 .exampletable td {text-align: center;}
+
+/* The RTD theme forces `white-space: nowrap` on table cells, so tables with
+   long text (e.g. the oomph-lib comparison) never wrap and overflow into a
+   horizontal scrollbar. Let cells wrap and the table use the full width. */
+.wy-table-responsive table td,
+.wy-table-responsive table th {
+    white-space: normal;
+    word-wrap: break-word;
+}
+
+.wy-table-responsive {
+    width: 100%;
+    overflow: visible;
+}
+
+/* :vidtime: links (docs/source/_ext/vidtime.py) - a timestamp that jumps into an embedded video. */
+a.vidtime {
+    white-space: nowrap;
+}
+a.vidtime::before {
+    content: "\25B6\FE0E";  /* text-style play triangle, so it does not render as a colour emoji */
+    font-size: 0.8em;
+    margin-right: 0.25em;
+}
+figure.vidtime-flash {
+    animation: vidtime-flash 1.2s ease-out 1;
+}
+@keyframes vidtime-flash {
+    from { box-shadow: 0 0 0 4px rgba(41, 128, 185, 0.75); }
+    to   { box-shadow: 0 0 0 4px rgba(41, 128, 185, 0); }
+}

@@ -127,11 +127,11 @@ namespace oomph
     virtual void get_Z2_compound_flux_indices(Vector<unsigned>& flux_index) {}
 
     /// Number of vertex nodes in the element
-    virtual unsigned nvertex_node() const = 0;
+    unsigned nvertex_node() const override = 0;
 
     /// Pointer to the j-th vertex node in the element. Needed for
     /// efficient patch assmbly
-    virtual Node* vertex_node_pt(const unsigned& j) const = 0;
+    Node* vertex_node_pt(const unsigned& j) const override = 0;
 
     /// Order of recovery shape functions
     virtual unsigned nrecovery_order() = 0;
@@ -296,7 +296,7 @@ namespace oomph
     void operator=(const Z2ErrorEstimator&) = delete;
 
     /// Empty virtual destructor
-    virtual ~Z2ErrorEstimator() {}
+    ~Z2ErrorEstimator() override {}
 
     /// Compute the elemental error measures for a given mesh
     /// and store them in a vector.
@@ -316,7 +316,7 @@ namespace oomph
     /// - flux_rec*.dat
     void get_element_errors(Mesh*& mesh_pt,
                             Vector<double>& elemental_error,
-                            DocInfo& doc_info);
+                            DocInfo& doc_info) override;
 
     /// Access function for order of recovery polynomials
     unsigned& recovery_order()
@@ -559,14 +559,14 @@ namespace oomph
     void operator=(const DummyErrorEstimator&) = delete;
 
     /// Empty virtual destructor
-    virtual ~DummyErrorEstimator() {}
+    ~DummyErrorEstimator() override {}
 
 
     /// Compute the elemental error measures for a given mesh
     /// and store them in a vector. Doc errors etc.
-    virtual void get_element_errors(Mesh*& mesh_pt,
+    void get_element_errors(Mesh*& mesh_pt,
                                     Vector<double>& elemental_error,
-                                    DocInfo& doc_info)
+                                    DocInfo& doc_info) override
     {
 #ifdef PARANOID
       if (doc_info.is_doc_enabled())

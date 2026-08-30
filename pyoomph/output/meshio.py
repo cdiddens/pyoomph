@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -41,7 +42,7 @@ from ..generic.mpi import has_mpi
 if has_mpi():
 	from mpi4py import MPI
 else:
-	MPI = None
+	MPI = None # type: ignore[assignment] # only used behind has_mpi() checks
 
 # Hack, because the meshio version does not have a meshio._mesh.topological_dimension["wedge15"] set!
 class Wedge15Cellblock(meshio.CellBlock):
@@ -57,8 +58,7 @@ import xml.etree.ElementTree as ET
 
 
 
-def _convert_mesh_to_meshio(problem:"Problem",cache,eigenvector:Optional[Union[int,List[int]]]=None,eigenmode:MeshDataEigenModes="abs",tesselate_tri:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True):
-	from .. import get_mpi_nproc #type:ignore
+def _convert_mesh_to_meshio(problem:"Problem",cache,eigenvector:int | list[int] | None=None,eigenmode:MeshDataEigenModes="abs",tesselate_tri:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True):
 
 
 
@@ -78,25 +78,37 @@ def _convert_mesh_to_meshio(problem:"Problem",cache,eigenvector:Optional[Union[i
 		x:NPFloatArray=nodal_data[:,field_names["coordinate_x"]] 
 	else:
 		x:NPFloatArray = numpy.zeros(len(nodal_data)) #type:ignore	
+	y:NPFloatArray
+	z:NPFloatArray
 	if "coordinate_y" in field_names.keys():
-		y:NPFloatArray = nodal_data[:, field_names["coordinate_y"]] #type:ignore
+		y = nodal_data[:, field_names["coordinate_y"]] #type:ignore
 	else:
-		y:NPFloatArray = 0*x
+		y = 0*x
 	if "coordinate_z" in field_names.keys():
-		z:NPFloatArray = nodal_data[:, field_names["coordinate_z"]] #type:ignore
+		z = nodal_data[:, field_names["coordinate_z"]] #type:ignore
 	else:
-		z:NPFloatArray = 0*x
+		z = 0*x
 	field_data={}
 	outfields=cache.get_default_output_fields(rem_lagrangian=hide_lagrangian,rem_underscore=hide_underscore)
 
 	group_vector_fields=True
-	rev_vector_fields:Dict[str,str]={}
+	rev_vector_fields:dict[str,str]={}
 	if group_vector_fields:
 		vector_fields = cache.vector_fields			
 		for a,_ in vector_fields.items():
 			for c in ["_x","_y","_z"]:
 				rev_vector_fields[a+c]=a
-	vector_fields_written:Set[str]=set()
+	vector_fields_written:set[str]=set()
+
+	# Tensors are grouped the same way, but off a 3x3 grid of component names rather than a triple.
+	tensor_fields=getattr(cache,"tensor_fields",{})
+	rev_tensor_fields:dict[str,str]={}
+	for a,trows in tensor_fields.items():
+		for trow in trows:
+			for tc in trow:
+				if tc:
+					rev_tensor_fields[tc]=a
+	tensor_fields_written:set[str]=set()
 
 	for n in outfields:
 		if n!="coordinate_x" and n!="coordinate_y" and n!="coordinate_z":
@@ -104,17 +116,43 @@ def _convert_mesh_to_meshio(problem:"Problem",cache,eigenvector:Optional[Union[i
 				vector_name=rev_vector_fields[n]
 				if vector_name in vector_fields_written:
 					continue
-				data:List[NPFloatArray]=[]
+				# A component that is identically zero is never registered as a field at all (see
+				# FiniteElementCode::register_local_expression), so it is missing here rather than zero.
+				# Every missing slot therefore has to be filled in place: padding only once something had
+				# already been collected slid the rest down a slot, and vector(0,u) came out as (u,0).
+				data:list[NPFloatArray | None]=[]
 				for k in "_x","_y","_z":
-					if vector_name+k in outfields:
-						#print("GETTING DATA",vector_name,k,cache.get_data(vector_name+k))
-						data.append(cache.get_data(vector_name+k)) #type:ignore
-					else:
-						if len(data)>0:
-							data.append(numpy.zeros(len(data[0]))) #type:ignore
-				if len(data)>0:
-					field_data[vector_name]=numpy.transpose(numpy.array(data)) #type:ignore
+					data.append(cache.get_data(vector_name+k) if vector_name+k in outfields else None) #type:ignore
+				present=[d for d in data if d is not None]
+				if len(present)>0:
+					zero=numpy.zeros(len(present[0])) #type:ignore
+					field_data[vector_name]=numpy.transpose(numpy.array([zero if d is None else d for d in data])) #type:ignore
 					vector_fields_written.add(vector_name)
+				continue
+
+			if n in rev_tensor_fields:
+				# VTK takes a tensor as either 9 components (full, row-major) or 6 (symmetric, ordered
+				# xx,yy,zz,xy,yz,xz -- verified against vtkTensorGlyph); nothing else is accepted as a
+				# tensor attribute. register_local_expression leaves a symbolically zero component
+				# unregistered and repeats the upper-triangle name in the lower triangle when the tensor
+				# is symmetric, so the name grid carries both the layout and the symmetry.
+				tensor_name=rev_tensor_fields[n]
+				if tensor_name in tensor_fields_written:
+					continue
+				tnames=[["","",""],["","",""],["","",""]]
+				for ti,trow in enumerate(tensor_fields[tensor_name][:3]):
+					for tj,tnm in enumerate(trow[:3]):
+						tnames[ti][tj]=tnm if tnm else ""
+				tdata:list[list[NPFloatArray | None]]=[[(cache.get_data(tnames[ti][tj]) if tnames[ti][tj] in outfields else None) for tj in range(3)] for ti in range(3)] #type:ignore
+				tpresent=[d for trow2 in tdata for d in trow2 if d is not None]
+				if len(tpresent)>0:
+					tzero=numpy.zeros(len(tpresent[0])) #type:ignore
+					if all(tnames[ti][tj]==tnames[tj][ti] for ti in range(3) for tj in range(3)):
+						torder=[(0,0),(1,1),(2,2),(0,1),(1,2),(0,2)]
+					else:
+						torder=[(ti,tj) for ti in range(3) for tj in range(3)]
+					field_data[tensor_name]=numpy.transpose(numpy.array([(tdata[ti][tj] if tdata[ti][tj] is not None else tzero) for ti,tj in torder])) #type:ignore
+					tensor_fields_written.add(tensor_name)
 				continue
 
 			field_data[n]=cache.get_data(n)
@@ -133,7 +171,7 @@ def _convert_mesh_to_meshio(problem:"Problem",cache,eigenvector:Optional[Union[i
 
 	points=numpy.transpose(numpy.array([x,y,z])) #type:ignore
 	cells = []
-	cell_data:Dict[str,List[NPFloatArray]] = {}
+	cell_data:dict[str,list[NPFloatArray]] = {}
 
 
 	present_elem_types,inds = numpy.unique(elemtypes,return_inverse=True) #type:ignore
@@ -229,9 +267,14 @@ def pretty_xml(element:ET.Element, indent:str, newline:str, level:int=0):
 
 
 class _MeshFileOutput(_BaseNumpyOutput):
-	def __init__(self,mesh:"AnySpatialMesh",ftrunk:str="output",in_subdir:bool=True,file_ext:str="vtu",tesselate_tri:bool=False,write_pvd:Optional[bool]=None,eigenvector:Optional[Union[int,List[int]]]=None,eigenmode:"MeshDataEigenModes"="abs",nondimensional:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True,history_index:int=0,operator:Optional["MeshDataCacheOperatorBase"]=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True):
+	def __init__(self,mesh:"AnySpatialMesh",ftrunk:str="output",in_subdir:bool=True,file_ext:str="vtu",tesselate_tri:bool=False,write_pvd:bool | None=None,eigenvector:int | list[int] | None=None,eigenmode:"MeshDataEigenModes"="abs",nondimensional:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True,history_index:int=0,operator:"MeshDataCacheOperatorBase | None"=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True):
 		super().__init__(mesh)
 		self.fname_trunk=ftrunk
+		#: Where this output has been redirected to, RELATIVE to the problem's base output directory,
+		#: or None. _BaseOutputter.change_output_directory is a no-op by default, and this outputter was
+		#: the one kind that never overrode it - so Problem._change_output_directory moved the text and
+		#: ODE outputs but left the VTUs where they were.
+		self._orbit_subdir:str | None=None
 		self.file_ext=file_ext
 		self.in_subdir=in_subdir
 		self.nondimensional=nondimensional
@@ -241,7 +284,7 @@ class _MeshFileOutput(_BaseNumpyOutput):
 		if write_pvd is None:
 			write_pvd= file_ext=="vtu"
 		if write_pvd==True:
-			self.write_pvd_file:Optional[str]=os.path.join(self.mesh.get_problem().get_output_directory(),self.fname_trunk+".pvd")
+			self.write_pvd_file:str | None=os.path.join(self.mesh.get_problem().get_output_directory(),self.fname_trunk+".pvd")
 		else:
 			self.write_pvd_file=None
 		self.eigenvector =eigenvector
@@ -250,11 +293,12 @@ class _MeshFileOutput(_BaseNumpyOutput):
 		self.active=True		
 		self.operator=operator
 		self.pvdcollection:ET.Element
+		self.pvddata:ET.Element
 		self.discontinuous=discontinuous
 		self.add_eigen_to_mesh_positions=add_eigen_to_mesh_positions
 
 
-	def init(self,eqtree:"EquationTree",continue_info:Optional[Dict[str,Any]]=None,rank:int=0):
+	def init(self,eqtree:"EquationTree",continue_info:dict[str, Any] | None=None,rank:int=0):
 		super().init(eqtree,continue_info,rank)
 		self.mpi_rank=rank
 		if isinstance(self.mesh,str):
@@ -270,13 +314,24 @@ class _MeshFileOutput(_BaseNumpyOutput):
 				self.pvdcollection = ET.SubElement(self.pvddata, "Collection")
 			else:
 				self.pvdtree=ET.parse(self.write_pvd_file)
-				self.pvddata=self.pvdtree.getroot()
+				root=self.pvdtree.getroot()
+				assert isinstance(root,ET.Element)
+				self.pvddata=root
 				cll=self.pvddata.find("Collection")
 				assert isinstance(cll,ET.Element)
 				self.pvdcollection=cll
 
 
-	def write_pvd(self,new_filename:str,all_files:Optional[List[str]]=None):
+	def change_output_directory(self,newdir:str,eqtree:"EquationTree"):
+		"""Redirect to newdir, stored relative to the problem's base directory - as _TextOutput does."""
+		basedir=self.problem.get_output_directory()
+		if Path(basedir).samefile(newdir):
+			self._orbit_subdir=None
+		else:
+			self._orbit_subdir=str(Path.relative_to(Path(newdir),Path(basedir)))
+			Path(os.path.join(self.problem.get_output_directory(self._orbit_subdir),self.fname_trunk)).mkdir(parents=True,exist_ok=True)
+
+	def write_pvd(self,new_filename:str,all_files:list[str] | None=None):
 		assert self.write_pvd_file is not None
 		if all_files is None:
 			all_files=[new_filename]
@@ -286,7 +341,7 @@ class _MeshFileOutput(_BaseNumpyOutput):
 			pvd_entry.set("timestep",str(self.mesh.get_problem().get_current_time(dimensional=not self.nondimensional, as_float=True)))
 			pvd_entry.set("part",str(i))
 			pvd_entry.set("file",f)
-		pretty_xml(self.pvdtree.getroot(),"\t","\n")
+		pretty_xml(self.pvddata,"\t","\n")
 		self.pvdtree.write(self.write_pvd_file)
 
 	def clean_up(self):
@@ -310,13 +365,14 @@ class _MeshFileOutput(_BaseNumpyOutput):
 		if get_mpi_nproc()>1 and mesh.is_mesh_distributed():
 			# Get nelement for all meshes and merge them via MPI
 			my_nelement=mesh.nelement()
+			assert MPI is not None # get_mpi_nproc()>1 implies mpi4py is available, see pyoomph.generic.mpi
 			comm = MPI.COMM_WORLD
 			all_nelement = numpy.array(comm.allgather(my_nelement))
    
 		
    
 
-		additional_eigenvectors:List[int]=[]
+		additional_eigenvectors:list[int]=[]
 		evarg_for_cache=self.eigenvector
 		if isinstance(self.eigenvector,(list,set,tuple)):
 			for e in self.eigenvector:
@@ -353,25 +409,37 @@ class _MeshFileOutput(_BaseNumpyOutput):
 				x:NPFloatArray=nodal_data[:,field_names["coordinate_x"]] 
 			else:
 				x:NPFloatArray = numpy.zeros(len(nodal_data)) #type:ignore	
+			y:NPFloatArray
+			z:NPFloatArray
 			if "coordinate_y" in field_names.keys():
-				y:NPFloatArray = nodal_data[:, field_names["coordinate_y"]] #type:ignore
+				y = nodal_data[:, field_names["coordinate_y"]] #type:ignore
 			else:
-				y:NPFloatArray = 0*x
+				y = 0*x
 			if "coordinate_z" in field_names.keys():
-				z:NPFloatArray = nodal_data[:, field_names["coordinate_z"]] #type:ignore
+				z = nodal_data[:, field_names["coordinate_z"]] #type:ignore
 			else:
-				z:NPFloatArray = 0*x
+				z = 0*x
 			field_data={}
 			outfields=cache.get_default_output_fields(rem_lagrangian=self.hide_lagrangian,rem_underscore=self.hide_underscore)
 
 			group_vector_fields=True
-			rev_vector_fields:Dict[str,str]={}
+			rev_vector_fields:dict[str,str]={}
 			if group_vector_fields:
 				vector_fields = cache.vector_fields			
 				for a,_ in vector_fields.items():
 					for c in ["_x","_y","_z"]:
 						rev_vector_fields[a+c]=a
-			vector_fields_written:Set[str]=set()
+			vector_fields_written:set[str]=set()
+
+			# Tensors are grouped the same way, but off a 3x3 grid of component names rather than a triple.
+			tensor_fields=getattr(cache,"tensor_fields",{})
+			rev_tensor_fields:dict[str,str]={}
+			for a,trows in tensor_fields.items():
+				for trow in trows:
+					for tc in trow:
+						if tc:
+							rev_tensor_fields[tc]=a
+			tensor_fields_written:set[str]=set()
 
 			for n in outfields:
 				if n!="coordinate_x" and n!="coordinate_y" and n!="coordinate_z":
@@ -379,29 +447,58 @@ class _MeshFileOutput(_BaseNumpyOutput):
 						vector_name=rev_vector_fields[n]
 						if vector_name in vector_fields_written:
 							continue
-						data:List[NPFloatArray]=[]
+						# A component that is identically zero is never registered as a field at all (see
+						# FiniteElementCode::register_local_expression), so it is missing here rather than zero.
+						# Every missing slot therefore has to be filled in place: padding only once something had
+						# already been collected slid the rest down a slot, and vector(0,u) came out as (u,0).
+						data:list[NPFloatArray | None]=[]
 						for k in "_x","_y","_z":
-							if vector_name+k in outfields:
-								#print("GETTING DATA",vector_name,k,cache.get_data(vector_name+k))
-								data.append(cache.get_data(vector_name+k)) #type:ignore
-							else:
-								if len(data)>0:
-									data.append(numpy.zeros(len(data[0]))) #type:ignore
-						if len(data)>0:
-							field_data[vector_name]=numpy.transpose(numpy.array(data)) #type:ignore
+							data.append(cache.get_data(vector_name+k) if vector_name+k in outfields else None) #type:ignore
+						present=[d for d in data if d is not None]
+						if len(present)>0:
+							zero=numpy.zeros(len(present[0])) #type:ignore
+							field_data[vector_name]=numpy.transpose(numpy.array([zero if d is None else d for d in data])) #type:ignore
 							vector_fields_written.add(vector_name)
 						continue
 
-					field_data[n]=cache.get_data(n)
-					#print("MESHIO FIELDADTA",n,field_data[n])
-					if field_data[n] is None:
-						del field_data[n]
+					if n in rev_tensor_fields:
+						# VTK takes a tensor as either 9 components (full, row-major) or 6 (symmetric, ordered
+						# xx,yy,zz,xy,yz,xz -- verified against vtkTensorGlyph); nothing else is accepted as a
+						# tensor attribute. register_local_expression leaves a symbolically zero component
+						# unregistered and repeats the upper-triangle name in the lower triangle when the tensor
+						# is symmetric, so the name grid carries both the layout and the symmetry.
+						tensor_name=rev_tensor_fields[n]
+						if tensor_name in tensor_fields_written:
+							continue
+						tnames=[["","",""],["","",""],["","",""]]
+						for ti,trow in enumerate(tensor_fields[tensor_name][:3]):
+							for tj,tnm in enumerate(trow[:3]):
+								tnames[ti][tj]=tnm if tnm else ""
+						tdata:list[list[NPFloatArray | None]]=[[(cache.get_data(tnames[ti][tj]) if tnames[ti][tj] in outfields else None) for tj in range(3)] for ti in range(3)] #type:ignore
+						tpresent=[d for trow2 in tdata for d in trow2 if d is not None]
+						if len(tpresent)>0:
+							tzero=numpy.zeros(len(tpresent[0])) #type:ignore
+							if all(tnames[ti][tj]==tnames[tj][ti] for ti in range(3) for tj in range(3)):
+								torder=[(0,0),(1,1),(2,2),(0,1),(1,2),(0,2)]
+							else:
+								torder=[(ti,tj) for ti in range(3) for tj in range(3)]
+							field_data[tensor_name]=numpy.transpose(numpy.array([(tdata[ti][tj] if tdata[ti][tj] is not None else tzero) for ti,tj in torder])) #type:ignore
+							tensor_fields_written.add(tensor_name)
+						continue
+
+					ndata=cache.get_data(n)
+					#print("MESHIO FIELDADTA",n,ndata)
+					if ndata is not None:
+						field_data[n]=ndata
 					if additional_eigenvectors is not None:
 						for eigenv in additional_eigenvectors:
 							re_name="EIGEN_"+str(eigenv)+"_REAL_"+n
 							im_name = "EIGEN_" + str(eigenv) + "_IMAG_"+n
-							field_data[re_name] = cache.get_data(n,additional_eigenvector=eigenv,eigen_real_imag=0)
-							field_data[im_name] = cache.get_data(n, additional_eigenvector=eigenv, eigen_real_imag=1)
+							re_data=cache.get_data(n,additional_eigenvector=eigenv,eigen_real_imag=0)
+							im_data=cache.get_data(n, additional_eigenvector=eigenv, eigen_real_imag=1)
+							assert re_data is not None and im_data is not None
+							field_data[re_name] = re_data
+							field_data[im_name] = im_data
 			
 			if cache.discontinuous:
 				for k,v in elemental_fields.items():
@@ -413,9 +510,14 @@ class _MeshFileOutput(_BaseNumpyOutput):
 
 			points=numpy.transpose(numpy.array([x,y,z])) #type:ignore
 			cells = []
-			cell_data:Dict[str,List[NPFloatArray]] = {}
+			cell_data:dict[str,list[NPFloatArray]] = {}
 
-			if self.tesselate_tri and self.mesh.get_dimension()>1:
+			# eleminds.shape[1]==3, not just the mesh dimension: tesselation makes plain triangles,
+			# but an extrusion operator then sweeps them into wedges, and the mesh this asks is the
+			# UNextruded one, so the shortcut fired and handed meshio 6-node cells labelled
+			# "triangle" ("Unexpected cells array shape (N, 6) for triangle cells"). The element-type
+			# dispatch below already knows wedges, so extruded output just falls through to it.
+			if self.tesselate_tri and self.mesh.get_dimension()>1 and eleminds.shape[1]==3:
 				if self.mesh.get_dimension()==3:
 					raise RuntimeError("TODO")
 				cells = [("triangle", eleminds)]
@@ -540,15 +642,26 @@ class _MeshFileOutput(_BaseNumpyOutput):
 			allfiles=[self.fname_trunk + "_{:06d}_{:d}".format(step,i) + "." + self.file_ext for i in contributing_procs]
 		else:
 			fname = self.fname_trunk + "_{:06d}".format(step) + "." + self.file_ext
+		# get_output_directory(self._orbit_subdir), not get_output_directory(): change_output_directory()
+		# redirects an output by storing the new location RELATIVE to the problem's base directory in
+		# _orbit_subdir, which get_filename() honours - but this method builds its own path and used to
+		# join the base directory directly, so a redirected MeshFileOutput kept writing to the old place.
+		# That is what Problem._change_output_directory is for (PeriodicOrbit.output_orbit uses it), so
+		# orbit VTUs were landing on top of the ordinary ones.
+		outdir=self.problem.get_output_directory(self._orbit_subdir)
 		if self.in_subdir:
 			rel_filename = os.path.join(self.fname_trunk, fname)
-			fname = os.path.join(self.problem.get_output_directory(), self.fname_trunk, fname)
+			fname = os.path.join(outdir, self.fname_trunk, fname)
 			if allfiles is not None:
 				for i,f in enumerate(allfiles):
 					allfiles[i] = os.path.join(self.fname_trunk, f)
 		else:
 			rel_filename = fname
-			fname = os.path.join(self.problem.get_output_directory(), fname)
+			fname = os.path.join(outdir, fname)
+		# The directory is only made when the output is set up or redirected; a redirection that happens
+		# between two writes (the bifurcation GUI outputs each tagged point into its own folder) would
+		# otherwise reach meshio.write with no directory to write into.
+		Path(fname).parent.mkdir(parents=True,exist_ok=True)
 
 		#print(mesh)
 		if mesh.nelement()>0:
@@ -587,7 +700,7 @@ class MeshFileOutput(GenericOutput):
 	OpCartesianExtrusion=MeshDataCartesianExtrusion
 	OpRotationalExtrusion=MeshDataRotationalExtrusion
 
-	def __init__(self,filetrunk:Optional[str]=None,tesselate_tri:bool=False,file_ext:str="vtu",eigenvector:Optional[Union[int,List[int]]]=None,eigenmode:"MeshDataEigenModes"="abs",nondimensional:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True,history_index:int=0,operator:Optional["MeshDataCacheOperatorBase"]=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True):
+	def __init__(self,filetrunk:str | None=None,tesselate_tri:bool=False,file_ext:str="vtu",eigenvector:int | list[int] | None=None,eigenmode:"MeshDataEigenModes"="abs",nondimensional:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True,history_index:int=0,operator:"MeshDataCacheOperatorBase | None"=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True):
 		super(MeshFileOutput, self).__init__()
 		self.filetrunk=filetrunk
 		self.tesselate_tri=tesselate_tri
@@ -599,13 +712,13 @@ class MeshFileOutput(GenericOutput):
 		self.hide_underscore=hide_underscore
 		self.history_index=history_index
 		self.active=True
-		self._my_outputter:List[_MeshFileOutput]=[]		
+		self._my_outputter:list[_MeshFileOutput]=[]		
 		self.operator=operator
 		self.discontinuous=discontinuous
 		self.add_eigen_to_mesh_positions=add_eigen_to_mesh_positions
 
 
-	def _construct_outputter_for_eq_tree(self,eqtree:"EquationTree",continue_info:Optional[Dict[str,Any]],mpirank:int) -> _MeshFileOutput:
+	def _construct_outputter_for_eq_tree(self,eqtree:"EquationTree",continue_info:dict[str, Any] | None,mpirank:int) -> _MeshFileOutput:
 		fn=self._expand_filename(eqtree,self.filetrunk,"",add_problem_outdir=False)
 		mesh=eqtree.get_mesh()
 		assert not isinstance(mesh,ODEStorageMesh)
@@ -621,7 +734,11 @@ class MeshFileOutput(GenericOutput):
 
 
 
-	def _is_ode(self) -> Optional[bool]:
+	def _is_ode(self) -> bool | None:
 		return False
 
 	
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -28,6 +29,7 @@
 
 from ..generic import Equations,InterfaceEquations
 from ..expressions import * #Import grad et al
+from ..typings import *
 from ..expressions.coordsys import AxisymmetricCoordinateSystem
 
 #Only works in axisymmetric and 2d cartesian
@@ -45,7 +47,7 @@ class StreamFunctionFromVelocity(Equations):
             axisymmetric (Union[Literal["auto"],bool]): If True, the equations are defined in axisymmetric coordinates. If "auto", the equations are defined in axisymmetric coordinates if the coordinate system is axisymmetric. Default is "auto".
             DG_alpha (ExpressionOrNum): The penalty parameter for the DG formulation of the stream function. If the stream function is defined in a DG space, this parameter is used to penalize jumps in the stream function across element boundaries. Default is 10.
     """
-    def __init__(self,*,name:str="streamfunc",space:FiniteElementSpaceEnum="C2",velocity:Expression=var("velocity"),with_error_estimator:bool=True,axisymmetric:Union[Literal["auto"],bool]="auto",DG_alpha:ExpressionOrNum=10):
+    def __init__(self,*,name:str="streamfunc",space:FiniteElementSpaceEnum="C2",velocity:Expression=var("velocity"),with_error_estimator:bool=True,axisymmetric:Literal["auto"] | bool="auto",DG_alpha:ExpressionOrNum=10):
         super(StreamFunctionFromVelocity, self).__init__()
         self.space:FiniteElementSpaceEnum=space
         self.name=name
@@ -84,12 +86,13 @@ class StreamFunctionFromVelocity(Equations):
     def define_scaling(self):
         axisymm,_=self.get_axisymmetry_flag_and_dir()
         X,U=scale_factor("spatial"),scale_factor("velocity")
-        scals={self.name:X**(2 if axisymm else 1)*U}
-        self.set_scaling(**scals)
-        tscals={self.name:1/U}
+        scals:dict[str,ExpressionOrNum|str]={self.name:X**(2 if axisymm else 1)*U}
+        self.set_scaling(scals)
+        tscal_val:Expression=1/U
         #if axisymm and not self.old_formulation:
-        tscals[self.name]*=X
-        self.set_test_scaling(**tscals)
+        tscal_val=tscal_val*X
+        tscals:dict[str,ExpressionOrNum|str]={self.name:tscal_val}
+        self.set_test_scaling(tscals)
 
     def define_residuals(self):
         phi,phi_test=var_and_test(self.name)
@@ -168,3 +171,6 @@ class StreamFunctionFromVelocityInterface(InterfaceEquations):
         else:
             self.add_residual(weak(n[0] * u[1] - n[1] * u[0],phi_test))
 
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

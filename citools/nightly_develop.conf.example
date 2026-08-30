@@ -1,0 +1,184 @@
+# Configuration for citools/nightly_develop.sh -- copy to ~/.pyoomph_nightly.conf on the
+# machine that runs the nightly and edit. It is sourced by bash, so it is shell syntax.
+#
+# Only REPO_DIR is really mandatory; everything else has a default that works on a machine
+# where pyoomph is already set up for interactive use.
+
+# ---------------------------------------------------------------- what to test ----
+
+# The existing checkout the nightly uses. It is left on the develop branch after a run,
+# and the run is aborted (with a mail) if the working tree is dirty, so do not point this
+# at a checkout you also work in by hand.
+REPO_DIR="$HOME/code/pyoomph"
+
+# Where the run logs and the "last tested commit" marker are kept. One dated subdirectory
+# per run; older ones are pruned (see KEEP_RUNS).
+LOG_DIR="$HOME/pyoomph_nightly_logs"
+KEEP_RUNS=30
+
+# TMPDIR for the run, wiped at the start of each one. Defaults to $LOG_DIR/tmp, which keeps the
+# nightly off the machine's shared /tmp: where that is a tmpfs, a day of interactive work can fill
+# it, and the run then fails everywhere at once -- pytest with ENOSPC on tmp_path, mpirun with a
+# SIGBUS from PMIx -- while the report blames the branch. Point it at a disk-backed filesystem with
+# a few GB free; do not point it back at a tmpfs.
+NIGHTLY_TMPDIR=""
+
+# ------------------------------------------------------------------ environment ----
+#
+# cron starts with almost no environment: no conda, no venv, often no /usr/local/bin in
+# PATH. The nightly therefore starts an interactive `bash -i`, which reads ~/.bashrc the
+# ordinary way, and takes PATH, LD_LIBRARY_PATH, PYTHONPATH and the three PETSC_* variables
+# below out of it -- so whatever your own shell has is normally already there. Anything the
+# rc file does not set, or that is not in that list, goes here.
+
+# Either a path to a file that is sourced before the build, or the commands themselves.
+# Typical contents:
+#   ENV_SETUP='source "$HOME/miniconda3/etc/profile.d/conda.sh"; conda activate pyoomph'
+#   ENV_SETUP="$HOME/venvs/pyoomph/bin/activate"
+# It runs after the git update, so it can also be used to pick up anything the checkout
+# itself provides. (This config file is sourced by bash too, so putting the activation
+# here directly works as well -- it just happens earlier.)
+ENV_SETUP=""
+
+PYTHON="python3"
+
+# PETSc is not configured here. test_all_tutorial_scripts.py needs both builds -- the
+# real-scalar one for the ordinary tutorials, the complex one for the normal-mode stability
+# examples -- and takes them from three variables the nightly picks up out of ~/.bashrc:
+#
+#   PETSC_DIR=$HOME/code/packages/petsc_pyoomph
+#   PETSC_ARCH_REAL=pyoomph_petsc_real_opt
+#   PETSC_ARCH_COMPLEX=pyoomph_petsc_opt
+#
+# Plain assignments are fine -- the nightly exports whatever it finds, so the same three
+# lines that feed an interactive petsc_real/petsc_complex alias also feed the nightly. If
+# your .bashrc cannot provide them, set them from ENV_SETUP above instead.
+#
+# The pytest step needs them too, and builds its own PYTHONPATH from PETSC_DIR and
+# PETSC_ARCH_COMPLEX -- one arch for the whole suite, the complex one, because it runs
+# everything the real one does and is additionally what the eigenvalue tests need. Without
+# it the MPI half of the suite does not test anything: the modules that guard on petsc4py
+# skip, and the ones that do not fail on Pardiso's "cannot be used under MPI". PYTHONPATH
+# from ~/.bashrc is NOT enough on a machine where the petsc_real/petsc_complex aliases set
+# it per invocation rather than at login -- which is the usual arrangement.
+#
+# (Configs written before d2cf20c set PETSC_PYTHONPATH for this. Nothing reads it any more;
+# the nightly prints a note if it is still there.)
+
+# Hard limits, in seconds. A hung solve otherwise keeps the lock until the next night.
+TIMEOUT_BUILD=7200           # 2 h
+TIMEOUT_PYTEST=7200          # 2 h  (the full suite is ~11 min when healthy)
+TIMEOUT_DOCS=5400            # 1.5 h (~1 min of pip, ~1 min of sphinx, ~6 min of xelatex)
+TIMEOUT_TUTORIALS=28800      # 8 h  (a full tutorial pass is over an hour when healthy)
+TIMEOUT_TUTORIALS_MPI=28800  # 8 h  (the same scripts again, under mpirun)
+
+# ---------------------------------------------------------------------- docs ----
+
+# The documentation is built the way Read the Docs builds it: a virtualenv created from
+# scratch for the run, with nothing in it but `pip install -r docs/requirements.txt`. That
+# is the point of the step -- it is the only thing that says whether that requirements file
+# is still sufficient, RTD having no other input, and the only thing that puts every
+# docstring through autodoc. It needs to reach PyPI; on a machine with no outbound network
+# set DOCS_ENABLED=0 rather than collecting one pip failure per night.
+#
+# The checkout is put in front of the venv on PYTHONPATH, so what is documented is develop
+# and not the pyoomph wheel that requirements file pulls in -- the wheel is only there to
+# bring pyoomph's own dependencies along. The report names the file it imported; if that is
+# ever not the one under REPO_DIR, the step stops rather than quietly documenting the last
+# release.
+DOCS_ENABLED=1
+
+# Run xelatex over the generated tutorial as well, which is what Read the Docs does for its
+# "formats: - pdf". Worth leaving on where TeX is installed: the HTML build excludes
+# latex_tutorial.rst, so without this nothing ever typesets the tutorial as one document,
+# and LaTeX reports a document that broke off half way only in its exit status -- a
+# truncated PDF is written and uploaded like any other. Skipped by itself, with a note in
+# the report, when latexmk or xelatex is not on PATH.
+DOCS_PDF=1
+
+# Sphinx warnings the docs step is not allowed to fail on, as an extended regular
+# expression matched against each warning line. Anything else fails the run, which is the
+# point: docs warnings are otherwise noticed by nobody. The default covers only the missing
+# preCICE bindings, which docs/requirements.txt deliberately does not ask for and Read the
+# Docs does not have either, so that warning is the state RTD builds in rather than
+# something develop broke. Adding to this list is a decision to stop being told; prefer
+# fixing the warning.
+#DOCS_IGNORE_WARNINGS='Failed to import pyoomph\.solvers\.precice_adapter|No module named .precice.|module .pyoomph\.solvers. has no attribute .precice_adapter.'
+
+# The tutorial scripts are run a second time under `mpirun -n N`, without --distribute, so
+# that every rank builds the whole mesh -- which is what a user gets who simply starts a
+# script under mpirun. Set it to 0 on a machine that cannot afford the second pass, or to
+# fewer ranks than there are cores; oversubscribing makes every solve slower and can turn
+# the pass into a timeout. It is skipped by itself, with a note in the report, when mpirun
+# is not on PATH.
+TUTORIAL_MPI_RANKS=4
+
+# ------------------------------------------------------------------------ mail ----
+
+# Leave MAIL_TO empty to switch mail off entirely: the run still writes its full report to
+# a dated directory under LOG_DIR, which is then simply where you read it. Worth doing on a
+# host that cannot send mail at all rather than letting every night end in two doomed SMTP
+# attempts and a message queued forever by a local MTA. Networks commonly forbid the hosts
+# in their workstation ranges from delivering mail directly, so run
+# `citools/nightly_develop.sh --test-mail` before assuming this machine can send at all.
+MAIL_TO="...@..."
+
+# Set this to a real mailbox. The default below is built from `hostname`, which on a
+# workstation is usually a bare name with no domain; a sender whose domain does not resolve
+# is rejected or silently dropped by most relays, and an authenticating relay will normally
+# insist the sender match the account anyway. `--test-mail` warns about it.
+MAIL_FROM="pyoomph-nightly@$(hostname -f 2>/dev/null || hostname)"
+
+# If SMTP_HOST is set the report is sent with Python's smtplib; otherwise the script falls
+# back to the local `mail`/`sendmail` command. Setting it is the more portable option --
+# most workstations have no working MTA at all.
+SMTP_HOST="..@.."
+SMTP_PORT=25
+SMTP_USER=""
+SMTP_PASSWORD=""
+# starttls (usual for port 587), ssl (port 465), or none (a port 25 relay).
+SMTP_SECURITY="starttls"
+
+# Microsoft rejects IPv6 senders whose address has no reverse-DNS record ("4.7.25 ...
+# must have reverse DNS record (S820)") while accepting the very same machine over IPv4,
+# and a host with an IPv6 route will pick IPv6 by itself. The script notices this and
+# retries over IPv4 on its own; setting this to 1 skips the attempt that is known to fail.
+SMTP_FORCE_IPV4=1
+
+# ---- authenticated submission, with a mailbox that exists only for this ----
+#
+# Where a network refuses direct delivery, it will normally still allow an authenticated
+# submission server on port 587 -- that is what such a restriction expects you to use.
+#
+# On a shared machine, make the credential one you do not care about: a free mailbox
+# created for nothing but sending these reports. Anyone with root there can read this file
+# whatever its mode, so the question is not whether the password leaks but what it is worth
+# when it does -- and the answer should be "it can send pyoomph nightly reports". Never a
+# password that is reused anywhere.
+#
+#   SMTP_HOST="smtp.gmail.com"          # Gmail: enable 2FA, then create an App Password
+#   SMTP_PORT=587                       # (a 16-character token, revocable on its own)
+#   SMTP_SECURITY="starttls"
+#   SMTP_USER="pyoomph.nightly@gmail.com"
+#   SMTP_PASSWORD="xxxxxxxxxxxxxxxx"
+#   MAIL_FROM="pyoomph.nightly@gmail.com"   # MUST match SMTP_USER; see below
+#   MAIL_TO="...@..."          # where you actually read it
+#
+# Transactional senders (Brevo, SMTP2GO, Mailjet) work the same way and are a better fit
+# still: the credential is a send-only API key that cannot read anything, and revoking it
+# takes one click. All of them have a free tier far above one mail a night.
+#
+# MAIL_FROM must equal SMTP_USER. Submission servers require the sender to be the account
+# that authenticated and will reject or rewrite anything else, and a From at a domain the
+# relay is not authorised to send for fails DMARC on arrival instead. --test-mail warns
+# about the mismatch.
+
+# Number of lines of each failing log that is quoted in the mail body. The full logs stay
+# in LOG_DIR on the test machine.
+MAIL_LOG_TAIL=60
+
+# How many scripts the Timing section of the mail names per tutorial pass - the slowest ones,
+# and the ones whose time changed most between the serial and the mpirun pass. The complete
+# per-script tables are written to timings_*.txt in the run's log directory either way. 0
+# leaves the section out of the mail.
+TIMING_TOP=10

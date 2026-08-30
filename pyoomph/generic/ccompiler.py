@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -32,20 +33,21 @@ import sys
 import shlex
 
 
-import setuptools 
 import distutils
 import distutils.ccompiler
-import distutils.log
+import distutils.log #type:ignore
 import distutils.errors
 
 
 from ..typings import *
+from .jit_cache import get_jit_cache
 
-_TypeVarCompiler=TypeVar("_TypeVarCompiler",bound=Type["BaseCCompiler"])
+_TypeVarCompiler=TypeVar("_TypeVarCompiler",bound=type["BaseCCompiler"])
 
 
 class BaseCCompiler(_pyoomph.SharedLibCCompiler):
     compiler_id:str
+    compiler_quality:int
 
     def __init__(self):
         super(BaseCCompiler, self).__init__()
@@ -54,7 +56,7 @@ class BaseCCompiler(_pyoomph.SharedLibCCompiler):
     def check_avail()->bool:
         return True
 
-    def toolchain_located(self)->Optional[bool]:
+    def toolchain_located(self)->bool | None:
         """Lightweight, no-file-write check for whether the underlying compiler
         toolchain can be located at all (e.g. cl.exe/link.exe for MSVC, via the
         registry/vswhere - no compiling or temp files involved). Returns None
@@ -64,7 +66,7 @@ class BaseCCompiler(_pyoomph.SharedLibCCompiler):
         return None
 
     @staticmethod
-    def call_cmd( cmd:List[str], shell:bool=False, env:Optional[Dict[str,str]]=None,quiet:bool=False)->str:
+    def call_cmd( cmd:list[str], shell:bool=False, env:dict[str, str] | None=None,quiet:bool=False)->str:
         if quiet==False:
             print(shlex.join(cmd))
         if env is None:
@@ -84,10 +86,72 @@ class BaseCCompiler(_pyoomph.SharedLibCCompiler):
     def get_lib_filename(self)->str:
         return self.get_code_trunk() + self.get_shared_lib_extension()
         
-    def expand_full_library_name(self, arg0: str) -> str:
-        return os.path.join(os.getcwd(),arg0)
+    def expand_full_library_name(self, relative_name: str) -> str:
+        return os.path.join(os.getcwd(),relative_name)
 
-    _registered_compilers={"_internal_":_pyoomph.CCompiler}
+    def get_compiler_fingerprint(self) -> str:
+        """A string identifying this compiler backend/binary/version, used as part
+        of the JIT cache key (see jit_cache.py) so that a cached shared library is
+        never reused with an incompatible compiler. Subclasses that wrap a system
+        compiler executable should override this to include that executable's
+        identity/version, not just the backend name."""
+        return self.compiler_id
+
+    def get_cache_flag_state(self) -> str:
+        """Additional state (beyond extra_flags, which the caller already passes
+        separately) that affects the actual compile flags used, and therefore must
+        be part of the JIT cache key. Subclasses should override/extend this if
+        they derive flags from further object state or environment variables."""
+        # The boolean, not the raw string: only PYOOMPH_DEBUG=="1" changes any flag, so keying on the
+        # value itself gave =2 and =off distinct cache entries for bit-identical builds.
+        return repr(os.environ.get('PYOOMPH_DEBUG') == "1")
+
+    def compile(self, suppress_compilation: bool, suppress_code_writing: bool, quiet: bool, extra_flags: Sequence[str]) -> bool:
+        if suppress_compilation:
+            return True
+
+        def do_compile() -> bool:
+            # Printed here (rather than by the C++ caller, which cannot know this in advance)
+            # so it is only shown when a compiler is actually about to be invoked - never on a
+            # JIT cache hit, where "compiling" would be misleading.
+            if not quiet:
+                print("Compiling equation C code")
+            return self._compile_impl(suppress_compilation, suppress_code_writing, quiet, extra_flags)
+
+        cache = None if suppress_code_writing else get_jit_cache()
+        if cache is None:
+            return do_compile()
+        try:
+            with open(self.get_code_filename(), "r") as f:
+                code_text = f.read()
+        except OSError:
+            return do_compile()
+        # jitbridge.h defines the ABI (struct layouts etc.) the generated code is compiled
+        # against and the runtime loader reads back - it can change during pyoomph
+        # development without codegen.cpp's *output* changing at all (same generated .c
+        # text, different ABI it needs to be compiled against). Folding its content into
+        # the cache key ensures such a change invalidates every previously cached .so
+        # instead of silently reusing one built against a stale, now-incompatible ABI.
+        try:
+            with open(os.path.join(self.get_jit_include_dir(), "jitbridge.h"), "r") as f:
+                header_text = f.read()
+        except OSError:
+            header_text = ""
+        key = cache.compute_key(code_text, self.get_compiler_fingerprint(), extra_flags, self.get_cache_flag_state(), header_text)
+        dest = self.expand_full_library_name(self.get_lib_filename())
+        if cache.try_restore(key, dest):
+            if not quiet:
+                print("  JIT cache hit, reusing previously compiled "+self.get_lib_filename())
+            return True
+        ok = do_compile()
+        if ok:
+            cache.store(key, dest)
+        return ok
+
+    def _compile_impl(self, suppress_compilation: bool, suppress_code_writing: bool, quiet: bool, extra_flags: Sequence[str]) -> bool:
+        raise NotImplementedError
+
+    _registered_compilers:dict[str,type["BaseCCompiler"]]={}
 
     @classmethod
     def register_compiler(cls,*,override:bool=False):
@@ -101,16 +165,12 @@ class BaseCCompiler(_pyoomph.SharedLibCCompiler):
         return decorator
 
     @classmethod
-    def available_compilers(cls) -> Dict[str, int]:
-        compiler_dict:Dict[str,int]={}
+    def available_compilers(cls) -> dict[str, int]:
+        compiler_dict:dict[str,int]={}
         for n,compclass in cls._registered_compilers.items():
-            quality=0
-            if n!="_internal_":
-                assert issubclass(compclass,BaseCCompiler)
-                if not compclass.check_avail():
-                    continue
-                quality=compclass.compiler_quality
-            compiler_dict[n]=quality
+            if not compclass.check_avail():
+                continue
+            compiler_dict[n]=compclass.compiler_quality
         return compiler_dict
 
     @classmethod
@@ -127,14 +187,23 @@ class TCCBoxCompiler(BaseCCompiler):
     compiler_id="tccbox"
     compiler_quality = 4
     @staticmethod
-    def check_avail() -> bool:    
+    def check_avail() -> bool:
         try:
-            import tccbox
+            pass
         except:
             return False
         return True
-    
-    def compile(self, suppress_compilation: bool, suppress_code_writing: bool, quiet: bool, extra_flags: List[str]) -> bool:
+
+    def get_compiler_fingerprint(self) -> str:
+        version=""
+        try:
+            import importlib.metadata
+            version=importlib.metadata.version("tccbox")
+        except Exception:
+            pass
+        return self.compiler_id+"|"+version
+
+    def _compile_impl(self, suppress_compilation: bool, suppress_code_writing: bool, quiet: bool, extra_flags: Sequence[str]) -> bool:
         if suppress_compilation:
             return True
         if not quiet:
@@ -146,9 +215,39 @@ class TCCBoxCompiler(BaseCCompiler):
             if os.name!="nt":
                 fullcmd+=["-nostdinc", "-nostdlib"]
             else:
-                fullcmd+=["-rdynamic"]
-            fullcmd+=["-DPYOOMPH_TCC_TO_MEMORY","-Dsize_t=unsigned long long"]+extra_flags+[self.get_code_filename(), "-o",soname]
-            self.call_cmd( fullcmd,quiet=quiet)
+                # -lucrtbase: tcc links msvcrt by default, and msvcrt predates C99. Measured on the
+                # runner by compiling each candidate on its own (citools/windows_tcc_diag.py): tcc
+                # can link exp, log, sqrt, pow, sinh, cosh, tanh, atan2, fabs, strcpy and strlen, and
+                # CANNOT link erf, erfc, asinh, acosh, atanh, fmax or fmin - the C99 additions. That
+                # is not just the math-functions test: fmax and fmin are generated by any weak form
+                # using maximum() or minimum(), so those models could not JIT-compile here at all.
+                #
+                # The symptom was as misleading as it gets - tcc emits "undefined symbol 'acosh'",
+                # EXITS 0 and writes no library, and pyoomph then reported a LoadLibrary failure with
+                # error 126, which is Windows saying the file does not exist.
+                #
+                # ucrtbase.dll is the right runtime rather than merely a runtime that has them: this
+                # wheel is built with MSYS2 UCRT64 and the host CPython is UCRT-based, so the JIT code
+                # binds to the same CRT as the extension beside it. (msvcr120 also linked in the
+                # probe; it is the VS2013 runtime and would be a different CRT from everything else
+                # in the process.)
+                fullcmd+=["-rdynamic","-lucrtbase"]
+            fullcmd+=["-DPYOOMPH_TCC_TO_MEMORY","-Dsize_t=unsigned long long"]+list(extra_flags)+[self.get_code_filename(), "-o",soname]
+            output=self.call_cmd( fullcmd,quiet=quiet)
+            # A zero exit is not proof that anything was written. tcc on Windows warns about an
+            # implicit declaration, exits 0 and produces NO library, and without this the failure
+            # surfaces much later as "DLL ... could not be loaded. Error code: 126" - Windows saying
+            # the file does not exist - pointing at a path that was never created, with tcc's own
+            # warning long since discarded (call_cmd only shows its output on a nonzero exit). The
+            # missing declaration was strcpy, in jitbridge.h; the misleading error cost far more to
+            # chase than the declaration did to add.
+            if not os.path.exists(soname):
+                raise RuntimeError(
+                    "The JIT compiler exited successfully but wrote no library at " + soname +
+                    ". Its output was:\n" + (output.strip() or "(nothing)") +
+                    "\nAn implicit declaration warning here means a function used by the generated "
+                    "code is missing from pyoomph/jitbridge/jitbridge.h, which is the only "
+                    "declaration tcc gets (it is called with -nostdinc).")
         return True
 
 
@@ -156,19 +255,19 @@ class TCCBoxCompiler(BaseCCompiler):
 class SystemCCompiler(BaseCCompiler):
     compiler_id = "system"
     compiler_quality=5
-    def __init__(self,compile_args:Optional[List[str]]=None):
+    def __init__(self,compile_args:list[str] | None=None):
         super(SystemCCompiler, self).__init__()
-        self.comp=distutils.ccompiler.new_compiler(verbose=1)
+        self.comp=distutils.ccompiler.new_compiler(verbose=True)
         self.comp.add_include_dir(self.get_jit_include_dir())
         self.compile_args=compile_args
         self._optimize_full_speed:bool=False
-        distutils.log.set_verbosity(2)
+        distutils.log.set_verbosity(2) #type:ignore
 
     def optimize_for_max_speed(self):
         self._optimize_full_speed=True
 
-    def has_function(self, funcname:str, includes:Optional[List[str]]=None, include_dirs:Optional[List[str]]=None,
-                     libraries:Optional[List[str]]=None, library_dirs:Optional[List[str]]=None) -> bool:
+    def has_function(self, funcname:str, includes:list[str] | None=None, include_dirs:list[str] | None=None,
+                     libraries:list[str] | None=None, library_dirs:list[str] | None=None) -> bool:
         import tempfile
         if includes is None:
             includes = []
@@ -209,12 +308,12 @@ int main (int argc, char **argv) {
     @staticmethod
     def check_avail()->bool:
         inst=SystemCCompiler()
-        distutils.log.set_verbosity(0)
+        distutils.log.set_verbosity(0) #type:ignore
         res:bool=inst.has_function("abort",includes=["stdlib.h"])
-        distutils.log.set_verbosity(2)
+        distutils.log.set_verbosity(2) #type:ignore
         return res
 
-    def toolchain_located(self)->Optional[bool]:
+    def toolchain_located(self)->bool | None:
         if self.comp.compiler_type!="msvc": #type:ignore
             return None
         try:
@@ -227,27 +326,64 @@ int main (int argc, char **argv) {
             return False
         return True
 
-    def compile(self, suppress_compilation:bool, suppress_code_writing:bool,quiet:bool,extra_flags:List[str]) -> bool:
+    def get_compiler_fingerprint(self) -> str:
+        exe=self.comp.compiler_so[0] if getattr(self.comp,'compiler_so',None) else "" #type:ignore
+        version=""
+        try:
+            out=subprocess.run([exe,"--version"],capture_output=True,text=True,timeout=5)
+            version=out.stdout+out.stderr
+        except Exception:
+            pass
+        return self.compiler_id+"|"+str(self.comp.compiler_type)+"|"+exe+"|"+version #type:ignore
+
+    def _compute_preargs(self) -> list[str]:
+        """The compile flags, without the per-Problem extra_compiler_flags (which the cache key hashes
+        separately).
+
+        Factored out of _compile_impl so that get_cache_flag_state() can return the flags THEMSELVES.
+        That is what dev_docs/code_generation.md 7 asked for: the key used to hash the few pieces of
+        state today's flags happen to be derivable from, so a flag hardcoded into the defaults was
+        invisible to it and every previously cached .so was silently reused. Hashing the computed list
+        means no flag change ever needs a cache epoch again.
+        """
+        if self.compile_args is not None:
+            # A copy, not the caller's list: get_ccompiler() memoises one compiler instance per backend,
+            # so the += below used to append -ffast-math and the Problem's extra flags to the user's own
+            # list on every single element compile, and the cache key drifted along with it.
+            return list(self.compile_args)
+        if self.comp.compiler_type=="unix": #type:ignore
+            if os.environ.get('PYOOMPH_DEBUG') == "1":
+                return ["-O0","-g3","-fPIC"]
+            # -fno-math-errno lets the compiler treat libm calls as pure, so it may CSE them and hoist
+            # them out of the trial loop. It changes no arithmetic - residuals are bit-identical (7) -
+            # and pyoomph never reads errno. On polynomial weak forms it is noise, which is why 7
+            # originally left it out; the case it was left out for was a transcendental weak form where
+            # subexpression() beats it. But the transcendental forms also arise inside pyoomph's OWN
+            # equations, where the user cannot reach in and wrap anything: measured on a 16x16 quad
+            # Navier-Stokes, elemental residual+Jacobian, only the mesh-motion class changed:
+            #   LaplaceSmoothedMesh 16.3 -> 16.5 ms, PseudoElasticMesh 16.9 -> 16.9 ms (the controls),
+            #   HyperelasticSmoothedMesh 41.9 -> 20.7 ms, YeohSmoothedMesh 127.2 -> 22.3 ms.
+            # Yeoh mesh smoothing is 7.8x slower than Laplace without it and 1.35x slower with it.
+            preargs=["-O3","-fPIC","-fno-math-errno"]
+            if sys.platform!="darwin":
+                preargs+=["-march=native"]
+            return preargs
+        elif self.comp.compiler_type=="msvc": #type:ignore
+            # No MSVC equivalent of -fno-math-errno that does not also change the arithmetic (/fp:fast
+            # does, and is what optimize_for_max_speed opts into).
+            return ["/O2"] #Optionally set things like /arch:AVX2 /O2 /Ob2
+        else:
+            raise RuntimeError("Compiler type "+str(self._comp.compiler_type)) #type:ignore
+
+    def get_cache_flag_state(self) -> str:
+        return super().get_cache_flag_state()+"|"+repr(self._optimize_full_speed)+"|"+repr(self._compute_preargs())
+
+    def _compile_impl(self, suppress_compilation:bool, suppress_code_writing:bool,quiet:bool,extra_flags:Sequence[str]) -> bool:
         if suppress_compilation:
             return True
-        distutils.log.set_verbosity(2 if not quiet else 0)
-        preargs=[]
+        distutils.log.set_verbosity(2 if not quiet else 0) #type:ignore
         link_extra_postargs=[]
-        if self.compile_args is None:
-            if self.comp.compiler_type=="unix": #type:ignore
-                if os.environ.get('PYOOMPH_DEBUG') == "1":
-                    preargs = ["-O0","-g3","-fPIC"]
-                else:
-                    preargs=["-O3","-fPIC"]
-                    if sys.platform!="darwin":
-                        preargs+=["-march=native"]                   
-
-            elif self.comp.compiler_type=="msvc": #type:ignore
-                preargs = ["/O2"] #Optionally set things like /arch:AVX2 /O2 /Ob2 #Test /fp:fast
-            else:
-                raise RuntimeError("Compiler type "+str(self._comp.compiler_type)) #type:ignore
-        else:
-            preargs=self.compile_args
+        preargs=self._compute_preargs()
 
         if self._optimize_full_speed:
             if self.comp.compiler_type=="msvc": #type:ignore
@@ -271,14 +407,29 @@ int main (int argc, char **argv) {
             src=self.get_code_filename()
         #print("Compiling "+src+" to shared library "+self.get_lib_filename()+" with compiler "+str(self.comp.compiler_type)+" i.e. "+self.comp.compiler_so[0]) #type:ignore
         obj=self.comp.compile([src],extra_preargs=preargs,extra_postargs=preargs,debug=os.environ.get('PYOOMPH_DEBUG') == "1")
-        self.comp.link(self.comp.SHARED_LIBRARY, obj,self.get_lib_filename(),extra_postargs=link_extra_postargs) #type:ignore
+        # Link to a sibling temp name and rename it into place, rather than letting the linker write
+        # the final name directly. A direct write truncates and rewrites the same inode, which may be
+        # mmapped right now by a library another Problem in this process still has loaded; os.replace
+        # is atomic and installs a new inode, so an existing mapping keeps the bytes it was opened
+        # with. Same reasoning as JITCache.try_restore in jit_cache.py.
+        final=self.get_lib_filename()
+        tmp=final+".tmp"+str(os.getpid())
+        self.comp.link(self.comp.SHARED_LIBRARY, obj,tmp,extra_postargs=link_extra_postargs) #type:ignore
+        try:
+            os.replace(tmp,final)
+        except BaseException:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
         return True
 
 
 
-_global_compilers:Dict[str,_pyoomph.CCompiler]={}
+_global_compilers:dict[str,_pyoomph.CCompiler]={}
 
-def get_ccompiler(comp:Optional[str]=None)->_pyoomph.CCompiler:   #If None, we set the best one
+def get_ccompiler(comp:str | None=None)->_pyoomph.CCompiler:   #If None, we set the best one
 #    print("GET CCOMPILER ",comp)
     if comp is None:
         avail=BaseCCompiler.available_compilers()
@@ -297,14 +448,5 @@ def get_ccompiler(comp:Optional[str]=None)->_pyoomph.CCompiler:   #If None, we s
         raise RuntimeError("Should not end here")
 
 
-
-
-@BaseCCompiler.register_compiler()
-class CCacheCCompiler(SystemCCompiler):
-    compiler_id = "ccache"
-    compiler_quality=6   
-    def __init__(self, compile_args = None):
-        super().__init__(compile_args)            
-        self.comp.compiler_so=["ccache"]+self.comp.compiler_so
-        self.comp.linker_so=["ccache"]+self.comp.linker_so
-        # TODO: Check whether the c expression mode is "deterministic" and warn if not?
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

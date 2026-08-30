@@ -85,7 +85,7 @@ namespace oomph
     /*void operator=(const MacroElementNodeUpdateNode&) = delete;*/
 
     /// Destructor (empty)
-    virtual ~MacroElementNodeUpdateNode() {}
+    ~MacroElementNodeUpdateNode() override {}
 
     /// Update the current nodal position. If
     /// required, perform the auxiliary update of nodal values.
@@ -94,7 +94,7 @@ namespace oomph
     /// of this flag, this should only be done for newly
     /// created nodes, when this function is called from
     /// MacroElementNodeUpdateElementBase::build_macro_element_node_update_node(...)
-    void node_update(const bool& update_all_time_levels_for_new_node = false);
+    void node_update(const bool& update_all_time_levels_for_new_node = false) override;
 
     ///  Pointer to finite element that performs the update by referring
     /// to its macro-element representation (Access required...)
@@ -112,7 +112,7 @@ namespace oomph
     }
 
     /// Number of geometric objects involved in node update function
-    unsigned ngeom_object() const
+    unsigned ngeom_object() const override
     {
       return Geom_object_pt.size();
     }
@@ -141,7 +141,7 @@ namespace oomph
     }
 
     /// Return all geometric objects that affect the node update
-    inline GeomObject** all_geom_object_pt()
+    inline GeomObject** all_geom_object_pt() override
     {
       if (Geom_object_pt.size() > 0)
       {
@@ -285,7 +285,7 @@ namespace oomph
       delete;
 
     /// Empty destructor to clean up allocated memory
-    ~MacroElementNodeUpdateElement() {}
+    ~MacroElementNodeUpdateElement() override {}
 
     /// Broken assignment operator
     /*void operator=(const MacroElementNodeUpdateElement&) = delete;*/
@@ -294,7 +294,7 @@ namespace oomph
     /// Pass the vector of (pointers to) the geometric objects
     /// that affect the node update. This gets passed on to all nodes in
     /// the element.
-    void set_node_update_info(const Vector<GeomObject*>& geom_object_pt)
+    void set_node_update_info(const Vector<GeomObject*>& geom_object_pt) override
     {
       // Store local copy of geom object vector, so it can be passed on
       // to son elements (and their nodes) during refinement
@@ -363,7 +363,7 @@ namespace oomph
     MacroElementNodeUpdateMesh() {}
 
     /// Virtual destructor (empty)
-    virtual ~MacroElementNodeUpdateMesh() {}
+    ~MacroElementNodeUpdateMesh() override {}
 
     /// Broken copy constructor
     MacroElementNodeUpdateMesh(const MacroElementNodeUpdateMesh&) = delete;
@@ -384,7 +384,7 @@ namespace oomph
     /// [Doesn't make sense to use this mesh with SolidElements anyway,
     /// so we buffer the case if update_all_solid_nodes is set to
     /// true.]
-    void node_update(const bool& update_all_solid_nodes = false)
+    void node_update(const bool& update_all_solid_nodes = false) override
     {
 #ifdef PARANOID
       if (update_all_solid_nodes)
@@ -467,7 +467,7 @@ namespace oomph
                     Vector<GeneralisedElement*>& deleted_element_pt,
                     DocInfo& doc_info,
                     const bool& report_stats,
-                    const bool& overrule_keep_as_halo_element_status)
+                    const bool& overrule_keep_as_halo_element_status) override
     {
       // Call underlying Mesh::distribute first
       Mesh::distribute(comm_pt,

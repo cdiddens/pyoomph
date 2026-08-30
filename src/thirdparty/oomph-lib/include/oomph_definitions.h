@@ -152,7 +152,7 @@ namespace oomph
     OomphLibQuietException();
 
     /// The destructor cannot throw an exception (C++ STL standard)
-    ~OomphLibQuietException() throw() {}
+    ~OomphLibQuietException() throw() override {}
   };
 
   /// ////////////////////////////////////////////////////////////////////
@@ -200,7 +200,7 @@ namespace oomph
                       bool list_trace_back);
 
     /// The destructor cannot throw an exception (C++ STL standard)
-    ~OomphLibException() throw();
+    ~OomphLibException() throw() override;
 
     /// Exception stream to which we write message in destructor
     std::ostream* Exception_stream_pt;

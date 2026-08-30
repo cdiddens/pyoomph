@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -21,12 +21,16 @@ The main author may be contacted at c.diddens@utwente.nl
 
 
 #include "mesh.hpp"
+#include "pointlocator.hpp"
 #include "meshtemplate.hpp"
 #include "exception.hpp"
+#include <array>
 #include <cassert>
+#include <chrono>
 #include <functional>
 
 #include "elements.hpp"
+#include "elements_concrete.hpp"
 #include "problem.hpp"
 #include "expressions.hpp"
 #include <cln/float.h>
@@ -42,8 +46,10 @@ using namespace oomph;
 
 namespace pyoomph
 {
+  bool Mesh::report_interpolation_timing = false;
 
   typedef double (*InitialConditionFctPt)(const double &t);
+
 
   // Determine how many "elemental index" entries to_numpy will need to write per element (nelem is
   // set to the total number of sub-elements across the mesh, e.g. after triangle tessellation of
@@ -53,6 +59,15 @@ namespace pyoomph
   // elements must be informed about how their finer neighbours subdivide them for consistent plotting
   // (inform_coarser_neighbors_for_tesselated_numpy) before the per-element sub-element counts are summed.
   int Mesh::get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nelem, bool discontinuous) // Gets the number of required elemental indices
+  {
+    return this->get_num_numpy_elemental_indices(tesselate_tri, nelem, discontinuous, NULL);
+  }
+
+  // As above, but optionally also records, for each of the nelem output rows, the index of the mesh
+  // element it stems from. The two must be produced by the same pass: an element's sub-element count
+  // depends on the hanging-neighbour information gathered below, so a second, independent loop over
+  // the elements would be one more thing that can silently drift out of sync with to_numpy's rows.
+  int Mesh::get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nelem, bool discontinuous, std::vector<int> *source_element_indices)
   {
     unsigned nelement = this->nelement();
 
@@ -64,7 +79,9 @@ namespace pyoomph
       if (this->element_pt(ne)->is_halo()) continue; // Skip halo elements, as they will be handled by the owning process
 #endif
 */
-      dynamic_cast<BulkElementBase *>(this->element_pt(ne))->_numpy_index = cnt++;
+      BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(ne));
+      be->_numpy_index = cnt++;
+      be->_tess_hang_scoord.clear(); // fresh per tesselated-numpy pass (populated by inform_coarser below)
     }
     std::vector<std::vector<std::set<oomph::Node *>>> additional_elemental_tri_nodes(nelement);
     if (tesselate_tri && !discontinuous)
@@ -84,43 +101,613 @@ namespace pyoomph
 
     int res = 0;
     nelem = 0;
+    if (source_element_indices)
+      source_element_indices->clear();
     for (unsigned int ne = 0; ne < nelement; ne++)
     {
 /*
 #ifdef OOMPH_HAS_MPI
       if (this->element_pt(ne)->is_halo()) continue; // Skip halo elements, as they will be handled by the owning process
-#endif      
+#endif
 */
       BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(ne));
       unsigned nsubelem = 0;
       res = std::max(res, be->get_num_numpy_elemental_indices(tesselate_tri, nsubelem, additional_elemental_tri_nodes));
       nelem += nsubelem;
+      if (source_element_indices)
+        source_element_indices->insert(source_element_indices->end(), nsubelem, (int)ne);
     }
     return res;
   }
 
-  // Lazily construct (at Lagrangian coordinates, history index 0) and cache the KD-tree used for
-  // nearest-node/element lookups; reused across calls until invalidate_lagrangian_kdtree() is called.
-  MeshKDTree *Mesh::get_lagrangian_kdtree()
+  // For each element row that to_numpy(tesselate_tri, ..., discontinuous) produces, the index of the
+  // mesh element it was generated from. Needed because the rows are sub-elements, not elements: with
+  // tesselate_tri a quad becomes two triangles (more if hanging neighbours force extra ones), so the
+  // rows cannot be zipped with element_pt() -- which is what any per-element decision on the Python
+  // side (halo filtering, in particular) has to go through.
+  std::vector<int> Mesh::get_numpy_element_source_indices(bool tesselate_tri, bool discontinuous)
   {
-    if (!lagrangian_kdtree)
-    {
-      lagrangian_kdtree = new MeshKDTree(this, true, 0);
-    }
-    return lagrangian_kdtree;
+    std::vector<int> res;
+    unsigned nelem = 0;
+    this->get_num_numpy_elemental_indices(tesselate_tri, nelem, discontinuous, &res);
+    return res;
   }
 
-  void Mesh::invalidate_lagrangian_kdtree()
+  // --- Partition-independent addressing of elements and nodes -------------------------------------
+  //
+  // State files must not contain anything rank-local, so elements are addressed by (index of their
+  // root in the undistributed base mesh, path through the refinement tree) and nodes by the smallest
+  // such address among the elements holding them. See dev_docs/distributed_state_files.md.
+
+  // The root element of e, or e itself on a mesh that was never refined (no tree).
+  static BulkElementBase *root_element_of(oomph::GeneralisedElement *e)
   {
-    if (lagrangian_kdtree)
-      delete lagrangian_kdtree;
-    lagrangian_kdtree = NULL;
+    oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(e);
+    if (!re || !re->tree_pt())
+      return dynamic_cast<BulkElementBase *>(e);
+    // Checked rather than assumed: a tree whose Root_pt was never filled in reports NULL here, and
+    // dereferencing it segfaults somewhere unrelated. Returning NULL instead surfaces as the explicit
+    // "elements without a global base index" error when a state file is written.
+    oomph::TreeRoot *root = re->tree_pt()->root_pt();
+    if (!root || !root->object_pt())
+      return NULL;
+    return dynamic_cast<BulkElementBase *>(root->object_pt());
   }
+
+  static std::vector<int> refinement_path_of(oomph::GeneralisedElement *e); // defined below
+
+  // The packed path of e from its tree root, in the encoding get_element_structural_keys() documents:
+  // one step per level, 3 bits each, +1 so son 0 is not a no-op, with a leading 1 so that "root" and
+  // "first son of the root" differ. 1 means the element IS the root.
+  static long packed_path_of(oomph::GeneralisedElement *e)
+  {
+    long path = 1;
+    for (int step : refinement_path_of(e))
+      path = path * 8 + (step + 1);
+    return path;
+  }
+
+  namespace
+  {
+    // splitmix64. Any decent 64-bit mixer would do; this one is short, has no table and is exactly
+    // reproducible across compilers, which is what matters -- two processes must digest the same input
+    // to the same 128 bits or the two sides of an interface stop recognising each other.
+    inline unsigned long long topo_mix64(unsigned long long x)
+    {
+      x += 0x9E3779B97F4A7C15ULL;
+      x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+      x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+      return x ^ (x >> 31);
+    }
+
+    inline void topo_absorb(std::array<unsigned long long, 2> &acc, unsigned long long v)
+    {
+      acc[0] = topo_mix64(acc[0] ^ v);
+      acc[1] = topo_mix64(acc[1] + v + 0x165667B19E3779F9ULL);
+    }
+
+    const double TOPO_WEIGHT_SCALE = 16777216.0; // 2^24
+  }
+
+  // See the declaration in nodes.hpp. Throws on a non-dyadic weight rather than rounding: a son's nodes
+  // sit at dyadic points of its father whatever the family, so anything else means the assumption this
+  // identity rests on is broken, and a silently rounded weight would make one side's key differ from the
+  // other's.
+  bool topo_weight_is_dyadic(double w)
+  {
+    const double scaled = w * TOPO_WEIGHT_SCALE;
+    return std::fabs(scaled - (double)std::llround(scaled)) <= 1e-6;
+  }
+
+  long long topo_weight_exact(double w)
+  {
+    const double scaled = w * TOPO_WEIGHT_SCALE;
+    const long long q = (long long)std::llround(scaled);
+    if (std::fabs(scaled - (double)q) > 1e-6)
+    {
+      throw_runtime_error("Cannot build a topological node identity: the C1 shape weight " + std::to_string(w) +
+                          " is not an exact dyadic. See dev_docs/interface_refinement_coupling.md section 15.");
+    }
+    return q;
+  }
+
+  std::array<unsigned long long, 2> topo_digest_of_template_index(std::size_t template_index)
+  {
+    // +1 so template node 0 does not digest to something that could collide with the "unset" state.
+    std::array<unsigned long long, 2> acc = {0x243F6A8885A308D3ULL, 0x13198A2E03707344ULL};
+    topo_absorb(acc, (unsigned long long)template_index + 1ULL);
+    if (!acc[0] && !acc[1]) acc[0] = 1ULL; // {0,0} is the sentinel; never hand it out
+    return acc;
+  }
+
+  std::array<unsigned long long, 2> topo_digest_of_expansion(std::vector<std::pair<std::size_t, double>> &expansion)
+  {
+    // Canonical form first: sorted by template index, weights of repeated indices summed, zeros dropped.
+    // Two domains reach the same point through different elements and in a different order, so nothing
+    // that depends on the order of assembly may survive into the digest.
+    std::sort(expansion.begin(), expansion.end());
+    std::vector<std::pair<std::size_t, double>> merged;
+    for (auto &e : expansion)
+    {
+      if (!merged.empty() && merged.back().first == e.first) merged.back().second += e.second;
+      else merged.push_back(e);
+    }
+    std::array<unsigned long long, 2> acc = {0xA4093822299F31D0ULL, 0x082EFA98EC4E6C89ULL};
+    for (auto &e : merged)
+    {
+      if (std::fabs(e.second) < 1e-13) continue;
+      topo_absorb(acc, (unsigned long long)e.first + 1ULL);
+      topo_absorb(acc, (unsigned long long)topo_weight_exact(e.second));
+    }
+    if (!acc[0] && !acc[1]) acc[0] = 1ULL;
+    expansion.swap(merged);
+    return acc;
+  }
+
+  // Deterministic identity for a point whose C1 description is not dyadic (a centroid bubble). Quantised
+  // the same way on both sides -- the shape function is evaluated at the same local coordinate, so the
+  // doubles are bit-identical -- but never compared against a refinement-created node, which is why an
+  // approximate quantisation is acceptable here and not above.
+  std::array<unsigned long long, 2> topo_digest_of_opaque_expansion(std::vector<std::pair<std::size_t, double>> expansion)
+  {
+    std::sort(expansion.begin(), expansion.end());
+    std::array<unsigned long long, 2> acc = {0x9216D5D98979FB1BULL, 0xD1310BA698DFB5ACULL};
+    for (auto &e : expansion)
+    {
+      if (std::fabs(e.second) < 1e-13) continue;
+      topo_absorb(acc, (unsigned long long)e.first + 1ULL);
+      topo_absorb(acc, (unsigned long long)std::llround(e.second * TOPO_WEIGHT_SCALE));
+    }
+    if (!acc[0] && !acc[1]) acc[0] = 1ULL;
+    return acc;
+  }
+
+  std::array<unsigned long long, 2> topo_digest_of_corner_set(const std::vector<std::size_t> &sorted_corners)
+  {
+    std::array<unsigned long long, 2> acc = {0x452821E638D01377ULL, 0xBE5466CF34E90C6CULL};
+    topo_absorb(acc, (unsigned long long)sorted_corners.size());
+    for (std::size_t c : sorted_corners) topo_absorb(acc, (unsigned long long)c + 1ULL);
+    if (!acc[0] && !acc[1]) acc[0] = 1ULL;
+    return acc;
+  }
+
+  // See the header. Walks the elements in order of increasing refinement level, so a father's nodes are
+  // always resolved before its sons' are needed.
+  void Mesh::assign_interface_topological_ids()
+  {
+    refresh_topological_interface_key_setting();
+    const unsigned nel = this->nelement();
+    if (!nel)
+    {
+      interface_topological_ids_complete = true;
+      return;
+    }
+    if (interface_topological_ids_complete && topo_ids_at_nnode == (unsigned long)this->nnode() &&
+        topo_ids_at_nelement == (unsigned long)nel)
+      return;
+    // Group by refinement level rather than sorting: the levels are small integers and the common case
+    // is that there is nothing left to do at all.
+    unsigned maxlevel = 0;
+    std::vector<BulkElementBase *> els;
+    els.reserve(nel);
+    for (unsigned e = 0; e < nel; e++)
+    {
+      BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(e));
+      if (!be) continue;
+      els.push_back(be);
+      maxlevel = std::max(maxlevel, be->refinement_level());
+    }
+
+    bool complete = true;
+    for (unsigned lvl = 0; lvl <= maxlevel; lvl++)
+    {
+      for (BulkElementBase *be : els)
+      {
+        if (be->refinement_level() != lvl) continue;
+        // Any node still unset here has to be resolved from the father; a level-0 element's nodes come
+        // from the mesh generator and are stamped there.
+        bool any_unset = false;
+        for (unsigned l = 0; l < be->nnode(); l++)
+          if (!static_cast<pyoomph::Node *>(be->node_pt(l))->has_interface_topological_id()) { any_unset = true; break; }
+        if (!any_unset) continue;
+
+        BulkElementBase *father = dynamic_cast<BulkElementBase *>(be->father_element_pt());
+        if (!father) { complete = false; continue; }
+        // Ask before calling: refusing is legitimate (a wedge or pyramid has no son->father map, and a
+        // tet refuses a pyramid father), and this sweep runs from actions_after_adapt() on EVERY
+        // refinement, so throwing here aborted any wedge/pyramid run that ever refined - the ids are
+        // only wanted for interface refinement coupling, which already falls back to position matching
+        // when they are incomplete. See BulkElementBase::can_report_nodal_s_in_father.
+        if (!be->can_report_nodal_s_in_father()) { complete = false; continue; }
+        const std::vector<unsigned> &c1map = father->get_nodal_space_index_to_element_index_map()[SPACE_INDEX_C1];
+        if (c1map.empty()) { complete = false; continue; }
+
+        oomph::Shape psi(c1map.size());
+        for (unsigned l = 0; l < be->nnode(); l++)
+        {
+          pyoomph::Node *n = static_cast<pyoomph::Node *>(be->node_pt(l));
+          if (n->has_interface_topological_id()) continue;
+          oomph::Vector<double> sfather;
+          be->get_nodal_s_in_father(l, sfather);
+          father->shape_at_s_C1(sfather, psi);
+          // Compose the father's C1 corners' TEMPLATE expansions, not their digests. The expansion is
+          // the canonical form and the only one that does not depend on the level at which this node
+          // happened to be created -- see pyoomph::Node::interface_topological_expansion for the
+          // quarter-edge point that reaches a C2 domain and a C1 domain by different routes.
+          std::vector<std::pair<std::size_t, double>> expansion;
+          bool resolvable = true;
+          for (unsigned m = 0; m < c1map.size(); m++)
+          {
+            if (std::fabs(psi[m]) < 1e-12) continue;
+            pyoomph::Node *fn = static_cast<pyoomph::Node *>(father->node_pt(c1map[m]));
+            const std::vector<std::pair<std::size_t, double>> &fe = fn->get_interface_topological_expansion();
+            if (fe.empty()) { resolvable = false; break; } // opaque, or not resolved yet
+            for (auto &t : fe) expansion.push_back(std::make_pair(t.first, t.second * psi[m]));
+          }
+          if (!resolvable || expansion.empty()) { complete = false; continue; }
+          // A bubble node sits at a centroid, so its C1 weights are thirds or sixths -- not dyadic, and
+          // not something any refinement ever produces. Those get an OPAQUE identity: deterministic, but
+          // deliberately outside the comparable set. That is safe because only C1 CORNERS ever enter an
+          // expansion or a facet key, and a bubble is never one of those.
+          bool dyadic = true;
+          for (auto &t : expansion)
+            if (!topo_weight_is_dyadic(t.second)) { dyadic = false; break; }
+          if (!dyadic)
+          {
+            n->set_interface_topological_expansion(std::vector<std::pair<std::size_t, double>>());
+            n->set_interface_topological_id(topo_digest_of_opaque_expansion(expansion));
+            continue;
+          }
+          const std::array<unsigned long long, 2> id = topo_digest_of_expansion(expansion);
+          n->set_interface_topological_expansion(expansion);
+          n->set_interface_topological_id(id);
+        }
+      }
+    }
+
+    // A node that is still unset after the sweep (e.g. rebuilt by the missing-master machinery rather
+    // than by a refinement this rank performed) makes the whole mesh fall back to position matching,
+    // rather than being compared as an unset id against a real one.
+    for (BulkElementBase *be : els)
+      for (unsigned l = 0; l < be->nnode(); l++)
+        if (!static_cast<pyoomph::Node *>(be->node_pt(l))->has_interface_topological_id()) { complete = false; break; }
+    interface_topological_ids_complete = complete;
+    topo_ids_at_nnode = (unsigned long)this->nnode();
+    topo_ids_at_nelement = (unsigned long)nel;
+  }
+
+  // Number the root elements in their current order. Must run BEFORE the problem is distributed,
+  // while the mesh still holds all of them - afterwards each rank only sees its own share and would
+  // number them 0..n_local, which is exactly the rank-local numbering this is meant to avoid.
+  void Mesh::assign_global_base_element_indices()
+  {
+    oomph::TreeBasedRefineableMeshBase *tb = dynamic_cast<oomph::TreeBasedRefineableMeshBase *>(this);
+    if (tb && tb->forest_pt())
+    {
+      unsigned ntree = tb->forest_pt()->ntree();
+      for (unsigned i = 0; i < ntree; i++)
+      {
+        BulkElementBase *be = dynamic_cast<BulkElementBase *>(tb->forest_pt()->tree_pt(i)->object_pt());
+        if (be)
+          be->global_base_index = (long)i;
+      }
+    }
+    else
+    {
+      for (unsigned i = 0; i < this->nelement(); i++)
+      {
+        BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(i));
+        if (be)
+          be->global_base_index = (long)i;
+      }
+    }
+    // Stamp every element with the number of ITS root, not only the roots with their own. The pair
+    // that addresses an element is (root index, path), and the root half used to be looked up through
+    // the tree at write time - which stops working the moment the mesh is distributed, since a leaf
+    // this rank keeps may belong to a root it does not. Doing it here, while the mesh is whole, is the
+    // only place the answer is available for every element.
+    for (unsigned i = 0; i < this->nelement(); i++)
+    {
+      BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(i));
+      if (!be) continue;
+      BulkElementBase *root = root_element_of(this->element_pt(i));
+      be->global_root_index = (root ? root->global_base_index : -1);
+      be->global_root_path = packed_path_of(this->element_pt(i));
+    }
+  }
+
+  // (root index, packed tree path) for every element, in local element order. The path packs the
+  // index of each element within its father's sons, 3 bits per level, with a leading 1 so that "root"
+  // and "first son of the root" do not collide. 3 bits cover an octree; an int64 then holds ~20
+  // levels, far beyond any reachable refinement depth.
+  std::vector<long> Mesh::get_element_structural_keys()
+  {
+    std::vector<long> res(2 * this->nelement(), -1);
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+    {
+      long root = -1, path = 1;
+      if (!element_structural_key(this->element_pt(ie), root, path))
+      {
+        root = -1;
+        path = packed_path_of(this->element_pt(ie));
+      }
+      res[2 * ie] = root;
+      res[2 * ie + 1] = path;
+    }
+    return res;
+  }
+
+  // The refinement path of e, read root -> leaf, as one entry per level (the index of the element
+  // within its father's sons). Empty for an unrefined element. Digit-wise rather than packed, because
+  // the packed form of get_element_structural_keys() does not COMPARE correctly: path*8+(s+1) makes a
+  // deep element numerically larger than a shallow one that precedes it in the tree.
+  static std::vector<int> refinement_path_of(oomph::GeneralisedElement *e)
+  {
+    std::vector<int> steps;
+    oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(e);
+    if (!re || !re->tree_pt())
+      return steps;
+    for (oomph::Tree *t = re->tree_pt(); t->father_pt(); t = t->father_pt())
+    {
+      oomph::Tree *f = t->father_pt();
+      int which = -1;
+      for (unsigned s = 0; s < f->nsons(); s++)
+      {
+        if (f->son_pt(s) == t)
+        {
+          which = (int)s;
+          break;
+        }
+      }
+      if (which < 0)
+        throw_runtime_error("Refinement tree is inconsistent: an element is not among its father's sons");
+      steps.push_back(which);
+    }
+    std::reverse(steps.begin(), steps.end()); // collected leaf -> root
+    return steps;
+  }
+
+  // The one place an element's partition-independent address is formed. Interface meshes reach it
+  // through their bulk element (InterfaceMesh::get_interface_element_structural_keys) and the bulk
+  // list through get_element_structural_keys(), so both see the stamp and neither has to know that
+  // Problem::distribute() has re-rooted the tree underneath them.
+  bool Mesh::element_structural_key(oomph::GeneralisedElement *e, long &root_index, long &path)
+  {
+    BulkElementBase *be = dynamic_cast<BulkElementBase *>(e);
+    if (be && be->global_root_index >= 0 && be->global_root_path >= 0)
+    {
+      root_index = be->global_root_index;
+      path = be->global_root_path;
+      return true;
+    }
+    BulkElementBase *r = root_element_of(e);
+    if (!r || r->global_base_index < 0)
+      return false;
+    root_index = r->global_base_index;
+    path = packed_path_of(e);
+    return true;
+  }
+
+  int Mesh::compare_structural_order(oomph::GeneralisedElement *a, oomph::GeneralisedElement *b)
+  {
+    if (a == b)
+      return 0;
+    BulkElementBase *ra = root_element_of(a), *rb = root_element_of(b);
+    if (!ra || !rb || ra->global_base_index < 0 || rb->global_base_index < 0)
+      return 0; // undecidable, see the declaration
+    if (ra->global_base_index != rb->global_base_index)
+      return (ra->global_base_index < rb->global_base_index ? -1 : 1);
+    std::vector<int> pa = refinement_path_of(a), pb = refinement_path_of(b);
+    for (unsigned i = 0; i < std::min(pa.size(), pb.size()); i++)
+    {
+      if (pa[i] != pb[i])
+        return (pa[i] < pb[i] ? -1 : 1);
+    }
+    // One path is a prefix of the other: the father precedes its sons in a preorder walk. Two leaves
+    // of one tree cannot be in that relation, so this only arises if a and b are not both leaves.
+    if (pa.size() != pb.size())
+      return (pa.size() < pb.size() ? -1 : 1);
+    return 0;
+  }
+
+  // Refinement tree of every root this mesh holds, as a preorder walk of son counts (0 for a leaf),
+  // with the roots ascending by global index. Describing a tree by its shape rather than by oomph's
+  // level-wise element numbers keeps it independent of how many elements the other ranks hold, so the
+  // same description can be replayed on any partition (and serially).
+  //
+  // One pass over the elements for all roots together: doing it per root meant re-scanning the whole
+  // element vector to find that root, which is quadratic and dominated the writing of a state file
+  // (222 ms of 228 ms on a 900-element mesh).
+  void Mesh::get_all_refinement_signatures(std::vector<long> &roots, std::vector<int> &lengths, std::vector<int> &data)
+  {
+    roots.clear();
+    lengths.clear();
+    data.clear();
+    std::map<long, oomph::Tree *> tree_of_root; // ordered, so the roots come out ascending
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+    {
+      BulkElementBase *root = root_element_of(this->element_pt(ie));
+      if (!root)
+        continue;
+      oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(this->element_pt(ie));
+      oomph::Tree *t = (re && re->tree_pt() ? re->tree_pt()->root_pt() : NULL);
+      auto it = tree_of_root.find(root->global_base_index);
+      if (it == tree_of_root.end())
+        tree_of_root[root->global_base_index] = t;
+      else if (!it->second)
+        it->second = t;
+    }
+    std::function<void(oomph::Tree *)> walk = [&](oomph::Tree *t)
+    {
+      unsigned ns = t->nsons();
+      data.push_back((int)ns);
+      for (unsigned s = 0; s < ns; s++)
+        walk(t->son_pt(s));
+    };
+    for (auto &entry : tree_of_root)
+    {
+      roots.push_back(entry.first);
+      size_t before = data.size();
+      if (entry.second)
+        walk(entry.second);
+      else
+        data.push_back(0); // no tree at all, i.e. a mesh that cannot be refined
+      lengths.push_back((int)(data.size() - before));
+    }
+  }
+
+  // Node indices (into this mesh's node_pt ordering) of every element's nodes, padded with -1 to the
+  // widest element. Together with the element keys this gives every node an address.
+  std::vector<int> Mesh::get_element_node_indices(unsigned &stride)
+  {
+    std::map<oomph::Node *, unsigned> nodemap;
+    this->fill_node_map(nodemap);
+    stride = 0;
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+      stride = std::max(stride, dynamic_cast<oomph::FiniteElement *>(this->element_pt(ie))->nnode());
+    std::vector<int> res((size_t)this->nelement() * stride, -1);
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+    {
+      oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(this->element_pt(ie));
+      for (unsigned j = 0; j < fe->nnode(); j++)
+      {
+        auto it = nodemap.find(fe->node_pt(j));
+        if (it != nodemap.end())
+          res[(size_t)ie * stride + j] = (int)it->second;
+      }
+    }
+    return res;
+  }
+
+  // Nodal state (positions at all history levels, Lagrangian coordinates, values at all history
+  // levels) in node_pt order, with the length of each node's block - unlike _save_state, which uses
+  // the traversal-dependent get_node_reordering and therefore cannot be addressed from outside.
+  void Mesh::save_nodal_state(std::vector<double> &data, std::vector<int> &lengths)
+  {
+    data.clear();
+    lengths.clear();
+    lengths.reserve(this->nnode());
+    for (unsigned ni = 0; ni < this->nnode(); ni++)
+    {
+      pyoomph::Node *n = static_cast<pyoomph::Node *>(this->node_pt(ni));
+      size_t before = data.size();
+      unsigned ntstor = n->ntstorage();
+      for (unsigned iv = 0; iv < n->ndim(); iv++)
+        for (unsigned ti = 0; ti < ntstor; ti++)
+          data.push_back(n->variable_position_pt()->value(ti, iv));
+      for (unsigned iv = 0; iv < n->nlagrangian(); iv++)
+        data.push_back(n->xi(iv));
+      for (unsigned iv = 0; iv < n->nvalue(); iv++)
+        for (unsigned ti = 0; ti < ntstor; ti++)
+          data.push_back(n->value(ti, iv));
+      lengths.push_back((int)(data.size() - before));
+    }
+  }
+
+  void Mesh::load_nodal_state(const std::vector<double> &data, const std::vector<int> &lengths)
+  {
+    if (lengths.size() != this->nnode())
+      throw_runtime_error("Nodal state has " + std::to_string(lengths.size()) + " entries, but the mesh has " + std::to_string(this->nnode()) + " nodes");
+    size_t s = 0;
+    for (unsigned ni = 0; ni < this->nnode(); ni++)
+    {
+      pyoomph::Node *n = static_cast<pyoomph::Node *>(this->node_pt(ni));
+      size_t before = s;
+      unsigned ntstor = n->ntstorage();
+      for (unsigned iv = 0; iv < n->ndim(); iv++)
+        for (unsigned ti = 0; ti < ntstor; ti++)
+          n->variable_position_pt()->set_value(ti, iv, data[s++]);
+      for (unsigned iv = 0; iv < n->nlagrangian(); iv++)
+        n->xi(iv) = data[s++];
+      for (unsigned iv = 0; iv < n->nvalue(); iv++)
+        for (unsigned ti = 0; ti < ntstor; ti++)
+          n->set_value(ti, iv, data[s++]);
+      if ((int)(s - before) != lengths[ni])
+        throw_runtime_error("Nodal state block " + std::to_string(ni) + " has the wrong length: the node now stores " + std::to_string(s - before) + " values, the state file has " + std::to_string(lengths[ni]));
+    }
+  }
+
+  // Elemental state: internal data at all history levels, plus the two geometric reference scalars.
+  void Mesh::save_elemental_state(std::vector<double> &data, std::vector<int> &lengths)
+  {
+    data.clear();
+    lengths.clear();
+    lengths.reserve(this->nelement());
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+    {
+      BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+      size_t before = data.size();
+      for (unsigned ied = 0; ied < e->ninternal_data(); ied++)
+        for (unsigned iv = 0; iv < e->internal_data_pt(ied)->nvalue(); iv++)
+          for (unsigned t = 0; t < e->internal_data_pt(ied)->ntstorage(); t++)
+            data.push_back(e->internal_data_pt(ied)->value(t, iv));
+      data.push_back(e->initial_cartesian_nondim_size);
+      data.push_back(e->initial_quality_factor);
+      lengths.push_back((int)(data.size() - before));
+    }
+  }
+
+  void Mesh::load_elemental_state(const std::vector<double> &data, const std::vector<int> &lengths)
+  {
+    if (lengths.size() != this->nelement())
+      throw_runtime_error("Elemental state has " + std::to_string(lengths.size()) + " entries, but the mesh has " + std::to_string(this->nelement()) + " elements");
+    size_t s = 0;
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+    {
+      BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+      for (unsigned ied = 0; ied < e->ninternal_data(); ied++)
+        for (unsigned iv = 0; iv < e->internal_data_pt(ied)->nvalue(); iv++)
+          for (unsigned t = 0; t < e->internal_data_pt(ied)->ntstorage(); t++)
+            e->internal_data_pt(ied)->set_value(t, iv, data[s++]);
+      e->initial_cartesian_nondim_size = data[s++];
+      e->initial_quality_factor = data[s++];
+    }
+  }
+
+  // Refine the elements with the given local indices (one level). Used to replay a refinement
+  // signature; each rank replays only what applies to the roots it holds.
+  void Mesh::refine_selected_elements_by_index(const std::vector<unsigned> &indices)
+  {
+    oomph::TreeBasedRefineableMeshBase *tb = dynamic_cast<oomph::TreeBasedRefineableMeshBase *>(this);
+    if (!tb)
+      throw_runtime_error("Cannot refine this mesh: it is not tree-based");
+    oomph::Vector<unsigned> v(indices.size());
+    for (size_t i = 0; i < indices.size(); i++)
+      v[i] = indices[i];
+    tb->refine_selected_elements(v);
+  }
+
+  // Row indices, in the node ordering to_numpy uses, of the nodes this mesh shares with process p.
+  // Entry j corresponds to entry j of process p's own list for this rank: oomph-lib builds
+  // Shared_node_pt in a matched order on both sides (Mesh::setup_shared_node_scheme), which makes
+  // this the exact node correspondence needed to merge the per-rank meshes into a global one - no
+  // geometric tolerance involved.
+  std::vector<int> Mesh::get_shared_node_numpy_indices(unsigned p)
+  {
+#ifdef OOMPH_HAS_MPI
+    std::map<oomph::Node *, unsigned> nodemap;
+    this->fill_node_map(nodemap);
+    unsigned n = this->nshared_node(p);
+    std::vector<int> res(n, -1);
+    for (unsigned j = 0; j < n; j++)
+    {
+      auto it = nodemap.find(this->shared_node_pt(p, j));
+      if (it != nodemap.end())
+        res[j] = (int)it->second;
+    }
+    return res;
+#else
+    return std::vector<int>();
+#endif
+  }
+
+  void Mesh::bump_topology_generation()
+  {
+    topology_generation++;
+  }
+
   Mesh::~Mesh()
   {
-    if (lagrangian_kdtree)
-      delete lagrangian_kdtree;
-    lagrangian_kdtree = NULL;
   }
 
   // Sanity-check the tree forest's neighbour information (if this is a tree-based refineable mesh);
@@ -135,6 +722,21 @@ namespace pyoomph
       dynamic_cast<oomph::TreeBasedRefineableMeshBase *>(this)->forest_pt()->check_all_neighbours(docinfo);
     }
     
+  }
+
+  // Re-derive the nodal positions of every element that carries a macro element from that macro
+  // element's mapping. The Python side used to loop the elements itself, crossing the nanobind
+  // boundary three times per element (element_pt, get_macro_element, map_nodes_on_macro_element);
+  // on a 250k-element mesh that alone was most of Problem.map_nodes_on_macro_elements().
+  void Mesh::map_nodes_on_macro_elements()
+  {
+    const unsigned nel = this->nelement();
+    for (unsigned ie = 0; ie < nel; ie++)
+    {
+      auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+      if (el && el->macro_elem_pt())
+        el->map_nodes_on_macro_element();
+    }
   }
 
   // Number of nodes; if discontinuous is set, counts per-element node copies (sum of each element's
@@ -162,9 +764,92 @@ namespace pyoomph
     }
   }
 
-  void Mesh::boundary_coordinates_bool(unsigned boundary_index)
+  void Mesh::boundary_coordinates_bool(unsigned boundary_index, bool value)
   {
-    Boundary_coordinate_exists[boundary_index] = true;
+    Boundary_coordinate_exists[boundary_index] = value;
+  }
+
+  void Mesh::set_boundary_zeta_period(unsigned boundary_index, double period)
+  {
+    if (period > 0.0)
+      boundary_zeta_periods[boundary_index] = period;
+    else
+      boundary_zeta_periods.erase(boundary_index);
+  }
+
+  double Mesh::get_boundary_zeta_period(unsigned boundary_index) const
+  {
+    auto it = boundary_zeta_periods.find(boundary_index);
+    return (it == boundary_zeta_periods.end() ? 0.0 : it->second);
+  }
+
+  // Positions of the nodes a transfer could not give a value to. Printed rather than counted,
+  // because "3 nodes got nothing" is not actionable and "the three nodes at these coordinates got
+  // nothing" is - they are almost always in one identifiable place, a corner or a boundary the two
+  // meshes disagree about.
+  static std::string describe_node_positions(const std::vector<std::vector<double>> &pos, unsigned max_shown = 12)
+  {
+    std::ostringstream oss;
+    for (unsigned i = 0; i < pos.size() && i < max_shown; i++)
+    {
+      oss << (i ? ", " : "") << "(";
+      for (unsigned d = 0; d < pos[i].size(); d++)
+        oss << (d ? ", " : "") << pos[i][d];
+      oss << ")";
+    }
+    if (pos.size() > max_shown)
+      oss << ", ... and " << (pos.size() - max_shown) << " more";
+    return oss.str();
+  }
+
+  // Which nodes one call of nodal_interpolate_from is responsible for.
+  //
+  // boundary_index < 0 is the bulk pass: it does the interior and leaves every boundary node to the
+  // per-boundary passes. On an INTERFACE mesh a boundary index only selects the zeta query, and all
+  // of that mesh's nodes are meant.
+  //
+  // On a BULK mesh with a boundary index - the branch the interpolator takes for a boundary that has
+  // no interface mesh, "corners to another domain" - only the nodes ON that boundary are meant. That
+  // restriction was missing, so the call walked the whole mesh: it re-did every node, and for the
+  // ones it could not locate it OVERWROTE, with a nearest-node blend, the values the interface
+  // passes had just transferred correctly. Running last, it undid their work. It also made the
+  // diagnostics unreadable, reporting sixteen failures for a boundary with two nodes on it.
+  static bool node_is_in_scope(oomph::Node *n, int boundary_index, bool on_interface_mesh)
+  {
+    if (boundary_index < 0)
+      return !n->is_on_boundary();   // the per-boundary passes own the boundary nodes
+    if (on_interface_mesh)
+      return true;
+    return n->is_on_boundary((unsigned)boundary_index);
+  }
+
+  std::string Mesh::get_full_domain_path()
+  {
+    if (this->nelement())
+    {
+      BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(0));
+      if (e && e->get_jit_code() && e->get_jit_code()->get_func_table() &&
+          e->get_jit_code()->get_func_table()->domain_name)
+      {
+        return std::string(e->get_jit_code()->get_func_table()->domain_name);
+      }
+    }
+    return "<unnamed mesh>";
+  }
+
+  std::string InterfaceMesh::get_full_domain_path()
+  {
+    const std::string parent = (bulkmesh ? bulkmesh->get_full_domain_path() : std::string("<detached>"));
+    return parent + "/" + interfacename;
+  }
+
+  std::string Mesh::get_boundary_name_or_index(unsigned boundary_index)
+  {
+    if (boundary_index < boundary_names.size() && !boundary_names[boundary_index].empty())
+      return boundary_names[boundary_index];
+    std::ostringstream oss;
+    oss << "boundary " << boundary_index;
+    return oss.str();
   }
 
   bool Mesh::is_boundary_coordinate_defined(unsigned boundary_index)
@@ -184,7 +869,7 @@ namespace pyoomph
     meshdata.clear();
     for (auto nii : nodes)
     {
-      pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(nii);
+      pyoomph::Node *n = static_cast<pyoomph::Node *>(nii);
       unsigned ntstor = n->ntstorage();
       for (unsigned int iv = 0; iv < n->ndim(); iv++)
       {
@@ -235,10 +920,10 @@ namespace pyoomph
 
     //for (unsigned nii = 0; nii < this->nnode(); nii++)
     //{
-    //  pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(this->node_pt(nii));
+    //  pyoomph::Node *n = static_cast<pyoomph::Node *>(this->node_pt(nii));
     for (auto * nn : nodes)
     {
-      pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(nn);
+      pyoomph::Node *n = static_cast<pyoomph::Node *>(nn);
       unsigned ntstor = n->ntstorage();
       for (unsigned int iv = 0; iv < n->ndim(); iv++)
       {
@@ -277,15 +962,390 @@ namespace pyoomph
     }
   }
 
+  // See declaration in mesh.hpp.
+  unsigned check_halo_element_consistency(oomph::Mesh *mesh_pt, const std::string &stage,
+                                          const oomph::Vector<double> *errors, bool throw_on_mismatch)
+  {
+    unsigned n_bad = 0;
+#ifdef OOMPH_HAS_MPI
+    if (!mesh_pt || !mesh_pt->is_mesh_distributed() || !mesh_pt->communicator_pt()) return 0;
+
+    oomph::OomphCommunicator *comm_pt = mesh_pt->communicator_pt();
+    MPI_Comm mc = comm_pt->mpi_comm();
+    int n_proc = comm_pt->nproc();
+    int my_rank = comm_pt->my_rank();
+    if (n_proc < 2) return 0;
+
+    // cx, cy, cz, refinement level, to_be_refined, sons_to_be_unrefined, error
+    const unsigned NPER = 7;
+    const unsigned MAX_REPORTED = 8; // Per process pair; enough to see the pattern, not a flood
+
+    // errors, when given, is indexed by the mesh's element numbering.
+    std::map<oomph::GeneralisedElement *, double> err_of;
+    if (errors)
+      for (unsigned int e = 0; e < mesh_pt->nelement() && e < errors->size(); e++)
+        err_of[mesh_pt->element_pt(e)] = (*errors)[e];
+
+    std::vector<double> mine(NPER);
+    // Describe one element as NPER doubles.
+    std::function<void(oomph::GeneralisedElement *, double *)> pack =
+        [&](oomph::GeneralisedElement *ge, double *into)
+    {
+      oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(ge);
+      into[0] = into[1] = into[2] = 0.0;
+      if (fe && fe->nnode())
+      {
+        unsigned nn = fe->nnode();
+        for (unsigned k = 0; k < nn; k++)
+          for (unsigned d = 0; d < fe->node_pt(k)->ndim() && d < 3; d++)
+            into[d] += fe->node_pt(k)->x(d);
+        for (unsigned d = 0; d < 3; d++) into[d] /= nn;
+      }
+      oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(ge);
+      into[3] = (re ? (double)re->refinement_level() : -1.0);
+      into[4] = (re ? (re->to_be_refined() ? 1.0 : 0.0) : -1.0);
+      into[5] = (re ? (re->sons_to_be_unrefined() ? 1.0 : 0.0) : -1.0);
+      into[6] = (err_of.count(ge) ? err_of[ge] : -1.0);
+    };
+
+    std::ostringstream report;
+
+    // Same communication order oomph-lib uses for its own halo exchanges: my halo-with-d goes to d, where
+    // it meets d's haloed-with-me. Both sides therefore walk their lists in the same order.
+    for (int d = 0; d < n_proc; d++)
+    {
+      if (d != my_rank) // Send the halo copies I hold of d's elements back to d
+      {
+        oomph::Vector<oomph::GeneralisedElement *> halo_el(mesh_pt->halo_element_pt(d));
+        unsigned n = halo_el.size();
+        std::vector<double> buf(n * NPER);
+        for (unsigned e = 0; e < n; e++) pack(halo_el[e], &buf[e * NPER]);
+        MPI_Send(&n, 1, MPI_UNSIGNED, d, 91, mc);
+        if (n) MPI_Send(&buf[0], (int)buf.size(), MPI_DOUBLE, d, 92, mc);
+      }
+      else // Compare what everyone else holds against the originals I own
+      {
+        for (int dd = 0; dd < n_proc; dd++)
+        {
+          if (dd == d) continue;
+          oomph::Vector<oomph::GeneralisedElement *> haloed_el(mesh_pt->haloed_element_pt(dd));
+          unsigned n_remote = 0;
+          MPI_Status status;
+          MPI_Recv(&n_remote, 1, MPI_UNSIGNED, dd, 91, mc, &status);
+          std::vector<double> buf(n_remote * NPER);
+          if (n_remote) MPI_Recv(&buf[0], (int)buf.size(), MPI_DOUBLE, dd, 92, mc, &status);
+
+          if (n_remote != haloed_el.size())
+          {
+            n_bad++;
+            report << "  [" << stage << "] process " << my_rank << " vs " << dd
+                   << ": list length mismatch -- " << haloed_el.size() << " haloed elements here, "
+                   << n_remote << " halo copies there. The distributed meshes have diverged.\n";
+          }
+
+          unsigned n_cmp = std::min((unsigned)haloed_el.size(), n_remote);
+          unsigned n_pos = 0, n_lvl = 0, n_ref = 0, n_unref = 0, n_err = 0, n_shown = 0;
+          for (unsigned e = 0; e < n_cmp; e++)
+          {
+            pack(haloed_el[e], &mine[0]);
+            double *theirs = &buf[e * NPER];
+            double dist2 = 0.0;
+            for (unsigned k = 0; k < 3; k++) dist2 += (mine[k] - theirs[k]) * (mine[k] - theirs[k]);
+            bool bad_pos = (sqrt(dist2) > 1e-9);
+            bool bad_lvl = (mine[3] != theirs[3]);
+            bool bad_ref = (mine[4] != theirs[4]);
+            bool bad_unref = (mine[5] != theirs[5]);
+            bool bad_err = (errors && fabs(mine[6] - theirs[6]) > 1e-12 * (1.0 + fabs(mine[6])));
+            if (bad_pos) n_pos++;
+            if (bad_lvl) n_lvl++;
+            if (bad_ref) n_ref++;
+            if (bad_unref) n_unref++;
+            if (bad_err) n_err++;
+            if ((bad_pos || bad_lvl || bad_ref || bad_unref || bad_err) && n_shown < MAX_REPORTED)
+            {
+              n_shown++;
+              report << "  [" << stage << "] process " << my_rank << " vs " << dd << ", entry " << e
+                     << ":\n      owned at (" << mine[0] << "," << mine[1] << "," << mine[2]
+                     << ") level " << mine[3] << " refine " << mine[4] << " unrefine " << mine[5]
+                     << " error " << mine[6] << "\n      copy  at (" << theirs[0] << "," << theirs[1]
+                     << "," << theirs[2] << ") level " << theirs[3] << " refine " << theirs[4]
+                     << " unrefine " << theirs[5] << " error " << theirs[6] << "\n";
+            }
+          }
+          unsigned n_here = n_pos + n_lvl + n_ref + n_unref + n_err;
+          n_bad += n_here;
+          if (n_here)
+            report << "  [" << stage << "] process " << my_rank << " vs " << dd << ": " << n_cmp
+                   << " elements compared -- " << n_pos << " position, " << n_lvl << " level, " << n_ref
+                   << " refine-flag, " << n_unref << " unrefine-flag, " << n_err
+                   << " error mismatches"
+                   << (n_shown < (n_pos + n_lvl + n_ref + n_unref + n_err) ? " (first few shown)" : "")
+                   << "\n";
+        }
+      }
+    }
+
+    // Only the process that OWNS an element sees the disagreement about it, so without this every rank
+    // but one would sail past a failure -- and in throwing mode the detecting rank would raise while the
+    // others blocked in the next collective. An asymmetric throw is the very failure mode this check
+    // exists to prevent, so agree on the verdict before acting on it.
+    unsigned global_bad = n_bad;
+    MPI_Allreduce(&n_bad, &global_bad, 1, MPI_UNSIGNED, MPI_SUM, mc);
+
+    if (global_bad)
+    {
+      std::ostringstream msg;
+      msg << "Halo consistency check failed at stage '" << stage << "': " << global_bad
+          << " inconsistencies across all processes (" << n_bad << " detected on process " << my_rank
+          << "). The processes do not agree about the elements they share, so adaptation and equation "
+          << "numbering will diverge between them.\n"
+          << report.str();
+      if (throw_on_mismatch) throw_runtime_error(msg.str());
+      // Report from every process, so the run does not look clean on the ranks that own nothing contested.
+      std::cout << "pyoomph WARNING: " << msg.str() << std::flush;
+    }
+    n_bad = global_bad;
+#endif
+    return n_bad;
+  }
+
+  // See declaration in mesh.hpp.
+  int TemplatedMeshBase::halo_consistency_check_mode()
+  {
+    // The environment does not change during a run, so only look at it once.
+    static int mode = -1;
+    if (mode < 0)
+    {
+      mode = 0;
+      const char *v = getenv("PYOOMPH_CHECK_HALO_CONSISTENCY");
+      if (v)
+      {
+        std::string s(v);
+        if (s == "2" || s == "throw" || s == "raise") mode = 2;
+        else if (s == "1" || s == "warn" || s == "report") mode = 1;
+        else if (s != "" && s != "0" && s != "off")
+        {
+          std::cout << "pyoomph WARNING: ignoring PYOOMPH_CHECK_HALO_CONSISTENCY='" << s
+                    << "'; expected one of 0/off, 1/warn/report, 2/throw." << std::endl;
+        }
+      }
+    }
+#ifdef OOMPH_HAS_MPI
+    // The check is collective. If it were enabled on some processes and not others, the ones running it
+    // would block in MPI_Recv forever -- a diagnostic that hangs the run is worse than no diagnostic, so
+    // take the strictest mode anyone asked for and have everyone use it.
+    if (this->is_mesh_distributed() && this->communicator_pt() && this->communicator_pt()->nproc() > 1)
+    {
+      int agreed = mode;
+      MPI_Allreduce(&mode, &agreed, 1, MPI_INT, MPI_MAX, this->communicator_pt()->mpi_comm());
+      return agreed;
+    }
+#endif
+    return mode;
+  }
+
+  // See declaration in mesh.hpp.
+  // See the declaration in mesh.hpp. Mirrors how oomph's own adapt() arrives at these numbers:
+  // n_refine counts elements flagged for refinement, n_unrefine counts the SONS that are about to be
+  // merged away (one per leaf whose father is selected, which sums to n_sons per selected father).
+  void TemplatedMeshBase::recount_pending_adaptation()
+  {
+    pending_n_refine = 0;
+    pending_n_unrefine = 0;
+    for (unsigned long e = 0; e < this->nelement(); e++)
+    {
+      oomph::RefineableElement *el = dynamic_cast<oomph::RefineableElement *>(this->element_pt(e));
+      if (!el) continue;
+      if (el->to_be_refined()) pending_n_refine++;
+      oomph::Tree *father = (el->tree_pt() ? el->tree_pt()->father_pt() : NULL);
+      if (father && father->object_pt())
+      {
+        oomph::RefineableElement *fel = dynamic_cast<oomph::RefineableElement *>(father->object_pt());
+        if (fel && fel->sons_to_be_unrefined()) pending_n_unrefine++;
+      }
+    }
+  }
+
+  void TemplatedMeshBase::synchronise_elemental_errors(oomph::Vector<double> &errs)
+  {
+#ifdef OOMPH_HAS_MPI
+    if (!this->is_mesh_distributed() || !this->communicator_pt()) return;
+
+    oomph::OomphCommunicator *comm_pt = this->communicator_pt();
+    MPI_Comm mc = comm_pt->mpi_comm();
+    int n_proc = comm_pt->nproc();
+    int my_rank = comm_pt->my_rank();
+    if (n_proc < 2) return;
+
+    // errs is indexed by this mesh's element numbering; we address elements by pointer.
+    std::map<oomph::GeneralisedElement *, unsigned> index_of;
+    for (unsigned int e = 0; e < this->nelement() && e < errs.size(); e++)
+      index_of[this->element_pt(e)] = e;
+
+    // Two passes, and it has to be two. The obvious "owner wins" single pass is not enough, because an
+    // error override is not always computed on the rank that OWNS the element it applies to. An
+    // interface element pushes its error onto the bulk element behind it -- including, at a coupled
+    // interface, the bulk element of the OPPOSITE domain. Two coupled domains share no nodes, so the
+    // partitioner treats them as disconnected components and cuts them independently: the rank holding
+    // the interface element routinely holds only a halo copy of that opposite bulk element. Owner-wins
+    // would discard the override there, silently, on every rank.
+    //
+    // So reduce instead of copy. The quantity IS a maximum (elemental_error_max_override), so the
+    // reduction is a max, and it is idempotent:
+    //   pass 0  halo -> haloed : every copy's value reaches the owner, which takes the max
+    //   pass 1  haloed -> halo : the owner's (now maximal) value goes back out to every copy
+    // The lists are built by walking the same root elements' trees, so they correspond entry by entry;
+    // pass 0 sends along halo_element_pt(p) and is received into haloed_element_pt(sender), which is
+    // exactly the mirror of pass 1.
+    for (int pass = 0; pass < 2; pass++)
+    {
+      const int tag_n = (pass == 0 ? 81 : 83), tag_v = (pass == 0 ? 82 : 84);
+      for (int iproc = 0; iproc < n_proc; iproc++)
+      {
+        if (iproc != my_rank)
+        {
+          oomph::Vector<oomph::GeneralisedElement *> src(
+              pass == 0 ? this->halo_element_pt(iproc) : this->haloed_element_pt(iproc));
+          unsigned n = src.size();
+          std::vector<double> buf(n);
+          for (unsigned e = 0; e < n; e++)
+          {
+            std::map<oomph::GeneralisedElement *, unsigned>::iterator it = index_of.find(src[e]);
+            buf[e] = (it == index_of.end() ? -1.0 : errs[it->second]);
+          }
+          MPI_Send(&n, 1, MPI_UNSIGNED, iproc, tag_n, mc);
+          if (n) MPI_Send(&buf[0], (int)n, MPI_DOUBLE, iproc, tag_v, mc);
+        }
+        else
+        {
+          for (int send_rank = 0; send_rank < n_proc; send_rank++)
+          {
+            if (send_rank == iproc) continue;
+            oomph::Vector<oomph::GeneralisedElement *> dst(
+                pass == 0 ? this->haloed_element_pt(send_rank) : this->halo_element_pt(send_rank));
+            unsigned n_remote = 0;
+            MPI_Status status;
+            MPI_Recv(&n_remote, 1, MPI_UNSIGNED, send_rank, tag_n, mc, &status);
+            std::vector<double> buf(n_remote);
+            if (n_remote) MPI_Recv(&buf[0], (int)n_remote, MPI_DOUBLE, send_rank, tag_v, mc, &status);
+
+            if (n_remote != dst.size())
+            {
+              // The two element lists no longer correspond, so there is no way to tell which error
+              // belongs to which element. That means the meshes have already diverged; imposing
+              // anything here would be guesswork, so leave the errors alone and say so.
+              std::cout << "pyoomph WARNING: cannot synchronise elemental errors between process "
+                        << my_rank << " and " << send_rank << ": " << dst.size()
+                        << " elements here but " << n_remote << " there (pass " << pass << "). "
+                        << "The distributed meshes have diverged; adaptation may be inconsistent."
+                        << std::endl;
+              continue;
+            }
+            for (unsigned e = 0; e < n_remote; e++)
+            {
+              if (buf[e] < 0.0) continue; // The sender could not resolve this element
+              std::map<oomph::GeneralisedElement *, unsigned>::iterator it = index_of.find(dst[e]);
+              if (it == index_of.end()) continue;
+              errs[it->second] = (pass == 0 ? std::max(errs[it->second], buf[e]) : buf[e]);
+            }
+          }
+        }
+      }
+    }
+#endif
+  }
+
+  // See the declaration in mesh.hpp for why these live here rather than in the Python equation classes
+  // that state them.
+  void Mesh::apply_refinement_directives()
+  {
+    if (refinement_directives.empty()) return;
+    oomph::RefineableMeshBase *rm = dynamic_cast<oomph::RefineableMeshBase *>(this);
+    if (!rm) return; // a non-refineable mesh has no thresholds to express the directive in
+
+    // The same two magic values the Python criteria used. "must refine" is far above the refinement
+    // threshold so that nothing else can outvote it; "may not unrefine" sits between the two thresholds,
+    // which is what tells oomph to leave the element exactly as it is.
+    const double must_refine = 100.0 * rm->max_permitted_error();
+    const double may_not_unrefine = 0.5 * (rm->max_permitted_error() + rm->min_permitted_error());
+
+    for (unsigned int ie = 0; ie < this->nelement(); ie++)
+    {
+      pyoomph::BulkElementBase *el = dynamic_cast<pyoomph::BulkElementBase *>(this->element_pt(ie));
+      if (!el) continue;
+      for (const RefinementDirective &d : refinement_directives)
+      {
+        if (d.kind == RefinementDirective::ToLevel)
+        {
+          if (d.level >= 0)
+          {
+            // The refinement LEVEL is a property of the bulk element. A directive stated on an interface
+            // ("... @ 'domain/boundary'") is registered on the interface mesh, whose elements are face
+            // elements with no level of their own, so walk up to the bulk element they hang off. More
+            // than one step for an interface of an interface.
+            pyoomph::BulkElementBase *blk = el;
+            while (true)
+            {
+              InterfaceElementBase *ie_el = blk->as_interface_element();
+              if (!ie_el) break;
+              pyoomph::BulkElementBase *parent = dynamic_cast<pyoomph::BulkElementBase *>(ie_el->bulk_element_pt());
+              if (!parent) break;
+              blk = parent;
+            }
+            oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(blk);
+            if (re && (int)re->refinement_level() >= d.level)
+            {
+              el->elemental_error_max_override = std::max(el->elemental_error_max_override, may_not_unrefine);
+              continue; // deep enough already
+            }
+          }
+          el->elemental_error_max_override = std::max(el->elemental_error_max_override, must_refine);
+        }
+        else if (d.kind == RefinementDirective::MaxElementSize)
+        {
+          const double size = el->size();
+          if (size > d.max_size)
+            el->elemental_error_max_override = std::max(el->elemental_error_max_override, must_refine);
+          else
+          {
+            // One unrefinement multiplies the size by 2^dim. If that would immediately put the element
+            // back over the threshold, refuse the unrefinement instead of oscillating.
+            const double grown = size * (double)(1u << el->dim());
+            if (grown > d.max_size)
+              el->elemental_error_max_override = std::max(el->elemental_error_max_override, may_not_unrefine);
+          }
+        }
+      }
+    }
+  }
+
   // Find elements that do not share a facet with the boundary
   void Mesh::enlarge_elemental_error_max_override_to_only_nodal_connected_elems(unsigned bind)
   {
-    std::set<pyoomph::BulkElementBase *> elems_with_boundnodes;
+    // This spreads a boundary element's refine flag to elements that touch the boundary only at a vertex,
+    // to force refinement rather than leave a 2:1 hang on the boundary. In a PYRAMID forest that is both
+    // unnecessary (post_adapt_setup_hanging_nodes now hangs boundary sub-faces too) and harmful: all 6
+    // pyramids of a cube share its boundary edges, so the spread cascades and a selective refinement
+    // collapses to uniform. Skip it there and let the cross-shape hanging handle the boundary interface.
+    // The pyramid test and the sweep below used to be two separate passes, i.e. two dynamic_casts per
+    // element down the virtual-inheritance diamond. One pass, one cast: the family comes off the
+    // element itself (BulkElementBase::element_family()). The pyramid check must still complete before
+    // anything is collected, hence the two-stage loop rather than doing the work inline.
+    std::vector<pyoomph::BulkElementBase *> all_elems;
+    all_elems.reserve(this->nelement());
     for (unsigned int ie = 0; ie < this->nelement(); ie++)
     {
       pyoomph::BulkElementBase *el = dynamic_cast<pyoomph::BulkElementBase *>(this->element_pt(ie));
       if (!el)
         continue;
+      if (el->element_family() == pyoomph::BulkElementBase::EF_PYRAMID)
+        return;
+      all_elems.push_back(el);
+    }
+
+    std::set<pyoomph::BulkElementBase *> elems_with_boundnodes;
+    for (pyoomph::BulkElementBase *el : all_elems)
+    {
       for (unsigned int in = 0; in < el->nnode(); in++)
       {
         if (el->node_pt(in)->is_on_boundary(bind))
@@ -340,35 +1400,34 @@ namespace pyoomph
   // a master node possibly owned by a different process. If an element on this process touches such a
   // copy node, the element(s) owning the corresponding master node must be kept as halo elements on
   // this process too (set_must_be_kept_as_halo), otherwise the master's data would not be available
-  // locally. This walks all boundary elements/nodes, finds copy nodes, locates the boundary element(s)
-  // that own the master node, and flags both sides as must-keep-halo. Nodal (as opposed to purely
-  // discontinuous/DG) degrees of freedom on copied nodes are not supported in this distributed
-  // periodic setup and trigger an error.
+  // locally: Data::~Data turns every surviving copy into a deep, no-longer-periodic node without so
+  // much as a warning, and the periodicity would simply vanish. This walks all boundary
+  // elements/nodes, finds copy nodes, locates a boundary element that owns the master node, and flags
+  // both sides as must-keep-halo. One element per side is enough - it only has to keep the node
+  // alive and reachable - which is why both searches below stop at the first hit.
+  // This is also what the other half of the fix relies on: in the vendored oomph-lib a copy node is
+  // kept out of the shared/halo/haloed schemes entirely (the two sides of a seam are at opposite ends
+  // of the domain, so no partitioning can pair them up), and the master is then the only node of the
+  // pair the halo exchange reaches - it has to exist wherever the copy does. Stubbing this function
+  // out fails 6 of the tests in tests/test_mpi_periodic.py, so the dependency is not theoretical.
+  // See dev_docs/distributed_periodic_bc.md.
   void Mesh::ensure_halos_for_periodic_boundaries()
   {
 #ifdef OOMPH_HAS_MPI
-    // if (!this->is_mesh_distributed()) return;
+    // No is_mesh_distributed() early-out: this runs from actions_before_distribute(), i.e. before
+    // the mesh has ever been distributed, so the flag is always false here.
     for (unsigned int ib = 0; ib < this->nboundary(); ib++)
     {
       unsigned nbe = this->nboundary_element(ib);
-      //	std::cout << "NBE IS " << nbe << std::endl;
       for (unsigned int ie = 0; ie < nbe; ie++)
       {
         auto *be = dynamic_cast<BulkElementBase *>(this->boundary_element_pt(ib, ie));
-        //		std::cout << "BE IS " << be << std::endl;
         for (unsigned int in = 0; in < be->nnode(); in++)
         {
           auto *n = be->node_pt(in);
-          //			std::cout << "N IS " << n << std::endl;
           if (n->is_on_boundary(ib) && n->is_a_copy())
           {
-            if (n->nvalue() > 0 || (dynamic_cast<pyoomph::Node*>(n)->variable_position_pt()->nvalue() > 0 && dynamic_cast<pyoomph::Node*>(n)->variable_position_pt()->is_a_copy()))
-            {
-              throw_runtime_error("Distributed parallel with copied nodes (i.e. PeriodicBC) does not work with nodal degrees of freedom. Either use pure DG or implement a periodic boundary condition by Lagrange multipliers");
-            }
-            std::cout << "FOUND ELEM NODE: " << ib << "  " << ie << "  " << in << "  iscpy " << n->is_a_copy() << std::endl;
             auto *master = n->copied_node_pt();
-            std::cout << "MASTER NODE " << master << std::endl;
             for (unsigned int ib2 = 0; ib2 < this->nboundary(); ib2++)
             {
               if (master->is_on_boundary(ib2))
@@ -394,26 +1453,70 @@ namespace pyoomph
 #endif
   }
 
+  // Periodic boundaries alias one node's value storage onto another's (see
+  // ensure_halos_for_periodic_boundaries above). Several code paths - notably adaptation of a
+  // distributed mesh - are not valid in the presence of such nodes and use this to refuse.
+  bool Mesh::has_periodic_nodes() const
+  {
+    unsigned nnod = this->nnode();
+    for (unsigned int i = 0; i < nnod; i++)
+    {
+      if (this->node_pt(i)->is_a_copy()) return true;
+    }
+    return false;
+  }
+
+  // make_periodic() aliases only a node's VALUES, never its positions - oomph-lib says so itself in
+  // the warning in BoundaryNode<SolidNode>::make_periodic - so a periodic copy's position dofs are
+  // its own. Under MPI the copy is deliberately kept out of the halo scheme (it owns no values, and
+  // the two sides of a seam are too far apart for any partition to pair them), which is exactly what
+  // independent position dofs would have needed. Reports whether any such dof exists, so the
+  // combination can be refused rather than silently numbered on several ranks at once.
+  // Reads equation numbers, so it only says anything after assign_eqn_numbers(); on a rank where the
+  // node is a halo the dofs read as pinned, hence the caller reduces over ranks.
+  bool Mesh::has_periodic_position_dofs() const
+  {
+    unsigned nnod = this->nnode();
+    for (unsigned int i = 0; i < nnod; i++)
+    {
+      oomph::Node *n = this->node_pt(i);
+      if (!n->is_a_copy()) continue;
+      oomph::Data *pos = static_cast<pyoomph::Node *>(n)->variable_position_pt();
+      for (unsigned int j = 0; j < pos->nvalue(); j++)
+      {
+        if (pos->eqn_number(j) >= 0) return true;
+      }
+    }
+    return false;
+  }
+
   // List the names of the named integral expressions defined in this mesh's JIT-compiled element code
-  // (looked up via the first element, since all elements of a mesh share the same code instance).
+  // (looked up via the first element, since all elements of a mesh share the same code).
+  // Taken from the mesh's own jitcode, NOT from element 0. The list must be the same on every rank:
+  // each name costs one MPI_Allreduce in evaluate_integral_function, and the output loop drives that
+  // reduction once per name. Reading it off element 0 meant a rank whose local part of an interface
+  // mesh is empty answered with an empty list and performed none of those reductions, while the ranks
+  // that did hold elements performed all of them -- so the two fell out of step inside Problem.output()
+  // and deadlocked, one rank still reducing observables and the other already in save_state's alltoall
+  // (nacl_capillary_evaporation.py under --distribute, found by the tutorial harness). The guard in
+  // evaluate_integral_function ("Can't skip out here, since it might run into an MPI call later") was
+  // defeated one level up: the loop it protects never ran at all.
   std::vector<std::string> Mesh::list_integral_functions()
   {
-    unsigned nelement = this->nelement();
-    if (!nelement)
+    if (!this->jitcode)
       return std::vector<std::string>();
-    auto *cg = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_code_instance()->get_element_class();
-    return cg->get_integral_expressions();
+    return this->jitcode->get_code_gen()->get_integral_expressions();
   }
 
   // List the names of the local (per-point, non-integrated) expressions defined in this mesh's
   // JIT-compiled element code.
   std::vector<std::string> Mesh::list_local_expressions()
   {
-    unsigned nelement = this->nelement();
-    if (!nelement)
+    // Same source as list_integral_functions above, and for the same reason: what a mesh DECLARES
+    // does not depend on how many of its elements this rank happens to hold.
+    if (!this->jitcode)
       return std::vector<std::string>();
-    auto *cg = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_code_instance()->get_element_class();
-    return cg->get_local_expressions();
+    return this->jitcode->get_code_gen()->get_local_expressions();
   }
 
   // Refine a local-coordinate guess s for the extremum of the local expression `index` within element
@@ -505,7 +1608,7 @@ namespace pyoomph
       extreme_element=NULL;
       return 0;
     }
-    int index = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_code_instance()->get_extremum_function_index(name);
+    int index = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_jit_code()->get_extremum_function_index(name);
     if (index < 0) throw_runtime_error("Extremum function " + name + " not defined on this mesh");
     // Get some reference to start with
     extreme_element=dynamic_cast<BulkElementBase *>(this->element_pt(0));
@@ -569,7 +1672,7 @@ namespace pyoomph
     
     if (flags & 1)
     {
-      GiNaC::ex factor_and_unit = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_code_instance()->get_element_class()->get_extremum_expression_unit_factor(name);
+      GiNaC::ex factor_and_unit = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_jit_code()->get_code_gen()->get_extremum_expression_unit_factor(name);
       return factor_and_unit*extreme_value;
       
     }
@@ -584,9 +1687,16 @@ namespace pyoomph
   GiNaC::ex Mesh::evaluate_integral_function(std::string name)
   {
     unsigned nelement = this->nelement();
-    int index;
-    if (!nelement) index=0; //Can't skip out here, since it might run into an MPI call later
-     index= dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_code_instance()->get_integral_function_index(name);
+    // The index comes from the mesh's own code, not from element 0: this function must run on EVERY
+    // rank, including one whose local part of the mesh is empty, because of the MPI_Allreduce below.
+    // The line this replaces read
+    //     if (!nelement) index=0; //Can't skip out here, since it might run into an MPI call later
+    //      index= dynamic_cast<BulkElementBase *>(this->element_pt(0))->...
+    // with no braces and no else, so the element_pt(0) dereference happened even when nelement==0 and
+    // an empty rank segfaulted instead of taking the branch that was written for it. Unreachable until
+    // list_integral_functions() stopped answering with an empty list on such a rank, which is what let
+    // it live.
+    int index = this->jitcode ? this->jitcode->get_integral_function_index(name) : -1;
     if (index < 0)
       throw_runtime_error("Integral function " + name + " not defined on this mesh");
     double res = 0.0;
@@ -609,8 +1719,8 @@ namespace pyoomph
     }
 #endif
     
-    GiNaC::ex factor_and_unit = this->codeinst->get_element_class()->get_integral_expression_unit_factor(name);
-    //GiNaC::ex factor_and_unit = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_code_instance()->get_element_class()->get_integral_expression_unit_factor(name);
+    GiNaC::ex factor_and_unit = this->jitcode->get_code_gen()->get_integral_expression_unit_factor(name);
+    //GiNaC::ex factor_and_unit = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_jit_code()->get_code_gen()->get_integral_expression_unit_factor(name);
     return factor_and_unit * res;
   }
 
@@ -636,7 +1746,7 @@ namespace pyoomph
   // (reusing already-built opposite elements shared by several smaller facets, via
   // opposite_already_at_index) and linked via set_opposite_interface_element, so the interface element
   // can access fields from both sides of the facet. Finally rebuild/boundary information on imesh is refreshed.
-  void Mesh::generate_interface_elements(std::string intername, Mesh *imesh, DynamicBulkElementInstance *jitcode)
+  void Mesh::generate_interface_elements(std::string intername, Mesh *imesh, DynamicJITCode *interface_jitcode)
   {
     unsigned bind, nbe;
     bool internal_facets;
@@ -651,8 +1761,8 @@ namespace pyoomph
       nbe = this->nboundary_element(bind);
     }
 
-    BulkElementBase::__CurrentCodeInstance = jitcode;
-    dynamic_cast<InterfaceMesh *>(imesh)->set_rebuild_information(this, intername, jitcode);
+    BulkElementBase::JITCodeScope __jit_scope1(interface_jitcode);
+    dynamic_cast<InterfaceMesh *>(imesh)->set_rebuild_information(this, intername, interface_jitcode);
 
     unsigned n_element = imesh->nelement();
     for (unsigned e = 0; e < n_element; e++)
@@ -665,9 +1775,9 @@ namespace pyoomph
     dynamic_cast<InterfaceMesh *>(imesh)->opposite_interior_facets.clear();
 
     int restriction_index = -1;
-    for (unsigned int i = 0; i < jitcode->get_func_table()->numlocal_expressions; i++)
+    for (unsigned int i = 0; i < interface_jitcode->get_func_table()->numlocal_expressions; i++)
     {
-      if (std::string(jitcode->get_func_table()->local_expressions_names[i]) == "__interface_constraint")
+      if (std::string(interface_jitcode->get_func_table()->local_expressions_names[i]) == "__interface_constraint")
       {
         restriction_index = i;
         break;
@@ -682,12 +1792,12 @@ namespace pyoomph
       nbe = internal_elements.size();
     }
 
-    auto gen_face_elem = [jitcode,internal_facets](BulkElementBase *be, int fi)->oomph::FaceElement *
+    auto gen_face_elem = [interface_jitcode,internal_facets](BulkElementBase *be, int fi)->oomph::FaceElement *
     {
-      oomph::FaceElement *fe = be->construct_face_element(jitcode,fi);      
-      if (jitcode->get_func_table()->integration_order)
+      oomph::FaceElement *fe = be->construct_face_element(interface_jitcode,fi);      
+      if (interface_jitcode->get_func_table()->integration_order)
       {
-        dynamic_cast<BulkElementBase *>(fe)->set_integration_order(jitcode->get_func_table()->integration_order);
+        dynamic_cast<BulkElementBase *>(fe)->set_integration_order(interface_jitcode->get_func_table()->integration_order);
       }
 
       if (!internal_facets)
@@ -709,7 +1819,7 @@ namespace pyoomph
               }
               oss << " is boundary node: " << dynamic_cast<oomph::BoundaryNodeBase*>(n2) << std::endl;
             }
-            oss << "Boundary is " << jitcode->get_code()->get_file_name() << std::endl;
+            oss << "Boundary is " << interface_jitcode->get_file_name() << std::endl;
             throw_runtime_error(oss.str());
             delete fe;
             return NULL; // Do not create such elements...
@@ -777,19 +1887,24 @@ namespace pyoomph
         }
         else
         {
-          ofe = gen_face_elem(opposite_elements[ei], opposite_face_dir[ei]);          
+          ofe = gen_face_elem(opposite_elements[ei], opposite_face_dir[ei]);
           dynamic_cast<InterfaceElementBase *>(ofe)->set_as_internal_facet_opposite_dummy();
+          // opposite_interior_facets owns and later deletes these; only register a
+          // NEWLY created opposite element. A reused ofe (many small elements sharing
+          // one large opposite face, as arises on a 2:1 non-conforming interior facet
+          // after tree-based refinement) is already registered -- pushing it again put
+          // a duplicate pointer in the delete list and double-freed it in
+          // InterfaceMesh::~InterfaceMesh.
+          dynamic_cast<InterfaceMesh *>(imesh)->opposite_interior_facets.push_back(ofe);
         }
         generated_opposite_face_elems.push_back(ofe);
-        dynamic_cast<InterfaceMesh *>(imesh)->opposite_interior_facets.push_back(ofe);
         dynamic_cast<InterfaceElementBase *>(fe)->set_opposite_interface_element(dynamic_cast<BulkElementBase *>(ofe),std::vector<double>());
       }
 
       imesh->add_element_pt(fe);
     }
-    dynamic_cast<InterfaceMesh *>(imesh)->set_rebuild_information(this, intername, jitcode);
+    dynamic_cast<InterfaceMesh *>(imesh)->set_rebuild_information(this, intername, interface_jitcode);
     dynamic_cast<InterfaceMesh *>(imesh)->setup_boundary_information(this);
-    BulkElementBase::__CurrentCodeInstance = NULL;
   }
 
   // Build a map from field name to its finite-element space (e.g. "C2", "C1", "DL", "D0"), by
@@ -804,8 +1919,8 @@ namespace pyoomph
     if (!this->nelement())
       return std::map<std::string, std::string>();
     auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-    auto *ft = el->get_code_instance()->get_func_table();
-    // auto *ci = el->get_code_instance();
+    auto *ft = el->get_jit_code()->get_func_table();
+    // auto *ci = el->get_jit_code();
 
     std::map<std::string, std::string> res;
     for (unsigned int i = 0; i < ft->info_DL.numfields; i++)
@@ -822,7 +1937,7 @@ namespace pyoomph
     while (current)
     {
       auto *cel = dynamic_cast<BulkElementBase *>(current->element_pt(0));
-      auto *cft = cel->get_code_instance()->get_func_table();
+      auto *cft = cel->get_jit_code()->get_func_table();
       if (!dynamic_cast<InterfaceMesh *>(current))
       {
         for (unsigned int si = 0; si < cft->num_present_continuous_spaces; si++)
@@ -900,7 +2015,7 @@ namespace pyoomph
     if (!this->nelement())
       return;
     auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-    auto *ft = el->get_code_instance()->get_func_table();
+    auto *ft = el->get_jit_code()->get_func_table();
     auto mustpin = [&](std::string name)
     {
       if (only_dofs.empty())
@@ -973,7 +2088,7 @@ namespace pyoomph
       // Conti fields
       for (unsigned int in = 0; in < el->nnode(); in++)
       {
-        pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(el->node_pt(in));
+        pyoomph::Node *n = static_cast<pyoomph::Node *>(el->node_pt(in));
         for (unsigned ind : posindices)
           n->variable_position_pt()->pin(ind);
         for (unsigned ind : valindices)
@@ -1117,7 +2232,7 @@ namespace pyoomph
   // Bind this mesh to its owning Problem and JIT-compiled element code. On first binding (when
   // dirichlet_active is still empty), initializes the per-dof Dirichlet-active flags from the code's
   // default Dirichlet_set (which fields are Dirichlet-constrained by default in the generated code).
-  void Mesh::_set_problem(Problem *p, DynamicBulkElementInstance *code)
+  void Mesh::_set_problem(Problem *p, DynamicJITCode *code)
   {
     problem = p;
     #ifdef OOMPH_HAS_MPI
@@ -1127,20 +2242,20 @@ namespace pyoomph
       this->set_communicator_pt(p->communicator_pt());
     }*/
     #endif
-    codeinst = code;
+    jitcode = code;
     if (code && dirichlet_active.empty())
     {
       dirichlet_active.resize(code->get_func_table()->Dirichlet_set_size, false);
       for (unsigned int i = 0; i < code->get_func_table()->Dirichlet_set_size; i++)
       {
-        //    std::cout << "SETTING " << code->get_code()->get_file_name() << " INDEX " << i << " to "  << (code->get_func_table()->Dirichlet_set[i] ? "true" : "false") << std::endl;
+        //    std::cout << "SETTING " << code->get_file_name() << " INDEX " << i << " to "  << (code->get_func_table()->Dirichlet_set[i] ? "true" : "false") << std::endl;
         dirichlet_active[i] = code->get_func_table()->Dirichlet_set[i];
       }
     }
   }
 
   // Currently unimplemented (always throws); the commented-out code below sketches the intended
-  // approach: locate each zeta coordinate in the mesh via oomph::MeshAsGeomObject::locate_zeta and
+  // approach: locate each zeta coordinate in the mesh with a MeshPointLocator and
   // evaluate/interpolate all fields there, optionally applying output_scales, marking entries whose
   // zeta could not be located in masked_lines.
   std::vector<std::vector<double>> Mesh::get_values_at_zetas(const std::vector<std::vector<double>> &, std::vector<bool> &, bool)
@@ -1148,7 +2263,7 @@ namespace pyoomph
     throw_runtime_error("Implement");
     /*
     auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-    auto *ft = el->get_code_instance()->get_func_table();
+    auto *ft = el->get_jit_code()->get_func_table();
     unsigned numfields = el->nodal_dimension() + ft->numfields_C2TB + ft->numfields_C2 + ft->numfields_C1TB + ft->numfields_C1 + ft->info_DL.numfields + ft->info_D0.numfields;
     std::vector<std::vector<double>> result(zetas.size(), std::vector<double>(numfields, 0.0));
 
@@ -1156,18 +2271,20 @@ namespace pyoomph
     std::vector<double> scales(numfields, 1.0);
     if (with_scales)
     {
-      for (auto &fi : el->get_code_instance()->get_nodal_field_indices())
+      for (auto &fi : el->get_jit_code()->get_nodal_field_indices())
       {
         scales[fi.second] = (output_scales.count(fi.first) ? output_scales[fi.first] : 1.0);
       }
-      for (auto &fi : el->get_code_instance()->get_elemental_field_indices())
+      for (auto &fi : el->get_jit_code()->get_elemental_field_indices())
       {
         scales[ft->numfields_C2TB + ft->numfields_C2 + ft->numfields_C1TB + ft->numfields_C1 + fi.second] = (output_scales.count(fi.first) ? output_scales[fi.first] : 1.0);
       }
     }
 
     masked_lines.resize(zetas.size(), false);
-    oomph::MeshAsGeomObject MaGO(this);
+    LocatorSetup lsetup;
+    lsetup.space = LocatorSpace::Lagrangian;
+    MeshPointLocator locator(this, lsetup);
     for (unsigned int zi = 0; zi < zetas.size(); zi++)
     {
       oomph::Vector<double> zet(zetas[zi].size());
@@ -1179,7 +2296,7 @@ namespace pyoomph
 
       oomph::GeomObject *res_go = NULL;
       oomph::Vector<double> s(el->dim(), 1.0 / 3.0);
-      MaGO.locate_zeta(zet, res_go, s, false);
+      // locator.locate_batch(...) over the whole zetas list, resolved per entry
       BulkElementBase *srcelem = dynamic_cast<BulkElementBase *>(res_go);
       if (!srcelem)
         masked_lines[zi] = true;
@@ -1273,6 +2390,16 @@ namespace pyoomph
     return res;
   }
 
+  // See the declaration for why the positions matter as much as the values here.
+  void Mesh::interpolate_hanging_values()
+  {
+    for (unsigned int i = 0; i < this->nelement(); i++)
+    {
+      if (BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(i)))
+        be->interpolate_hang_values();
+    }
+  }
+
   // Export the entire mesh into flat, pre-allocated buffers suitable for wrapping as numpy arrays
   // (used by the Python output/plotting layer). All buffers must already be sized according to a
   // prior call to get_num_numpy_elemental_indices()/count_nnode(discontinuous) etc.
@@ -1299,12 +2426,12 @@ namespace pyoomph
     BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(0));
     unsigned nlagrangian = node0->nlagrangian();
     unsigned nelement = this->nelement();
-    auto *ft = be->get_code_instance()->get_func_table();
+    auto *ft = be->get_jit_code()->get_func_table();
     for (unsigned int i = 0; i < nelement; i++)
     {
       dynamic_cast<BulkElementBase *>(this->element_pt(i))->interpolate_hang_values();
     }
-    // pyoomph::DynamicBulkElementInstance * ci=be->get_code_instance();
+    // pyoomph::DynamicJITCode * ci=be->get_jit_code();
     unsigned ncontfields = be->ncont_interpolated_values();
     unsigned nDGfields = (be ? be->num_DG_fields(false) : 0);
     unsigned nDGfields_basebulk = (be ? be->num_DG_fields(true) : 0);
@@ -1329,7 +2456,7 @@ namespace pyoomph
     unsigned contstride = nodal_dim + nlagrangian + ncontfields + nDGfields + nadd_interface + nnormal;
     double spatial_scale = (output_scales.count("spatial") && (!nondimensional) ? output_scales["spatial"] : 1.0);
     std::vector<double> nodal_scales(ncontfields + nDGfields + nadd_interface+ nnormal, 1.0);
-    for (auto &fi : be->get_code_instance()->get_nodal_field_indices())
+    for (auto &fi : be->get_jit_code()->get_nodal_field_indices())
     {
       nodal_scales[fi.second] = (output_scales.count(fi.first) && (!nondimensional) ? output_scales[fi.first] : 1.0);
     }
@@ -1373,7 +2500,7 @@ namespace pyoomph
     for (unsigned int ni = 0; ni < rev_nodemap.size(); ni++)
     {
 
-      pyoomph::Node *node = dynamic_cast<pyoomph::Node *>(rev_nodemap[ni]);
+      pyoomph::Node *node = static_cast<pyoomph::Node *>(rev_nodemap[ni]);
       for (unsigned nd = 0; nd < nodal_dim; nd++)
       {
         xbuffer[ni * contstride + nd] = node->position(history_index, nd) * spatial_scale;
@@ -1536,11 +2663,11 @@ namespace pyoomph
     }
 
     unsigned current_subelem = 0;
-    unsigned numD0 = be->get_code_instance()->get_func_table()->info_D0.numfields;
-    unsigned numDL = be->get_code_instance()->get_func_table()->info_DL.numfields;
+    unsigned numD0 = be->get_jit_code()->get_func_table()->info_D0.numfields;
+    unsigned numDL = be->get_jit_code()->get_func_table()->info_DL.numfields;
 
     std::vector<double> D_scales(numDL + numD0, 1.0);
-    for (auto &fi : be->get_code_instance()->get_elemental_field_indices())
+    for (auto &fi : be->get_jit_code()->get_elemental_field_indices())
     {
       D_scales[fi.second] = (output_scales.count(fi.first) && (!nondimensional) ? output_scales[fi.first] : 1.0);
     }
@@ -1550,7 +2677,9 @@ namespace pyoomph
     // Additional nodes due to different refinements:
     for (unsigned int ne = 0; ne < nelement; ne++)
     {
-      dynamic_cast<BulkElementBase *>(this->element_pt(ne))->_numpy_index = ne;
+      BulkElementBase *bee = dynamic_cast<BulkElementBase *>(this->element_pt(ne));
+      bee->_numpy_index = ne;
+      bee->_tess_hang_scoord.clear(); // fresh per tesselated-numpy pass (populated by inform_coarser below)
     }
     std::vector<std::vector<std::set<oomph::Node *>>> additional_elemental_tri_nodes(nelement);
     if (tesselate_tri && !discontinuous)
@@ -1573,10 +2702,18 @@ namespace pyoomph
     for (unsigned int ne = 0; ne < nelement; ne++)
     {
       BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(ne));
-      elemtypes[ne] = be->get_meshio_type_index();
       unsigned nsubelem = 0;
 
       unsigned nindices = be->get_num_numpy_elemental_indices(tesselate_tri, nsubelem, additional_elemental_tri_nodes); // nindices
+      // The type belongs to the output ROW, not to the element: with tesselate_tri an element covers
+      // several rows (a Quad9 becomes 8 triangles). Writing it at elemtypes[ne] left every row beyond
+      // the element count filled with whatever was in the buffer, and gave the first row of a split
+      // element the parent's type although it only carries the sub-element's nodes.
+      // Only 2d elements are ever split, and always into linear triangles (see the tesselate_tri
+      // branches of BulkElementQuad2d*/Tri2d*::get_num_numpy_elemental_indices), hence type 3.
+      int etype = (int)(nsubelem > 1 ? 3 : be->get_meshio_type_index());
+      for (unsigned isub = 0; isub < nsubelem; isub++)
+        elemtypes[current_subelem + isub] = etype;
       std::vector<unsigned> local_ni_to_elemindex;
       for (unsigned isubelem = 0; isubelem < nsubelem; isubelem++)
       {
@@ -1693,7 +2830,7 @@ namespace pyoomph
     if (!this->nelement())
       return 0.0;
     BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-    DynamicBulkElementInstance *ci = be->get_code_instance();
+    DynamicJITCode *ci = be->get_jit_code();
     auto *ft = ci->get_func_table();
     if (!ft->has_temporal_estimators)
       return 0.0;
@@ -1772,6 +2909,23 @@ namespace pyoomph
 
   void Mesh::apply_additional_dof_constraints()
   {
+    // A mesh that owns its nodes can answer "is anything constrained at all?" from the node list -
+    // one pass over nnode() instead of one per element over all its nodes, i.e. ~2.25x fewer visits
+    // on a quad C2 mesh, and no per-element setup at all in the (overwhelmingly common) case where
+    // no ConstrainFieldsToC1Space/ConstrainPositionsToC1Space is in play. Interface meshes have an
+    // empty Node_pt, so they keep taking the element route, where BulkElementBase::
+    // setup_additional_dof_constraints() does the same test per element.
+    unsigned long n_node = nnode();
+    if (n_node)
+    {
+      bool any = false;
+      for (unsigned n = 0; n < n_node; n++)
+      {
+        if (static_cast<Node *>(Node_pt[n])->get_additional_dof_constraints()) { any = true; break; }
+      }
+      if (!any)
+        return;
+    }
     unsigned long n_elem = nelement();
     for (unsigned n = 0; n < n_elem; n++)
     {
@@ -1782,7 +2936,6 @@ namespace pyoomph
 
   void Mesh::set_lagrangian_nodal_coordinates()
   {
-    std::cout << "Setting Lagrangian nodal coordinates for all nodes in mesh" << std::endl;
     unsigned long n_node = nnode();
     for (unsigned n = 0; n < n_node; n++)
     {
@@ -1801,45 +2954,169 @@ namespace pyoomph
 
 
   // For every integration point of every element of this (new) mesh, locate the corresponding point in
-  // oldmesh (wrapped as a MeshAsGeomObject, i.e. via global zeta/Eulerian coordinates) and cache the
+  // oldmesh (via global zeta/Eulerian coordinates) and cache the
   // resulting (old element, old local coordinate) pair in curr_el->coords_oldmesh. This precomputed
   // mapping is later used (e.g. by nodal_interpolate_from/projection) to transfer field values from
   // the old mesh to this mesh's integration points without repeating the (potentially expensive)
   // point-location search for every quantity being transferred.
   void Mesh::prepare_zeta_interpolation(Mesh *oldmesh)
   {
-
-    // Mesh as a geometric object.
-    oomph::MeshAsGeomObject mesh_as_geom(oldmesh);
+    // Both meshes' elements need their eleminfo allocated before anything reads fields off them.
+    // get_interpolated_values() sizes an oomph::Shape from eleminfo.nnode_of_space[...] and then
+    // writes the shape functions into it, so on an element whose eleminfo was never filled that is a
+    // garbage-sized buffer and the write runs off the end - which showed up only much later as
+    // "free(): invalid size" inside the Jacobian assembly. The OLD mesh is the one that matters here:
+    // it is past its own setup by the time a projection reads from it, and unlike interpolated_x(),
+    // which goes straight to the nodes, get_interpolated_values() cannot do without eleminfo.
+    auto ensure_eleminfo = [](Mesh *m) {
+      if (!m)
+        return;
+      for (unsigned ie = 0; ie < m->nelement(); ie++)
+      {
+        BulkElementBase *e = dynamic_cast<BulkElementBase *>(m->element_pt(ie));
+        if (e && !e->get_eleminfo()->alloced)
+          e->fill_element_info(true);
+      }
+    };
+    ensure_eleminfo(oldmesh);
+    ensure_eleminfo(this);
 
     // Number of elements.
     const unsigned nelem = this->nelement();
 
-    // Loop through all elements.
+    // Resize and initialise the per-element storage, whichever path fills it.
     for (unsigned el = 0; el < nelem; el++)
     {
-
-      // Current element
       BulkElementBase *curr_el = dynamic_cast<BulkElementBase *>(this->element_pt(el));
-
-      // Number of integration points.
-      unsigned int n_intpt = curr_el->integral_pt()->nweight();
-
-      // Dimension of element
-      const unsigned int dim = curr_el->dim();
-
-      // Resize and initialise vector pair.
+      const unsigned n_intpt = curr_el->integral_pt()->nweight();
+      const unsigned dim = curr_el->dim();
       curr_el->coords_oldmesh.resize(n_intpt);
       for (unsigned ipt = 0; ipt < n_intpt; ipt++)
       {
         curr_el->coords_oldmesh[ipt].first = NULL;
         curr_el->coords_oldmesh[ipt].second.resize(dim, 0.0);
       }
-
-      // Fill the vector pair.
-      curr_el->prepare_zeta_interpolation(&mesh_as_geom);
     }
-    
+
+    // This is the heaviest query in the codebase - one point per integration point per element,
+    // so of the order of 1e5-1e6 for a 3d mesh at the dof ceiling - and it is what the locator's
+    // batching and per-element seeding were designed around: the points of one element are
+    // clustered, so all but the first of them resolve by walking from the previous match.
+    std::vector<double> qcoords;
+    std::vector<unsigned> qgroups;
+    std::vector<std::pair<BulkElementBase *, unsigned>> qwhere; // (element, integration point)
+
+    for (unsigned el = 0; el < nelem; el++)
+    {
+      BulkElementBase *curr_el = dynamic_cast<BulkElementBase *>(this->element_pt(el));
+      // Deliberately does NOT enable the projection residual. The flag no longer clears itself on
+      // first assembly, so setting it here would leave it on for good and every later ordinary
+      // solve would assemble the projection residual instead of the physics. The driver switches it
+      // on around its own solve via set_zeta_projection_enabled().
+      const unsigned n_intpt = curr_el->integral_pt()->nweight();
+      const unsigned dim = curr_el->dim();
+      oomph::Vector<double> s(dim), zeta(dim, 0.0);
+      for (unsigned ipt = 0; ipt < n_intpt; ipt++)
+      {
+        for (unsigned i = 0; i < dim; i++)
+          s[i] = curr_el->integral_pt()->knot(ipt, i);
+        // The PHYSICAL position of the integration point, not interpolated_zeta. zeta is the
+        // Lagrangian coordinate by default, and on a freshly remeshed mesh those need not equal the
+        // positions - so the query named a point that is not the integration point, the located
+        // (element, local coordinate) named yet another, and the projection's premise that the
+        // integrand vanishes where the field is representable failed near curved boundaries.
+        curr_el->interpolated_x(0, s, zeta);
+        for (unsigned i = 0; i < dim; i++)
+          qcoords.push_back(zeta[i]);
+        qgroups.push_back(el);
+        qwhere.push_back(std::make_pair(curr_el, ipt));
+      }
+    }
+
+    if (qwhere.empty())
+      return;
+
+    LocatorSetup lsetup;
+    lsetup.space = LocatorSpace::Eulerian; // physical positions, matching the query above
+    const auto t0 = std::chrono::steady_clock::now();
+    MeshPointLocator locator(oldmesh, lsetup);
+    const unsigned lsetup_dim = locator.get_space_dim();
+    const auto t1 = std::chrono::steady_clock::now();
+    LocationSet located = locator.locate_batch(qcoords, qwhere.size(), &qgroups);
+    const auto t2 = std::chrono::steady_clock::now();
+    if (report_interpolation_timing)
+    {
+      std::cout << "  [locator] " << qwhere.size() << " integration points: index "
+                << std::chrono::duration<double>(t1 - t0).count() * 1000.0 << " ms, locate "
+                << std::chrono::duration<double>(t2 - t1).count() * 1000.0 << " ms ("
+                << located.search_statistics() << ", " << locator.affine_fraction() << ")" << std::endl;
+    }
+
+    BulkElementBase *src = NULL;
+    std::vector<double> sloc;
+    double worst_map = 0.0;
+    unsigned n_bad_map = 0;
+    std::vector<double> worst_at;
+    for (unsigned i = 0; i < qwhere.size(); i++)
+    {
+      if (!located.resolve_local(i, src, sloc))
+        continue; // stays NULL, exactly as an unlocated point did before
+      qwhere[i].first->coords_oldmesh[qwhere[i].second].first = src;
+      oomph::Vector<double> sv(sloc.size());
+      for (unsigned d = 0; d < sloc.size(); d++)
+        sv[d] = sloc[d];
+      qwhere[i].first->coords_oldmesh[qwhere[i].second].second = sv;
+
+      // The whole projection rests on (old element, old_s) naming the SAME physical point as the
+      // integration point it came from. If it does not, a field the new space can represent exactly
+      // still comes back wrong, because the integrand (u_new - u_old) no longer vanishes pointwise.
+      oomph::Vector<double> back(sv.size(), 0.0);
+      src->interpolated_x(0, sv, back);
+      double d = 0.0;
+      for (unsigned k = 0; k < back.size() && k < lsetup_dim; k++)
+      {
+        const double diff = back[k] - qcoords[(size_t)i * lsetup_dim + k];
+        d += diff * diff;
+      }
+      d = sqrt(d);
+      if (d > worst_map)
+      {
+        worst_map = d;
+        worst_at.assign(qcoords.begin() + (size_t)i * lsetup_dim, qcoords.begin() + (size_t)(i + 1) * lsetup_dim);
+      }
+      if (d > 1e-8)
+        n_bad_map++;
+    }
+    if (report_interpolation_timing)
+    {
+      std::cout << "  [locator] integration-point mapping: worst " << worst_map << ", " << n_bad_map
+                << " of " << qwhere.size() << " worse than 1e-8";
+      if (!worst_at.empty())
+      {
+        std::cout << ", worst at (";
+        for (unsigned k = 0; k < worst_at.size(); k++) std::cout << (k ? ", " : "") << worst_at[k];
+        std::cout << ") radius " << sqrt(worst_at[0]*worst_at[0] + (worst_at.size()>1?worst_at[1]*worst_at[1]:0.0));
+      }
+      std::cout << std::endl;
+    }
+  }
+
+  void Mesh::set_zeta_projection_enabled(bool yesno)
+  {
+    for (unsigned el = 0; el < this->nelement(); el++)
+    {
+      BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(el));
+      if (e)
+        e->enable_zeta_projection = yesno;
+    }
+  }
+
+  bool Mesh::has_zeta_projection_prepared() const
+  {
+    if (!this->nelement())
+      return false;
+    BulkElementBase *e = dynamic_cast<BulkElementBase *>(const_cast<Mesh *>(this)->element_pt(0));
+    return e && !e->coords_oldmesh.empty();
   }
 
   // Update time level for each element.
@@ -1866,6 +3143,26 @@ namespace pyoomph
     if (!this->interpolated_lagrangian_coordinates_at_remeshing) this->set_lagrangian_nodal_coordinates();
   }
 
+  // Look up the value slot an interface dof id occupies on a node, without creating one.
+  //
+  // index_of_first_value_assigned_by_face_element() reads the map with std::map::operator[], which
+  // INSERTS a zero for an id the node does not carry - so a field the node knows nothing about is
+  // silently written into value slot 0, i.e. over a bulk field. Every node reached by the transfer
+  // below should have the dof, but "should" is what produced the defects that transfer already had.
+  static bool face_value_index(oomph::BoundaryNodeBase *bn, unsigned interface_dof_id, int &index)
+  {
+    if (!bn)
+      return false;
+    std::map<unsigned, unsigned> *m = bn->index_of_first_value_assigned_by_face_element_pt();
+    if (!m)
+      return false;
+    auto entry = m->find(interface_dof_id);
+    if (entry == m->end())
+      return false;
+    index = (int)entry->second;
+    return true;
+  }
+
   // This only works in max. 2d well
   //
   // Transfer nodal field values from an old mesh's boundary (old, boundary index oldbind) to this
@@ -1873,7 +3170,7 @@ namespace pyoomph
   // a full-mesh nodal_interpolate_from would be inaccurate or too expensive right at the boundary.
   // High-level algorithm:
   //  1. Build a field_map from this mesh's continuous field indices to the old mesh's field indices by
-  //     matching field names (only needed if the two meshes use different JIT code instances, i.e.
+  //     matching field names (only needed if the two meshes use different JIT codes, i.e.
   //     potentially different field sets/ordering).
   //  2. For every node on this mesh's boundary bind, find the nearest and second-nearest node (by
   //     Euclidean distance in physical space) on the old mesh's boundary oldbind. If the nearest match
@@ -1883,14 +3180,58 @@ namespace pyoomph
   //     giving a cheap 1d ("along the boundary") linear interpolation without needing explicit
   //     boundary-arclength bookkeeping. Interface-only additional dofs are transferred analogously via
   //     imesh/oldimesh (the corresponding interface meshes), using inter_field_map.
-  void Mesh::nodal_interpolate_along_boundary(Mesh *old, int bind, int oldbind, Mesh *imesh, Mesh *oldimesh, double boundary_max_dist)
+  //  4. only_interface_fields=true does step 3 for the interface-only dofs alone and leaves the bulk
+  //     fields as they are; see the declaration in mesh.hpp for why the codim-2 pass needs that.
+  void Mesh::nodal_interpolate_along_boundary(Mesh *old, int bind, int oldbind, Mesh *imesh, Mesh *oldimesh, double boundary_max_dist, bool only_interface_fields)
   {
+    // Asked before anything else, because it is collective: every rank has to reach it, including
+    // the ones whose share of the OLD boundary is empty and which therefore have nothing to match
+    // against. This is the remeshing case - old partitioned, new replicated - where this rank's
+    // nearest old node can be arbitrarily far from the new node while another rank has one right
+    // next to it. See dev_docs/distributed_remeshing.md.
+    const bool shared_across_ranks = this->interpolation_is_shared_across_ranks(old);
+
+    // The destination nodes, collected first because they are all this rank is sure to have. Ordered
+    // by element and node index rather than by pointer, so that entry k is the same node on every
+    // rank - the pooling below addresses them by position in this list, and a std::set of pointers
+    // would order them differently in every process.
+    std::vector<oomph::Node *> newnodes;
+    if (this->nboundary_node(bind)) // Works only if codim 1 wrt. bulk mesh
+    {
+      newnodes.reserve(this->nboundary_node(bind));
+      for (unsigned in = 0; in < this->nboundary_node(bind); in++)
+        newnodes.push_back(this->boundary_node_pt(bind, in));
+    }
+    else // Now this is more complicated: We only have boundary elements defined, codim 2 or higher
+    {
+      std::set<oomph::Node *> seen;
+      for (unsigned ie = 0; ie < this->nboundary_element(bind); ie++)
+      {
+        pyoomph::BulkElementBase *be = dynamic_cast<pyoomph::BulkElementBase *>(this->boundary_element_pt(bind, ie));
+        for (unsigned in = 0; in < be->nnode(); in++)
+        {
+          oomph::Node *n = be->node_pt(in);
+          if (n->is_on_boundary(bind) && seen.insert(n).second)
+            newnodes.push_back(n);
+        }
+      }
+    }
+
+    // How far this rank's chosen match was, per destination node; infinite where it has none. The
+    // rank with the closest match is the one whose values are worth having.
+    std::vector<double> local_dist(newnodes.size(), std::numeric_limits<double>::infinity());
+
+    // A rank holding no part of the old boundary has nothing to match against - and asking its old
+    // mesh for element_pt(0) below would be out of bounds. It still owns a full copy of the
+    // destination, so it takes part in the pooling and contributes nothing.
+    if (old->nelement() && this->nelement())
+    {
     //std::cout << "Nodal interpolation along boundary " << bind << std::endl;
     // Bulk field mapping
     BulkElementBase *my_be0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
     BulkElementBase *from_be0 = dynamic_cast<BulkElementBase *>(old->element_pt(0));
-    auto *my_ci = my_be0->get_code_instance();
-    auto *from_ci = from_be0->get_code_instance();
+    auto *my_ci = my_be0->get_jit_code();
+    auto *from_ci = from_be0->get_jit_code();
     auto *my_ft = my_ci->get_func_table();
     auto *from_ft = from_ci->get_func_table();
     std::vector<int> field_map;
@@ -1960,8 +3301,8 @@ namespace pyoomph
     BulkElementBase *from_fe0 = NULL;
     if (oldimesh && oldimesh->nelement())
       from_fe0 = dynamic_cast<BulkElementBase *>(oldimesh->element_pt(0));
-    auto *my_fci = (my_fe0 ? my_fe0->get_code_instance() : NULL);
-    auto *from_fci = (from_fe0 ? from_fe0->get_code_instance() : NULL);
+    auto *my_fci = (my_fe0 ? my_fe0->get_jit_code() : NULL);
+    auto *from_fci = (from_fe0 ? from_fe0->get_jit_code() : NULL);
     auto *my_fft = (my_fci ? my_fci->get_func_table() : NULL);
     auto *from_fft = (from_fci ? from_fci->get_func_table() : NULL);
 
@@ -1976,21 +3317,32 @@ namespace pyoomph
       }
     }
 
-    if (has_dg || my_fft->info_DL.numfields || my_fft->info_D0.numfields)
+    // my_fft is NULL whenever imesh is empty (a boundary that carries no interface elements on this
+    // rank), and this used to dereference it unconditionally.
+    if (has_dg || (my_fft && (my_fft->info_DL.numfields || my_fft->info_D0.numfields)))
     {
       std::ostringstream oss;
       oss << "At interface: " << this->domainname ;
       throw_runtime_error("Cannot interpolate discontinuous fields at interfaces yet: " + oss.str());
     }
 
+    // The dofs the interface adds on top of the bulk, matched by name between the two interfaces.
+    //
+    // Built from my_fft/from_fft - the tables of imesh/oldimesh - not from the BULK tables my_ft and
+    // from_ft, which is what this did before: on a bulk mesh a bulk code has numfields ==
+    // numfields_basebulk, so the loop found nothing at all and every interface-only field (a
+    // surfactant concentration, a Lagrange multiplier) was silently dropped by this transfer. On the
+    // codim-2 call the bulk table is the codim-1 interface's, so the codim-2 mesh's own dofs were
+    // missed in the same way. Same construction as nodal_interpolate_from further down.
     std::map<unsigned, unsigned> inter_field_map;
 
     if (my_fft && from_fft)
     {
       std::map<unsigned, std::string> my_interface_dofs;
-      for (unsigned int si=0;si<my_ft->num_present_continuous_spaces;si++)
+      for (unsigned int si=0;si<my_fft->num_present_continuous_spaces;si++)
       {
-        auto * space_info=my_ft->present_continuous_spaces[si];
+        auto * space_info=my_fft->present_continuous_spaces[si];
+        if (!space_info->interface_dof_indices) continue; // never resolved: no interface dofs here
         for (unsigned int i = 0; i < space_info->numfields-space_info->numfields_basebulk; i++)
         {
           std::string name2find = space_info->fieldnames[i+space_info->numfields_basebulk];
@@ -2001,9 +3353,10 @@ namespace pyoomph
 
       std::map<std::string, unsigned> from_interface_dofs;
 
-      for (unsigned int si=0;si<from_ft->num_present_continuous_spaces;si++)
+      for (unsigned int si=0;si<from_fft->num_present_continuous_spaces;si++)
       {
-        auto * space_info=from_ft->present_continuous_spaces[si];
+        auto * space_info=from_fft->present_continuous_spaces[si];
+        if (!space_info->interface_dof_indices) continue;
         for (unsigned int i = 0; i < space_info->numfields-space_info->numfields_basebulk; i++)
         {
           std::string name2find = space_info->fieldnames[i+space_info->numfields_basebulk];
@@ -2019,36 +3372,7 @@ namespace pyoomph
       }
     }
 
-    std::vector<oomph::Node *> newnodes, oldnodes;
-    // Fill the node buffers
-    if (this->nboundary_node(bind)) // Works only if codim 1 wrt. bulk mesh
-    {
-      newnodes.reserve(this->nboundary_node(bind));
-      for (unsigned in = 0; in < this->nboundary_node(bind); in++)
-      {
-        newnodes.push_back(this->boundary_node_pt(bind, in));
-      }
-    }
-    else // Now this is more complicated: We only have boundary elements defined, codim 2 or higher
-    {
-      std::set<oomph::Node *> uniquenodes;
-      for (unsigned ie = 0; ie < this->nboundary_element(bind); ie++)
-      {
-        pyoomph::BulkElementBase *be = dynamic_cast<pyoomph::BulkElementBase *>(this->boundary_element_pt(bind, ie));
-        for (unsigned in = 0; in < be->nnode(); in++)
-        {
-          if (be->node_pt(in)->is_on_boundary(bind))
-          {
-            uniquenodes.insert(be->node_pt(in));
-          }
-        }
-      }
-      for (auto *n : uniquenodes)
-      {
-        newnodes.push_back(n);
-      }
-    }
-
+    std::vector<oomph::Node *> oldnodes;
     if (old->nboundary_node(oldbind)) // Works only if codim 1 wrt. bulk mesh
     {
       oldnodes.reserve(old->nboundary_node(oldbind));
@@ -2077,7 +3401,40 @@ namespace pyoomph
       }
     }
 
-    for (unsigned in = 0; in < newnodes.size(); in++)
+    // Characteristic size of the OLD boundary's elements, for judging whether a nearest-node match
+    // is close enough to be believable. The previous test compared the squared distance against a
+    // literal 1.0, which is an absolute length in nondimensional units and therefore says nothing
+    // about this mesh: on a domain of size 0.01 it never fires, on one of size 100 it always does.
+    double old_elem_size = 0.0;
+    if (oldimesh)
+    {
+      for (unsigned ie = 0; ie < oldimesh->nelement(); ie++)
+      {
+        oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(oldimesh->element_pt(ie));
+        if (!fe || fe->nnode() < 2)
+          continue;
+        double d2 = 0.0;
+        oomph::Node *a = fe->node_pt(0), *b = fe->node_pt(fe->nnode() - 1);
+        for (unsigned di = 0; di < a->ndim(); di++)
+          d2 += (a->x(di) - b->x(di)) * (a->x(di) - b->x(di));
+        old_elem_size = std::max(old_elem_size, sqrt(d2));
+      }
+    }
+    // Two element lengths: far enough that an ordinary remesh never trips it, close enough that a
+    // node matched against an unrelated part of the interface does.
+    const double suspicious_dist = (old_elem_size > 0.0 ? 2.0 * old_elem_size : -1.0);
+
+    unsigned n_suspicious = 0;
+    double worst_dist = 0.0;
+    std::vector<std::vector<double>> unset_positions;
+
+    // Under distribution a rank can hold no part of the OLD boundary at all - a corner that sits
+    // entirely inside another partition - and that is ordinary rather than an error: it offers no
+    // match, and the pooling afterwards takes the values from a rank that has one. Serially an empty
+    // old boundary is a real problem, so the per-node diagnostics below still get to report it.
+    const bool nothing_to_match = (shared_across_ranks && oldnodes.empty());
+
+    for (unsigned in = 0; in < newnodes.size() && !nothing_to_match; in++)
     {
       oomph::Node *n = newnodes[in];
       oomph::Vector<double> xn = n->position();
@@ -2098,8 +3455,13 @@ namespace pyoomph
           mindist = dist;
         }
       }
-      if (mindist > 1.0)
+      if (bestnode)
       {
+        worst_dist = std::max(worst_dist, sqrt(mindist));
+      }
+      if (suspicious_dist > 0.0 && mindist > suspicious_dist * suspicious_dist)
+      {
+        n_suspicious++;
         bestnode = NULL;
         mindist = 1e40;
       }
@@ -2131,10 +3493,12 @@ namespace pyoomph
       } // TODO
       if (boundary_max_dist > 0 && sqrt(mindist) > boundary_max_dist)
       {
-        std::cerr << "Cannot find a boundary node within the distance of " << boundary_max_dist << "  at " << xn[0] << ", " << xn[1] << std::endl;
+        // Nothing is written for this node at all - it keeps whatever it was built with.
+        unset_positions.push_back(std::vector<double>(xn.begin(), xn.end()));
         continue;
-        // TODO
       }
+      // Recorded before the blend, since it is the match this rank is offering the others.
+      local_dist[in] = sqrt(mindist);
 
       double mindist2 = 1e40;
       oomph::Node *bestnode2 = NULL;
@@ -2176,23 +3540,25 @@ namespace pyoomph
       //   oomph::Vector<double> xm=bestnode->position();
       for (unsigned int time_ind = 0; time_ind < n->time_stepper_pt()->ntstorage(); time_ind++)
       {
-        for (unsigned vi = 0; vi < field_map.size(); vi++)
-        { // Do not interpolate lagrange multipiers
-          //          std::cerr << "SETTING VALUE " << xm[0] << "," << xm[1]  << " :  " << time_ind << "  " << vi <<"  -> " << bestnode->value(time_ind,vi) << std::endl;
-          if (field_map[vi] >= 0)
-          {
-            n->set_value(time_ind, vi, bestnode->value(time_ind, field_map[vi]) * lambda1 + bestnode2->value(time_ind, field_map[vi]) * lambda2);
+        // Skipped on the codim-2 pass: the per-boundary pass has already put properly interpolated
+        // bulk values on this very node, and the blend below is not an interpolation.
+        if (!only_interface_fields)
+        {
+          for (unsigned vi = 0; vi < field_map.size(); vi++)
+          { // Do not interpolate lagrange multipiers
+            //          std::cerr << "SETTING VALUE " << xm[0] << "," << xm[1]  << " :  " << time_ind << "  " << vi <<"  -> " << bestnode->value(time_ind,vi) << std::endl;
+            if (field_map[vi] >= 0)
+            {
+              n->set_value(time_ind, vi, bestnode->value(time_ind, field_map[vi]) * lambda1 + bestnode2->value(time_ind, field_map[vi]) * lambda2);
+            }
           }
         }
         for (auto interfield : inter_field_map)
         {
-          // std::cout << "SIZES  " <<newnodes.size() << " OLD "<< oldnodes.size() << std::endl << std::flush ;
-          // std::cout << "DEST  " <<bnode << " @ "<< interfield.first << " NV " << n->nvalue() << " X " << n->x(0) << ", " << n->x(1)<< std::endl << std::flush ;
-          int dest_i = bnode->index_of_first_value_assigned_by_face_element(interfield.first);
-          // std::cout << "SRC1  " <<bestbnode << " @ "<< interfield.second << " NV " << bestnode->nvalue() << " X " << bestnode->x(0) << ", " << bestnode->x(1) <<std::endl << std::flush ;
-          int src_i1 = bestbnode->index_of_first_value_assigned_by_face_element(interfield.second);
-          // std::cout << "SRC2  " <<bestbnode2 << " @ "<< interfield.second << std::endl << std::flush ;
-          int src_i2 = bestbnode2->index_of_first_value_assigned_by_face_element(interfield.second);
+          int dest_i, src_i1, src_i2;
+          if (!face_value_index(bnode, interfield.first, dest_i)) continue;
+          if (!face_value_index(bestbnode, interfield.second, src_i1)) continue;
+          if (!face_value_index(bestbnode2, interfield.second, src_i2)) continue;
           n->set_value(time_ind, dest_i, bestnode->value(time_ind, src_i1) * lambda1 + bestnode2->value(time_ind, src_i2) * lambda2);
         }
       }
@@ -2205,18 +3571,152 @@ namespace pyoomph
 
       if (this->interpolated_lagrangian_coordinates_at_remeshing) // Interpolate also the Lagrangian coordinates
         {
-          if (dynamic_cast<pyoomph::Node*>(n)->nlagrangian()!=dynamic_cast<pyoomph::Node*>(bestnode)->nlagrangian())
+          if (static_cast<pyoomph::Node*>(n)->nlagrangian()!=static_cast<pyoomph::Node*>(bestnode)->nlagrangian())
           {
             throw_runtime_error("Cannot interpolate Lagrangian coordinates if the number of Lagrangian nodes is different");
           }                    
-          for (unsigned int i = 0; i < dynamic_cast<pyoomph::Node*>(n)->nlagrangian(); i++)
+          for (unsigned int i = 0; i < static_cast<pyoomph::Node*>(n)->nlagrangian(); i++)
           {            
-            double xl=dynamic_cast<pyoomph::Node*>(bestnode)->lagrangian_position(i)*lambda1+dynamic_cast<pyoomph::Node*>(bestnode2)->lagrangian_position(i)*lambda2;
-            //std::cout << "SETTING LAGRANGIAN COORDINATE " << i << " from " << dynamic_cast<pyoomph::Node*>(n)->xi(i) << " to "  << xl << std::endl;
-            dynamic_cast<pyoomph::Node*>(n)->xi(i)=xl;
+            double xl=static_cast<pyoomph::Node*>(bestnode)->lagrangian_position(i)*lambda1+static_cast<pyoomph::Node*>(bestnode2)->lagrangian_position(i)*lambda2;
+            //std::cout << "SETTING LAGRANGIAN COORDINATE " << i << " from " << static_cast<pyoomph::Node*>(n)->xi(i) << " to "  << xl << std::endl;
+            static_cast<pyoomph::Node*>(n)->xi(i)=xl;
           }
         }
     }
+
+    // This whole routine is a two-nearest-node inverse-distance blend, which is not an
+    // interpolation - it is not even linear-exact on a general mesh - and it is reached silently
+    // whenever no boundary coordinate is defined. Say when it produced a match that is implausibly
+    // far away, rather than letting a wrong value pass as a transferred one.
+    const std::string where = (imesh ? imesh->get_full_domain_path()
+                                     : this->get_full_domain_path() + "/" + this->get_boundary_name_or_index(bind));
+    // Under distribution these counts describe this rank's share of the old boundary, not the
+    // transfer: a node matched far away here is usually one that another rank has right next to an
+    // old node of its own, and the pooling below is what decides. Reported globally afterwards.
+    if (n_suspicious && !shared_across_ranks)
+    {
+      std::cout << "WARNING: interpolating '" << where
+                << "' by nearest-node blending matched " << n_suspicious << " of " << newnodes.size()
+                << " nodes to an old node further than " << suspicious_dist
+                << " away (two element lengths; worst match " << worst_dist
+                << "). Those values come from an unrelated part of the boundary. Assigning a zeta "
+                << "coordinate along this boundary avoids the nearest-node path entirely."
+                << std::endl;
+    }
+    if (!unset_positions.empty() && !shared_across_ranks)
+    {
+      std::cout << "WARNING: interpolating '" << where << "': " << unset_positions.size() << " of "
+                << newnodes.size() << " nodes received NO value, because no old node lay within the "
+                << "boundary_max_distance of " << boundary_max_dist << ". They keep whatever they "
+                << "were built with. Nodes at: " << describe_node_positions(unset_positions) << std::endl;
+    }
+    } // end of "this rank holds part of the old boundary"
+
+    if (shared_across_ranks)
+      this->pool_boundary_interpolation_across_ranks(newnodes, local_dist, oldimesh,
+                                                     (imesh ? imesh->get_full_domain_path()
+                                                            : this->get_full_domain_path() + "/" + this->get_boundary_name_or_index(bind)));
+  }
+
+  // See declaration in mesh.hpp.
+  void Mesh::pool_boundary_interpolation_across_ranks(const std::vector<oomph::Node *> &newnodes,
+                                                      const std::vector<double> &local_dist,
+                                                      Mesh *oldimesh, const std::string &where)
+  {
+#ifdef OOMPH_HAS_MPI
+    MPI_Comm mc = this->get_problem()->communicator_pt()->mpi_comm();
+    const int my_rank = this->get_problem()->communicator_pt()->my_rank();
+
+    // Unlike the point-located transfer, every rank produces an answer for every node here - the
+    // nearest of ITS old nodes, however far that is. So this is not "who found it" but "who found it
+    // closest", and only that rank's blend may stand. MINLOC also settles a tie deterministically,
+    // by the lower rank, which matters for the nodes on a partition boundary that several ranks hold
+    // at the same distance.
+    std::vector<double> best(newnodes.size(), 0.0);
+    std::vector<int> owner(newnodes.size(), -1);
+    {
+      std::vector<double> mine(newnodes.size());
+      std::vector<int> mine_rank(newnodes.size());
+      for (unsigned k = 0; k < newnodes.size(); k++)
+      {
+        mine[k] = local_dist[k];
+        mine_rank[k] = my_rank;
+      }
+      // MPI_DOUBLE_INT pairs, packed the way MPI_MINLOC wants them.
+      std::vector<std::pair<double, int>> in(newnodes.size()), out(newnodes.size());
+      for (unsigned k = 0; k < newnodes.size(); k++)
+        in[k] = std::make_pair(mine[k], mine_rank[k]);
+      if (!in.empty())
+        MPI_Allreduce(&in[0], &out[0], (int)in.size(), MPI_DOUBLE_INT, MPI_MINLOC, mc);
+      for (unsigned k = 0; k < newnodes.size(); k++)
+      {
+        best[k] = out[k].first;
+        owner[k] = out[k].second;
+      }
+    }
+
+    std::vector<double> weights(newnodes.size(), 0.0);
+    unsigned n_unmatched = 0;
+    for (unsigned k = 0; k < newnodes.size(); k++)
+    {
+      if (!std::isfinite(best[k]))
+      {
+        n_unmatched++; // no rank had a usable old node; the node keeps what it was built with
+        continue;
+      }
+      weights[k] = (owner[k] == my_rank) ? 1.0 : 0.0;
+    }
+    this->pool_node_values_across_ranks(newnodes, weights);
+
+    // Now that the closest match over ALL ranks is known, the "matched implausibly far away" test
+    // finally means something. The threshold is the old interface's element size, which is itself
+    // per-rank, so take the largest anybody saw.
+    double old_elem_size = 0.0;
+    if (oldimesh)
+    {
+      for (unsigned ie = 0; ie < oldimesh->nelement(); ie++)
+      {
+        oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(oldimesh->element_pt(ie));
+        if (!fe || fe->nnode() < 2)
+          continue;
+        double d2 = 0.0;
+        oomph::Node *a = fe->node_pt(0), *b = fe->node_pt(fe->nnode() - 1);
+        for (unsigned di = 0; di < a->ndim(); di++)
+          d2 += (a->x(di) - b->x(di)) * (a->x(di) - b->x(di));
+        old_elem_size = std::max(old_elem_size, sqrt(d2));
+      }
+    }
+    MPI_Allreduce(MPI_IN_PLACE, &old_elem_size, 1, MPI_DOUBLE, MPI_MAX, mc);
+    unsigned n_suspicious = 0;
+    double worst = 0.0;
+    if (old_elem_size > 0.0)
+    {
+      for (unsigned k = 0; k < newnodes.size(); k++)
+      {
+        if (!std::isfinite(best[k]))
+          continue;
+        worst = std::max(worst, best[k]);
+        if (best[k] > 2.0 * old_elem_size)
+          n_suspicious++;
+      }
+    }
+    // Every rank has the same numbers, so only one of them says so.
+    if (my_rank == 0 && (n_suspicious || n_unmatched))
+    {
+      if (n_suspicious)
+        std::cout << "WARNING: interpolating '" << where << "' by nearest-node blending matched "
+                  << n_suspicious << " of " << newnodes.size() << " nodes to an old node further than "
+                  << 2.0 * old_elem_size << " away (two element lengths; worst match " << worst
+                  << "), across all ranks. Those values come from an unrelated part of the boundary."
+                  << std::endl;
+      if (n_unmatched)
+        std::cout << "WARNING: interpolating '" << where << "': " << n_unmatched << " of "
+                  << newnodes.size() << " nodes received NO value on any rank. They keep whatever they "
+                  << "were built with." << std::endl;
+    }
+#else
+    (void)newnodes; (void)local_dist; (void)oldimesh; (void)where;
+#endif
   }
 
   // Transfer nodal field values (and, if requested, Lagrangian coordinates) from mesh `from` to this
@@ -2224,22 +3724,261 @@ namespace pyoomph
   // Unlike nodal_interpolate_along_boundary's nearest-node matching, this locates each of this mesh's
   // nodes within the `from` mesh by global (Eulerian or, if
   // interpolated_lagrangian_coordinates_at_remeshing, Lagrangian - via zeta_coordinate_type) position
-  // using oomph::MeshAsGeomObject::locate_zeta, and then evaluates/interpolates the `from` element's
+  // using the point locator, and then evaluates/interpolates the `from` element's
   // shape functions at that local coordinate to obtain exact interpolated values, rather than picking
   // the value at a nearby existing node. As in the boundary variant, a field_map translates field
-  // indices between the two mesh's JIT-compiled code instances (identity if they are the same code),
+  // indices between the two mesh's JIT-compiled codes (identity if they are the same code),
   // and DG/DL/D0 (discontinuous) fields are not supported (throws if present).
-  void Mesh::nodal_interpolate_from(Mesh *from, int boundary_index)
+  // See declaration in mesh.hpp. Collective, and deliberately so.
+  bool Mesh::interpolation_is_shared_across_ranks(Mesh *from) const
+  {
+#ifdef OOMPH_HAS_MPI
+    // The gate has to be something every rank answers the same way, since it decides whether this
+    // rank enters the MPI_Allreduce below: the problem being distributed is a Problem-wide flag, and
+    // so is the process count.
+    Problem *prob = const_cast<Mesh *>(this)->get_problem();
+    if (!prob || !prob->distributed() || !prob->communicator_pt() || prob->communicator_pt()->nproc() <= 1)
+      return false;
+    // The local answer is not: a rank holding no element of the source cannot say whether the source
+    // is partitioned (an interface mesh it has no share of does not carry the flag), and a rank that
+    // decided differently from the others would leave them in the pooling collective. Ask everybody.
+    int local = (from && from->is_mesh_distributed() && !this->is_mesh_distributed()) ? 1 : 0;
+    int any = local;
+    MPI_Allreduce(&local, &any, 1, MPI_INT, MPI_MAX, prob->communicator_pt()->mpi_comm());
+    return any != 0;
+#else
+    (void)from;
+    return false;
+#endif
+  }
+
+  // See declaration in mesh.hpp.
+  std::vector<double> Mesh::pool_node_values_across_ranks(const std::vector<oomph::Node *> &nodes,
+                                                          std::vector<double> weights)
+  {
+#ifdef OOMPH_HAS_MPI
+    MPI_Comm mc = this->get_problem()->communicator_pt()->mpi_comm();
+    // Everything a transfer writes on a node, pre-multiplied by whether this rank filled it. Only
+    // what it writes: a value it never touches is whatever the freshly built mesh carries, which is
+    // the same number on every rank, so summing it would be harmless but pointless.
+    std::vector<double> values;
+    for (unsigned k = 0; k < nodes.size(); k++)
+    {
+      oomph::Node *n = nodes[k];
+      const double have = weights[k];
+      for (unsigned t = 0; t < n->time_stepper_pt()->ntstorage(); t++)
+        for (unsigned vi = 0; vi < n->nvalue(); vi++)
+          values.push_back(have * n->value(t, vi));
+      for (unsigned t = 1; t < n->position_time_stepper_pt()->ntstorage(); t++)
+        for (unsigned i = 0; i < n->ndim(); i++)
+          values.push_back(have * n->x(t, i));
+      if (this->interpolated_lagrangian_coordinates_at_remeshing)
+      {
+        pyoomph::Node *pn = static_cast<pyoomph::Node *>(n);
+        for (unsigned i = 0; pn && i < pn->nlagrangian(); i++)
+          values.push_back(have * pn->xi(i));
+      }
+    }
+    if (!values.empty())
+      MPI_Allreduce(MPI_IN_PLACE, &values[0], (int)values.size(), MPI_DOUBLE, MPI_SUM, mc);
+    if (!weights.empty())
+      MPI_Allreduce(MPI_IN_PLACE, &weights[0], (int)weights.size(), MPI_DOUBLE, MPI_SUM, mc);
+
+    unsigned pos = 0;
+    for (unsigned k = 0; k < nodes.size(); k++)
+    {
+      oomph::Node *n = nodes[k];
+      const double w = weights[k];
+      // Nobody had it: leave it exactly as it was, so that whatever the caller does with unplaced
+      // nodes still sees them untouched.
+      auto take = [&]() { return values[pos++]; };
+      for (unsigned t = 0; t < n->time_stepper_pt()->ntstorage(); t++)
+        for (unsigned vi = 0; vi < n->nvalue(); vi++)
+        {
+          double v = take();
+          if (w > 0.0)
+            n->set_value(t, vi, v / w);
+        }
+      for (unsigned t = 1; t < n->position_time_stepper_pt()->ntstorage(); t++)
+        for (unsigned i = 0; i < n->ndim(); i++)
+        {
+          double v = take();
+          if (w > 0.0)
+            n->x(t, i) = v / w;
+        }
+      if (this->interpolated_lagrangian_coordinates_at_remeshing)
+      {
+        pyoomph::Node *pn = static_cast<pyoomph::Node *>(n);
+        for (unsigned i = 0; pn && i < pn->nlagrangian(); i++)
+        {
+          double v = take();
+          if (w > 0.0)
+            pn->xi(i) = v / w;
+        }
+      }
+    }
+    return weights;
+#else
+    (void)nodes;
+    return weights;
+#endif
+  }
+
+  // Defined with the rest of the discontinuous-transfer helpers further down; needed here to address
+  // the DL/D0 block of an element that also carries nodal DG fields.
+  static unsigned dg_internal_data_offset(const JITFuncSpec_Table_FiniteElement_t *ft);
+
+  // See declaration in mesh.hpp.
+  unsigned Mesh::share_interpolation_across_ranks(Mesh *from, int boundary_index, bool interface_case,
+                                                  const std::vector<bool> &completed_elements,
+                                                  std::set<oomph::Node *> &completed_nodes,
+                                                  std::set<oomph::Node *> &missing_nodes)
+  {
+#ifdef OOMPH_HAS_MPI
+    // Not re-checked here: interpolation_is_shared_across_ranks() is itself collective, so asking it
+    // a second time from a place only some ranks reach would be the very deadlock it prevents. The
+    // caller has established it. The communicator is the Problem's - the source mesh may be one this
+    // rank holds no element of, and this one was built after the last distribution and has none.
+    MPI_Comm mc = this->get_problem()->communicator_pt()->mpi_comm();
+
+    // The very order the transfer loop visits them in, so that entry k describes the same node on
+    // every rank. That holds because this mesh is replicated: same elements, same order, same nodes.
+    std::vector<oomph::Node *> nodes;
+    {
+      std::set<oomph::Node *> seen;
+      for (unsigned int ie = 0; ie < this->nelement(); ie++)
+      {
+        BulkElementBase *deste = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+        for (unsigned int ine = 0; ine < deste->nnode(); ine++)
+        {
+          oomph::Node *n = deste->node_pt(ine);
+          if (!node_is_in_scope(n, boundary_index, interface_case))
+            continue;
+          if (seen.insert(n).second)
+            nodes.push_back(n);
+        }
+      }
+    }
+
+    std::vector<double> weights(nodes.size(), 0.0);
+    for (unsigned k = 0; k < nodes.size(); k++)
+      weights[k] = completed_nodes.count(nodes[k]) ? 1.0 : 0.0;
+    const std::vector<double> node_ranks = this->pool_node_values_across_ranks(nodes, weights);
+
+    // The element-centre transfer of the discontinuous fields, which fails and succeeds independently
+    // of the nodes around it.
+    //
+    // Every internal Data allocate_discontinous_fields() laid out, in its order [DG spaces][DL][D0]
+    // (src/elements.cpp). Counting DL and D0 alone would still START at internal data 0, i.e. inside
+    // the DG block, as soon as an interface carries a nodal DG field: the DL/D0 values would never be
+    // pooled and the leading DG ones would be pooled in their place.
+    //
+    // ndisc is 0 in every run today, and this loop is therefore dead: nodal_interpolate_from() below
+    // refuses ANY mesh that carries a DG, DL or D0 field ("Cannot interpolate DG fields at
+    // interfaces yet"), so it never gets as far as calling this. Instrumenting a distributed
+    // D1-skeleton remesh confirmed it - the only meshes that reach here are the bulk and the
+    // boundary interfaces, all with no internal data at all, and the skeleton itself never comes
+    // through this route (it is rebuilt and refilled by _transfer_internal_facet_fields, see
+    // pyoomph/meshes/interpolator.py). The indexing is kept correct for the day that gate is
+    // narrowed again; it cannot be tested before then.
+    std::vector<double> values, elem_weights;
+    unsigned ndisc = 0;
+    if (this->nelement())
+    {
+      BulkElementBase *e0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
+      auto *ft = e0->get_jit_code()->get_func_table();
+      ndisc = dg_internal_data_offset(ft) + ft->info_DL.numfields + ft->info_D0.numfields;
+      // A DL block is only allocated where the element has DL "nodes" at all, so the static offsets
+      // can overshoot on an element family that has none.
+      if (ndisc > e0->ninternal_data())
+        ndisc = e0->ninternal_data();
+    }
+    for (unsigned int ie = 0; ie < this->nelement() && ndisc; ie++)
+    {
+      double have = (ie < completed_elements.size() && completed_elements[ie]) ? 1.0 : 0.0;
+      elem_weights.push_back(have);
+      BulkElementBase *deste = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+      for (unsigned d = 0; d < ndisc; d++)
+      {
+        oomph::Data *dat = deste->internal_data_pt(d);
+        for (unsigned t = 0; t < dat->time_stepper_pt()->ntstorage(); t++)
+          for (unsigned j = 0; j < dat->nvalue(); j++)
+            values.push_back(have * dat->value(t, j));
+      }
+    }
+    if (!values.empty())
+      MPI_Allreduce(MPI_IN_PLACE, &values[0], (int)values.size(), MPI_DOUBLE, MPI_SUM, mc);
+    if (!elem_weights.empty())
+      MPI_Allreduce(MPI_IN_PLACE, &elem_weights[0], (int)elem_weights.size(), MPI_DOUBLE, MPI_SUM, mc);
+
+    unsigned pos = 0;
+    for (unsigned int ie = 0; ie < this->nelement() && ndisc; ie++)
+    {
+      double w = elem_weights[ie];
+      BulkElementBase *deste = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+      for (unsigned d = 0; d < ndisc; d++)
+      {
+        oomph::Data *dat = deste->internal_data_pt(d);
+        for (unsigned t = 0; t < dat->time_stepper_pt()->ntstorage(); t++)
+          for (unsigned j = 0; j < dat->nvalue(); j++)
+          {
+            double v = values[pos++];
+            if (w > 0.0)
+              dat->set_value(t, j, v / w);
+          }
+      }
+    }
+
+    // Placed by somebody, so it must not go to the nearest-node fallback - nor be counted as a
+    // failure by the report at the end, which is about the transfer and not about this partition.
+    unsigned rescued = 0;
+    for (unsigned k = 0; k < nodes.size(); k++)
+    {
+      if (node_ranks[k] > 0.0 && !completed_nodes.count(nodes[k]))
+      {
+        completed_nodes.insert(nodes[k]);
+        missing_nodes.erase(nodes[k]);
+        rescued++;
+      }
+    }
+    return rescued;
+#else
+    (void)from; (void)boundary_index; (void)interface_case; (void)completed_elements;
+    (void)completed_nodes; (void)missing_nodes;
+    return 0;
+#endif
+  }
+
+  void Mesh::nodal_interpolate_from(Mesh *from, int boundary_index, bool use_boundary_coordinate, bool only_interface_fields)
   {
     this->interpolated_lagrangian_coordinates_at_remeshing=from->interpolated_lagrangian_coordinates_at_remeshing;
     auto old_setting=BulkElementBase::zeta_coordinate_type;
     if (this->interpolated_lagrangian_coordinates_at_remeshing) BulkElementBase::zeta_coordinate_type=1;
+    // Asked before any return, because it is collective: every rank has to reach it, including the
+    // ones that have nothing to do here.
+    const bool shared_across_ranks = this->interpolation_is_shared_across_ranks(from);
     if (!this->nelement() || !from->nelement())
+    {
+      // A rank holding no element of the source still owns a full copy of the destination (that is
+      // what makes this case possible at all), so it has to take part in the pooling below and
+      // contribute nothing, or the ranks that do have something will wait for it forever.
+      if (shared_across_ranks && this->nelement())
+      {
+        std::set<oomph::Node *> nothing_completed, nothing_missing;
+        std::vector<bool> no_elements(this->nelement(), false);
+        // The same interface_case the body derives below - it selects which nodes are in scope, so
+        // the two have to agree or the ranks would pack buffers of different lengths.
+        share_interpolation_across_ranks(from, boundary_index,
+                                         (dynamic_cast<InterfaceMesh *>(this) && boundary_index >= 0),
+                                         no_elements, nothing_completed, nothing_missing);
+      }
+      BulkElementBase::zeta_coordinate_type = old_setting;
       return;
+    }
     BulkElementBase *my_be0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
     BulkElementBase *from_be0 = dynamic_cast<BulkElementBase *>(from->element_pt(0));
-    auto *my_ci = my_be0->get_code_instance();
-    auto *from_ci = from_be0->get_code_instance();
+    auto *my_ci = my_be0->get_jit_code();
+    auto *from_ci = from_be0->get_jit_code();
     auto *my_ft = my_ci->get_func_table();
     auto *from_ft = from_ci->get_func_table();
     std::vector<int> field_map;
@@ -2257,7 +3996,20 @@ namespace pyoomph
       }
     }
 
-    if (has_dg || my_ft->info_DL.numfields || my_ft->info_D0.numfields)
+    // This refuses every discontinuous field, DL and D0 included, so the DL/D0 transfer further down
+    // and the discontinuous pooling in share_interpolation_across_ranks() are both unreachable. That
+    // was not always so: until 41b438f2 ("Completed refactoring of the DG fields") the test was on
+    // the nodal DG spaces alone, and a DL or D0 field did travel through a remesh. Widening it here
+    // turned that into a hard error, which is where it stands - tests/test_mesh_point_locator.py
+    // pins the refusal so that lifting it is a deliberate act, and the code below is kept correct
+    // for that day rather than deleted.
+    //
+    // discontinuous_fields_need_no_transfer is the one way past it, and it is not a lifting of the
+    // limitation: it says the destination recomputes those fields itself, so skipping them loses
+    // nothing. Without it a domain carrying a single D0 field - a DisjunctDomainMarker's component
+    // numbering, say - could not be remeshed at all.
+    if (!this->discontinuous_fields_need_no_transfer &&
+        (has_dg || my_ft->info_DL.numfields || my_ft->info_D0.numfields))
     {
       throw_runtime_error("Cannot interpolate DG fields at interfaces yet");
     }
@@ -2365,11 +4117,187 @@ namespace pyoomph
       }
     }
 
-    std::cout << "INTERPOLATING FROM " << from << std::endl;
-    oomph::MeshAsGeomObject MaGO(from);
 
     std::set<oomph::Node *> completed_nodes;
     std::set<oomph::Node *> missing_nodes;
+
+    // Which coordinate space the location happens in. Note this is NOT what the naming suggests:
+    // zeta_coordinate_type defaults to 0 = Lagrangian, and is flipped to Eulerian only when
+    // interpolated_lagrangian_coordinates_at_remeshing is set. That is deliberate - in the default
+    // case prepare_interpolation() has just reset the OLD mesh's Lagrangian coordinates to its
+    // Eulerian ones (mesh.cpp: set_lagrangian_nodal_coordinates), so locating in Lagrangian space
+    // is locating in Eulerian space; when the Lagrangian coordinates are instead interpolated they
+    // are no longer a copy of x, and the location has to use x explicitly.
+    LocatorSetup lsetup;
+    lsetup.space = (this->interpolated_lagrangian_coordinates_at_remeshing ? LocatorSpace::Eulerian : LocatorSpace::Lagrangian);
+    const bool interface_case = (dynamic_cast<InterfaceMesh *>(this) && boundary_index >= 0);
+    // With a boundary coordinate the interface is a 1d chart and the match is an exact inversion of
+    // it. Without one, the match is the closest point on the old interface geometry instead: the
+    // locator sees a codimension-1 source in the position space and switches to projection by
+    // itself. That is what lets a 2d interface in 3d work at all, since no chart exists for it.
+    const bool by_zeta = (interface_case && use_boundary_coordinate);
+    if (by_zeta)
+    {
+      lsetup.space = LocatorSpace::BoundaryZeta;
+      lsetup.boundary_index = boundary_index;
+      // A closed loop is periodic in zeta; the period comes from the bulk mesh the boundary belongs
+      // to, which is where the assignment recorded it.
+      Mesh *bulk_of_this = dynamic_cast<InterfaceMesh *>(this)->get_bulk_mesh();
+      const double period = (bulk_of_this ? bulk_of_this->get_boundary_zeta_period(boundary_index) : 0.0);
+      if (period > 0.0)
+        lsetup.period.assign(1, period);
+    }
+    {
+      // Name the boundary when there is one. Two calls land on the same BULK mesh - the bulk pass
+      // with boundary_index < 0, and one pass per boundary that has no interface mesh of its own -
+      // and without the name they print identically, which reads as the same work being done twice.
+      std::string what = this->get_full_domain_path();
+      if (boundary_index >= 0 && !interface_case)
+        what += "/" + this->get_boundary_name_or_index((unsigned)boundary_index) + " (boundary nodes only)";
+      else if (boundary_index < 0)
+        what += " (interior nodes only)";
+      std::string how;
+      if (by_zeta)
+        how = " by its zeta coordinate";
+      else if (interface_case)
+        how = " by projection onto the old interface";
+      std::cout << "Interpolating " << what << " from " << from->get_full_domain_path() << how << std::endl;
+    }
+
+    // Pre-locate every node this routine is about to visit, in one batch. Collected in exactly the
+    // order and with exactly the filtering of the transfer loop below, so the two agree on which
+    // nodes exist; grouped by destination element so the locator's walk can seed each query from
+    // the previous match instead of returning to the tree.
+    std::map<oomph::Node *, std::pair<BulkElementBase *, oomph::Vector<double>>> prelocated;
+    std::unique_ptr<MeshPointLocator> locator;
+    {
+      std::vector<double> qcoords;
+      std::vector<unsigned> qgroups;
+      std::vector<oomph::Node *> qnodes;
+      std::set<oomph::Node *> seen;
+      unsigned qdim = 0;
+
+      for (unsigned int ie = 0; ie < this->nelement(); ie++)
+      {
+        BulkElementBase *deste = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+        for (unsigned int ine = 0; ine < deste->nnode(); ine++)
+        {
+          oomph::Node *n = deste->node_pt(ine);
+          if (!node_is_in_scope(n, boundary_index, interface_case))
+            continue;
+          if (seen.count(n))
+            continue;
+          seen.insert(n);
+
+          oomph::Vector<double> xnode = n->position();
+          if (by_zeta)
+          {
+            xnode.resize(deste->dim());
+            n->get_coordinates_on_boundary(boundary_index, xnode);
+          }
+          if (!qdim)
+            qdim = xnode.size();
+          for (unsigned d = 0; d < qdim; d++)
+            qcoords.push_back(d < xnode.size() ? xnode[d] : 0.0);
+          qgroups.push_back(ie);
+          qnodes.push_back(n);
+        }
+      }
+
+      if (!qnodes.empty())
+      {
+        const auto t0 = std::chrono::steady_clock::now();
+        locator.reset(new MeshPointLocator(from, lsetup));
+        const auto t1 = std::chrono::steady_clock::now();
+        LocationSet located = locator->locate_batch(qcoords, qnodes.size(), &qgroups);
+        const auto t2 = std::chrono::steady_clock::now();
+        if (report_interpolation_timing)
+        {
+          std::cout << "  [locator] " << qnodes.size() << " points: index "
+                    << std::chrono::duration<double>(t1 - t0).count() * 1000.0 << " ms, locate "
+                    << std::chrono::duration<double>(t2 - t1).count() * 1000.0 << " ms ("
+                    << located.search_statistics() << ", " << locator->affine_fraction() << ")" << std::endl;
+        }
+        BulkElementBase *el = NULL;
+        std::vector<double> sloc;
+        std::vector<unsigned> zeta_missed;
+        for (unsigned i = 0; i < qnodes.size(); i++)
+        {
+          if (located.resolve_local(i, el, sloc))
+          {
+            oomph::Vector<double> sv(sloc.size());
+            for (unsigned d = 0; d < sloc.size(); d++)
+              sv[d] = sloc[d];
+            prelocated[qnodes[i]] = std::make_pair(el, sv);
+          }
+          else if (by_zeta)
+          {
+            zeta_missed.push_back(i);
+          }
+        }
+
+        // Nodes zeta could not place get a second chance by PROJECTION, before anything falls
+        // through to the nearest-node blend.
+        //
+        // zeta is a chart, and the old and the new mesh only agree on it where both cover the same
+        // range. At the end of a boundary - a corner where two differently named boundaries meet -
+        // the new mesh can reach a zeta the old one never had, and every node there is then
+        // unlocatable however good the locator is. That is not a defect in the chart so much as a
+        // property of charts. The geometry, on the other hand, is still there to be projected onto,
+        // and a closest point on the old interface is a far better answer than a blend of the two
+        // nearest nodes.
+        if (!zeta_missed.empty())
+        {
+          LocatorSetup psetup;
+          psetup.space = (this->interpolated_lagrangian_coordinates_at_remeshing ? LocatorSpace::Eulerian
+                                                                                 : LocatorSpace::Lagrangian);
+          std::vector<double> pcoords;
+          unsigned pdim = 0;
+          for (unsigned k : zeta_missed)
+          {
+            oomph::Vector<double> xn = qnodes[k]->position();
+            if (!pdim)
+              pdim = xn.size();
+            for (unsigned d = 0; d < pdim; d++)
+              pcoords.push_back(d < xn.size() ? xn[d] : 0.0);
+          }
+          try
+          {
+            MeshPointLocator plocator(from, psetup);
+            LocationSet plocated = plocator.locate_batch(pcoords, zeta_missed.size());
+            unsigned rescued = 0;
+            for (unsigned k = 0; k < zeta_missed.size(); k++)
+            {
+              if (!plocated.resolve_local(k, el, sloc))
+                continue;
+              oomph::Vector<double> sv(sloc.size());
+              for (unsigned d = 0; d < sloc.size(); d++)
+                sv[d] = sloc[d];
+              prelocated[qnodes[zeta_missed[k]]] = std::make_pair(el, sv);
+              rescued++;
+            }
+            if (rescued)
+            {
+              std::cout << "  " << rescued << " of " << zeta_missed.size()
+                        << " node(s) that the zeta coordinate could not place were located by "
+                        << "projecting onto the old interface instead." << std::endl;
+            }
+          }
+          catch (...)
+          {
+            // The source may not admit a projection locator at all (equal dimensions, say). Leaving
+            // these unplaced is no worse than before.
+          }
+        }
+      }
+    }
+
+    // shared_across_ranks, asked once at the top of this function, says that we are transferring out
+    // of a distributed mesh into a replicated one. This rank can then only place what falls into its
+    // own share of the old mesh; everything else is another rank's to place, not a failure, so it
+    // must neither be reported per node here nor blended from local nodes below - the ranks pool
+    // what each of them found first (share_interpolation_across_ranks).
+    std::vector<bool> completed_elements(this->nelement(), false);
 
     for (unsigned int ie = 0; ie < this->nelement(); ie++)
     {
@@ -2377,39 +4305,40 @@ namespace pyoomph
       for (unsigned int ine = 0; ine < deste->nnode(); ine++)
       {
         oomph::Node *n = deste->node_pt(ine);
-        if (n->is_on_boundary() && boundary_index < 0)
-          continue; // Skip the boundary nodes here
+        if (!node_is_in_scope(n, boundary_index, interface_case))
+          continue;
         if (completed_nodes.count(n) || missing_nodes.count(n))
           continue;
 
         oomph::Vector<double> xnode = n->position();
-        if (dynamic_cast<InterfaceMesh *>(this) && boundary_index >= 0)
+        if (by_zeta)
         {
           xnode.resize(deste->dim());
-          //          std::cout << "BOUNDARY INDEX " << boundary_index << "  xnode " << xnode.size() << std::endl;
           n->get_coordinates_on_boundary(boundary_index, xnode);
-          //          std::cout << "  XNODE " << xnode[0] << std::endl;
         }
         oomph::Vector<double> s(xnode.size(), 0.5 * (deste->s_min() + deste->s_max()));
-        oomph::GeomObject *resgo = 0;
         BulkElementBase *srcelem = NULL;
 
-        MaGO.locate_zeta(xnode, resgo, s, false);
-        srcelem = dynamic_cast<BulkElementBase *>(resgo);
+        auto pl = prelocated.find(n);
+        if (pl != prelocated.end())
+        {
+          srcelem = pl->second.first;
+          s = pl->second.second;
+        }
         if (!srcelem)
         {
-          if (boundary_index<0) std::cerr << "MISSING_BULKONLY_ELEM_AT\t" << xnode[0] << "\t" << xnode[1] << "  " << completed_nodes.size() * 100.0 / this->nnode() << " % done  | resgo " << resgo  << std::endl;
+          if (boundary_index<0 && !shared_across_ranks) std::cerr << "MISSING_BULKONLY_ELEM_AT\t" << xnode[0] << "\t" << xnode[1] << "  " << completed_nodes.size() * 100.0 / this->nnode() << " % done" << std::endl;
           missing_nodes.insert(n);
           continue;
         }
 
         std::vector<double> shift(deste->nodal_dimension(), 0.0);
-        for (unsigned int i = 0; i < deste->nodal_dimension(); i++)
+        for (unsigned int i = 0; i < deste->nodal_dimension() && !only_interface_fields; i++)
         {
           shift[i] = n->x(i) - srcelem->interpolated_x(s, i);
           //         std::cout << "SHIFT " << i << "  " << shift[i] << " WITH BOUND IND " << boundary_index << std::endl;
         }
-        for (unsigned int i = 0; i < deste->nodal_dimension(); i++)
+        for (unsigned int i = 0; i < deste->nodal_dimension() && !only_interface_fields; i++)
         {
           for (unsigned int time_ind = 1; time_ind < n->position_time_stepper_pt()->ntstorage(); time_ind++)
           {
@@ -2417,7 +4346,7 @@ namespace pyoomph
           }
         }
 
-        if (this->interpolated_lagrangian_coordinates_at_remeshing) // Interpolate also the Lagrangian coordinates
+        if (this->interpolated_lagrangian_coordinates_at_remeshing && !only_interface_fields) // Interpolate also the Lagrangian coordinates
         {
           if (srcelem->nlagrangian()!=deste->nlagrangian())
           {
@@ -2426,15 +4355,18 @@ namespace pyoomph
           for (unsigned int i = 0; i < srcelem->nlagrangian(); i++)
           {            
             double xl=srcelem->interpolated_xi(s,i);
-            //std::cout << "SETTING LAGRANGIAN COORDINATE " << i << " from " << dynamic_cast<pyoomph::Node*>(n)->xi(i) << " to "  << xl << std::endl;
-            dynamic_cast<pyoomph::Node*>(n)->xi(i)=xl;
+            //std::cout << "SETTING LAGRANGIAN COORDINATE " << i << " from " << static_cast<pyoomph::Node*>(n)->xi(i) << " to "  << xl << std::endl;
+            static_cast<pyoomph::Node*>(n)->xi(i)=xl;
           }
         }
 
         for (unsigned int time_ind = 0; time_ind < n->time_stepper_pt()->ntstorage(); time_ind++)
         {
           oomph::Vector<double> vals;
-          srcelem->get_interpolated_values(time_ind, s, vals);
+          if (!only_interface_fields)
+          {
+            srcelem->get_interpolated_values(time_ind, s, vals);
+          }
           for (unsigned int vi = 0; vi < vals.size(); vi++)
           {
             if (field_map[vi] >= 0)
@@ -2454,23 +4386,44 @@ namespace pyoomph
         completed_nodes.insert(n);
       }
       // TODO: Internal data
-      if (my_ft->info_DL.numfields || my_ft->info_D0.numfields)
+      if ((my_ft->info_DL.numfields || my_ft->info_D0.numfields) && !only_interface_fields)
       {
         auto *ts = deste->internal_data_pt(0)->time_stepper_pt();
         // Find the elem in the center
         oomph::Vector<double> dmpt = deste->get_Eulerian_midpoint_from_local_coordinate(); // TODO: Lagrangian?
 
         oomph::Vector<double> s(dmpt.size(), 0.5 * (deste->s_min() + deste->s_max()));
-        oomph::GeomObject *resgo = 0;
         BulkElementBase *srcelem = NULL;
 
-        MaGO.locate_zeta(dmpt, resgo, s, false);
-        srcelem = dynamic_cast<BulkElementBase *>(resgo);
+        // The element-centre query for DL/D0. One point per destination element, so it is not
+        // batched with the nodal pass above; it reuses the same locator, which is where the cost
+        // sits (the index is built once, not once per query). It can still be absent here when no
+        // node was in scope at all - an element-wise-only transfer - so build it on demand.
+        if (!locator)
+          locator.reset(new MeshPointLocator(from, lsetup));
+        {
+          std::vector<double> centre(dmpt.size());
+          for (unsigned d = 0; d < dmpt.size(); d++)
+            centre[d] = dmpt[d];
+          LocationSet one = locator->locate_batch(centre, 1);
+          std::vector<double> sloc;
+          if (one.resolve_local(0, srcelem, sloc))
+          {
+            s.resize(sloc.size());
+            for (unsigned d = 0; d < sloc.size(); d++)
+              s[d] = sloc[d];
+          }
+          else
+          {
+            srcelem = NULL;
+          }
+        }
         if (!srcelem)
         {
-          if (boundary_index<0) std::cerr << "MISSING_BULKONLY_ELEM_AT\t" << dmpt[0] << "\t" << dmpt[1] << "  INTERNAL CENTER " << ie * 100.0 / this->nelement() << " % done  | resgo " << resgo << std::endl;
+          if (boundary_index<0 && !shared_across_ranks) std::cerr << "MISSING_BULKONLY_ELEM_AT\t" << dmpt[0] << "\t" << dmpt[1] << "  INTERNAL CENTER " << ie * 100.0 / this->nelement() << " % done" << std::endl;
           continue;
         }
+        completed_elements[ie] = true;
         // Interpolate all D0 fields
         if (my_ft->info_D0.numfields != from_ft->info_D0.numfields)
         {
@@ -2481,6 +4434,12 @@ namespace pyoomph
           throw_runtime_error("TODO: Field mapping if DL spaces are different"); // TODO: Field mapping
         }
 
+        // Same offset as in share_interpolation_across_ranks(): allocate_discontinous_fields() lays
+        // the internal data out as [DG spaces][DL][D0], so addressing the DL block from index 0
+        // would write into the leading DG data instead. Unreachable while the gate at the top of
+        // this function refuses DL/D0 outright, and so untested - fixed anyway, because the two
+        // places have to agree the day it is lifted.
+        const unsigned my_dg_off = dg_internal_data_offset(my_ft);
         for (unsigned int time_ind = 0; time_ind < ts->ntstorage(); time_ind++)
         {
           if (my_ft->info_D0.numfields)
@@ -2489,7 +4448,7 @@ namespace pyoomph
             srcelem->get_interpolated_fields_D0(s, vals, time_ind);
             for (unsigned int vi = 0; vi < vals.size(); vi++)
             {
-              deste->internal_data_pt(my_ft->info_DL.numfields + vi)->set_value(time_ind, 0, vals[vi]); // TODO: Field mapping
+              deste->internal_data_pt(my_dg_off + my_ft->info_DL.numfields + vi)->set_value(time_ind, 0, vals[vi]); // TODO: Field mapping
             }
           }
           if (my_ft->info_DL.numfields)
@@ -2498,10 +4457,11 @@ namespace pyoomph
             srcelem->get_interpolated_fields_DL(s, vals, time_ind);
             for (unsigned int vi = 0; vi < vals.size(); vi++)
             {
-              deste->internal_data_pt(vi)->set_value(time_ind, 0, vals[vi]); // TODO: Field mapping
-              for (unsigned int j = 1; j < deste->internal_data_pt(vi)->nvalue(); j++)
+              oomph::Data *dl = deste->internal_data_pt(my_dg_off + vi);
+              dl->set_value(time_ind, 0, vals[vi]); // TODO: Field mapping
+              for (unsigned int j = 1; j < dl->nvalue(); j++)
               {
-                deste->internal_data_pt(vi)->set_value(time_ind, j, 0); // TODO: Field mapping, slopes!
+                dl->set_value(time_ind, j, 0); // TODO: Field mapping, slopes!
               }
             }
           }
@@ -2511,18 +4471,70 @@ namespace pyoomph
       }
     }
 
-    // Handle the nodes which where not found by nearest nodes
+    // Pool what each rank could place, before anything falls through to the blend below: a node this
+    // rank could not find is usually one that simply lives in another rank's share of the old mesh,
+    // and blending it from local nodes would produce a confident wrong value that the pooling could
+    // no longer tell from a real one.
+    if (shared_across_ranks)
+    {
+      unsigned rescued = share_interpolation_across_ranks(from, boundary_index, interface_case,
+                                                          completed_elements, completed_nodes, missing_nodes);
+      if (rescued && report_interpolation_timing)
+        std::cout << "  [mpi] " << rescued << " node(s) were transferred by another rank" << std::endl;
+    }
+
+    // Handle the nodes which where not found by nearest nodes.
+    //
+    // Reaching here at all means locate_zeta could not place the node in the source mesh, and what
+    // follows is a two-nearest-node inverse-distance blend - a fallback of much lower quality than
+    // the shape-function evaluation above, and quadratic in the mesh size on top. It used to happen
+    // silently for boundaries (the cerr below is guarded by boundary_index<0), so count it and
+    // report once at the end.
+    unsigned n_fallback = 0;
+    std::vector<std::vector<double>> unset_positions, fallback_positions;
+
+    // Source nodes for the fallback below. An INTERFACE mesh has no node list of its own - its nodes
+    // belong to the bulk and are reachable only through its elements - so from->nnode() is 0 there
+    // and the nearest-node search found nothing at all, leaving those nodes with no value rather
+    // than a poor one. Gather them from the elements when the list is empty.
+    std::vector<oomph::Node *> source_nodes;
+    if (from->nnode())
+    {
+      source_nodes.reserve(from->nnode());
+      for (unsigned mi = 0; mi < from->nnode(); mi++)
+        source_nodes.push_back(from->node_pt(mi));
+    }
+    else
+    {
+      std::set<oomph::Node *> uniq;
+      for (unsigned ie = 0; ie < from->nelement(); ie++)
+      {
+        oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(from->element_pt(ie));
+        if (!fe)
+          continue;
+        for (unsigned in = 0; in < fe->nnode(); in++)
+          uniq.insert(fe->node_pt(in));
+      }
+      source_nodes.assign(uniq.begin(), uniq.end());
+    }
     for (oomph::Node *n : missing_nodes)
     {
       if (completed_nodes.count(n))
         continue;
+      n_fallback++;
+      {
+        oomph::Vector<double> xf = n->position();
+        fallback_positions.push_back(std::vector<double>(xf.begin(), xf.end()));
+      }
       oomph::Vector<double> xnode = n->position();
       if (boundary_index<0) std::cerr << "FOUND UNTREATED BULK NODE AT\t" << xnode[0] << "\t" << xnode[1] << std::endl;
+      // These are the nodes no element of the old mesh contains, which for a COALESCENCE is exactly
+      // the fresh bridge: it is built where there was no liquid at all, so it cannot be located and
+      // the located-node branch above never sees it. All they can get is the blend below.
       double mindist = 1e40;
       oomph::Node *bestnode = NULL;
-      for (unsigned int mi = 0; mi < from->nnode(); mi++)
+      for (oomph::Node *m : source_nodes)
       {
-        oomph::Node *m = from->node_pt(mi);
         oomph::Vector<double> xm = m->position();
         double dist = 0;
         for (unsigned di = 0; di < xm.size(); di++)
@@ -2537,9 +4549,8 @@ namespace pyoomph
       {
         double mindist2 = 1e40;
         oomph::Node *bestnode2 = NULL;
-        for (unsigned int mi = 0; mi < from->nnode(); mi++)
+        for (oomph::Node *m : source_nodes)
         {
-          oomph::Node *m = from->node_pt(mi);
           if (m == bestnode)
             continue;
           oomph::Vector<double> xm = m->position();
@@ -2562,7 +4573,7 @@ namespace pyoomph
         double lambda1 = (mindist > 1e-20 ? mindist2 / (mindist + mindist2) : 1);
         double lambda2 = (mindist > 1e-20 ? mindist / (mindist + mindist2) : 0);
         oomph::Vector<double> xm = bestnode->position();
-        for (unsigned int time_ind = 0; time_ind < n->time_stepper_pt()->ntstorage(); time_ind++)
+        for (unsigned int time_ind = 0; time_ind < n->time_stepper_pt()->ntstorage() && !only_interface_fields; time_ind++)
         {
           for (unsigned vi = 0; vi < std::min((unsigned int)field_map.size(),n->nvalue()); vi++)
           {
@@ -2573,23 +4584,50 @@ namespace pyoomph
           }
         }
 
-        for (unsigned int time_ind = 1; time_ind < n->position_time_stepper_pt()->ntstorage(); time_ind++)
+        // Interface-only dofs. Without this an interface node that could not be located kept
+        // whatever it was built with - zero - while its bulk fields were transferred, so the field
+        // simply vanished on that node with nothing said. Blended the same way as everything else
+        // here, which is crude, but the point of the fallback is to be crude rather than absent.
+        if (!inter_field_map.empty())
+        {
+          auto *bn = dynamic_cast<oomph::BoundaryNodeBase *>(n);
+          auto *bb1 = dynamic_cast<oomph::BoundaryNodeBase *>(bestnode);
+          auto *bb2 = dynamic_cast<oomph::BoundaryNodeBase *>(bestnode2);
+          if (bn && bb1 && bb2)
+          {
+            for (unsigned int time_ind = 0; time_ind < n->time_stepper_pt()->ntstorage(); time_ind++)
+            {
+              for (auto interfield : inter_field_map)
+              {
+                int dest_i = bn->index_of_first_value_assigned_by_face_element(interfield.first);
+                int src_i1 = bb1->index_of_first_value_assigned_by_face_element(interfield.second);
+                int src_i2 = bb2->index_of_first_value_assigned_by_face_element(interfield.second);
+                if (dest_i < 0 || src_i1 < 0 || src_i2 < 0)
+                  continue;
+                n->set_value(time_ind, dest_i,
+                             bestnode->value(time_ind, src_i1) * lambda1 + bestnode2->value(time_ind, src_i2) * lambda2);
+              }
+            }
+          }
+        }
+
+        for (unsigned int time_ind = 1; time_ind < n->position_time_stepper_pt()->ntstorage() && !only_interface_fields; time_ind++)
         {
           for (unsigned i = 0; i < xm.size(); i++)
             n->x(time_ind, i) = bestnode->x(time_ind, i) * lambda1 + bestnode2->x(time_ind, i) * lambda2;
         }
 
-        if (this->interpolated_lagrangian_coordinates_at_remeshing) // Interpolate also the Lagrangian coordinates
+        if (this->interpolated_lagrangian_coordinates_at_remeshing && !only_interface_fields) // Interpolate also the Lagrangian coordinates
         {
-          if (dynamic_cast<pyoomph::Node*>(n)->nlagrangian()!=dynamic_cast<pyoomph::Node*>(bestnode)->nlagrangian())
+          if (static_cast<pyoomph::Node*>(n)->nlagrangian()!=static_cast<pyoomph::Node*>(bestnode)->nlagrangian())
           {
             throw_runtime_error("Cannot interpolate Lagrangian coordinates if the number of Lagrangian nodes is different");
           }                    
-          for (unsigned int i = 0; i < dynamic_cast<pyoomph::Node*>(n)->nlagrangian(); i++)
+          for (unsigned int i = 0; i < static_cast<pyoomph::Node*>(n)->nlagrangian(); i++)
           {            
-            double xl=dynamic_cast<pyoomph::Node*>(bestnode)->lagrangian_position(i)*lambda1+dynamic_cast<pyoomph::Node*>(bestnode2)->lagrangian_position(i)*lambda2;
-            //std::cout << "SETTING LAGRANGIAN COORDINATE " << i << " from " << dynamic_cast<pyoomph::Node*>(n)->xi(i) << " to "  << xl << std::endl;
-            dynamic_cast<pyoomph::Node*>(n)->xi(i)=xl;
+            double xl=static_cast<pyoomph::Node*>(bestnode)->lagrangian_position(i)*lambda1+static_cast<pyoomph::Node*>(bestnode2)->lagrangian_position(i)*lambda2;
+            //std::cout << "SETTING LAGRANGIAN COORDINATE " << i << " from " << static_cast<pyoomph::Node*>(n)->xi(i) << " to "  << xl << std::endl;
+            static_cast<pyoomph::Node*>(n)->xi(i)=xl;
           }
         }
 
@@ -2597,7 +4635,31 @@ namespace pyoomph
       }
       else
       {
-        std::cerr << "  NOT EVEN FOUND A NEAREST NODE" << std::endl;
+        // No source node at all: this node keeps whatever it was built with.
+        oomph::Vector<double> xn = n->position();
+        unset_positions.push_back(std::vector<double>(xn.begin(), xn.end()));
+      }
+    }
+
+    if (n_fallback || !unset_positions.empty())
+    {
+      // Deliberately does NOT name a boundary. Only boundary_index < 0 skips boundary nodes; with
+      // boundary_index >= 0 this routine walks EVERY node of the mesh (that is the only difference
+      // the index makes here, besides selecting the zeta query), so blaming the failures on the
+      // boundary whose name happened to bring us here reads as "16 nodes of a 2-node boundary".
+      std::string where = this->get_full_domain_path();
+      if (boundary_index >= 0 && !interface_case)
+        where += "/" + this->get_boundary_name_or_index((unsigned)boundary_index);
+      std::cout << "WARNING: interpolating " << where << ": " << n_fallback
+                << " of " << completed_nodes.size() + n_fallback
+                << " node(s) could not be located in the old mesh and fell back to nearest-node "
+                << "blending instead of proper interpolation. Nodes at: "
+                << describe_node_positions(fallback_positions) << std::endl;
+      if (!unset_positions.empty())
+      {
+        std::cout << "         Of those, " << unset_positions.size() << " received NO value at all "
+                  << "and keep whatever they were built with. Nodes at: "
+                  << describe_node_positions(unset_positions) << std::endl;
       }
     }
 
@@ -2608,7 +4670,7 @@ namespace pyoomph
 
   // Create new, unattached nodes (not added to any element/mesh storage - just returned to the caller,
   // e.g. for probing/sampling) at the given physical coordinates. For each requested coordinate, the
-  // containing element is located via MeshAsGeomObject::locate_zeta; if found, the new node's field
+  // containing element is located by the point locator; if found, the new node's field
   // values and Eulerian position are set at every time-history level by interpolating the source
   // element's shape functions there. If no containing element is found (point outside the mesh), the
   // node is still created (with only its position set) but left without interpolated values.
@@ -2617,17 +4679,46 @@ namespace pyoomph
   std::vector<pyoomph::Node*> Mesh::add_interpolated_nodes_at(const std::vector<std::vector<double> > & coords,bool all_as_boundary_nodes)
   {
     std::vector<pyoomph::Node*> res;
-    oomph::MeshAsGeomObject MaGO(this);
     pyoomph::BulkElementBase* el0=dynamic_cast<pyoomph::BulkElementBase*>(this->element_pt(0));
-    pyoomph::Node * n0=dynamic_cast<pyoomph::Node*>(el0->node_pt(0));
+    pyoomph::Node * n0=static_cast<pyoomph::Node*>(el0->node_pt(0));
+
+    // All the requested points are located in one batch; the index is what costs, and building it
+    // once for the whole list rather than once per call is the point.
+    LocatorSetup lsetup;
+    lsetup.space = LocatorSpace::Lagrangian; // matches zeta_coordinate_type's default, as before
+    std::unique_ptr<MeshPointLocator> locator;
+    std::unique_ptr<LocationSet> located;
+    const unsigned qdim = (coords.empty() ? el0->dim() : coords[0].size());
+    if (!coords.empty())
+    {
+      std::vector<double> flat;
+      flat.reserve(coords.size() * qdim);
+      for (const auto &coord : coords)
+        for (unsigned i = 0; i < qdim; i++)
+          flat.push_back(i < coord.size() ? coord[i] : 0.0);
+      locator.reset(new MeshPointLocator(this, lsetup));
+      located.reset(new LocationSet(locator->locate_batch(flat, coords.size())));
+    }
+
+    unsigned coord_index = 0;
     for ( const auto  & coord : coords)
     {
-      oomph::GeomObject *res_go = NULL;
-      oomph::Vector<double> zet(coord.size());
-      for (unsigned i=0;i<coord.size();i++) zet[i]=coord[i];
       oomph::Vector<double> s(el0->dim(), 1.0 / 3.0);
-      MaGO.locate_zeta(zet, res_go, s, false);
-      BulkElementBase *srcelem = dynamic_cast<BulkElementBase *>(res_go);
+      BulkElementBase *srcelem = NULL;
+      {
+        std::vector<double> sloc;
+        if (located->resolve_local(coord_index, srcelem, sloc))
+        {
+          s.resize(sloc.size());
+          for (unsigned d = 0; d < sloc.size(); d++)
+            s[d] = sloc[d];
+        }
+        else
+        {
+          srcelem = NULL;
+        }
+      }
+      coord_index++;
 
       pyoomph::Node *newnode;
       if (all_as_boundary_nodes)
@@ -2672,22 +4763,126 @@ namespace pyoomph
     return res;
   }
 
+  // The one consumer of LocationSet::evaluate() in the tree, and the reason it exists as a batched
+  // call rather than a loop over resolve_local: everything a caller wants at a point is requested
+  // up front, so a distributed version costs one collective instead of one per field.
+  std::vector<std::vector<double>> Mesh::evaluate_at_points(const std::vector<std::vector<double>> &coords, bool lagrangian, bool with_position, unsigned time_level)
+  {
+    std::vector<std::vector<double>> result;
+    if (coords.empty() || !this->nelement())
+      return result;
+
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+    {
+      BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+      if (e && !e->get_eleminfo()->alloced)
+        e->fill_element_info(true);
+    }
+
+    LocatorSetup lsetup;
+    lsetup.space = (lagrangian ? LocatorSpace::Lagrangian : LocatorSpace::Eulerian);
+    MeshPointLocator locator(this, lsetup);
+
+    const unsigned qdim = coords[0].size();
+    std::vector<double> flat;
+    flat.reserve(coords.size() * qdim);
+    for (const auto &c : coords)
+      for (unsigned i = 0; i < qdim; i++)
+        flat.push_back(i < c.size() ? c[i] : 0.0);
+
+    EvalRequest what;
+    what.continuous_fields = true;
+    what.DL_fields = true;
+    what.D0_fields = true;
+    what.position = with_position;
+    what.time_levels.assign(1, time_level);
+
+    LocationSet located = locator.locate_batch(flat, coords.size());
+    const unsigned stride = located.values_per_point(what);
+    std::vector<double> vals = located.evaluate(what);
+
+    for (unsigned i = 0; i < coords.size(); i++)
+    {
+      std::vector<double> row;
+      if (located.get_handles()[i].is_located())
+      {
+        row.push_back(1.0);
+        row.insert(row.end(), vals.begin() + (size_t)i * stride, vals.begin() + (size_t)(i + 1) * stride);
+      }
+      else
+      {
+        row.push_back(0.0);
+      }
+      result.push_back(row);
+    }
+    return result;
+  }
+
+  std::vector<std::vector<double>> Mesh::locate_points(const std::vector<std::vector<double>> &coords, bool lagrangian)
+  {
+    std::vector<std::vector<double>> result;
+    if (coords.empty() || !this->nelement())
+      return result;
+
+    LocatorSetup lsetup;
+    lsetup.space = (lagrangian ? LocatorSpace::Lagrangian : LocatorSpace::Eulerian);
+    MeshPointLocator locator(this, lsetup);
+
+    const unsigned qdim = coords[0].size();
+    std::vector<double> flat;
+    flat.reserve(coords.size() * qdim);
+    for (const auto &c : coords)
+      for (unsigned i = 0; i < qdim; i++)
+        flat.push_back(i < c.size() ? c[i] : 0.0);
+
+    LocationSet located = locator.locate_batch(flat, coords.size());
+    if (report_interpolation_timing)
+    {
+      std::cout << "  [locator] " << coords.size() << " probes, "
+                << (locator.get_mode() == LocatorMode::Project ? "project" : "invert")
+                << " mode, space dim " << locator.get_space_dim() << ", element dim "
+                << locator.get_element_dim() << " (" << located.search_statistics() << ", "
+                << locator.affine_fraction() << ")" << std::endl;
+    }
+
+    BulkElementBase *el = NULL;
+    std::vector<double> sloc;
+    for (unsigned i = 0; i < coords.size(); i++)
+    {
+      std::vector<double> row;
+      if (located.resolve_local(i, el, sloc))
+      {
+        row.push_back(1.0);
+        row.push_back(located.offset_of(i));
+        for (double v : sloc)
+          row.push_back(v);
+      }
+      else
+      {
+        row.push_back(0.0);
+        row.push_back(-1.0);
+      }
+      result.push_back(row);
+    }
+    return result;
+  }
+
   // Determine and store the numeric factor by which field fname's raw (nondimensional) values must be
   // multiplied to convert to the physical scale s requested for output: computed as the field's
   // intrinsic scaling (from the generated code) divided by s, with any symbolic placeholders/global
   // parameters resolved to their current numeric values. Throws if the resulting expression is not a
   // pure number (i.e. s has incompatible units/dimension with the field).
-  void Mesh::set_output_scale(std::string fname, GiNaC::ex s, DynamicBulkElementInstance *_code)
+  void Mesh::set_output_scale(std::string fname, GiNaC::ex s, DynamicJITCode *_code)
   {
     if (!_code)
     {
       BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-      _code = be->get_code_instance();
+      _code = be->get_jit_code();
     }
-    GiNaC::ex fscale = _code->get_element_class()->get_scaling(fname);
+    GiNaC::ex fscale = _code->get_code_gen()->get_scaling(fname);
     GiNaC::ex scale = fscale / s;
     // Expand the scale (to remove any scale factors)
-    scale = _code->get_element_class()->expand_placeholders(scale, "OutputScale", true);
+    scale = _code->get_code_gen()->expand_placeholders(scale, "OutputScale", true);
     scale = pyoomph::expressions::replace_global_params_by_current_values(scale);
     try
     {
@@ -2711,18 +4906,174 @@ namespace pyoomph
   // data, and nodal position dofs, mapping each dof's global equation number (eqn_number) to the field
   // index it corresponds to in the generated code's field ordering (buffer_offset_basebulk/interf).
   // Used for introspection/debugging of the assembled Jacobian's dof structure.
+  //
+  // Answers for the WHOLE problem (doftype is indexed by the global equation number), but only about
+  // the dofs this rank's own elements reach: on a distributed problem the caller has to merge the
+  // per-rank answers, see Problem.get_dof_description().
+    // The single walk both dof descriptions are built from. See Mesh::DofVisit in mesh.hpp for why
+  // there is one rather than one per consumer.
+  //
+  // The order is element-driven, and a node shared by several elements is reported once per element:
+  // both consumers write into a per-equation array, so a repeat is idempotent, and a consumer that
+  // needs to attribute a shared dof to exactly ONE element (the dof ordering) wants to see the repeat
+  // in order to claim the first.
+  void Mesh::visit_global_dofs(const std::function<void(const DofVisit &)> &visit)
+  {
+    if (!this->nelement()) return;
+    DynamicJITCode *ci = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_jit_code();
+    if (!ci) return;
+    auto *ft = ci->get_func_table();
+
+    unsigned num_bulk_nodal = 0;
+    for (unsigned si = 0; si < ft->num_present_continuous_spaces; si++)
+      num_bulk_nodal += ft->present_continuous_spaces[si]->numfields_basebulk;
+
+    DofVisit v;
+    v.dg_on_own_facet = true; // only meaningful for DofKind::DG, set per value there
+    std::vector<char> own_facet;
+    for (unsigned ei = 0; ei < this->nelement(); ei++)
+    {
+      BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ei));
+      if (!e) continue;
+      v.element = e;
+      v.element_index = ei;
+      v.element_is_interface = (e->as_interface_element() != NULL);
+      v.space_index = 0;
+      v.field_in_space = 0;
+
+      for (unsigned nn = 0; nn < e->nnode(); nn++)
+      {
+        pyoomph::Node *n = static_cast<pyoomph::Node *>(e->node_pt(nn));
+        v.node = n;
+
+        // Nodal positions. Only a moving mesh has them as unknowns; on a fixed one their equation
+        // numbers are negative and the report never fires, so no guard on ft->moving_nodes is needed.
+        v.kind = DofKind::NodalPosition;
+        v.data = n->variable_position_pt();
+        for (unsigned d = 0; d < n->ndim(); d++)
+        {
+          const long eq = n->variable_position_pt()->eqn_number(d);
+          if (eq < 0) continue;
+          v.eqn = eq; v.value_index = d; v.field_index = d;
+          visit(v);
+        }
+
+        v.kind = DofKind::NodalContinuous;
+        v.data = n;
+        for (unsigned nv = 0; nv < num_bulk_nodal; nv++)
+        {
+          const long eq = n->eqn_number(nv);
+          if (eq < 0) continue;
+          v.eqn = eq; v.value_index = nv; v.field_index = nv;
+          visit(v);
+        }
+
+        // Interface-only continuous values, in the slots the face element assigned them.
+        oomph::BoundaryNodeBase *bn = dynamic_cast<oomph::BoundaryNodeBase *>(n);
+        if (bn)
+        {
+          v.kind = DofKind::NodalInterface;
+          for (unsigned si = 0; si < ft->num_present_continuous_spaces; si++)
+          {
+            auto *space_info = ft->present_continuous_spaces[si];
+            for (unsigned f = 0; f < space_info->numfields - space_info->numfields_basebulk; f++)
+            {
+              const unsigned nv = bn->index_of_first_value_assigned_by_face_element(space_info->interface_dof_indices[f]);
+              const long eq = n->eqn_number(nv);
+              if (eq < 0) continue;
+              v.eqn = eq; v.value_index = nv;
+              v.field_index = space_info->buffer_offset_interf + f;
+              v.space_index = si; v.field_in_space = f;
+              visit(v);
+            }
+          }
+          v.space_index = 0; v.field_in_space = 0;
+        }
+      }
+
+      v.node = NULL;
+
+      // DG spaces. Reported by (space_index, field_in_space) rather than by a buffer index, because
+      // the two consumers do not agree on how to turn one into the other on an interface element.
+      v.kind = DofKind::DG;
+      for (unsigned si = 0; si < ft->num_present_dg_spaces; si++)
+      {
+        auto *space_info = ft->present_dg_spaces[si];
+        for (unsigned nf = 0; nf < space_info->numfields; nf++)
+        {
+          oomph::Data *data = e->get_DG_nodal_data(space_info->space_index, nf);
+          if (!data) continue;
+          v.data = data; v.space_index = space_info->space_index; v.field_in_space = nf;
+          v.field_index = nf;
+          own_facet.assign(data->nvalue(), 0);
+          for (unsigned ni = 0; ni < e->get_eleminfo()->nnode_of_space[space_info->space_index]; ni++)
+          {
+            const unsigned nj = e->get_DG_node_index(space_info->space_index, nf, ni);
+            if (nj < own_facet.size()) own_facet[nj] = 1;
+          }
+          for (unsigned nj = 0; nj < data->nvalue(); nj++)
+          {
+            const long eq = data->eqn_number(nj);
+            if (eq < 0) continue;
+            v.eqn = eq; v.value_index = nj; v.dg_on_own_facet = (own_facet[nj] != 0);
+            visit(v);
+          }
+        }
+      }
+      v.space_index = 0; v.field_in_space = 0;
+
+      v.kind = DofKind::DL;
+      for (unsigned nid = 0; nid < ft->info_DL.numfields; nid++)
+      {
+        oomph::Data *data = e->internal_data_pt(ft->info_DL.internal_offset_new + nid);
+        v.data = data; v.field_index = nid;
+        for (unsigned nv = 0; nv < data->nvalue(); nv++)
+        {
+          const long eq = data->eqn_number(nv);
+          if (eq < 0) continue;
+          v.eqn = eq; v.value_index = nv;
+          visit(v);
+        }
+      }
+      v.kind = DofKind::D0;
+      for (unsigned nid = 0; nid < ft->info_D0.numfields; nid++)
+      {
+        oomph::Data *data = e->internal_data_pt(ft->info_D0.internal_offset_new + nid);
+        v.data = data; v.field_index = nid;
+        for (unsigned nv = 0; nv < data->nvalue(); nv++)
+        {
+          const long eq = data->eqn_number(nv);
+          if (eq < 0) continue;
+          v.eqn = eq; v.value_index = nv;
+          visit(v);
+        }
+      }
+    }
+  }
+
   void Mesh::describe_global_dofs(std::vector<int> &doftype, std::vector<std::string> &typnames)
   {
     typnames.clear();
-    if (!this->nelement())
+    doftype.clear();
+    // The code comes from the mesh itself when the mesh is empty, not from element 0: a distributed
+    // mesh has ranks with no elements of it at all - an interface that lies entirely on somebody
+    // else - and returning "no dofs and no type names" for those made every LATER mesh's type
+    // indices differ from the other ranks', which is exactly what the merge cannot survive. Same
+    // reasoning as evaluate_integral_function above.
+    DynamicJITCode *ci = NULL;
+    if (this->nelement())
+      ci = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_jit_code();
+    else
+      ci = this->jitcode;
+    if (!ci || !problem)
       return;
     doftype.resize(problem->ndof(), -1);
-    BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-    DynamicBulkElementInstance *ci = be->get_code_instance();
 
     auto *ft = ci->get_func_table();
 
-    // TODO: Can't this be just copied from the functable Dirichlet_names ?
+    // The type names are the Dirichlet names past the three reserved coordinate slots, with the
+    // position types appended at the END under their mesh_* spelling. Hence the two-branch
+    // translation from a Dirichlet index in the visitor below.
     if (ft->Dirichlet_set_size >= 3)
     {
       typnames.reserve(ft->Dirichlet_set_size - 3);
@@ -2730,9 +5081,7 @@ namespace pyoomph
         typnames.push_back(ft->Dirichlet_names[i]);
     }
 
-   
-
-    unsigned moving_node_offset = typnames.size();
+    const unsigned moving_node_offset = typnames.size();
     if (ft->moving_nodes)
     {
       if (ft->nodal_dim > 0)
@@ -2742,100 +5091,47 @@ namespace pyoomph
       if (ft->nodal_dim > 2)
         typnames.push_back("mesh_z");
     }
-    unsigned int num_bulk_nodal=0;
-    for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
-    {
-      auto * space_info=ft->present_continuous_spaces[si];
-      num_bulk_nodal+=space_info->numfields_basebulk;      
-    }    
 
-    for (unsigned int ne = 0; ne < this->nelement(); ne++)
-    {
-      BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ne));
-      for (unsigned nn = 0; nn < e->nnode(); nn++)
-      {
-        Node *n = dynamic_cast<Node *>(e->node_pt(nn));
-        for (unsigned int nv = 0; nv < num_bulk_nodal; nv++)
-        {
-          if (n->eqn_number(nv) >= 0)
-          {
-            doftype[n->eqn_number(nv)] = nv;
-          }
-        }
-        oomph::BoundaryNodeBase *bn = dynamic_cast<oomph::BoundaryNodeBase *>(n);
-        if (bn)
-        {
-          for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
-          {
-            auto * space_info=ft->present_continuous_spaces[si];
-            for (unsigned int f = 0; f < space_info->numfields-space_info->numfields_basebulk; f++)
-            {
-              int nv = bn->index_of_first_value_assigned_by_face_element(space_info->interface_dof_indices[f]);
-              if (n->eqn_number(nv) >= 0)
-              {
-                doftype[n->eqn_number(nv)] = space_info->buffer_offset_interf + f;
-              }
-            }
-          }          
-        }
-      }
-
-
-      for (unsigned si=0;si<ft->num_present_dg_spaces;si++)
-      {
-        auto * space_info=ft->present_dg_spaces[si];
-        for (unsigned nf = 0; nf < space_info->numfields; nf++)
-        {
-          for (unsigned int ni = 0; ni < e->get_eleminfo()->nnode_of_space[space_info->space_index]; ni++)
-          {
-            int eqn_no = e->get_DG_nodal_data(space_info->space_index,nf)->eqn_number(e->get_DG_node_index(space_info->space_index, nf, ni));
-            if (eqn_no >= 0)
-            {
-              doftype[eqn_no] = (nf <space_info->numfields_basebulk ? space_info->buffer_offset_basebulk : space_info->buffer_offset_interf - space_info->numfields_basebulk) + nf;
-            }
-          }
-        }
-
-      }
-
-      for (unsigned nid = 0; nid < ft->info_DL.numfields; nid++)
-      {
-        auto *idp = e->internal_data_pt(ft->info_DL.internal_offset_new + nid);
-        for (unsigned int nv = 0; nv < idp->nvalue(); nv++)
-        {
-          if (idp->eqn_number(nv) >= 0)
-          {
-            doftype[idp->eqn_number(nv)] = ft->info_DL.buffer_offset_basebulk + nid;
-          }
-        }
-      }
-      for (unsigned nid = 0; nid < ft->info_D0.numfields; nid++)
-      {
-        auto *idp = e->internal_data_pt(ft->info_D0.internal_offset_new + nid);
-        for (unsigned int nv = 0; nv < idp->nvalue(); nv++)
-        {
-          if (idp->eqn_number(nv) >= 0)
-          {
-            doftype[idp->eqn_number(nv)] = ft->info_D0.buffer_offset_basebulk + nid;
-          }
-        }
-      }
-
-      if (ft->moving_nodes)
-      {
-        for (unsigned nn = 0; nn < e->nnode(); nn++)
-        {
-          Node *n = dynamic_cast<Node *>(e->node_pt(nn));
-          for (unsigned int nv = 0; nv < ft->nodal_dim; nv++)
-          {
-            if (n->variable_position_pt()->eqn_number(nv) >= 0)
-            {
-              doftype[n->variable_position_pt()->eqn_number(nv)] = moving_node_offset + nv;
-            }
-          }
-        }
-      }
-    }
+    // Translate a visit into this function's own type numbering. The field types come first, in
+    // Dirichlet-name order past the three reserved coordinate slots; the position types are the ones
+    // appended above.
+    this->visit_global_dofs([&doftype, ft, moving_node_offset](const DofVisit &v)
+                            {
+                              int t = -1;
+                              switch (v.kind)
+                              {
+                              case DofKind::NodalPosition:
+                                t = (int)(moving_node_offset + v.field_index);
+                                break;
+                              case DofKind::NodalContinuous:
+                              case DofKind::NodalInterface:
+                                t = (int)v.field_index;
+                                break;
+                              case DofKind::DG:
+                              {
+                                // A facet element labels only the values on its own facet; the rest of
+                                // that Data belongs to the bulk element and is labelled there.
+                                if (!v.dg_on_own_facet) return;
+                                // NOT get_DG_buffer_index(): this has always used the interface
+                                // element's formula for every element, which on a bulk element agrees
+                                // with the virtual one and on an interface element does not. See
+                                // fill_dof_to_global_field_index_buffer for the other choice.
+                                auto *space_info = &ft->dg_spaces[v.space_index];
+                                t = (int)((v.field_in_space < space_info->numfields_basebulk
+                                               ? space_info->buffer_offset_basebulk
+                                               : space_info->buffer_offset_interf - space_info->numfields_basebulk) +
+                                          v.field_in_space);
+                                break;
+                              }
+                              case DofKind::DL:
+                                t = (int)(ft->info_DL.buffer_offset_basebulk + v.field_index);
+                                break;
+                              case DofKind::D0:
+                                t = (int)(ft->info_D0.buffer_offset_basebulk + v.field_index);
+                                break;
+                              }
+                              doftype[v.eqn] = t;
+                            });
   }
 
   pyoomph::Node *Mesh::resolve_copy_master(pyoomph::Node *cpy)
@@ -2869,7 +5165,7 @@ namespace pyoomph
     if ((!this->nnode()) || (!this->nelement()))
       return;
     BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-    DynamicBulkElementInstance *ci = be->get_code_instance();
+    DynamicJITCode *ci = be->get_jit_code();
     int i = ci->get_nodal_field_index(fieldname);
     if (i < 0)
     {
@@ -2880,8 +5176,8 @@ namespace pyoomph
       }
     }
 
-    ReplaceFieldsToNonDimFields repl(ci->get_element_class(), "InitialCondition");
-    initial_conditions[fieldname] = 0 + repl(expression) / ci->get_element_class()->get_scaling(fieldname);
+    ReplaceFieldsToNonDimFields repl(ci->get_code_gen(), "InitialCondition");
+    initial_conditions[fieldname] = 0 + repl(expression) / ci->get_code_gen()->get_scaling(fieldname);
     // Test if the initial condition is nondimensional and has no free parameters
     auto *n = this->node_pt(0);
     GiNaC::lst subslist;
@@ -2928,7 +5224,7 @@ namespace pyoomph
   // evaluating the actual symbolic expression; when resetting_first_step is set, position dofs at the
   // current time level (t==0) are instead re-seeded from the previous time level's value, so a fresh
   // restart doesn't discard the last known velocity/history information.
-  void Generic_SetInitialCondition(BulkElementBase *elempt, oomph::Data *data, DynamicBulkElementInstance *ci, int fieldindex, unsigned valindex, double *x_buffer, double *x_lagr, double *normal, bool use_identity, bool resetting_first_step, unsigned icindex)
+  void Generic_SetInitialCondition(BulkElementBase *elempt, oomph::Data *data, DynamicJITCode *ci, int fieldindex, unsigned valindex, double *x_buffer, double *x_lagr, double *normal, bool use_identity, bool resetting_first_step, unsigned icindex)
   {
     auto *ts = data->time_stepper_pt();
     auto *Time_pt = ts->time_pt();
@@ -2998,6 +5294,10 @@ namespace pyoomph
     }
   }
 
+  // Defined further down, next to the ElementModeFit/sample_local_coordinates it reuses.
+  static void set_DL_initial_condition(BulkElementBase *el, DynamicJITCode *ci, const JITFuncSpec_Table_FiniteElement_t *ft,
+                                       double *normal, unsigned icindex);
+
   // Evaluate and assign the named initial-condition set ic_name to every dof of every element in this
   // mesh, at every stored time-history level. If this mesh has a well-defined normal (codim-1, i.e.
   // nodal_dim == element_dim+1), first precomputes an averaged unit nodal normal at every node
@@ -3015,9 +5315,26 @@ namespace pyoomph
       return;
 
     auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-    auto *ft = el->get_code_instance()->get_func_table();
+    auto *ft = el->get_jit_code()->get_func_table();
     unsigned nodal_dim = el->nodal_dimension();
     unsigned eldim = el->dim();
+
+    // Resolve the IC name FIRST. This test used to sit below the normal precomputation, so a mesh
+    // that defines no initial condition under this name - the usual case for all but one domain when
+    // several named ICs are in play - still paid a full per-element normal evaluation and built the
+    // nodal_normals map before bailing out.
+    int ic_index = -1;
+    for (unsigned int i = 0; i < ft->num_ICs; i++)
+    {
+      if (std::string(ft->IC_names[i]) == ic_name)
+      {
+        ic_index = i;
+        break;
+      }
+    }
+    if (ic_index < 0)
+      return;
+
     // Precalculate the normals, they might be relevant
     std::map<pyoomph::Node *, oomph::Vector<double>> nodal_normals;
     if (this->nnode() && nodal_dim == eldim + 1)
@@ -3027,7 +5344,7 @@ namespace pyoomph
         auto *ele = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
         for (unsigned int in = 0; in < ele->nnode(); in++)
         {
-          pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(ele->node_pt(in));
+          pyoomph::Node *nodept = static_cast<pyoomph::Node *>(ele->node_pt(in));
           oomph::Vector<double> s(eldim);
           ele->local_coordinate_of_node(in, s);
           oomph::Vector<double> n(nodal_dim);
@@ -3054,22 +5371,11 @@ namespace pyoomph
       }
     }
 
-    int ic_index = -1;
-    for (unsigned int i = 0; i < ft->num_ICs; i++)
-    {
-      if (std::string(ft->IC_names[i]) == ic_name)
-      {
-        ic_index = i;
-        break;
-      }
-    }
-    if (ic_index < 0)
-      return;
-    // std::cout << "IC SETTING " << el->get_code_instance()->get_func_table()->numfields_C2 << "  " << el->get_code_instance()->get_func_table()->numfields_C1 << "  NNODE " << this->nnode() << std::endl;
+    // std::cout << "IC SETTING " << el->get_jit_code()->get_func_table()->numfields_C2 << "  " << el->get_jit_code()->get_func_table()->numfields_C1 << "  NNODE " << this->nnode() << std::endl;
     // First set the coordinates
     for (unsigned int ni = 0; ni < this->nnode(); ni++)
     {
-      pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(this->node_pt(ni));
+      pyoomph::Node *nodept = static_cast<pyoomph::Node *>(this->node_pt(ni));
       for (unsigned int i = 0; i < nodept->ndim(); i++)
         x_buffer[i] = nodept->x((resetting_first_step ? 1 : 0), i);
       for (unsigned int i = 0; i < nodept->nlagrangian(); i++)
@@ -3090,13 +5396,13 @@ namespace pyoomph
       for (unsigned int d = 0; d < nodept->ndim(); d++)
       {
         int valindex = -1 - d;
-        Generic_SetInitialCondition(el, nodept->variable_position_pt(), el->get_code_instance(), valindex, d, x_buffer, x_lagr, normal, true, resetting_first_step, ic_index);
+        Generic_SetInitialCondition(el, nodept->variable_position_pt(), el->get_jit_code(), valindex, d, x_buffer, x_lagr, normal, true, resetting_first_step, ic_index);
       }
     }
 
     for (unsigned int ni = 0; ni < this->nnode(); ni++)
     {
-      pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(this->node_pt(ni));
+      pyoomph::Node *nodept = static_cast<pyoomph::Node *>(this->node_pt(ni));
       for (unsigned int i = 0; i < nodept->ndim(); i++)
         x_buffer[i] = nodept->x(i);
       for (unsigned int i = 0; i < nodept->nlagrangian(); i++)
@@ -3119,13 +5425,11 @@ namespace pyoomph
         auto * space_info=ft->present_continuous_spaces[si];
         for (unsigned int fieldindex = 0; fieldindex < space_info->numfields_basebulk; fieldindex++)
         {
-          Generic_SetInitialCondition(el, nodept, el->get_code_instance(), fieldindex + offset, fieldindex + offset, x_buffer, x_lagr, normal, true, false, ic_index);
+          Generic_SetInitialCondition(el, nodept, el->get_jit_code(), fieldindex + offset, fieldindex + offset, x_buffer, x_lagr, normal, true, false, ic_index);
         }
         offset += space_info->numfields_basebulk;
       }      
     }
-
-    const std::vector<std::vector<unsigned>> & space_to_elem_node_index = el->get_nodal_space_index_to_element_index_map();
 
     for (unsigned int si=0;si<ft->num_present_dg_spaces;si++)
     {
@@ -3133,17 +5437,22 @@ namespace pyoomph
       if (!space_info->numfields) continue;
       for (unsigned int ei = 0; ei < this->nelement(); ei++)
       {
-        auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ei));        
+        auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ei));
+        // Per ELEMENT, not once from element 0: the map is a property of the element's shape, and a
+        // mesh can mix shapes. The 3d interior-facet skeleton of a wedge/pyramid mesh does exactly
+        // that (triangular caps and quadrilateral sides in one InterfaceMesh), and reading a
+        // triangle's map for a quad element indexed past the end of node_pt and segfaulted.
+        const std::vector<std::vector<unsigned>> & space_to_elem_node_index = el->get_nodal_space_index_to_element_index_map();
         for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_of_space[space_info->space_index]; ni++)
         {
-          pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(space_to_elem_node_index[space_info->space_index][ni]));
+          pyoomph::Node *nodept = static_cast<pyoomph::Node *>(el->node_pt(space_to_elem_node_index[space_info->space_index][ni]));
           for (unsigned int i = 0; i < nodept->ndim(); i++)
             x_buffer[i] = nodept->x(i);
           for (unsigned int i = 0; i < nodept->nlagrangian(); i++)
             x_lagr[i] = nodept->xi(i);
           for (unsigned int fieldindex = 0; fieldindex < space_info->numfields; fieldindex++)
           {
-            Generic_SetInitialCondition(el, el->get_DG_nodal_data(space_info->space_index, fieldindex), el->get_code_instance(), el->get_DG_buffer_index(space_info->space_index, fieldindex), el->get_DG_node_index(space_info->space_index, fieldindex, ni), x_buffer, x_lagr, normal, true, false, ic_index);
+            Generic_SetInitialCondition(el, el->get_DG_nodal_data(space_info->space_index, fieldindex), el->get_jit_code(), el->get_DG_buffer_index(space_info->space_index, fieldindex), el->get_DG_node_index(space_info->space_index, fieldindex, ni), x_buffer, x_lagr, normal, true, false, ic_index);
           }
         }        
       }
@@ -3155,7 +5464,7 @@ namespace pyoomph
       for (unsigned int ei = 0; ei < this->nelement(); ei++)
       {
         auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ei));
-        auto *iel = dynamic_cast<InterfaceElementBase *>(this->element_pt(ei));
+        auto *iel = el->as_interface_element();
         for (unsigned int ni = 0; ni < el->nnode(); ni++)
         {
           normal[0] = normal[1] = normal[2] = 0.0;
@@ -3168,7 +5477,7 @@ namespace pyoomph
             for (unsigned int jnormd = 0; jnormd < iel->nodal_dimension(); jnormd++)
               normal[jnormd] = nbuff[jnormd];
           }
-          pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(ni));
+          pyoomph::Node *nodept = static_cast<pyoomph::Node *>(el->node_pt(ni));
           for (unsigned int i = 0; i < nodept->ndim(); i++)
             x_buffer[i] = nodept->x(i);
           for (unsigned int i = 0; i < nodept->nlagrangian(); i++)
@@ -3177,7 +5486,7 @@ namespace pyoomph
           for (unsigned int d = 0; d < nodept->ndim(); d++)
           {
             int valindex = -1 - d;
-            Generic_SetInitialCondition(el, nodept->variable_position_pt(), el->get_code_instance(), valindex, d, x_buffer, x_lagr, normal, true, resetting_first_step, ic_index);
+            Generic_SetInitialCondition(el, nodept->variable_position_pt(), el->get_jit_code(), valindex, d, x_buffer, x_lagr, normal, true, resetting_first_step, ic_index);
           }
 
           for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
@@ -3185,7 +5494,7 @@ namespace pyoomph
             auto * space_info=ft->present_continuous_spaces[si];
             for (unsigned int fieldindex = 0; fieldindex < space_info->numfields_basebulk; fieldindex++)
             {
-              Generic_SetInitialCondition(el, nodept, el->get_code_instance(), fieldindex + space_info->buffer_offset_basebulk, fieldindex + space_info->buffer_offset_basebulk, x_buffer, x_lagr, normal, true, false, ic_index);
+              Generic_SetInitialCondition(el, nodept, el->get_jit_code(), fieldindex + space_info->buffer_offset_basebulk, fieldindex + space_info->buffer_offset_basebulk, x_buffer, x_lagr, normal, true, false, ic_index);
             }
           }
           for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
@@ -3194,7 +5503,7 @@ namespace pyoomph
             for (unsigned int fieldindex = 0; fieldindex < space_info->numfields-space_info->numfields_basebulk; fieldindex++)
             {              
               unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(space_info->interface_dof_indices[fieldindex]);
-              Generic_SetInitialCondition(el, nodept, el->get_code_instance(), fieldindex + space_info->buffer_offset_interf, valindex, x_buffer, x_lagr, normal, true, false, ic_index);
+              Generic_SetInitialCondition(el, nodept, el->get_jit_code(), fieldindex + space_info->buffer_offset_interf, valindex, x_buffer, x_lagr, normal, true, false, ic_index);
             }
           }
         }
@@ -3211,63 +5520,26 @@ namespace pyoomph
       for (unsigned int i = 0; i < xlagr.size(); i++)
         x_lagr[i] = xlagr[i];
 
-      for (unsigned int fieldindex = 0; fieldindex < el->get_code_instance()->get_func_table()->info_DL.numfields; fieldindex++)
-      {
-        oomph::Vector<double> np(el->nodal_dimension(), 0.0);
-        oomph::Vector<double> np_lagr(el->nodal_dimension(), 0.0);
-        oomph::Vector<double> s(el->dim(), 0.5 * (el->s_min() + el->s_max()));
-        for (unsigned int j = 0; j < s.size(); j++)
-        {
-          double old = s[j];
-          s[j] = el->s_min();
-          el->interpolated_x(s, np);
-          el->interpolated_xi(s, np_lagr);
-          for (unsigned int i = 0; i < xcenter.size(); i++)
-            x_buffer[i] = np[i];
-          for (unsigned int i = 0; i < xlagr.size(); i++)
-            x_lagr[i] = np_lagr[i];
-          Generic_SetInitialCondition(el, this->element_pt(ei)->internal_data_pt(fieldindex + ft->info_DL.internal_offset_new), el->get_code_instance(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, false, false, ic_index);
-
-          auto *ts = this->element_pt(ei)->internal_data_pt(fieldindex + ft->info_DL.internal_offset_new)->time_stepper_pt();
-          oomph::Vector<double> vmin(ts->ntstorage());
-          for (unsigned t = 0; t < vmin.size(); t++)
-            vmin[t] = this->element_pt(ei)->internal_data_pt(fieldindex + ft->info_DL.internal_offset_new)->value(t, 0);
-
-          s[j] = el->s_max();
-          el->interpolated_x(s, np);
-          el->interpolated_xi(s, np_lagr);
-          for (unsigned int i = 0; i < xcenter.size(); i++)
-            x_buffer[i] = np[i];
-          for (unsigned int i = 0; i < xlagr.size(); i++)
-            x_lagr[i] = np_lagr[i];
-          Generic_SetInitialCondition(el, this->element_pt(ei)->internal_data_pt(fieldindex + ft->info_DL.internal_offset_new), el->get_code_instance(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, false, false, ic_index);
-          oomph::Vector<double> vmax(ts->ntstorage());
-          for (unsigned t = 0; t < vmax.size(); t++)
-            vmax[t] = this->element_pt(ei)->internal_data_pt(fieldindex + ft->info_DL.internal_offset_new)->value(t, 0);
-
-          double denom = el->s_max() - el->s_min();
-          for (unsigned t = 0; t < vmax.size(); t++)
-            this->element_pt(ei)->internal_data_pt(fieldindex + ft->info_DL.internal_offset_new)->set_value(t, j + 1, (vmax[t] - vmin[t]) / denom);
-
-          s[j] = old;
-        }
-
-        Generic_SetInitialCondition(el, this->element_pt(ei)->internal_data_pt(fieldindex + ft->info_DL.internal_offset_new), el->get_code_instance(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, false, false, ic_index);
-      }
+      // DL is fitted, not sampled at one point: its 1+dim coefficients live in the shape_at_s_DL
+      // basis, so a value at the midpoint plus a finite difference along each LOCAL coordinate - which
+      // is what this used to do - is not the same thing, and did not reproduce even a linear field.
+      // Sampling the IC on a lattice and least-squares fitting it onto that basis does, and reuses the
+      // fitter the adaptation/remeshing transfer already uses.
+      set_DL_initial_condition(el, el->get_jit_code(), ft, normal, ic_index);
 
       for (unsigned int i = 0; i < xcenter.size(); i++)
         x_buffer[i] = xcenter[i];
       for (unsigned int i = 0; i < xlagr.size(); i++)
         x_lagr[i] = xlagr[i];
-      for (unsigned int fieldindex = 0; fieldindex < el->get_code_instance()->get_func_table()->info_D0.numfields; fieldindex++)
+      for (unsigned int fieldindex = 0; fieldindex < el->get_jit_code()->get_func_table()->info_D0.numfields; fieldindex++)
       {
         //        std::cout << "d0 ic " << x_lagr[0] << "  " << x_lagr[1] << "  " << xlagr[0] << "  " << xlagr[1] << std::endl;
-        Generic_SetInitialCondition(el, this->element_pt(ei)->internal_data_pt(fieldindex + ft->info_D0.internal_offset_new), el->get_code_instance(), fieldindex + ft->info_D0.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, false, false, ic_index);
+        Generic_SetInitialCondition(el, this->element_pt(ei)->internal_data_pt(fieldindex + ft->info_D0.internal_offset_new), el->get_jit_code(), fieldindex + ft->info_D0.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, false, false, ic_index);
       }
     }
   }
 
-  void Generic_SetDirichletCondition(BulkElementBase *elempt, oomph::Data *data, DynamicBulkElementInstance *ci, int fieldindex, unsigned valindex, double *x_buffer, double *x_lagr, double *normal, bool only_update_vals)
+  void Generic_SetDirichletCondition(BulkElementBase *elempt, oomph::Data *data, DynamicJITCode *ci, int fieldindex, unsigned valindex, double *x_buffer, double *x_lagr, double *normal, bool only_update_vals)
   {
     auto *ts = data->time_stepper_pt();
     auto *Time_pt = ts->time_pt();
@@ -3286,7 +5558,7 @@ namespace pyoomph
   // Toggle whether the named Dirichlet condition is currently enforced. "mesh_x"/"y"/"z" are aliased
   // to the generated code's "coordinate_x"/"y"/"z" Dirichlet names (mesh-motion boundary conditions).
   // The name is resolved to an index into dirichlet_active via the code's Dirichlet_names table (using
-  // codeinst directly if this mesh has no elements yet, e.g. before the mesh is built).
+  // jitcode directly if this mesh has no elements yet, e.g. before the mesh is built).
   void Mesh::set_dirichlet_active(std::string name, bool active)
   {
     int index = -1;
@@ -3299,14 +5571,14 @@ namespace pyoomph
     JITFuncSpec_Table_FiniteElement_t *ft;
     if (!this->nelement())
     {
-      if (!codeinst)
-        throw_runtime_error("Cannot toggle a Dirichlet active without elements or JIT code instance."); // Note: throw_runtime_error already expands to a statement ending in ';'
-      ft = codeinst->get_func_table();
+      if (!jitcode)
+        throw_runtime_error("Cannot toggle a Dirichlet active without elements or JIT code."); // Note: throw_runtime_error already expands to a statement ending in ';'
+      ft = jitcode->get_func_table();
     }
     else
     {
       auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-      ft = el->get_code_instance()->get_func_table();
+      ft = el->get_jit_code()->get_func_table();
     }
 
     for (unsigned int i = 0; i < ft->Dirichlet_set_size; i++)
@@ -3319,8 +5591,28 @@ namespace pyoomph
     }
     if (index == -1)
       throw_runtime_error("Cannot set a Dirichlet condition active or not for an unknown field " + name);
-    std::cout << "TOGGLING DIRICHLET ACTIVE AT INDEX " << index << " TO " << active << " CORESPONDING TO " << name <<std::endl;
+    // Was an unconditional cout. Harmless when this was only reached once per azimuthal eigensolve,
+    // but the mode gate of an eigensolve during bifurcation tracking toggles these per solve.
+    if (pyoomph_verbose)
+      std::cout << "TOGGLING DIRICHLET ACTIVE AT INDEX " << index << " TO " << active << " CORESPONDING TO " << name << std::endl;
     dirichlet_active[index] = active;
+  }
+
+  // Whole-vector accessors for dirichlet_active, used to snapshot and restore the activation state
+  // around a probe that mutates it: Problem's mode gate for an eigensolve during bifurcation tracking
+  // must call the equations' _before_eigen_solve hooks to learn whether they would need a renumbering,
+  // and those hooks have already flipped the flags by the time they answer. Index-based rather than
+  // name-based, so no name resolution (and no Dirichlet_names table) is needed to put them back.
+  std::vector<bool> Mesh::get_dirichlet_active_flags() const
+  {
+    return dirichlet_active;
+  }
+
+  void Mesh::set_dirichlet_active_flags(const std::vector<bool> &flags)
+  {
+    if (flags.size() != dirichlet_active.size())
+      throw_runtime_error("Cannot restore the Dirichlet activation flags: got " + std::to_string(flags.size()) + " entries for a mesh that has " + std::to_string(dirichlet_active.size()));
+    dirichlet_active = flags;
   }
 
   // Query whether the named Dirichlet condition is currently active; see set_dirichlet_active for the
@@ -3334,11 +5626,11 @@ namespace pyoomph
       name = "coordinate_y";
     if (name == "mesh_z")
       name = "coordinate_z";
-    DynamicBulkElementInstance *ci=this->codeinst;
+    DynamicJITCode *ci=this->jitcode;
     if (!ci)
     {	
     	auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-    	ci=el->get_code_instance();
+    	ci=el->get_jit_code();
     }
     auto *ft = ci->get_func_table();
     for (unsigned int i = 0; i < ft->Dirichlet_set_size; i++)
@@ -3388,7 +5680,7 @@ namespace pyoomph
     if (!this->nelement()) return;
     if (!this->problem->has_empty_jacobian_rows_marked()) return;
     auto *el0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-    auto *ft = el0->get_code_instance()->get_func_table();
+    auto *ft = el0->get_jit_code()->get_func_table();
     int Doffset = 3;
     unsigned int ncontfields=0;
     for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
@@ -3401,7 +5693,7 @@ namespace pyoomph
       auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ei));
       for (unsigned int ni=0;ni<el->nnode();ni++)
       {
-        pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(ni));
+        pyoomph::Node *nodept = static_cast<pyoomph::Node *>(el->node_pt(ni));
         // Handle moving mesh dofs
         for (unsigned int d = 0; d < nodept->ndim(); d++)
         {
@@ -3437,11 +5729,11 @@ namespace pyoomph
       }
 
       // Handling interface dofs
-      if (dynamic_cast<InterfaceElementBase*>(el))
+      if (el->as_interface_element())
       {
           for (unsigned int ni=0;ni<el->nnode();ni++)
           {
-            pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(ni));
+            pyoomph::Node *nodept = static_cast<pyoomph::Node *>(el->node_pt(ni));
             for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
             {
               auto * space_info=ft->present_continuous_spaces[si];
@@ -3487,87 +5779,44 @@ namespace pyoomph
   {
     if (!this->nelement()) return;
     auto *el0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-    auto *ft = el0->get_code_instance()->get_func_table();
-    int Doffset = 3;
-    long eqn_number=0;
-    unsigned int ncontfields=0;
-    for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
-    {
-      auto * space_info=ft->present_continuous_spaces[si];
-      ncontfields+=space_info->numfields_basebulk;
-    }
-    for (unsigned int ei = 0; ei < this->nelement(); ei++)
-    {
-      auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ei));
-      for (unsigned int ni=0;ni<el->nnode();ni++)
-      {
-        pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(ni));
-        // Handle moving mesh dofs
-        for (unsigned int d = 0; d < nodept->ndim(); d++)
-        {
-          int valindex = -1 - d;                    
-          if (eqn_number=nodept->variable_position_pt()->eqn_number(d); eqn_number>=0) dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[valindex + Doffset];          
-        }
-
-        // Handling continuous bulk dofs
-        for (unsigned int fieldindex = 0; fieldindex < ncontfields; fieldindex++)
-        {
-          if (eqn_number=nodept->eqn_number(fieldindex); eqn_number>=0) dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[fieldindex  + Doffset];          
-        }                
-      }
-      
-      // Handling discontinuous dofs
-      for (unsigned int si=0;si<ft->num_present_dg_spaces;si++)
-      {
-        auto * space_info=ft->present_dg_spaces[si];
-        for (unsigned int fieldindex = 0; fieldindex < space_info->numfields; fieldindex++)
-        {
-          unsigned bindex = el->get_DG_buffer_index(space_info->space_index, fieldindex);
-          oomph::Data *data = el->get_DG_nodal_data(space_info->space_index, fieldindex);
-          for (unsigned int nj = 0; nj < data->nvalue(); nj++) 
-          {
-              if (eqn_number=data->eqn_number(nj); eqn_number>=0) dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[Doffset + bindex];          
-          }          
-        }
-      }
-
-            
-      // Handling interface dofs
-      if (dynamic_cast<InterfaceElementBase*>(el))
-      {
-          for (unsigned int ni=0;ni<el->nnode();ni++)
-          {
-            pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(ni));
-            for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
-            {
-              auto * space_info=ft->present_continuous_spaces[si];
-              for (unsigned int fieldindex = 0; fieldindex < space_info->numfields-space_info->numfields_basebulk; fieldindex++)
-              {              
-                unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(space_info->interface_dof_indices[fieldindex]);
-                if (eqn_number=nodept->eqn_number(valindex); eqn_number>=0) dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[fieldindex + space_info->buffer_offset_interf + Doffset];          
-              }
-            }
-          }
-      }
-      // Handling elemental dofs
-      for (unsigned int fieldindex = 0; fieldindex < ft->info_DL.numfields; fieldindex++)
-      {
-        oomph::Data *data=this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex);
-        for (unsigned int nj = 0; nj < data->nvalue(); nj++) 
-        {
-            if (eqn_number=data->eqn_number(nj); eqn_number>=0) dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[fieldindex + ft->info_DL.buffer_offset_basebulk + Doffset];          
-        }        
-      }
-      for (unsigned int fieldindex = 0; fieldindex < ft->info_D0.numfields; fieldindex++)
-      {
-        oomph::Data *data=this->element_pt(ei)->internal_data_pt(ft->info_D0.internal_offset_new + fieldindex);
-        for (unsigned int nj = 0; nj < data->nvalue(); nj++)        
-        {
-            if (eqn_number=data->eqn_number(nj); eqn_number>=0) dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[fieldindex + ft->info_D0.buffer_offset_basebulk + Doffset];          
-        }
-
-      }
-    }    
+    auto *ft = el0->get_jit_code()->get_func_table();
+    // The Dirichlet buffer reserves its first three slots for the nodal positions, and it does so in
+    // REVERSE: coordinate_x is field index -1, y is -2, z is -3 (see FiniteElementCode's initial
+    // condition emitter), so with the +3 offset x lands in slot 2 and z in slot 0.
+    const int Doffset = 3;
+    this->visit_global_dofs([&dofs_to_global_field_index, ft](const DofVisit &v)
+                            {
+                              int dirichlet_index;
+                              switch (v.kind)
+                              {
+                              case DofKind::NodalPosition:
+                                dirichlet_index = Doffset - 1 - (int)v.field_index;
+                                break;
+                              case DofKind::NodalInterface:
+                                // Only from an interface element. That is what this walk has always
+                                // done and it differs from describe_global_dofs, which labels such a
+                                // value from any element touching the boundary node; which of the two
+                                // is right is a question about the field-index map, not about the
+                                // walk, so it is left alone here.
+                                if (!v.element_is_interface) return;
+                                dirichlet_index = Doffset + (int)v.field_index;
+                                break;
+                              case DofKind::DG:
+                                dirichlet_index = Doffset + (int)v.element->get_DG_buffer_index(v.space_index, v.field_in_space);
+                                break;
+                              case DofKind::DL:
+                                dirichlet_index = Doffset + (int)(ft->info_DL.buffer_offset_basebulk + v.field_index);
+                                break;
+                              case DofKind::D0:
+                                dirichlet_index = Doffset + (int)(ft->info_D0.buffer_offset_basebulk + v.field_index);
+                                break;
+                              default: // NodalContinuous
+                                dirichlet_index = Doffset + (int)v.field_index;
+                                break;
+                              }
+                              dofs_to_global_field_index[v.eqn] =
+                                  ft->dirichlet_field_index_to_global_field_index[dirichlet_index];
+                            });
   }
 
   // Applies (or, if only_update_vals, re-evaluates) the Dirichlet conditions marked
@@ -3587,13 +5836,57 @@ namespace pyoomph
     if (!this->nelement())
       return;
     auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-    auto *ft = el->get_code_instance()->get_func_table();
+    auto *ft = el->get_jit_code()->get_func_table();
     int Doffset = 3;
 
-    // Nodal position dofs (Dirichlet conditions on mesh coordinates, e.g. for ALE)
-    for (unsigned int ni = 0; ni < this->nnode(); ni++)
+    // Every loop below fills the x/xi buffers - and, for the elemental dofs, evaluates two element
+    // midpoints - BEFORE testing dirichlet_active, so a mesh with no active condition of a given kind
+    // still paid a full per-node/per-element sweep. On a bulk mesh whose Dirichlet conditions all live
+    // on its boundary (interface) meshes, which is the common case, that was the entire cost: 2.3 s of
+    // the 25 s it took to initialise a 1M-dof Poisson problem, producing nothing. Hence these guards.
+    // Nothing outside an "if (dirichlet_active[...])" branch has a side effect, so skipping a kind
+    // whose flags are all false is exactly equivalent to running it. Unpinning a condition that was
+    // switched off is not this function's job - ensure_dummy_values_to_be_dummy() unpins everything
+    // before setup_pinning() gets here.
+    bool any_dirichlet_active = false;
+    for (unsigned int i = 0; i < dirichlet_active.size(); i++)
+      if (dirichlet_active[i]) { any_dirichlet_active = true; break; }
+    if (!any_dirichlet_active)
+      return;
+
+    bool any_position_active = false;
+    for (int d = 0; d < Doffset; d++)
+      if (dirichlet_active[Doffset - 1 - d]) { any_position_active = true; break; }
+
+    // Continuous fields: the nodal loop below indexes dirichlet_active by a running offset over the
+    // present spaces, the interface-mesh branch by space_info->buffer_offset_basebulk. They agree for
+    // the basebulk part, but keep each guard on the indices its own loop uses.
+    bool any_continuous_active = false, any_interface_only_active = false;
     {
-      pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(this->node_pt(ni));
+      unsigned offset = 0;
+      for (unsigned int si = 0; si < ft->num_present_continuous_spaces; si++)
+      {
+        auto *space_info = ft->present_continuous_spaces[si];
+        for (unsigned int fieldindex = 0; fieldindex < space_info->numfields_basebulk; fieldindex++)
+          if (dirichlet_active[fieldindex + offset + Doffset]) any_continuous_active = true;
+        for (unsigned int fieldindex = 0; fieldindex < space_info->numfields_basebulk; fieldindex++)
+          if (dirichlet_active[fieldindex + space_info->buffer_offset_basebulk + Doffset]) any_continuous_active = true;
+        for (unsigned int fieldindex = 0; fieldindex < space_info->numfields - space_info->numfields_basebulk; fieldindex++)
+          if (dirichlet_active[fieldindex + space_info->buffer_offset_interf + Doffset]) any_interface_only_active = true;
+        offset += space_info->numfields_basebulk;
+      }
+    }
+
+    bool any_elemental_active = false;
+    for (unsigned int fieldindex = 0; fieldindex < ft->info_DL.numfields; fieldindex++)
+      if (dirichlet_active[fieldindex + ft->info_DL.buffer_offset_basebulk + Doffset]) any_elemental_active = true;
+    for (unsigned int fieldindex = 0; fieldindex < ft->info_D0.numfields; fieldindex++)
+      if (dirichlet_active[fieldindex + ft->info_D0.buffer_offset_basebulk + Doffset]) any_elemental_active = true;
+
+    // Nodal position dofs (Dirichlet conditions on mesh coordinates, e.g. for ALE)
+    for (unsigned int ni = 0; any_position_active && ni < this->nnode(); ni++)
+    {
+      pyoomph::Node *nodept = static_cast<pyoomph::Node *>(this->node_pt(ni));
       for (unsigned int i = 0; i < nodept->ndim(); i++)
         x_buffer[i] = nodept->x(i);
       for (unsigned int i = 0; i < nodept->nlagrangian(); i++)
@@ -3604,15 +5897,15 @@ namespace pyoomph
         int valindex = -1 - d;
         if (dirichlet_active[valindex + Doffset])
         {
-          Generic_SetDirichletCondition(el, nodept->variable_position_pt(), el->get_code_instance(), valindex, d, x_buffer, x_lagr, normal, only_update_vals);
+          Generic_SetDirichletCondition(el, nodept->variable_position_pt(), el->get_jit_code(), valindex, d, x_buffer, x_lagr, normal, only_update_vals);
         }
       }
     }
 
     // Nodally-interpolated continuous field dofs (basebulk part only)
-    for (unsigned int ni = 0; ni < this->nnode(); ni++)
+    for (unsigned int ni = 0; any_continuous_active && ni < this->nnode(); ni++)
     {
-      pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(this->node_pt(ni));
+      pyoomph::Node *nodept = static_cast<pyoomph::Node *>(this->node_pt(ni));
       for (unsigned int i = 0; i < nodept->ndim(); i++)
         x_buffer[i] = nodept->x(i);
       for (unsigned int i = 0; i < nodept->nlagrangian(); i++)
@@ -3626,14 +5919,12 @@ namespace pyoomph
         {
           if (dirichlet_active[fieldindex + offset + Doffset])
           {
-            Generic_SetDirichletCondition(el, nodept, el->get_code_instance(), fieldindex + offset, fieldindex + offset, x_buffer, x_lagr, normal, only_update_vals);
+            Generic_SetDirichletCondition(el, nodept, el->get_jit_code(), fieldindex + offset, fieldindex + offset, x_buffer, x_lagr, normal, only_update_vals);
           }
         }
         offset += space_info->numfields_basebulk;
       }
     }
-
-    const std::vector<std::vector<unsigned int>> space_to_elem_node_index = el->get_nodal_space_index_to_element_index_map();
 
     // DG field dofs: unlike continuous fields these are owned per-element (each
     // element has its own copy of the nodal data), so the loop is over elements
@@ -3645,9 +5936,13 @@ namespace pyoomph
       for (unsigned int ei = 0; ei < this->nelement(); ei++)
       {
         auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ei));
+        // Per ELEMENT, not once from element 0 -- see the same fix in setup_initial_conditions above:
+        // a mesh can mix element shapes (the 3d interior-facet skeleton of a wedge/pyramid mesh has
+        // triangular and quadrilateral face elements side by side) and the map is shape-specific.
+        const std::vector<std::vector<unsigned>> & space_to_elem_node_index = el->get_nodal_space_index_to_element_index_map();
         for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_of_space[space_info->space_index]; ni++)
         {
-            pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(space_to_elem_node_index[space_info->space_index][ni]));
+            pyoomph::Node *nodept = static_cast<pyoomph::Node *>(el->node_pt(space_to_elem_node_index[space_info->space_index][ni]));
             for (unsigned int i = 0; i < nodept->ndim(); i++)
               x_buffer[i] = nodept->x(i);
             for (unsigned int i = 0; i < nodept->nlagrangian(); i++)
@@ -3657,7 +5952,7 @@ namespace pyoomph
               unsigned bindex = el->get_DG_buffer_index(space_info->space_index, fieldindex);
               if (dirichlet_active[bindex + Doffset])
               {
-                Generic_SetDirichletCondition(el, el->get_DG_nodal_data(space_info->space_index, fieldindex), el->get_code_instance(), bindex, el->get_DG_node_index(space_info->space_index, fieldindex, ni), x_buffer, x_lagr, normal, only_update_vals);
+                Generic_SetDirichletCondition(el, el->get_DG_nodal_data(space_info->space_index, fieldindex), el->get_jit_code(), bindex, el->get_DG_node_index(space_info->space_index, fieldindex, ni), x_buffer, x_lagr, normal, only_update_vals);
               }
             }
         }
@@ -3666,15 +5961,17 @@ namespace pyoomph
     
 
 
-    if (!this->nnode()) // This happens for interface meshes. Here, we also can access the normal, since we do it on an elemental basis
+    if (!this->nnode() && (any_position_active || any_continuous_active || any_interface_only_active)) // This happens for interface meshes. Here, we also can access the normal, since we do it on an elemental basis
     {
       // Interface meshes have no nodes of their own (Node_pt is empty), so we
       // instead iterate over the elements' nodes directly, which also lets us
       // compute the outward normal at each node for use in Dirichlet expressions.
+      // The normal evaluation is the expensive part, hence the guard above: an interface mesh
+      // carrying only elemental (DL/D0) conditions must not pay for it.
       for (unsigned int ei = 0; ei < this->nelement(); ei++)
       {
         auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ei));
-        auto *iel = dynamic_cast<InterfaceElementBase *>(el);
+        auto *iel = el->as_interface_element();
         for (unsigned int ni = 0; ni < el->nnode(); ni++)
         {
           normal[0] = normal[1] = normal[2] = 0.0;
@@ -3688,7 +5985,7 @@ namespace pyoomph
               normal[jnormd] = nbuff[jnormd];
           }
 
-          pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(ni));
+          pyoomph::Node *nodept = static_cast<pyoomph::Node *>(el->node_pt(ni));
           for (unsigned int i = 0; i < nodept->ndim(); i++)
             x_buffer[i] = nodept->x(i);
           for (unsigned int i = 0; i < nodept->nlagrangian(); i++)
@@ -3698,7 +5995,7 @@ namespace pyoomph
             int valindex = -1 - d;
             if (dirichlet_active[valindex + Doffset])
             {
-              Generic_SetDirichletCondition(el, nodept->variable_position_pt(), el->get_code_instance(), valindex, d, x_buffer, x_lagr, normal, only_update_vals);
+              Generic_SetDirichletCondition(el, nodept->variable_position_pt(), el->get_jit_code(), valindex, d, x_buffer, x_lagr, normal, only_update_vals);
             }
           }
 
@@ -3709,7 +6006,7 @@ namespace pyoomph
             {
               if (dirichlet_active[fieldindex + space_info->buffer_offset_basebulk + Doffset])
               {
-                Generic_SetDirichletCondition(el, nodept, el->get_code_instance(), fieldindex + space_info->buffer_offset_basebulk, fieldindex + space_info->buffer_offset_basebulk, x_buffer, x_lagr, normal, only_update_vals);
+                Generic_SetDirichletCondition(el, nodept, el->get_jit_code(), fieldindex + space_info->buffer_offset_basebulk, fieldindex + space_info->buffer_offset_basebulk, x_buffer, x_lagr, normal, only_update_vals);
               }
             }
           }
@@ -3726,7 +6023,7 @@ namespace pyoomph
               unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(space_info->interface_dof_indices[fieldindex]);
               if (dirichlet_active[fieldindex + space_info->buffer_offset_interf + Doffset])
               {
-                Generic_SetDirichletCondition(el, nodept, el->get_code_instance(), fieldindex + space_info->buffer_offset_interf, valindex, x_buffer, x_lagr, normal, only_update_vals);
+                Generic_SetDirichletCondition(el, nodept, el->get_jit_code(), fieldindex + space_info->buffer_offset_interf, valindex, x_buffer, x_lagr, normal, only_update_vals);
               }
             }
           }
@@ -3738,7 +6035,9 @@ namespace pyoomph
     // carry a linear slope in each local direction j (stored at internal value index
     // j+1), obtained here by finite-differencing the field value at s_min and s_max
     // of that direction and dividing by the local coordinate range.
-    for (unsigned int ei = 0; ei < this->nelement(); ei++)
+    // The two midpoint evaluations are unconditional within the loop body, so without the guard a
+    // mesh with no DL/D0 fields at all still evaluated them once per element.
+    for (unsigned int ei = 0; any_elemental_active && ei < this->nelement(); ei++)
     {
       auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ei));
       oomph::Vector<double> xcenter = el->get_Eulerian_midpoint_from_local_coordinate();
@@ -3765,7 +6064,7 @@ namespace pyoomph
             x_lagr[i] = np_lagr[i];
           if (dirichlet_active[fieldindex + ft->info_DL.buffer_offset_basebulk + Doffset])
           {
-            Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex), el->get_code_instance(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals);
+            Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex), el->get_jit_code(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals);
 
             auto *ts = this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex)->time_stepper_pt();
             oomph::Vector<double> vmin(ts->ntstorage());
@@ -3781,7 +6080,7 @@ namespace pyoomph
               x_lagr[i] = np_lagr[i];
             if (dirichlet_active[fieldindex + ft->info_DL.buffer_offset_basebulk + Doffset])
             {
-              Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex), el->get_code_instance(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals);
+              Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex), el->get_jit_code(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals);
             }
             oomph::Vector<double> vmax(ts->ntstorage());
             for (unsigned t = 0; t < vmax.size(); t++)
@@ -3791,13 +6090,18 @@ namespace pyoomph
             double denom = el->s_max() - el->s_min();
             for (unsigned t = 0; t < vmax.size(); t++)
               this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex)->set_value(t, j + 1, (vmax[t] - vmin[t]) / denom);
+            // Generic_SetDirichletCondition only ever pins value slot 0, so the slopes used to be
+            // written and then left free: a DirichletBC on a DL field constrained its mean but let the
+            // residual pick the slope, i.e. it did not impose the prescribed value at all.
+            if (!only_update_vals)
+              this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex)->pin(j + 1);
           }
           s[j] = old;
         }
         // Finally reapply the Dirichlet condition at the midpoint itself (value slot 0)
         if (dirichlet_active[fieldindex + ft->info_DL.buffer_offset_basebulk + Doffset])
         {
-          Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex), el->get_code_instance(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals);
+          Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex), el->get_jit_code(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals);
         }
       }
 
@@ -3810,7 +6114,7 @@ namespace pyoomph
       {
         if (dirichlet_active[fieldindex + ft->info_D0.buffer_offset_basebulk + Doffset])
         {
-          Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_D0.internal_offset_new + fieldindex), el->get_code_instance(), fieldindex + ft->info_D0.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals);
+          Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_D0.internal_offset_new + fieldindex), el->get_jit_code(), fieldindex + ft->info_D0.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals);
         }
       }
     }
@@ -3833,14 +6137,12 @@ namespace pyoomph
 		}
 
   // Creates a new "0d" pseudo-element wrapping a single ODE, using the code
-  // instance's generated residual/Jacobian routines. __CurrentCodeInstance is a
-  // thread-local-like hook that BulkElementODE0d's constructor reads to know which
-  // generated code table it belongs to.
+  // instance's generated residual/Jacobian routines. __CurrentJITCode is the per-thread hook that
+  // BulkElementODE0d's constructor reads to know which generated code table it belongs to.
   oomph::GeneralisedElement *ODEStorageMesh::_create_ode_element(oomph::TimeStepper *ts)
   {
-    BulkElementBase::__CurrentCodeInstance = this->codeinst;
-    oomph::GeneralisedElement *ode = new BulkElementODE0d(this->codeinst, ts);
-    BulkElementBase::__CurrentCodeInstance = NULL;
+    BulkElementBase::JITCodeScope __jit_scope2(this->jitcode);
+    oomph::GeneralisedElement *ode = new BulkElementODE0d(this->jitcode, ts);
     this->add_element_pt(ode);
     return ode;
   }
@@ -3855,7 +6157,7 @@ namespace pyoomph
     {
       int ic_index = -1;
       auto *ode = dynamic_cast<BulkElementODE0d *>(this->element_pt(ei));
-      auto *ft = ode->get_code_instance()->get_func_table();
+      auto *ft = ode->get_jit_code()->get_func_table();
       for (unsigned int i = 0; i < ft->num_ICs; i++)
       {
         if (std::string(ft->IC_names[i]) == ic_name)
@@ -3867,9 +6169,9 @@ namespace pyoomph
       if (ic_index < 0)
         continue;
 
-      for (unsigned int fieldindex = 0; fieldindex < ode->get_code_instance()->get_func_table()->info_D0.numfields; fieldindex++)
+      for (unsigned int fieldindex = 0; fieldindex < ode->get_jit_code()->get_func_table()->info_D0.numfields; fieldindex++)
       {
-        Generic_SetInitialCondition(ode, ode->internal_data_pt(fieldindex), ode->get_code_instance(), fieldindex, 0, x_buffer, x_buffer, normal, false, false, ic_index);
+        Generic_SetInitialCondition(ode, ode->internal_data_pt(fieldindex), ode->get_jit_code(), fieldindex, 0, x_buffer, x_buffer, normal, false, false, ic_index);
       }
     }
   }
@@ -3885,11 +6187,11 @@ namespace pyoomph
     for (unsigned int ei = 0; ei < this->nelement(); ei++)
     {
       auto *ode = dynamic_cast<BulkElementODE0d *>(this->element_pt(ei));
-      for (unsigned int fieldindex = 0; fieldindex < ode->get_code_instance()->get_func_table()->info_D0.numfields; fieldindex++)
+      for (unsigned int fieldindex = 0; fieldindex < ode->get_jit_code()->get_func_table()->info_D0.numfields; fieldindex++)
       {
         if (dirichlet_active[fieldindex + Doffset])
         {
-          Generic_SetDirichletCondition(ode, ode->internal_data_pt(fieldindex), ode->get_code_instance(), fieldindex, 0, x_buffer, x_buffer, normal, only_update_vals);
+          Generic_SetDirichletCondition(ode, ode->internal_data_pt(fieldindex), ode->get_jit_code(), fieldindex, 0, x_buffer, x_buffer, normal, only_update_vals);
         }
         else if (!only_update_vals)
         {
@@ -3930,7 +6232,7 @@ namespace pyoomph
     for (unsigned int i = 0; i < this->nelement(); i++)
     {
       auto *ode = dynamic_cast<BulkElementBase *>(this->element_pt(i));
-      DynamicBulkElementInstance *ci = ode->get_code_instance();
+      DynamicJITCode *ci = ode->get_jit_code();
       auto *ft = ci->get_func_table();
       if (!ft->has_temporal_estimators)
         continue;
@@ -3990,7 +6292,7 @@ namespace pyoomph
     for (unsigned int ie = 0; ie < this->nelement(); ie++)
     {
       BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
-      DynamicBulkElementInstance *ci = be->get_code_instance();
+      DynamicJITCode *ci = be->get_jit_code();
       auto *functable = ci->get_func_table();
       auto &eleminfo = *be->get_eleminfo();
       unsigned offset_zeta=eleminfo.nodal_dim + functable->lagr_dim +be->dim(); // This is the offset for the zeta coordinate in the nodal data ( first Eulerian, then Lagrangian, then local coords. Finally zeta coords)
@@ -4066,7 +6368,7 @@ namespace pyoomph
     if (!this->nelement())
       return 0.0;
     BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-    DynamicBulkElementInstance *ci = be->get_code_instance();
+    DynamicJITCode *ci = be->get_jit_code();
     auto *ft = ci->get_func_table();
     if (!ft->has_temporal_estimators)
       return 0.0;
@@ -4085,7 +6387,7 @@ namespace pyoomph
         auto * space_info=ft->present_continuous_spaces[is];
         for (unsigned int in=0;in<be->get_eleminfo()->nnode_of_space[space_info->space_index];in++)
         {
-          pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(be->node_pt(node_index_to_elem[space_info->space_index][in]));
+          pyoomph::Node *n = static_cast<pyoomph::Node *>(be->node_pt(node_index_to_elem[space_info->space_index][in]));
           if (handled_nodes_on_conti_spaces[is].count(n))
             continue;
           handled_nodes_on_conti_spaces[is].insert(n);
@@ -4154,7 +6456,7 @@ namespace pyoomph
   }
 
   // Falls back from the generic Mesh implementation (which needs an actual node to
-  // inspect, and interface meshes may have none) to the code instance's declared
+  // inspect, and interface meshes may have none) to the code's declared
   // nodal dimension, or finally to the bulk mesh's dimension if no code is set yet.
   unsigned InterfaceMesh::get_nodal_dimension()
   {
@@ -4232,6 +6534,32 @@ namespace pyoomph
     return result;
   }
 
+  // pyoomph builds interface meshes itself, so oomph-lib never sets up a shared node scheme on them
+  // and the base class version would return nothing. The nodes are the bulk mesh's nodes, so take the
+  // bulk scheme - which both ranks agree on entry by entry - and translate it into this mesh's own
+  // node numbering. Bulk nodes this interface does not contain become -1 rather than being dropped:
+  // removing them would shift the entries and destroy the correspondence with the other rank's list.
+  std::vector<int> InterfaceMesh::get_shared_node_numpy_indices(unsigned p)
+  {
+#ifdef OOMPH_HAS_MPI
+    if (!bulkmesh)
+      return std::vector<int>();
+    std::map<oomph::Node *, unsigned> nodemap;
+    this->fill_node_map(nodemap);
+    unsigned n = bulkmesh->nshared_node(p);
+    std::vector<int> res(n, -1);
+    for (unsigned j = 0; j < n; j++)
+    {
+      auto it = nodemap.find(bulkmesh->shared_node_pt(p, j));
+      if (it != nodemap.end())
+        res[j] = (int)it->second;
+    }
+    return res;
+#else
+    return std::vector<int>();
+#endif
+  }
+
   // Counts nodes touched by this interface mesh's elements: unique nodes (shared
   // between elements) when continuous, or the sum of each element's node count when
   // discontinuous. See class comment on Mesh for why interface meshes need this
@@ -4262,7 +6590,7 @@ namespace pyoomph
 
   // Currently disabled/unused feature (kept for reference): would zero out selected
   // bulk residual contributions at boundary nodes touched by this interface, for
-  // bulk equations that this interface's code instance flags for nullification.
+  // bulk equations that this interface's code flags for nullification.
   void InterfaceMesh::nullify_selected_bulk_dofs()
   {
     throw_runtime_error("Nullified dofs are deactivated for now... Never used so far");
@@ -4270,8 +6598,8 @@ namespace pyoomph
     if (!bulkmesh || !bulkmesh->nelement()) return;
     unsigned n_element = this->nelement();
     if (!n_element) return;
-    auto * for_ci=dynamic_cast<BulkElementBase*>(bulkmesh->element_pt(0))->get_code_instance(); //Code instance to nullify the dofs
-    auto * my_ci=dynamic_cast<BulkElementBase*>(this->element_pt(0))->get_code_instance(); //My code instance to nullify the dofs
+    auto * for_ci=dynamic_cast<BulkElementBase*>(bulkmesh->element_pt(0))->get_jit_code(); //Code to nullify the dofs
+    auto * my_ci=dynamic_cast<BulkElementBase*>(this->element_pt(0))->get_jit_code(); //My code to nullify the dofs
     for (auto index : my_ci->nullify_bulk_residuals)
     {
       for(unsigned e=0;e<n_element;e++)
@@ -4295,6 +6623,11 @@ namespace pyoomph
   // (shared between adjacent elements), so a seen-set avoids double deletion.
   void InterfaceMesh::clear_before_adapt()
   {
+    // Before anything is deleted: the discontinuous values live in these elements' internal Data and have
+    // no other home.
+    this->snapshot_discontinuous_data();
+    // And the halo/haloed lists point at the very elements about to go, so they have to go first.
+    this->clear_halo_element_scheme();
     unsigned n_element = this->nelement();
     for (unsigned e = 0; e < n_element; e++)
     {
@@ -4311,7 +6644,1116 @@ namespace pyoomph
       }
     }
     opposite_interior_facets.clear();
-    this->invalidate_lagrangian_kdtree();
+    this->bump_topology_generation();
+  }
+
+  // Both the locator and shape_at_s_DL read their buffer sizes out of eleminfo, so an element whose
+  // eleminfo was never filled sizes an oomph::Shape from garbage and the write runs off the end.
+  // Freshly generated interface elements are exactly that case (this cost a segfault inside
+  // restore_discontinuous_data before the guard existed).
+  static void ensure_eleminfo_filled(Mesh *m)
+  {
+    for (unsigned ie = 0; ie < m->nelement(); ie++)
+    {
+      BulkElementBase *e = dynamic_cast<BulkElementBase *>(m->element_pt(ie));
+      if (e && !e->get_eleminfo()->alloced)
+        e->fill_element_info(true);
+    }
+  }
+
+  // Number of DG-space internal Data entries preceding the DL ones, which allocate_discontinous_fields
+  // lays out as [DG spaces][DL fields][D0 fields].
+  static unsigned dg_internal_data_offset(const JITFuncSpec_Table_FiniteElement_t *ft)
+  {
+    unsigned off = 0;
+    for (unsigned i = 0; i < ft->num_present_dg_spaces; i++)
+      off += ft->present_dg_spaces[i]->numfields_new;
+    return off;
+  }
+
+  // The nodal DG spaces (D1/D2/D1TB/D2TB) this interface declares fields on ITSELF, in func-table
+  // order. Fields inherited from the bulk are excluded: they are the bulk element's storage, read
+  // here through external data, and they travel across an adaptation by the bulk's own father->son
+  // route (BulkElementBase::further_build). A space with no nodes on this element - which is how a
+  // TB space appears when the geometry never got its bubble node - is skipped, since it has no
+  // storage to carry.
+  static std::vector<JITFuncSpec_Table_FiniteElement_SpaceInfo_t *>
+  own_dg_spaces(const JITFuncSpec_Table_FiniteElement_t *ft, BulkElementBase *e)
+  {
+    std::vector<JITFuncSpec_Table_FiniteElement_SpaceInfo_t *> res;
+    for (unsigned i = 0; i < ft->num_present_dg_spaces; i++)
+    {
+      auto *si = ft->present_dg_spaces[i];
+      if (!si->numfields_new)
+        continue;
+      if (!e->get_eleminfo()->nnode_of_space[si->space_index])
+        continue;
+      res.push_back(si);
+    }
+    return res;
+  }
+
+  // Basis functions per direction of a DG space, i.e. its polynomial order plus one: 3 for the
+  // second-order spaces (D2/D2TB), 2 for the first-order ones. Drives the sampling density, since the
+  // fit has to stay determined on each SON of a refined element, not merely on the element.
+  static unsigned dg_space_nmode_1d(unsigned space_index)
+  {
+    return (space_index == SPACE_INDEX_D2TB || space_index == SPACE_INDEX_D2) ? 3 : 2;
+  }
+
+  // Samples every element on a lattice in its own local coordinates, on the CELL CENTRES of an even
+  // subdivision rather than on nodes: after one refinement each son must still receive enough points
+  // to determine a linear (DL) field on its own, and any lattice point shared by several sons - a
+  // father's own nodes, and the midpoint of an odd lattice - arbitrates to one of them and leaves the
+  // others empty or, worse, feeds a stranger (see below).
+  //
+  // The lattice is then shrunk towards the element's centre, so that no sample lies ON the element's
+  // boundary. A sample sitting exactly on a shared node/edge belongs to two elements geometrically,
+  // and the fields sampled here are DISCONTINUOUS, so letting it arbitrate to the neighbour feeds
+  // that neighbour's fit a value from a different element. On the interior-facet skeleton this is not
+  // an edge case at all: the facets created inside a refined element END on the surrounding facets,
+  // so on the next unrefinement every one of them dropped a sample onto a surviving facet - a
+  // constant field came back at ~5/6 of its value after a refine/unrefine round trip.
+  // Where a sample point of a facet element sits, in Eulerian coordinates.
+  //
+  // A POINT facet is read off its single node rather than interpolated. oomph's
+  // FaceElement::interpolated_x does not interpolate over the face element itself - it maps the local
+  // coordinate into the element the face hangs off and asks that one. For a point interface that
+  // element is the LINE interface element it terminates, which is a face element as well and has no
+  // oomph-level shape() of its own, so the call lands in a pure virtual slot and aborts the process
+  // ("pure virtual method called"). A point has one node and that node is its position anyway.
+  static double sample_position(BulkElementBase *e, const oomph::Vector<double> &s, unsigned d)
+  {
+    return e->dim() ? e->interpolated_x(s, d) : e->node_pt(0)->x(d);
+  }
+
+  static void sample_local_coordinates(BulkElementBase *e, std::vector<oomph::Vector<double>> &out,
+                                       unsigned nmode_1d = 2)
+  {
+    out.clear();
+    const unsigned edim = e->dim();
+    if (!edim) // a point interface has a single location and no local coordinate at all
+    {
+      out.push_back(oomph::Vector<double>());
+      return;
+    }
+    // The fit needs nmode_1d coefficients per direction, and it must stay determined on a SON of this
+    // element and not merely on the element itself - a nodal DG space needs more than DL ("D2" has
+    // three per direction), and an underdetermined fit does not fail loudly, it falls back to a
+    // constant and quietly drops the linear part of every surviving facet. So the lattice grows with
+    // the widest basis present, at nmode_1d+1 points per son.
+    //
+    // CELL CENTRES of an EVEN lattice, not its nodes: an odd node lattice puts a sample exactly on
+    // the midpoint of the element, and on the skeleton that midpoint becomes a NODE of the refined
+    // mesh, shared not only by the two sons of this facet but by the brand-new facets that a refined
+    // triangle grows inside itself (its midlines end there). The locator is free to hand such a point
+    // to any of them, and the new facet it lands on then counts as restored, fits its single foreign
+    // sample to a constant, and is neither reported nor recovered - a wrong value that looks
+    // transferred. Off the midpoint the ambiguity does not arise: every sample lies strictly inside
+    // exactly one son.
+    const unsigned NS = 2 * (nmode_1d < 2 ? 2 : nmode_1d) + 2;
+    // 0.8 keeps every sample well away from the element boundary. Cell centres already do that in a
+    // tensor direction, but not on the hypotenuse of a simplex, which the tensor lattice hits exactly.
+    const double shrink = 0.8;
+    const double smin = e->s_min(), smax = e->s_max();
+    unsigned total = 1;
+    for (unsigned d = 0; d < edim; d++)
+      total *= NS;
+    oomph::Vector<double> centre(edim, 0.0);
+    unsigned ncentre = 0;
+    for (unsigned k = 0; k < total; k++)
+    {
+      oomph::Vector<double> s(edim);
+      unsigned rem = k;
+      for (unsigned d = 0; d < edim; d++)
+      {
+        s[d] = smin + (smax - smin) * (rem % NS + 0.5) / NS;
+        rem /= NS;
+      }
+      // Discards the ~half of a tensor lattice that falls outside a simplex.
+      if (e->local_coord_is_valid(s))
+      {
+        for (unsigned d = 0; d < edim; d++)
+          centre[d] += s[d];
+        ncentre++;
+        out.push_back(s);
+      }
+    }
+    if (!ncentre)
+      return;
+    for (unsigned d = 0; d < edim; d++)
+      centre[d] /= ncentre;
+    // The reference element is convex and the centre is interior to it, so a point pulled towards
+    // the centre stays inside - this works for simplices (where clamping per coordinate would not,
+    // the hypotenuse being diagonal) just as well as for tensor-product elements.
+    for (auto &s : out)
+      for (unsigned d = 0; d < edim; d++)
+        s[d] = centre[d] + shrink * (s[d] - centre[d]);
+  }
+
+  void InterfaceMesh::snapshot_discontinuous_data()
+  {
+    discontinuous_snapshot.clear();
+    if (!code || !this->nelement())
+      return;
+    auto *ft = code->get_func_table();
+    const unsigned nDL = ft->info_DL.numfields, nD0 = ft->info_D0.numfields;
+
+    ensure_eleminfo_filled(this);
+    BulkElementBase *e0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
+    if (!e0 || !e0->ninternal_data())
+      return;
+    const auto dgspaces = own_dg_spaces(ft, e0);
+    if (!nDL && !nD0 && dgspaces.empty())
+      return;
+
+    auto &snap = discontinuous_snapshot;
+    snap.space_dim = e0->nodal_dimension();
+    snap.nDL = nDL;
+    snap.nD0 = nD0;
+    snap.nDL_modes = e0->get_eleminfo()->nnode_DL;
+    snap.ntstorage = e0->internal_data_pt(0)->time_stepper_pt()->ntstorage();
+    unsigned nmode_1d = 2; // DL needs two coefficients per direction; a D2 space needs three
+    for (auto *si : dgspaces)
+    {
+      snap.dg_space_index.push_back(si->space_index);
+      snap.dg_numfields_new.push_back(si->numfields_new);
+      snap.dg_nmodes.push_back(e0->get_eleminfo()->nnode_of_space[si->space_index]);
+      nmode_1d = std::max(nmode_1d, dg_space_nmode_1d(si->space_index));
+    }
+
+    std::vector<oomph::Vector<double>> slist;
+    std::vector<double> vDL, vD0;
+    oomph::Vector<double> vDG;
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+    {
+      BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+      if (!e)
+        continue;
+      sample_local_coordinates(e, slist, nmode_1d);
+      for (const auto &sloc : slist)
+      {
+        for (unsigned d = 0; d < snap.space_dim; d++)
+          snap.coords.push_back(sample_position(e, sloc, d));
+        for (unsigned t = 0; t < snap.ntstorage; t++)
+        {
+          // Order matches the internal-Data layout [DG][DL][D0], so the fit can walk both together.
+          for (auto *si : dgspaces)
+          {
+            // get_DG_fields_at_s returns the space's inherited-from-bulk fields first and the ones
+            // declared here last; only the latter are ours to carry.
+            e->get_DG_fields_at_s(si->space_index, t, sloc, vDG);
+            for (unsigned f = si->numfields - si->numfields_new; f < si->numfields; f++)
+              snap.values.push_back(vDG[f]);
+          }
+          if (nDL)
+          {
+            e->get_interpolated_fields_DL(sloc, vDL, t);
+            snap.values.insert(snap.values.end(), vDL.begin(), vDL.end());
+          }
+          if (nD0)
+          {
+            e->get_interpolated_fields_D0(sloc, vD0, t);
+            snap.values.insert(snap.values.end(), vD0.begin(), vD0.end());
+          }
+        }
+      }
+    }
+  }
+
+  // Solves the small symmetric system A c = b in place by Gaussian elimination with partial
+  // pivoting. Returns false on a negligible pivot, which is how an underdetermined fit (fewer
+  // sample points in this element than DL modes, or points that happen to be collinear) announces
+  // itself; the caller then falls back to a constant.
+  static bool solve_small_system(std::vector<double> &A, std::vector<double> &b, unsigned n)
+  {
+    for (unsigned col = 0; col < n; col++)
+    {
+      unsigned piv = col;
+      for (unsigned r = col + 1; r < n; r++)
+        if (std::abs(A[r * n + col]) > std::abs(A[piv * n + col]))
+          piv = r;
+      if (std::abs(A[piv * n + col]) < 1e-13)
+        return false;
+      if (piv != col)
+      {
+        for (unsigned c = 0; c < n; c++)
+          std::swap(A[piv * n + c], A[col * n + c]);
+        std::swap(b[piv], b[col]);
+      }
+      for (unsigned r = col + 1; r < n; r++)
+      {
+        const double f = A[r * n + col] / A[col * n + col];
+        if (f == 0.0)
+          continue;
+        for (unsigned c = col; c < n; c++)
+          A[r * n + c] -= f * A[col * n + c];
+        b[r] -= f * b[col];
+      }
+    }
+    for (int r = (int)n - 1; r >= 0; r--)
+    {
+      double acc = b[r];
+      for (unsigned c = r + 1; c < n; c++)
+        acc -= A[r * n + c] * b[c];
+      b[r] = acc / A[r * n + r];
+    }
+    return true;
+  }
+
+  // Least-squares fit of scattered values sampled inside ONE element onto that element's DL basis
+  // (or, for D0, just their mean). The geometry-dependent part - the basis at the sample points and
+  // the normal matrix built from it - is shared by every field and every time level, so it is built
+  // once per element and then reused. Three sources of values feed into this: the snapshot taken
+  // before an adaptation, the values pulled from the previous mesh after a remeshing, and the
+  // optional recovery expression evaluated on a facet that neither of those could reach.
+  struct ElementModeFit
+  {
+    unsigned nmode = 0, npts = 0;
+    std::vector<double> psi_at; // npts x nmode
+    std::vector<double> A0;     // nmode x nmode normal matrix
+    unsigned n_fallback = 0;
+
+    // `space_index` selects the basis to fit in: -1 is the DL modal basis, otherwise the nodal basis
+    // of that DG space. Nothing else differs - both are partitions of unity over the element, which
+    // is what makes the constant fallback below correct for either.
+    void build(BulkElementBase *e, const std::vector<std::vector<double>> &slocs, int space_index,
+               bool need_fit)
+    {
+      nmode = (space_index < 0 ? e->get_eleminfo()->nnode_DL
+                               : e->get_eleminfo()->nnode_of_space[(unsigned)space_index]);
+      npts = slocs.size();
+      psi_at.assign(npts * (nmode ? nmode : 1), 1.0);
+      A0.assign(nmode * nmode, 0.0);
+      if (!need_fit || !nmode)
+        return;
+      for (unsigned p = 0; p < npts; p++)
+      {
+        oomph::Shape psi(nmode);
+        oomph::Vector<double> sv(slocs[p].size());
+        for (unsigned d = 0; d < sv.size(); d++)
+          sv[d] = slocs[p][d];
+        if (space_index < 0)
+          e->shape_at_s_DL(sv, psi);
+        else
+          e->shape_of_space((unsigned)space_index, sv, psi);
+        for (unsigned l = 0; l < nmode; l++)
+          psi_at[p * nmode + l] = psi[l];
+      }
+      for (unsigned l = 0; l < nmode; l++)
+        for (unsigned m = 0; m < nmode; m++)
+        {
+          double acc = 0.0;
+          for (unsigned p = 0; p < npts; p++)
+            acc += psi_at[p * nmode + l] * psi_at[p * nmode + m];
+          A0[l * nmode + m] = acc;
+        }
+    }
+
+    double mean(const std::vector<double> &vals) const
+    {
+      double m = 0.0;
+      for (unsigned p = 0; p < npts; p++)
+        m += vals[p];
+      return m / npts;
+    }
+
+    // vals holds one value per sample point; coeffs comes back with nmode coefficients in whichever
+    // basis build() was given.
+    void fit(const std::vector<double> &vals, std::vector<double> &coeffs)
+    {
+      std::vector<double> A = A0;
+      coeffs.assign(nmode, 0.0);
+      for (unsigned p = 0; p < npts; p++)
+        for (unsigned l = 0; l < nmode; l++)
+          coeffs[l] += psi_at[p * nmode + l] * vals[p];
+      if (!solve_small_system(A, coeffs, nmode))
+      {
+        // A Lagrange basis is a partition of unity, so every coefficient equal to the mean is
+        // exactly the constant field - the right thing to keep when the fit is underdetermined.
+        coeffs.assign(nmode, mean(vals));
+        n_fallback++;
+      }
+    }
+  };
+
+  // Fills the DL coefficients of one element from an initial condition, by evaluating the IC on a
+  // lattice of local sample points and least-squares fitting it onto the DL basis.
+  //
+  // This replaced a midpoint value plus a finite difference along each local coordinate, which was
+  // wrong twice over. The DL coefficients are amplitudes in the shape_at_s_DL basis, not a value and
+  // d/ds slopes, so even a linear field - which DL represents exactly - came out with the wrong
+  // gradient. And the Lagrangian sample buffer was filled under `i < xlagr.size()`, the size of
+  // get_Lagrangian_midpoint_from_local_coordinate(), i.e. the ELEMENT's nlagrangian(): that is zero
+  // whenever the equations do not use Lagrangian coordinates, while the nodes still carry xi, so an IC
+  // written in terms of lagrangian_x silently evaluated at the origin for every element and produced a
+  // uniform field. Both are gone here: the fit is in the real basis, and the samples come from
+  // interpolated_xi, bounded by what the nodes actually have.
+  static void set_DL_initial_condition(BulkElementBase *el, DynamicJITCode *ci, const JITFuncSpec_Table_FiniteElement_t *ft,
+                                       double *normal, unsigned icindex)
+  {
+    const unsigned nDL = ft->info_DL.numfields;
+    if (!nDL || !el->nnode())
+      return;
+
+    std::vector<oomph::Vector<double>> lattice;
+    sample_local_coordinates(el, lattice, 2); // DL is two modes per direction
+    std::vector<std::vector<double>> slocs(lattice.size());
+    for (unsigned p = 0; p < lattice.size(); p++)
+      slocs[p].assign(lattice[p].begin(), lattice[p].end());
+
+    ElementModeFit dlfit;
+    dlfit.build(el, slocs, -1, true);
+    if (!dlfit.nmode)
+      return;
+
+    // The physical and Lagrangian position of every sample point. nlagrangian is taken from the node,
+    // not from the element - see above.
+    const unsigned ndim = el->nodal_dimension();
+    const unsigned nlagr = static_cast<pyoomph::Node *>(el->node_pt(0))->nlagrangian();
+    std::vector<std::array<double, 3>> xs(slocs.size(), {0.0, 0.0, 0.0}), xis(slocs.size(), {0.0, 0.0, 0.0});
+    for (unsigned p = 0; p < slocs.size(); p++)
+    {
+      oomph::Vector<double> sv(lattice[p]);
+      oomph::Vector<double> np(ndim, 0.0);
+      el->interpolated_x(sv, np);
+      for (unsigned i = 0; i < ndim && i < 3; i++)
+        xs[p][i] = np[i];
+      // Interpolated from the NODES, not with interpolated_xi: that one loops over the element's
+      // nlagrangian(), which is what was zero here in the first place.
+      if (nlagr)
+      {
+        oomph::Shape psi(el->nnode());
+        el->shape(sv, psi);
+        for (unsigned n = 0; n < el->nnode(); n++)
+        {
+          auto *nod = static_cast<pyoomph::Node *>(el->node_pt(n));
+          for (unsigned i = 0; i < nlagr && i < 3; i++)
+            xis[p][i] += psi[n] * nod->xi(i);
+        }
+      }
+    }
+
+    std::vector<double> vals(slocs.size()), coeffs;
+    for (unsigned fieldindex = 0; fieldindex < nDL; fieldindex++)
+    {
+      oomph::Data *d = el->internal_data_pt(fieldindex + ft->info_DL.internal_offset_new);
+      auto *ts = d->time_stepper_pt();
+      auto *Time_pt = ts->time_pt();
+      for (unsigned t = 0; t < Time_pt->ndt(); t++)
+      {
+        const double time_local = Time_pt->time(t);
+        for (unsigned p = 0; p < slocs.size(); p++)
+        {
+          double xb[3] = {xs[p][0], xs[p][1], xs[p][2]};
+          double xl[3] = {xis[p][0], xis[p][1], xis[p][2]};
+          vals[p] = ft->InitialConditionFunc[icindex](el->get_eleminfo(), fieldindex + ft->info_DL.buffer_offset_basebulk,
+                                                      xb, xl, normal, time_local, 0, 0.0);
+        }
+        dlfit.fit(vals, coeffs);
+        for (unsigned l = 0; l < dlfit.nmode; l++)
+          d->set_value(t, l, coeffs[l]);
+      }
+    }
+  }
+
+  // Local expressions can only be evaluated once the element's (and, for anything reading bulk or
+  // opposite-side fields, the neighbouring elements') eleminfo buffers exist. Freshly built facet
+  // elements have none of that yet at restore time.
+  static void ensure_local_expr_evaluable(BulkElementBase *e)
+  {
+    if (!e->get_eleminfo()->alloced)
+      e->fill_element_info(true);
+    InterfaceElementBase *ie = e->as_interface_element();
+    if (!ie)
+      return;
+    if (BulkElementBase *b = dynamic_cast<BulkElementBase *>(ie->bulk_element_pt()))
+      ensure_local_expr_evaluable(b);
+    if (InterfaceElementBase *o = ie->get_opposite_side())
+      ensure_local_expr_evaluable(dynamic_cast<BulkElementBase *>(o));
+  }
+
+  // Fits sampled values back onto this mesh's own discontinuous element data, of every space.
+  //
+  // `snap` carries the values, `per_elem` the assignment "which sample landed in which of THIS mesh's
+  // elements, at which local coordinate there" - the only thing the two callers disagree about.
+  // restore_discontinuous_data() pushes its OWN pre-adaptation snapshot onto whatever element the
+  // locator puts each sample in; interpolate_discontinuous_data_from() pulls the values of a still
+  // living old mesh at each new element's own lattice points, restricted to the part of the old mesh
+  // that element lies in.
+  //
+  // Elements that end up with no sample are filled from their __facet_recovery_<field> expressions if
+  // every field has one, and otherwise left at zero and listed in discontinuous_unrestored_elements.
+  // Returns how many elements were left at zero.
+  unsigned InterfaceMesh::fit_discontinuous_data(const DiscontinuousSnapshot &snap, const DiscontinuousSampleMap &per_elem)
+  {
+    discontinuous_unrestored_elements.clear();
+    auto *ft = code->get_func_table();
+    const unsigned nDL = ft->info_DL.numfields, nD0 = ft->info_D0.numfields;
+    if (!this->nelement())
+      return 0;
+
+    // The nodal DG block, ahead of DL/D0 in both the internal Data and the snapshot's value order.
+    BulkElementBase *efirst = dynamic_cast<BulkElementBase *>(this->element_pt(0));
+    const auto dgspaces = efirst ? own_dg_spaces(ft, efirst)
+                                 : std::vector<JITFuncSpec_Table_FiniteElement_SpaceInfo_t *>();
+    unsigned nDG = 0, nmode_1d = 2;
+    for (auto *si : dgspaces)
+    {
+      nDG += si->numfields_new;
+      nmode_1d = std::max(nmode_1d, dg_space_nmode_1d(si->space_index));
+    }
+
+    // Opt-in per-field recovery for facets that receive no samples: a local expression named
+    // __facet_recovery_<field> (see Equations.set_facet_recovery) evaluated on the same lattice the
+    // snapshot uses and fitted the same way. This is the HDG answer for a facet created inside a
+    // refined bulk element - its trace is defined by the bulk solution, not by the old skeleton.
+    const unsigned nfield = nDG + nDL + nD0;
+    std::vector<int> recovery_index(nfield, -1);
+    bool any_recovery = false;
+    for (unsigned i = 0; i < ft->numlocal_expressions; i++)
+    {
+      const std::string nam = ft->local_expressions_names[i];
+      if (nam.compare(0, 17, "__facet_recovery_") != 0)
+        continue;
+      const std::string field = nam.substr(17);
+      unsigned base = 0;
+      for (auto *si : dgspaces)
+      {
+        // Only the fields declared at this level are carried, and they are the LAST ones of the space.
+        for (unsigned fi = 0; fi < si->numfields_new; fi++)
+          if (field == si->fieldnames[si->numfields - si->numfields_new + fi])
+          { recovery_index[base + fi] = (int)i; any_recovery = true; }
+        base += si->numfields_new;
+      }
+      for (unsigned fi = 0; fi < nDL; fi++)
+        if (field == ft->info_DL.fieldnames[fi]) { recovery_index[nDG + fi] = (int)i; any_recovery = true; }
+      for (unsigned fi = 0; fi < nD0; fi++)
+        if (field == ft->info_D0.fieldnames[fi]) { recovery_index[nDG + nDL + fi] = (int)i; any_recovery = true; }
+    }
+    bool recovery_for_all = any_recovery;
+    for (unsigned fi = 0; fi < nfield; fi++)
+      if (recovery_index[fi] < 0) recovery_for_all = false;
+    // An empty assignment means the snapshot is not usable here at all (none taken, taken against
+    // different fields, or every sample rejected), so nothing below may read from it.
+    const bool use_snapshot = !per_elem.empty();
+    const unsigned stride = use_snapshot ? snap.ntstorage * nfield : 0;
+    unsigned ntstorage = use_snapshot ? snap.ntstorage : 0;
+
+    const unsigned dg_off = dg_internal_data_offset(ft);
+    unsigned n_empty = 0, n_recovered = 0, n_fallback = 0;
+    std::vector<std::vector<double>> slocs;
+    std::vector<double> vals, coeffs;
+    std::vector<oomph::Vector<double>> lattice;
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+    {
+      BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+      if (!e)
+        continue;
+      // Any of the element's discontinuous Data answers this; they share one time stepper. Asking
+      // internal_data_pt(dg_off) - the head of the DL/D0 block - ran off the end of the list on an
+      // interface that declares nodal DG fields and nothing else, which is precisely the case where
+      // there is no DL/D0 block (segfault on the first remesh of a D1-only skeleton).
+      if (!ntstorage && e->ninternal_data())
+        ntstorage = e->internal_data_pt(0)->time_stepper_pt()->ntstorage();
+      auto found = per_elem.find(e);
+      const bool from_snapshot = (found != per_elem.end() && !found->second.empty());
+
+      if (!from_snapshot && !any_recovery)
+      {
+        n_empty++;
+        discontinuous_unrestored_elements.push_back(ie);
+        continue;
+      }
+
+      // The sample locations: where the snapshot's points landed inside this element, or - for a
+      // recovered element - the element's own lattice.
+      slocs.clear();
+      if (from_snapshot)
+      {
+        for (const auto &pt : found->second)
+          slocs.push_back(pt.second);
+      }
+      else
+      {
+        sample_local_coordinates(e, lattice, nmode_1d);
+        for (const auto &s : lattice)
+          slocs.push_back(std::vector<double>(s.begin(), s.end()));
+        ensure_local_expr_evaluable(e);
+        if (!recovery_for_all)
+        {
+          n_empty++;
+          discontinuous_unrestored_elements.push_back(ie);
+        }
+        else
+          n_recovered++;
+      }
+
+      // One fit per basis: the DL modal one, plus the nodal basis of every DG space present. They
+      // share the sample locations but not the shape functions, so the normal matrix is built once
+      // per basis and reused across that basis's fields and all their time levels.
+      ElementModeFit dlfit;
+      dlfit.build(e, slocs, -1, nDL > 0);
+      std::vector<ElementModeFit> dgfit(dgspaces.size());
+      for (unsigned s = 0; s < dgspaces.size(); s++)
+        dgfit[s].build(e, slocs, (int)dgspaces[s]->space_index, true);
+
+      // Where field `fi` of the combined [DG][DL][D0] ordering is stored, and how it is fitted.
+      // A D0 field has no basis at all - its single value is the mean.
+      auto write_field = [&](unsigned fi, const std::vector<double> &v, unsigned t_lo, unsigned t_hi) {
+        unsigned base = 0;
+        for (unsigned s = 0; s < dgspaces.size(); s++)
+        {
+          if (fi < base + dgspaces[s]->numfields_new)
+          {
+            dgfit[s].fit(v, coeffs);
+            oomph::Data *d = e->internal_data_pt(dgspaces[s]->internal_offset_new + (fi - base));
+            for (unsigned t = t_lo; t < t_hi; t++)
+              for (unsigned l = 0; l < dgfit[s].nmode; l++)
+                d->set_value(t, l, coeffs[l]);
+            return;
+          }
+          base += dgspaces[s]->numfields_new;
+        }
+        if (fi < nDG + nDL)
+        {
+          dlfit.fit(v, coeffs);
+          oomph::Data *d = e->internal_data_pt(dg_off + (fi - nDG));
+          for (unsigned t = t_lo; t < t_hi; t++)
+            for (unsigned l = 0; l < dlfit.nmode; l++)
+              d->set_value(t, l, coeffs[l]);
+          return;
+        }
+        const double m = dlfit.mean(v);
+        oomph::Data *d = e->internal_data_pt(dg_off + (fi - nDG));
+        for (unsigned t = t_lo; t < t_hi; t++)
+          d->set_value(t, 0, m);
+      };
+
+      if (from_snapshot)
+      {
+        const auto &pts = found->second;
+        for (unsigned t = 0; t < ntstorage; t++)
+        {
+          for (unsigned fi = 0; fi < nfield; fi++)
+          {
+            vals.assign(pts.size(), 0.0);
+            for (unsigned p = 0; p < pts.size(); p++)
+              vals[p] = snap.values[(size_t)pts[p].first * stride + t * nfield + fi];
+            write_field(fi, vals, t, t + 1);
+          }
+        }
+      }
+      else
+      {
+        for (unsigned fi = 0; fi < nfield; fi++)
+        {
+          if (recovery_index[fi] < 0)
+            continue;
+          vals.assign(slocs.size(), 0.0);
+          for (unsigned p = 0; p < slocs.size(); p++)
+          {
+            oomph::Vector<double> sv(slocs[p].size());
+            for (unsigned d = 0; d < sv.size(); d++)
+              sv[d] = slocs[p][d];
+            vals[p] = e->eval_local_expression_at_s((unsigned)recovery_index[fi], sv);
+          }
+          // The recovery expression sees the current state only, so the value it produces is written
+          // to every time level: a facet that pops into existence with a consistent history has no
+          // spurious time derivative at the next step, which zeroed history levels would create.
+          write_field(fi, vals, 0, ntstorage);
+        }
+      }
+      n_fallback += dlfit.n_fallback;
+      for (const auto &f : dgfit)
+        n_fallback += f.n_fallback;
+    }
+    (void)n_fallback;
+    (void)n_recovered;
+    return n_empty;
+  }
+
+  void InterfaceMesh::restore_discontinuous_data()
+  {
+    auto &snap = discontinuous_snapshot;
+    discontinuous_unrestored_elements.clear();
+    if (!this->nelement() || !code)
+    {
+      snap.clear();
+      return;
+    }
+    auto *ft = code->get_func_table();
+    const unsigned nDL = ft->info_DL.numfields, nD0 = ft->info_D0.numfields;
+    ensure_eleminfo_filled(this);
+    BulkElementBase *e0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
+    const auto dgspaces = e0 ? own_dg_spaces(ft, e0)
+                             : std::vector<JITFuncSpec_Table_FiniteElement_SpaceInfo_t *>();
+    if (!nDL && !nD0 && dgspaces.empty())
+    {
+      snap.clear();
+      return;
+    }
+    // A snapshot taken against a different code describes different fields; there is nothing
+    // sensible to fit from it, but the recovery pass below can still do its job. The nodal DG spaces
+    // are part of that signature: same field COUNTS but a different space is still a different layout.
+    DiscontinuousSnapshot now;
+    now.nDL = nDL;
+    now.nD0 = nD0;
+    for (auto *si : dgspaces)
+    {
+      now.dg_space_index.push_back(si->space_index);
+      now.dg_numfields_new.push_back(si->numfields_new);
+      now.dg_nmodes.push_back(e0->get_eleminfo()->nnode_of_space[si->space_index]);
+    }
+    const bool have_snapshot = !snap.empty() && snap.same_fields_as(now);
+    // No snapshot AT ALL is not an adaptation losing data: it is force_remesh() building this
+    // skeleton from scratch, where the values arrive afterwards through
+    // interpolate_discontinuous_data_from(). Warning here would be both wrong and harmful, since it
+    // would consume the once-per-mesh flag before the transfer that can really fail has run.
+    const bool warn_if_empty = !snap.empty();
+
+    ensure_eleminfo_filled(this);
+
+    const unsigned npoint = have_snapshot ? snap.coords.size() / snap.space_dim : 0;
+    DiscontinuousSampleMap per_elem;
+    unsigned n_unplaced = 0;
+    if (have_snapshot && e0 && !e0->dim())
+    {
+      // A POINT interface - the end of a free surface, the corner where two boundaries meet - is
+      // matched by position instead of being located. It has no extent to project onto (it is
+      // codimension 2 in the surrounding space, which MeshPointLocator refuses outright), and it needs
+      // none: an adaptation neither moves nodes nor adds or removes such a corner, so the new point
+      // element sits exactly where the old one did and the match is a comparison, not a search.
+      for (unsigned ie = 0; ie < this->nelement(); ie++)
+      {
+        BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+        if (!e || !e->nnode())
+          continue;
+        for (unsigned i = 0; i < npoint; i++)
+        {
+          double dist2 = 0.0, scale = 1.0;
+          for (unsigned d = 0; d < snap.space_dim; d++)
+          {
+            const double x = e->node_pt(0)->x(d), dx = x - snap.coords[i * snap.space_dim + d];
+            dist2 += dx * dx;
+            scale = std::max(scale, std::fabs(x));
+          }
+          // The node does not move, so this is a round-off tolerance rather than a search radius:
+          // it must never reach as far as another corner of the same domain.
+          if (dist2 <= 1e-16 * scale * scale)
+          {
+            per_elem[e].push_back(std::make_pair(i, std::vector<double>()));
+            break;
+          }
+        }
+      }
+      unsigned n_placed = 0;
+      for (const auto &entry : per_elem)
+        n_placed += entry.second.size();
+      n_unplaced = npoint - n_placed;
+    }
+    else if (have_snapshot)
+    {
+      // Eulerian, because adaptation does not move nodes: a sample point taken on the old interface
+      // lies on the new one to round-off, and the locator is in Project mode anyway (an interface is
+      // codimension 1 in the space its positions live in).
+      LocatorSetup lsetup;
+      lsetup.space = LocatorSpace::Eulerian;
+      // On the interior-facet skeleton the "interface" is a non-manifold soup of facets, and the
+      // default projection slack of half an element size is far too generous there: when a bulk
+      // element is UNREFINED, the sample points of the facets that lived inside it sit a quarter of
+      // the coarse facet's length away from the surviving facets and were happily projected onto
+      // them, dragging the fitted value towards whatever those vanishing facets held (typically the
+      // zero of a never-recovered facet - a refine/unrefine round trip lost two thirds of a constant
+      // field this way). Adaptation does not move nodes, so a sample that genuinely belongs to a
+      // surviving facet lies on it to round-off; the only legitimate deviation is the curvature of an
+      // interior edge that a macro element repositions on refinement, which is O(h*curvature*h).
+      // Points beyond that are dropped and their facet is reported as unrestored - loud and
+      // recoverable, rather than silently mixed. A REMESH cannot use this criterion at all, which is
+      // what interpolate_discontinuous_data_from() is for.
+      if (std::string(ft->domain_name) == "_internal_facets_")
+        lsetup.max_projection_offset_factor = 0.02;
+      MeshPointLocator locator(this, lsetup);
+      LocationSet located = locator.locate_batch(snap.coords, npoint);
+      for (unsigned i = 0; i < npoint; i++)
+      {
+        BulkElementBase *e = NULL;
+        std::vector<double> sloc;
+        if (located.resolve_local(i, e, sloc) && e)
+          per_elem[e].push_back(std::make_pair(i, sloc));
+        else
+          n_unplaced++;
+      }
+    }
+
+    const unsigned n_empty = this->fit_discontinuous_data(snap, per_elem);
+
+    // Only n_empty is worth a warning: those elements really are left at zero. Unplaced sample points
+    // on their own are the normal outcome of a COARSENING (the facets they came from no longer exist,
+    // and deliberately dropping them is what keeps the fit on the surviving facets clean), so warning
+    // about them alone would cry wolf on every unrefinement.
+    if (n_empty && warn_if_empty && !warned_about_discontinuous_reset)
+    {
+      warned_about_discontinuous_reset = true;
+      std::cout << "WARNING: transferring the discontinuous fields of interface '" << interfacename
+                << "' across an adaptation left " << n_empty << " of " << this->nelement()
+                << " new element(s) without a single sample point";
+      if (n_unplaced)
+        std::cout << " (" << n_unplaced << " of " << npoint << " old sample points could not be placed)";
+      std::cout << ". Those elements keep the zero they were allocated with. Define a recovery expression"
+                << " (Equations.set_facet_recovery) to fill them from the surrounding solution instead." << std::endl;
+    }
+    snap.clear();
+  }
+
+  // The chain of face indices from a bulk element down to one of its (sub)facets, as one long. Given
+  // innermost first, the way the walk below collects them.
+  //
+  // A single index is passed through unchanged: that is the ordinary interface, and its address must
+  // stay the one the interior-facet halo scheme and the already written state files use. Deeper chains
+  // - an interface OF an interface, e.g. the point where a free surface meets a wall - pack one octal
+  // digit per level, outermost first, behind a leading 1 that keeps the depth readable. Face indices
+  // may be negative (oomph numbers the faces of a quad or a brick +-1..+-3), so each is zig-zagged
+  // into a digit first. The leading 1 puts every packed chain at 8 or above, well clear of the plain
+  // face indices, so the two encodings cannot be confused for one another.
+  static long pack_face_chain(const std::vector<int> &faces_inner_to_outer)
+  {
+    if (faces_inner_to_outer.size() == 1)
+      return faces_inner_to_outer[0];
+    long code = 1;
+    for (auto it = faces_inner_to_outer.rbegin(); it != faces_inner_to_outer.rend(); ++it)
+    {
+      long digit = (*it >= 0 ? 2L * (*it) : -2L * (*it) - 1);
+      if (digit > 7)
+        throw_runtime_error("Face index " + std::to_string(*it) + " is too large to be packed into an interface element key");
+      code = code * 8 + digit;
+    }
+    return code;
+  }
+
+  std::vector<long> InterfaceMesh::get_interface_element_structural_keys()
+  {
+    std::vector<long> res;
+    res.reserve(3 * this->nelement());
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+    {
+      long root = -1, path = -1, face = -1;
+      InterfaceElementBase *e = dynamic_cast<InterfaceElementBase *>(this->element_pt(ie));
+      if (e)
+      {
+        // An interface of an interface hangs off a face element, which has no refinement tree and no
+        // base index of its own, so asking it for a structural key yields nothing and the state file
+        // refused to be written at all. Descend instead until a genuine bulk element is reached,
+        // collecting the face index of every level on the way.
+        std::vector<int> faces;
+        oomph::FiniteElement *cur = e;
+        while (InterfaceElementBase *iel = dynamic_cast<InterfaceElementBase *>(cur))
+        {
+          faces.push_back(iel->face_index());
+          cur = iel->bulk_element_pt();
+        }
+        if (Mesh::element_structural_key(cur, root, path))
+        {
+          face = pack_face_chain(faces);
+        }
+        else
+        {
+          root = -1;
+          path = -1;
+        }
+      }
+      res.push_back(root);
+      res.push_back(path);
+      res.push_back(face);
+    }
+    return res;
+  }
+
+  // Carries this interface's own discontinuous fields - DL/D0 and the nodal DG spaces - over from the corresponding interface
+  // mesh of a mesh that has just been REPLACED (Problem.force_remesh), rather than adapted. Driven
+  // from InternalInterpolator.interpolate(), i.e. once the bulk fields of the new mesh are in place -
+  // which is what the recovery expressions below need, since they read the bulk.
+  //
+  // The direction is the opposite of the adaptation path's. There, the old elements are already gone
+  // when the new ones appear, so the only possible transfer is to PUSH a point cloud snapshotted
+  // beforehand onto whatever comes out. Here the old mesh is still alive, so each new facet can PULL
+  // the values it needs at its OWN sample points - which covers the new skeleton by construction,
+  // whereas pushing assigns every old sample to exactly one new facet and therefore leaves a refined
+  // skeleton half empty (measured: 42 of 132 facets with nothing at all on a 2x refining remesh).
+  //
+  // What it cannot inherit from the adaptation path is that path's accept-only-what-lies-on-the-facet
+  // rule (2% of an element), because after a remesh nothing lies on anything. Merely widening the
+  // slack is not a fix either: in a non-manifold facet soup the nearest old facet within half an
+  // element can be one on the far side of a bulk element, carrying an entirely different trace. The
+  // criterion is topological instead - every new facet is located in the OLD BULK mesh, and only old
+  // facets OF the bulk element(s) it runs through may feed it. Those are exactly the traces
+  // surrounding its position. Where that yields nothing the search widens by one ring of face
+  // neighbours, and beyond that the element is left to its recovery expression, since a value from
+  // further away says more about the search radius than about the solution.
+  void InterfaceMesh::interpolate_discontinuous_data_from(InterfaceMesh *old)
+  {
+    if (!old || old == this || !code || !this->nelement())
+      return;
+    auto *ft = code->get_func_table();
+    const unsigned nDL = ft->info_DL.numfields, nD0 = ft->info_D0.numfields;
+    if (!nDL && !nD0 && !ft->num_present_dg_spaces)
+      return;
+    // own_dg_spaces() reads the per-space node counts out of eleminfo, and a facet element that has
+    // just been rebuilt has none yet - so this has to come before the spaces are asked for, not with
+    // the rest of the setup below.
+    ensure_eleminfo_filled(this);
+    BulkElementBase *e0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
+    const auto dgspaces = e0 ? own_dg_spaces(ft, e0)
+                             : std::vector<JITFuncSpec_Table_FiniteElement_SpaceInfo_t *>();
+    unsigned nDG = 0, nmode_1d = 2;
+    for (auto *si : dgspaces)
+    {
+      nDG += si->numfields_new;
+      nmode_1d = std::max(nmode_1d, dg_space_nmode_1d(si->space_index));
+    }
+    if (!nDL && !nD0 && !nDG)
+      return;
+    if (!old->code)
+      throw_runtime_error("Cannot transfer the discontinuous fields of interface '" + interfacename + "': the previous mesh has no generated code attached");
+    auto *oft = old->code->get_func_table();
+    // Normally both meshes are driven by the very same code, so this can only fire when the
+    // equations were redefined together with the mesh (Problem.redefine_problem).
+    std::string mismatch;
+    if (oft->info_DL.numfields != nDL || oft->info_D0.numfields != nD0)
+      mismatch = "the previous mesh has " + std::to_string(oft->info_DL.numfields) + " DL and " + std::to_string(oft->info_D0.numfields) +
+                 " D0 field(s), the new one " + std::to_string(nDL) + " and " + std::to_string(nD0);
+    for (unsigned i = 0; i < nDL && mismatch.empty(); i++)
+      if (std::string(oft->info_DL.fieldnames[i]) != std::string(ft->info_DL.fieldnames[i]))
+        mismatch = "DL field " + std::to_string(i) + " is '" + std::string(oft->info_DL.fieldnames[i]) + "' on the previous mesh and '" + std::string(ft->info_DL.fieldnames[i]) + "' on the new one";
+    for (unsigned i = 0; i < nD0 && mismatch.empty(); i++)
+      if (std::string(oft->info_D0.fieldnames[i]) != std::string(ft->info_D0.fieldnames[i]))
+        mismatch = "D0 field " + std::to_string(i) + " is '" + std::string(oft->info_D0.fieldnames[i]) + "' on the previous mesh and '" + std::string(ft->info_D0.fieldnames[i]) + "' on the new one";
+    if (!mismatch.empty())
+      throw_runtime_error("Cannot transfer the discontinuous fields of interface '" + interfacename + "' from the previous mesh: " + mismatch +
+                          ". They are matched by name and space, in order, and must agree on both sides.");
+
+    if (!old->nelement())
+      return; // nothing to take values from; the new facets keep what rebuild_after_adapt left them
+    ensure_eleminfo_filled(old); // its elements are evaluated below, not merely searched
+    BulkElementBase *oe0 = dynamic_cast<BulkElementBase *>(old->element_pt(0));
+    if (!e0 || !oe0 || !oe0->ninternal_data())
+      return;
+    // The nodal DG spaces have to line up as well - same spaces, same own fields, same node counts -
+    // since the pulled block is read positionally, one scalar per own field per space.
+    const auto odgspaces = own_dg_spaces(oft, oe0);
+    if (odgspaces.size() != dgspaces.size())
+      mismatch = "the previous mesh declares " + std::to_string(odgspaces.size()) + " nodal discontinuous space(s) here, the new one " +
+                 std::to_string(dgspaces.size());
+    for (unsigned s = 0; s < dgspaces.size() && mismatch.empty(); s++)
+    {
+      if (odgspaces[s]->space_index != dgspaces[s]->space_index || odgspaces[s]->numfields_new != dgspaces[s]->numfields_new)
+        mismatch = "nodal discontinuous space " + std::to_string(s) + " is '" + std::string(odgspaces[s]->space_name) +
+                   "' with " + std::to_string(odgspaces[s]->numfields_new) + " own field(s) on the previous mesh and '" +
+                   std::string(dgspaces[s]->space_name) + "' with " + std::to_string(dgspaces[s]->numfields_new) + " on the new one";
+      else if (oe0->get_eleminfo()->nnode_of_space[odgspaces[s]->space_index] != e0->get_eleminfo()->nnode_of_space[dgspaces[s]->space_index])
+        mismatch = "the elements of space '" + std::string(dgspaces[s]->space_name) + "' have different node counts on the two meshes";
+    }
+    if (!mismatch.empty())
+      throw_runtime_error("Cannot transfer the discontinuous fields of interface '" + interfacename + "' from the previous mesh: " + mismatch +
+                          ". They are matched by name and space, in order, and must agree on both sides.");
+    const unsigned sdim = e0->nodal_dimension();
+    const unsigned nfield = nDG + nDL + nD0;
+    const unsigned ntstorage = oe0->internal_data_pt(0)->time_stepper_pt()->ntstorage();
+
+    // The query points: every new facet's own sample lattice. The same lattice the adaptation
+    // snapshot uses, and for the same reason - shrunk towards the centre, so that no point sits on a
+    // facet end where it would ask the wrong side of the skeleton. Its density follows the widest DG
+    // basis present, exactly as there, so that a facet whose points are partly rejected by the
+    // topological filter below still has enough left to determine the fit.
+    std::vector<double> probe;
+    std::vector<std::vector<double>> probe_s;
+    std::vector<unsigned> probe_first(this->nelement() + 1, 0);
+    std::vector<oomph::Vector<double>> lattice;
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+    {
+      probe_first[ie] = probe_s.size();
+      BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+      if (!e)
+        continue;
+      sample_local_coordinates(e, lattice, nmode_1d);
+      for (const auto &s : lattice)
+      {
+        probe_s.push_back(std::vector<double>(s.begin(), s.end()));
+        for (unsigned d = 0; d < sdim; d++)
+          probe.push_back(sample_position(e, s, d));
+      }
+    }
+    probe_first[this->nelement()] = probe_s.size();
+    const unsigned npoint = probe_s.size();
+    if (!npoint)
+      return;
+
+    // Which old BULK element each query point falls in. This is what makes the pull well posed: it
+    // says which part of the old skeleton is entitled to answer.
+    std::vector<BulkElementBase *> in_old_bulk(npoint, (BulkElementBase *)NULL);
+    Mesh *oldbulk = old->get_bulk_mesh();
+    if (oldbulk && oldbulk->nelement())
+    {
+      LocatorSetup bsetup;
+      bsetup.space = LocatorSpace::Eulerian;
+      MeshPointLocator bulkloc(oldbulk, bsetup);
+      LocationSet blocated = bulkloc.locate_batch(probe, npoint);
+      std::vector<double> s;
+      for (unsigned p = 0; p < npoint; p++)
+      {
+        BulkElementBase *b = NULL;
+        if (blocated.resolve_local(p, b, s) && b)
+          in_old_bulk[p] = b;
+      }
+    }
+
+    // The old traces at those points. Project mode with the default slack: a query point lies inside
+    // an old bulk element, not on an old facet, so the offset is genuinely up to half an element.
+    LocatorSetup ssetup;
+    ssetup.space = LocatorSpace::Eulerian;
+    MeshPointLocator skelloc(old, ssetup);
+    LocationSet slocated = skelloc.locate_batch(probe, npoint);
+    EvalRequest req;
+    req.DL_fields = (nDL > 0);
+    req.D0_fields = (nD0 > 0);
+    req.DG_fields = (nDG > 0);
+    for (unsigned t = 0; t < ntstorage; t++)
+      req.time_levels.push_back(t);
+    const unsigned vpp = slocated.values_per_point(req);
+    if (vpp != ntstorage * nfield)
+      throw_runtime_error("Internal error transferring the discontinuous fields of interface '" + interfacename + "': the old skeleton evaluates to " +
+                          std::to_string(vpp) + " values per point, expected " + std::to_string(ntstorage * nfield));
+    std::vector<double> pulled = slocated.evaluate(req);
+
+    // LocationSet::evaluate writes its blocks in one fixed order (continuous, DL, D0, DG), while the
+    // fit reads a snapshot in the internal-Data order [DG][DL][D0]. One rotation per time level here,
+    // rather than a convention flag on either side.
+    if (nDG && (nDL || nD0))
+    {
+      std::vector<double> level(nfield);
+      for (size_t off = 0; off + nfield <= pulled.size(); off += nfield)
+      {
+        std::copy(pulled.begin() + off, pulled.begin() + off + nfield, level.begin());
+        std::copy(level.begin() + (nDL + nD0), level.end(), pulled.begin() + off);
+        std::copy(level.begin(), level.begin() + (nDL + nD0), pulled.begin() + off + nDG);
+      }
+    }
+
+    // Face neighbours in the old bulk mesh, for the widening fallback. An interior facet IS the
+    // shared face of the two elements it separates, so the old skeleton already is that adjacency.
+    std::map<BulkElementBase *, std::set<BulkElementBase *>> old_neighbours;
+    for (unsigned oe = 0; oe < old->nelement(); oe++)
+    {
+      InterfaceElementBase *ie = dynamic_cast<InterfaceElementBase *>(old->element_pt(oe));
+      if (!ie)
+        continue;
+      BulkElementBase *a = dynamic_cast<BulkElementBase *>(ie->bulk_element_pt());
+      InterfaceElementBase *opp = ie->get_opposite_side();
+      BulkElementBase *b = (opp ? dynamic_cast<BulkElementBase *>(opp->bulk_element_pt()) : NULL);
+      if (a && b)
+      {
+        old_neighbours[a].insert(b);
+        old_neighbours[b].insert(a);
+      }
+    }
+
+    // Which old facet answered for each query point, as the pair of old bulk elements it separates.
+    std::vector<std::pair<BulkElementBase *, BulkElementBase *>> facet_owner(npoint);
+    std::vector<double> s_unused;
+    unsigned n_unplaced = 0;
+    for (unsigned p = 0; p < npoint; p++)
+    {
+      BulkElementBase *of = NULL;
+      if (!slocated.resolve_local(p, of, s_unused) || !of)
+      {
+        n_unplaced++;
+        continue;
+      }
+      InterfaceElementBase *ife = dynamic_cast<InterfaceElementBase *>(of);
+      if (!ife)
+        continue;
+      InterfaceElementBase *opp = ife->get_opposite_side();
+      facet_owner[p] = std::make_pair(dynamic_cast<BulkElementBase *>(ife->bulk_element_pt()),
+                                      opp ? dynamic_cast<BulkElementBase *>(opp->bulk_element_pt()) : (BulkElementBase *)NULL);
+    }
+
+    DiscontinuousSampleMap per_elem;
+    unsigned n_rejected = 0;
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+    {
+      BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+      if (!e)
+        continue;
+      std::set<BulkElementBase *> allowed;
+      for (unsigned p = probe_first[ie]; p < probe_first[ie + 1]; p++)
+        if (in_old_bulk[p])
+          allowed.insert(in_old_bulk[p]);
+      // Two rounds at most: the old element(s) the facet runs through, then one ring of their face
+      // neighbours. An empty `allowed` means the facet is nowhere in the old mesh at all (a remesh
+      // may change the geometry itself), and then there is nothing to restrict with.
+      std::vector<std::pair<unsigned, std::vector<double>>> kept;
+      for (unsigned round = 0; round < 2 && kept.empty(); round++)
+      {
+        if (round == 1)
+        {
+          if (allowed.empty())
+            break;
+          std::set<BulkElementBase *> wider = allowed;
+          for (auto *b : allowed)
+          {
+            auto nb = old_neighbours.find(b);
+            if (nb != old_neighbours.end())
+              wider.insert(nb->second.begin(), nb->second.end());
+          }
+          if (wider.size() == allowed.size())
+            break;
+          allowed.swap(wider);
+        }
+        for (unsigned p = probe_first[ie]; p < probe_first[ie + 1]; p++)
+        {
+          const auto &o = facet_owner[p];
+          if (!o.first && !o.second)
+            continue; // this point found no old facet at all
+          if (allowed.empty() || (o.first && allowed.count(o.first)) || (o.second && allowed.count(o.second)))
+            kept.push_back(std::make_pair(p, probe_s[p]));
+        }
+      }
+      if (kept.empty())
+        n_rejected++;
+      else
+        per_elem[e] = kept;
+    }
+
+    // The pulled values are now laid out the way the fit expects a snapshot to be - time levels
+    // outermost, then [DG][DL][D0] - and their positions are the new elements' own lattice points, so
+    // the local coordinates handed over are exact rather than projected.
+    DiscontinuousSnapshot pulled_snap;
+    pulled_snap.space_dim = sdim;
+    pulled_snap.nDL = nDL;
+    pulled_snap.nD0 = nD0;
+    pulled_snap.nDL_modes = e0->get_eleminfo()->nnode_DL;
+    for (auto *si : dgspaces)
+    {
+      pulled_snap.dg_space_index.push_back(si->space_index);
+      pulled_snap.dg_numfields_new.push_back(si->numfields_new);
+      pulled_snap.dg_nmodes.push_back(e0->get_eleminfo()->nnode_of_space[si->space_index]);
+    }
+    pulled_snap.ntstorage = ntstorage;
+    pulled_snap.coords.swap(probe);
+    pulled_snap.values.swap(pulled);
+
+    const unsigned n_empty = this->fit_discontinuous_data(pulled_snap, per_elem);
+    if (n_empty && !warned_about_discontinuous_reset)
+    {
+      warned_about_discontinuous_reset = true;
+      std::cout << "WARNING: transferring the discontinuous fields of interface '" << interfacename
+                << "' from the previous mesh left " << n_empty << " of " << this->nelement()
+                << " new element(s) without a usable value (" << n_rejected
+                << " found nothing from the part of the old mesh they lie in, " << n_unplaced << " of " << npoint
+                << " sample points found no old facet at all). Those elements keep the zero they were"
+                << " allocated with. Define a recovery expression (Equations.set_facet_recovery) to fill them"
+                << " from the surrounding solution instead." << std::endl;
+    }
   }
 
   // Populates Boundary_element_pt/Face_index_at_boundary for a 1d interface mesh
@@ -4547,29 +7989,50 @@ namespace pyoomph
     Lookup_for_elements_next_boundary_is_setup = true;
   }
 
-  // Rebuilds this interface mesh from scratch after the bulk mesh has been adapted
-  // (interface elements are never incrementally adapted, see clear_before_adapt).
-  // Adaptive meshes with discontinuous (DG) fields defined at the interface are not
-  // yet supported and are rejected with an explanatory error.
+  // The nodal discontinuous (D1/D2/...) fields THIS interface level declares itself, as
+  // "name (space)" entries. [numfields_bulk,numfields) is exactly that set: an interface that merely
+  // READS a DG field of the domain it sits on does not own any storage for it, and numfields_bulk
+  // rather than numfields_basebulk keeps a field an intermediate interface owns reported on that
+  // interface only, not again on every interface of it.
+  //
+  // A pure query nowadays. It used to be the predicate of three guards (adaptation, remeshing,
+  // distribution), all of which are gone: every discontinuous space is carried across a skeleton
+  // rebuild now.
+  std::vector<std::string> InterfaceMesh::get_own_nodal_dg_fields() const
+  {
+    std::vector<std::string> res;
+    if (!code)
+      return res;
+    auto *ft = code->get_func_table();
+    for (unsigned int i = 0; i < ft->num_present_dg_spaces; i++)
+    {
+      auto *space_info = ft->present_dg_spaces[i];
+      for (unsigned int f = space_info->numfields_bulk; f < space_info->numfields; f++)
+        res.push_back(std::string(space_info->fieldnames[f]) + " (" + space_info->space_name + ")");
+    }
+    return res;
+  }
+
+  // Rebuilds this interface mesh from scratch after the bulk mesh has been adapted (interface
+  // elements are never incrementally adapted, see clear_before_adapt). The interface's own
+  // discontinuous values survive via snapshot_discontinuous_data()/restore_discontinuous_data().
   void InterfaceMesh::rebuild_after_adapt()
   {
     if (code)
     {
-      auto *ft = code->get_func_table();
-      bool has_dg=false;
-      for (unsigned int i = 0; i < ft->num_present_dg_spaces; i++)
-      {
-        auto * space_info=ft->present_dg_spaces[i];
-        if (space_info->numfields_new>0)
-        {
-          has_dg=true;
-          break;
-        }
-      }
-      if (has_dg) // || ft->info_D0.numfields
-      {
-        throw_runtime_error("Cannot adapt yet when having discontinuous fields added at an interface. Make sure to set Problem.max_refinement_level=0 and/or Problem.initial_adaption_steps=0. Will be hopefully implemented soon.");
-      }
+      // Nodal DG (D1/D2/...) facet fields used to be refused here, on the grounds that their values
+      // sit in per-node slots of the element's internal Data and there was "no get_interpolated_fields_Dx()
+      // to sample them with". That was never quite true - BulkElementBase::get_DG_fields_at_s() has
+      // always interpolated exactly those slots, it is what the bulk father->son transfer uses - and
+      // snapshot_discontinuous_data()/fit_discontinuous_data() now carry them alongside DL/D0, fitting
+      // each in its own nodal basis.
+
+      // Interface-owned discontinuous fields used only to be reset to zero here - current value AND time
+      // history - because clear_before_adapt() destroys the internal Data holding them. A field its
+      // own residual determines algebraically recovered at the next solve, which is why this went
+      // unnoticed for a long time; anything carrying history across the adaptation was silently
+      // wrong. snapshot_discontinuous_data() sampled them before the deletion, and
+      // restore_discontinuous_data() below fits them back on.
     }
     if (!bulkmesh)
     {
@@ -4585,23 +8048,96 @@ namespace pyoomph
 
     bulkmesh->generate_interface_elements(interfacename, this, code);
     // this->nullify_selected_bulk_dofs();
-    this->invalidate_lagrangian_kdtree();
+    this->bump_topology_generation();
+    // Only now do the elements to restore into exist.
+    this->restore_discontinuous_data();
   }
 
   // Stores the information needed to (re)build this interface mesh's elements later
   // (via rebuild_after_adapt/generate_interface_elements): which bulk mesh it is
   // attached to, under which boundary/interface name, and which generated code
   // instance defines its fields. Also pre-resolves the interface dof indices.
-  void InterfaceMesh::set_rebuild_information(Mesh *_bulkmesh, std::string intername, DynamicBulkElementInstance *jitcode)
+  void InterfaceMesh::set_rebuild_information(Mesh *_bulkmesh, std::string intername, DynamicJITCode *interface_jitcode)
   {
     bulkmesh = _bulkmesh;
     interfacename = intername;
-    code = jitcode;
+    code = interface_jitcode;
     auto idofs=code->setup_interface_dof_indices();
     /*for (auto &idof : idofs)
     {
       std::cout << "INTERFACE DOF " << idof.first << "  " << idof.second << std::endl;
     }*/
+  }
+
+  // See the declaration in nodes.hpp. Cached rather than read per call because
+  // InterfaceElementBase::vertex_match_distance2 asks once per candidate vertex pair, and getenv is a
+  // linear scan of the environment. Refreshed by assign_interface_topological_ids(), i.e. once per mesh
+  // per adaptation -- without that the value would be frozen at whatever the first query saw, and a test
+  // that sets the variable in-process (monkeypatch) would silently measure the wrong build.
+  namespace
+  {
+    int topo_keys_disabled_cache = -1;
+  }
+
+  void refresh_topological_interface_key_setting()
+  {
+    const char *e = getenv("PYOOMPH_DISABLE_TOPOLOGICAL_INTERFACE_KEYS");
+    topo_keys_disabled_cache = (e && std::string(e) != "0") ? 1 : 0;
+  }
+
+  bool topological_interface_keys_disabled()
+  {
+    if (topo_keys_disabled_cache < 0) refresh_topological_interface_key_setting();
+    return topo_keys_disabled_cache == 1;
+  }
+
+  // The same element-for-element pairing as connect_interface_elements_by_kdtree, on the cross-domain
+  // topological node identity instead of the positions: exact equality of a 128-bit digest rather than a
+  // nearest-neighbour lookup with an epsilon, so it also stops being a question of how far the two sides'
+  // vertices have drifted apart under ALE. Only reached when both sides carry a complete set of ids.
+  void InterfaceMesh::connect_interface_elements_topologically(InterfaceMesh *other)
+  {
+    std::map<std::set<std::pair<unsigned long long, unsigned long long>>, BulkElementBase *> nodes_to_elemB;
+    for (unsigned int ieB = 0; ieB < other->nelement(); ieB++)
+    {
+      BulkElementBase *eB = dynamic_cast<BulkElementBase *>(other->element_pt(ieB));
+      std::set<std::pair<unsigned long long, unsigned long long>> ids;
+      for (unsigned int inB = 0; inB < eB->nvertex_node(); inB++)
+      {
+        const std::array<unsigned long long, 2> &id =
+            static_cast<pyoomph::Node *>(eB->vertex_node_pt(inB))->get_interface_topological_id();
+        ids.insert(std::make_pair(id[0], id[1]));
+      }
+      nodes_to_elemB[ids] = eB;
+    }
+    for (unsigned int ieA = 0; ieA < this->nelement(); ieA++)
+    {
+      BulkElementBase *eA = dynamic_cast<BulkElementBase *>(this->element_pt(ieA));
+      std::set<std::pair<unsigned long long, unsigned long long>> ids;
+      for (unsigned int inA = 0; inA < eA->nvertex_node(); inA++)
+      {
+        const std::array<unsigned long long, 2> &id =
+            static_cast<pyoomph::Node *>(eA->vertex_node_pt(inA))->get_interface_topological_id();
+        ids.insert(std::make_pair(id[0], id[1]));
+      }
+      auto found = nodes_to_elemB.find(ids);
+      if (found == nodes_to_elemB.end())
+      {
+        pyoomph::Node *n0 = static_cast<pyoomph::Node *>(eA->vertex_node_pt(0));
+        std::string posstring = "";
+        for (unsigned int d = 0; d < n0->ndim(); d++) posstring += std::to_string(n0->x(d)) + (d + 1 < n0->ndim() ? "," : "");
+        // Keep the "Cannot locate opposite" wording of the position-based matcher: it is the phrase that
+        // is in every log, test and note about this failure, and the cause is the same one.
+        throw_runtime_error("Cannot locate opposite interface element, matching topologically (one of its vertices "
+                            "is at x=(" + posstring + ")). The two sides of the interface do not carry the same "
+                            "facets, which Problem.check_interface_conformity() reports in detail.");
+      }
+      BulkElementBase *eB = found->second;
+      InterfaceElementBase *iA = eA->as_interface_element();
+      InterfaceElementBase *iB = eB->as_interface_element();
+      iA->set_opposite_interface_element(iB, this->opposite_offset_vector);
+      iB->set_opposite_interface_element(iA, this->reversed_opposite_offset_vector);
+    }
   }
 
   // Pairs up each element of this interface mesh with the geometrically coincident
@@ -4613,6 +8149,39 @@ namespace pyoomph
   {
     if (!this->nelement() || !other->nelement())
       return;
+    // Prefer the cross-domain TOPOLOGICAL identity over the positions. The two sides' interface vertices
+    // coincide only when both domains can represent the same geometry: a C2 side's interface is a
+    // quadratic curve through three nodes, a C1 side's is the chord between two of them, and a refinement
+    // then promotes an off-chord midside node to a vertex on one side while creating a chord midpoint on
+    // the other -- at which point the KD-tree below reports "Cannot locate opposite node". See
+    // pyoomph::Node::interface_topological_id and dev_docs/interface_refinement_coupling.md section 14.3.
+    //
+    // The offset is what rules the topological path out for a periodic/translated pair: there the two
+    // sides are DIFFERENT template facets, related only by the translation, and no topological identity
+    // can bridge that. Those keep the KD-tree.
+    bool topological = !topological_interface_keys_disabled();
+    for (double o : this->opposite_offset_vector)
+      if (o != 0.0) topological = false;
+    if (topological)
+    {
+      for (unsigned int ie = 0; ie < this->nelement() && topological; ie++)
+      {
+        BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+        for (unsigned int in = 0; in < e->nvertex_node(); in++)
+          if (!static_cast<pyoomph::Node *>(e->vertex_node_pt(in))->has_interface_topological_id()) { topological = false; break; }
+      }
+      for (unsigned int ie = 0; ie < other->nelement() && topological; ie++)
+      {
+        BulkElementBase *e = dynamic_cast<BulkElementBase *>(other->element_pt(ie));
+        for (unsigned int in = 0; in < e->nvertex_node(); in++)
+          if (!static_cast<pyoomph::Node *>(e->vertex_node_pt(in))->has_interface_topological_id()) { topological = false; break; }
+      }
+    }
+    if (topological)
+    {
+      connect_interface_elements_topologically(other);
+      return;
+    }
     std::map<std::set<int>, BulkElementBase *> nodes_to_elemB;
 
     unsigned ndimB = dynamic_cast<BulkElementBase *>(other->element_pt(0))->nodal_dimension();
@@ -4677,8 +8246,8 @@ namespace pyoomph
       }
       BulkElementBase *eB = nodes_to_elemB[indices];
 
-      InterfaceElementBase *iA = dynamic_cast<InterfaceElementBase *>(eA);
-      InterfaceElementBase *iB = dynamic_cast<InterfaceElementBase *>(eB);
+      InterfaceElementBase *iA = eA->as_interface_element();
+      InterfaceElementBase *iB = eB->as_interface_element();
       iA->set_opposite_interface_element(iB,this->opposite_offset_vector);
       iB->set_opposite_interface_element(iA,this->reversed_opposite_offset_vector);
     }
@@ -4750,9 +8319,11 @@ namespace pyoomph
     new_el->initial_cartesian_nondim_size = new_el->size();
     new_el->initial_quality_factor = new_el->get_quality_factor();
 
-    if (BulkElementBase::__CurrentCodeInstance->get_func_table()->integration_order)
+    // See the same change in BulkElementBase::create_from_template: read the code off the element
+    // that was just built rather than off the ambient construction side channel.
+    if (new_el->get_jit_code()->get_func_table()->integration_order)
     {
-      new_el->set_integration_order(BulkElementBase::__CurrentCodeInstance->get_func_table()->integration_order);
+      new_el->set_integration_order(new_el->get_jit_code()->get_func_table()->integration_order);
     }
     return res;
   }
@@ -5395,91 +8966,423 @@ namespace pyoomph
 
 #endif
 
-  // Facet-based boundary element lookup: uses the `facets` map (built once from the
-  // mesh template by setup_facets_from_template) that records, for each set of
-  // vertex nodes forming a facet, which boundaries that facet belongs to. For every
-  // element face whose vertices are all boundary nodes, looks up the matching facet
-  // entry and verifies all its nodes are actually still tagged with each candidate
-  // boundary (nodes can end up on multiple boundaries at mixed corners/edges, hence
-  // the extra check) before registering the element/face as a boundary element. This
-  // is more robust than the purely node-based approach in mixed-corner situations,
-  // but is only valid for non-adaptive meshes since it relies on the original
-  // template's facet topology (see TemplatedMeshBase3d::setup_boundary_element_info).
-  void  TemplatedMeshBase::setup_boundary_element_info(std::ostream &)
+  // Seeds the per-element face boundary tags from the `facets` map (built once from the mesh
+  // template by setup_facets_from_template), which records, for each set of vertex nodes forming a
+  // facet, which boundaries that facet belongs to. For every element face whose vertices are all
+  // boundary nodes, looks up the matching facet entry and verifies all its nodes are actually
+  // tagged with each candidate boundary (nodes can end up on multiple boundaries at mixed
+  // corners/edges, hence the extra check) before recording the boundary on the element's face.
+  //
+  // This runs exactly once per mesh generation, on the UNREFINED mesh, where the template's facet
+  // topology is by construction exact. Everything after that is handled by forward propagation of
+  // the tags onto the son elements at each split (BulkElementBase::dynamic_split), which is what
+  // makes the scheme survive both non-uniform refinement and re-rooting/pruning of the tree forest.
+  void TemplatedMeshBase::seed_face_boundaries_from_facets()
   {
-    if (!identication_of_boundary_elements_by_facets)
+    for (unsigned int ie = 0; ie < this->nelement(); ie++)
     {
-      throw_runtime_error("This method should only be called if identication_of_boundary_elements_by_facets is false");
-    }
+      pyoomph::BulkElementBase *el = dynamic_cast<pyoomph::BulkElementBase *>(this->element_pt(ie));
+      if (!el) continue; // e.g. interface/point elements that may live in the same storage
+      el->clear_face_boundaries();
+      if (facets.empty()) continue;
+      for (int face_id : el->get_possible_face_indices())
+      {
+        std::vector<pyoomph::Node *> el_face_nodes = el->get_vertex_nodes_of_face(face_id);
+        if (el_face_nodes.empty()) continue;
+        bool may_skip = false;
+        for (unsigned int i = 0; i < el_face_nodes.size(); i++)
+        {
+          if (!dynamic_cast<oomph::BoundaryNodeBase *>(el_face_nodes[i]))
+          {
+            may_skip = true;
+            break;
+          }
+        }
+        if (may_skip) continue;
+        std::set<pyoomph::Node *> facet_nodes(el_face_nodes.begin(), el_face_nodes.end());
+        auto found = facets.find(facet_nodes);
+        if (found == facets.end()) continue;
 
+        // Double-check that every node of this face is really tagged with the candidate boundary
+        // before accepting it (a facet's node set can be shared with facets on other boundaries).
+        std::vector<unsigned> accepted;
+        for (unsigned int boundary_id : found->second)
+        {
+          may_skip = false;
+          for (unsigned int i = 0; i < el_face_nodes.size(); i++)
+          {
+            if (!dynamic_cast<oomph::BoundaryNodeBase *>(el_face_nodes[i])->is_on_boundary(boundary_id))
+            {
+              may_skip = true;
+              break;
+            }
+          }
+          if (!may_skip) accepted.push_back(boundary_id);
+        }
+        el->set_face_boundaries(face_id, accepted);
+      }
+    }
+    face_boundary_tags_valid = !facets.empty();
+    // The template's own intermediate-node rule intersects the parents' boundary sets
+    // (MeshTemplate::add_intermediate_node_unique), which over-marks in exactly the same way
+    // refinement does, so the unrefined mesh can already be wrong. Nothing has been distributed at
+    // this point, so the local pass is all that is needed here.
+    repair_boundary_node_membership_from_face_tags();
+    Pending_boundary_membership_removals.clear();
+  }
+
+  // Collects, from the per-face boundary tags, the set of nodes that genuinely lie on each boundary,
+  // plus the set of nodes for which THIS rank's answer is complete.
+  //
+  // `truth[b]` is the union of the nodes of every face tagged with boundary b. Halo elements are
+  // included: they are evidence like any other element.
+  //
+  // `decidable` is the nodes of the non-halo elements. If a node lies in at least one non-halo element
+  // on a rank, then every element incident to it is present on that rank -- Mesh::distribute() keeps a
+  // foreign element as a root halo iff it shares a node with an element of my domain, and the halo
+  // pruning keeps it on the same criterion. So for those nodes truth[] is complete and a missing entry
+  // really means "not on this boundary". For the rest (nodes reached only through a halo element) this
+  // rank cannot tell, and the owner's decision is pushed to it afterwards; see
+  // reconcile_boundary_node_membership_across_processes().
+  void TemplatedMeshBase::collect_face_tag_node_sets(std::vector<std::set<oomph::Node *>> &truth, std::set<oomph::Node *> &decidable) const
+  {
+    const unsigned nbound = this->nboundary();
+    truth.clear();
+    truth.resize(nbound);
+    decidable.clear();
+    for (unsigned int ie = 0; ie < this->nelement(); ie++)
+    {
+      pyoomph::BulkElementBase *el = dynamic_cast<pyoomph::BulkElementBase *>(this->element_pt(ie));
+      if (!el) continue;
+      if (!element_is_halo(el))
+      {
+        for (unsigned int in = 0; in < el->nnode(); in++) decidable.insert(el->node_pt(in));
+      }
+      for (const auto &entry : el->get_all_face_boundaries())
+      {
+        std::vector<oomph::Node *> face_nodes;
+        bool have_nodes = false;
+        for (unsigned boundary_id : entry.second)
+        {
+          if (boundary_id >= nbound) continue; // boundary was removed since the tags were seeded
+          if (!have_nodes)
+          {
+            face_nodes = el->get_all_nodes_of_face(entry.first);
+            have_nodes = true;
+          }
+          truth[boundary_id].insert(face_nodes.begin(), face_nodes.end());
+        }
+      }
+    }
+  }
+
+  // Whether a node's membership of boundary b may be removed. The truth set is a union of NODE LISTS
+  // of tagged faces, and that is not the same as "lies on the boundary": a HANGING node sits inside a
+  // coarser element's facet without being one of its nodes, so it belongs to no tagged face while
+  // being every bit as much on the boundary. Removing its membership is not a harmless mislabel --
+  // when that coarser element is refined later, its new node is created as a plain Node rather than a
+  // BoundaryNode (the class is chosen from the generating nodes' memberships and can never be changed
+  // afterwards), and the interface mesh then dies with "is not a boundary node".
+  //
+  // Found the hard way on a non-uniformly adapted tet cube, where four such nodes lost their marks one
+  // adapt before the elements around them were refined; see dev_docs/boundary_node_membership.md.
+  // Skipping hanging nodes is deliberately conservative: a genuinely spurious mark on a hanging node
+  // survives, which is exactly the behaviour there was before any of this, and it stops being hanging
+  // (and gets cleaned up) as soon as the neighbourhood conforms.
+  static bool may_drop_boundary_membership(oomph::Node *n)
+  {
+    return !n->is_obsolete() && !n->is_hanging();
+  }
+
+  // Counts, without changing anything, the (node, boundary) pairs where nodal boundary membership and
+  // the face tags disagree: `spurious` are marked but on no tagged face (what the repair removes),
+  // `missing` are on a tagged face but not marked. `missing` must always be zero -- the inheritance
+  // rules only ever intersect, so they cannot lose a membership, and a node that arrived as a plain
+  // Node can never become a boundary node anyway. A nonzero value therefore means the seeding or one
+  // of the nnode_on_face_by_index()/node_index_on_face() tables is wrong, and is a reason to stop
+  // rather than to patch: it is the one way this machinery could strip a genuine membership.
+  std::pair<unsigned, unsigned> TemplatedMeshBase::check_boundary_node_membership_against_face_tags() const
+  {
+    if (!face_boundary_tags_valid || !this->nboundary()) return std::make_pair(0u, 0u);
+    std::vector<std::set<oomph::Node *>> truth;
+    std::set<oomph::Node *> decidable;
+    collect_face_tag_node_sets(truth, decidable);
+    unsigned spurious = 0, missing = 0;
+    for (unsigned b = 0; b < this->nboundary(); b++)
+    {
+      for (unsigned i = 0; i < Boundary_node_pt[b].size(); i++)
+      {
+        oomph::Node *n = Boundary_node_pt[b][i];
+        // Reports what the repair would act on, hanging nodes included in the exemption -- otherwise a
+        // mesh the repair has deliberately left alone would look broken.
+        if (may_drop_boundary_membership(n) && decidable.count(n) && !truth[b].count(n)) spurious++;
+      }
+      for (oomph::Node *n : truth[b])
+      {
+        if (!n->is_obsolete() && !n->is_on_boundary(b)) missing++;
+      }
+    }
+    return std::make_pair(spurious, missing);
+  }
+
+  // Drops every nodal boundary membership that is not backed by a tagged face, and records what was
+  // dropped in Pending_boundary_membership_removals so the distributed push can replay it.
+  //
+  // Why this is needed at all: a new node inherits the boundaries shared by ALL its generating nodes
+  // (RefineableTElement<2>::get_boundaries and the tet/wedge/pyramid/brick equivalents; oomph's own
+  // RefineableQElement does the same). Two nodes can share a boundary label without the edge between
+  // them lying on that boundary, so an element with two or more faces on the SAME boundary mislabels
+  // the interior edges joining them, and each mislabelled edge seeds more at the next refinement.
+  // The face tags do not have that weakness, so they are used to correct the node labels afterwards.
+  // See dev_docs/boundary_node_membership.md.
+  unsigned TemplatedMeshBase::repair_boundary_node_membership_from_face_tags()
+  {
+    Pending_boundary_membership_removals.clear();
+    if (!repair_boundary_node_membership || !face_boundary_tags_valid || !this->nboundary()) return 0;
+    std::vector<std::set<oomph::Node *>> truth;
+    std::set<oomph::Node *> decidable;
+    collect_face_tag_node_sets(truth, decidable);
+
+    for (unsigned b = 0; b < this->nboundary(); b++)
+    {
+      oomph::Vector<oomph::Node *> keep;
+      keep.reserve(Boundary_node_pt[b].size());
+      for (unsigned i = 0; i < Boundary_node_pt[b].size(); i++)
+      {
+        oomph::Node *n = Boundary_node_pt[b][i];
+        // Obsolete nodes are left alone: prune_dead_nodes() deletes one exactly when it is on no
+        // boundary any more, so un-marking here would change what it frees. Hanging nodes are left
+        // alone for the reason given at may_drop_boundary_membership().
+        if (!may_drop_boundary_membership(n) || !decidable.count(n) || truth[b].count(n))
+        {
+          keep.push_back(n);
+          continue;
+        }
+        Pending_boundary_membership_removals.push_back(std::make_pair(n, b));
+      }
+      Boundary_node_pt[b] = keep;
+    }
+    detach_pending_boundary_memberships();
+    return Pending_boundary_membership_removals.size();
+  }
+
+  // Detaches the recorded (node, boundary) pairs from the nodes themselves. The is_on_boundary() guard
+  // is not optional: PARANOID is off in the default build, so BoundaryNodeBase::remove_from_boundary()
+  // skips its own check and dereferences a Boundaries_pt that may already be null.
+  void TemplatedMeshBase::detach_pending_boundary_memberships()
+  {
+    for (const auto &entry : Pending_boundary_membership_removals)
+    {
+      if (entry.first->is_on_boundary(entry.second)) entry.first->remove_from_boundary(entry.second);
+    }
+  }
+
+  // Replays the local repair's removals onto the ranks that hold halo copies of the affected elements.
+  //
+  // Needed because the local pass deliberately leaves undecided every node this rank reaches only
+  // through a halo element: the element carrying the tagged face may sit on another rank, so removing
+  // it here on the strength of an incomplete truth set could drop a genuine membership. The owner of
+  // such an element is by construction decidable for its nodes, so it decides and tells everyone
+  // holding a copy. One hop suffices: any node this rank holds lives in some element of this rank,
+  // which is either non-halo (decided locally, and correctly) or a halo copy of an element whose owner
+  // is included in the exchange below.
+  //
+  // Nothing else in oomph or pyoomph exchanges boundary membership -- the halo consistency check only
+  // compares geometry, level, flags and error -- so without this the ranks would silently disagree,
+  // and InterfaceMesh::setup_boundary_information() would then build different numbers of
+  // boundary-of-boundary corner elements on the halo and haloed copies of the same element.
+  void TemplatedMeshBase::reconcile_boundary_node_membership_across_processes()
+  {
+#ifdef OOMPH_HAS_MPI
+    if (this->is_mesh_distributed() && this->communicator_pt() && this->communicator_pt()->nproc() > 1)
+    {
+      oomph::OomphCommunicator *comm_pt = this->communicator_pt();
+      MPI_Comm mc = comm_pt->mpi_comm();
+      const int n_proc = comm_pt->nproc();
+      const int my_rank = comm_pt->my_rank();
+
+      std::map<oomph::Node *, std::set<unsigned>> removed_here;
+      for (const auto &entry : Pending_boundary_membership_removals) removed_here[entry.first].insert(entry.second);
+
+      // (index into the element list, local node index, boundary). Both sides walk their lists in the
+      // same order, exactly as oomph's own halo exchanges do.
+      std::vector<unsigned> received;
+      std::vector<std::pair<oomph::Node *, unsigned>> to_remove;
+
+      for (int d = 0; d < n_proc; d++)
+      {
+        if (d != my_rank) // Tell d what I decided about the elements of mine it holds as halos
+        {
+          oomph::Vector<oomph::GeneralisedElement *> haloed_el(this->haloed_element_pt(d));
+          std::vector<unsigned> buf;
+          if (!removed_here.empty())
+          {
+            for (unsigned e = 0; e < haloed_el.size(); e++)
+            {
+              oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(haloed_el[e]);
+              if (!fe) continue;
+              for (unsigned n = 0; n < fe->nnode(); n++)
+              {
+                auto found = removed_here.find(fe->node_pt(n));
+                if (found == removed_here.end()) continue;
+                for (unsigned b : found->second)
+                {
+                  buf.push_back(e);
+                  buf.push_back(n);
+                  buf.push_back(b);
+                }
+              }
+            }
+          }
+          unsigned n_send = buf.size();
+          MPI_Send(&n_send, 1, MPI_UNSIGNED, d, 93, mc);
+          if (n_send) MPI_Send(&buf[0], (int)n_send, MPI_UNSIGNED, d, 94, mc);
+        }
+        else // Collect everyone else's decisions about the elements I hold as halos
+        {
+          for (int dd = 0; dd < n_proc; dd++)
+          {
+            if (dd == d) continue;
+            unsigned n_recv = 0;
+            MPI_Status status;
+            MPI_Recv(&n_recv, 1, MPI_UNSIGNED, dd, 93, mc, &status);
+            received.resize(n_recv);
+            if (n_recv) MPI_Recv(&received[0], (int)n_recv, MPI_UNSIGNED, dd, 94, mc, &status);
+            if (!n_recv) continue;
+            oomph::Vector<oomph::GeneralisedElement *> halo_el(this->halo_element_pt(dd));
+            for (unsigned k = 0; k + 2 < n_recv; k += 3)
+            {
+              if (received[k] >= halo_el.size()) continue; // lists diverged; the halo check reports that
+              oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(halo_el[received[k]]);
+              if (!fe || received[k + 1] >= fe->nnode()) continue;
+              oomph::Node *nod_pt = fe->node_pt(received[k + 1]);
+              if (received[k + 2] < this->nboundary() && nod_pt->is_on_boundary(received[k + 2]))
+                to_remove.push_back(std::make_pair(nod_pt, received[k + 2]));
+            }
+          }
+        }
+      }
+
+      if (!to_remove.empty())
+      {
+        std::set<std::pair<oomph::Node *, unsigned>> drop(to_remove.begin(), to_remove.end());
+        std::set<unsigned> touched;
+        for (const auto &entry : drop) touched.insert(entry.second);
+        for (unsigned b : touched)
+        {
+          oomph::Vector<oomph::Node *> keep;
+          keep.reserve(Boundary_node_pt[b].size());
+          for (unsigned i = 0; i < Boundary_node_pt[b].size(); i++)
+          {
+            if (!drop.count(std::make_pair(Boundary_node_pt[b][i], b))) keep.push_back(Boundary_node_pt[b][i]);
+          }
+          Boundary_node_pt[b] = keep;
+        }
+        Pending_boundary_membership_removals.assign(drop.begin(), drop.end());
+        detach_pending_boundary_memberships();
+      }
+    }
+#endif
+    Pending_boundary_membership_removals.clear();
+  }
+
+  // Drops every face tag and marks them invalid, so setup_boundary_element_info() falls back to the
+  // legacy node-membership reconstruction. For meshes whose element set is replaced by something
+  // that carries no facet information.
+  void TemplatedMeshBase::invalidate_face_boundary_tags()
+  {
+    for (unsigned int ie = 0; ie < this->nelement(); ie++)
+    {
+      pyoomph::BulkElementBase *el = dynamic_cast<pyoomph::BulkElementBase *>(this->element_pt(ie));
+      if (el) el->clear_face_boundaries();
+    }
+    face_boundary_tags_valid = false;
+  }
+
+  // THE boundary-element identification: shape-, order- and dimension-neutral, and exact on
+  // arbitrarily (non-uniformly) refined meshes, because it only reads the per-face boundary tags
+  // that were seeded from the template and inherited through every split. No nodal boundary
+  // membership is consulted, so an interior face whose vertices all happen to lie on one boundary
+  // (a corner triangle's third edge; a quad in a channel whose opposite walls share a name) is
+  // never mistaken for a boundary face.
+  void TemplatedMeshBase::setup_boundary_element_info_from_face_tags()
+  {
     unsigned nbound = nboundary();
     Boundary_element_pt.clear();
     Face_index_at_boundary.clear();
     Boundary_element_pt.resize(nbound);
     Face_index_at_boundary.resize(nbound);
 
-    //std::cout << "Number of facets found " << facets.size() << std::endl;
-    for (unsigned int ie=0;ie<this->nelement();ie++)
+    for (unsigned int ie = 0; ie < this->nelement(); ie++)
     {
       pyoomph::BulkElementBase *el = dynamic_cast<pyoomph::BulkElementBase *>(this->element_pt(ie));
-      if (!el)
+      if (!el) continue;
+      for (const auto &entry : el->get_all_face_boundaries())
       {
-        throw_runtime_error("This method should only be called for meshes with BulkElementBase elements");
-      }
-      for (int face_id : el->get_possible_face_indices())
-      {
-        std::vector<pyoomph::Node *> el_face_nodes=el->get_vertex_nodes_of_face(face_id);
-        bool may_skip=false;
-        for (unsigned int i=0;i<el_face_nodes.size();i++)
+        const int face_id = entry.first;
+        for (unsigned boundary_id : entry.second)
         {
-          if (!dynamic_cast<oomph::BoundaryNodeBase *>(el_face_nodes[i]))
-          {
-            //std::cout << "Element " << ie << " face " << face_id << " has node " << i << " which is not a boundary node" << std::endl;
-            may_skip=true; break;
-          }
+          if (boundary_id >= nbound) continue; // boundary was removed since the tags were seeded
+          Boundary_element_pt[boundary_id].push_back(el);
+          Face_index_at_boundary[boundary_id].push_back(face_id);
         }
-        if (may_skip) continue;
-        std::set<pyoomph::Node *> facet_nodes(el_face_nodes.begin(), el_face_nodes.end());
-        if (facets.count(facet_nodes))
-        {
-          std::vector<unsigned int> facet_boundaries=facets[facet_nodes];
-          /*std::cout << "Adding a facet for a patch of " << facet_nodes.size() << " nodes for element " << ie << " face " << face_id << " with boundaries: ";
-          for (unsigned int boundary_id : facet_boundaries)
-          {
-            std::cout << boundary_id << " ";
-          }
-          std::cout << std::endl;*/
-
-          // Double-check that every node of this face is still tagged with the
-          // candidate boundary before accepting it (a facet's node set can be
-          // shared with facets on other boundaries after mesh operations).
-          for (unsigned int boundary_id : facet_boundaries)
-          {
-            may_skip=false;
-            for (unsigned int i=0;i<el_face_nodes.size();i++) 
-            {
-               if (!dynamic_cast<oomph::BoundaryNodeBase *>(el_face_nodes[i])->is_on_boundary(boundary_id))
-               {
-                 //std::cout << "Element " << ie << " face " << face_id << " has node " << i << " which is not on boundary " << boundary_id << std::endl;
-                 may_skip=true; break;            
-               }
-            }
-            if (!may_skip)
-            {
-              Boundary_element_pt[boundary_id].push_back(el);
-              Face_index_at_boundary[boundary_id].push_back(face_id);
-            }
-          }
-        }
-        
       }
-      //throw_runtime_error("This method is not implemented yet");
-      // std::cout << "Element " << ie << " has " << el_facets.size() << " facets" << std::endl;
     }
-    
+  }
+
+  void TemplatedMeshBase::setup_boundary_element_info(std::ostream &)
+  {
+    setup_boundary_element_info_from_face_tags();
   }
 
 
+
+  // Groups the current active bulk elements by the vertex-node set of each facet, returning for
+  // every facet the (element, local face index) pairs incident on it. Shape- and
+  // split-scheme-neutral neighbour-finding primitive for the generic refinement engine; see the
+  // declaration in mesh.hpp and dev_docs/adaptive_refinement.md.
+  TemplatedMeshBase::FacetAdjacencyMap TemplatedMeshBase::build_facet_adjacency() const
+  {
+    FacetAdjacencyMap adj;
+    for (unsigned int ie = 0; ie < this->nelement(); ie++)
+    {
+      pyoomph::BulkElementBase *el = dynamic_cast<pyoomph::BulkElementBase *>(this->element_pt(ie));
+      if (!el) continue; // Skip anything that is not a bulk element (should not occur here)
+      for (int face_id : el->get_possible_face_indices())
+      {
+        std::vector<pyoomph::Node *> face_nodes = el->get_vertex_nodes_of_face(face_id);
+        if (face_nodes.empty()) continue; // e.g. 0d "point" faces that carry no vertex set
+        std::set<pyoomph::Node *> key;
+        for (pyoomph::Node *n : face_nodes)
+        {
+          // Periodic boundaries are realised as "copy" nodes aliasing a master (see
+          // ensure_halos_for_periodic_boundaries); keying on the master makes the two sides of the
+          // periodic seam one facet with incidence 2 rather than two unrelated boundary facets. The
+          // 1d/2d interior-facet enumerators resolve copies for exactly this reason. On a
+          // non-periodic mesh is_a_copy() is false everywhere and nothing changes.
+          if (n->is_a_copy()) n = static_cast<pyoomph::Node *>(n->copied_node_pt());
+          key.insert(n);
+        }
+        adj[key].push_back(std::make_pair(el, face_id));
+      }
+    }
+    return adj;
+  }
+
+  // {n_facets, n_boundary_facets, n_interior_facets, max_incidence}. See declaration for semantics.
+  std::vector<unsigned> TemplatedMeshBase::facet_adjacency_summary() const
+  {
+    FacetAdjacencyMap adj = build_facet_adjacency();
+    unsigned n_boundary = 0, n_interior = 0, max_incidence = 0;
+    for (const auto &kv : adj)
+    {
+      unsigned incidence = kv.second.size();
+      if (incidence == 1) n_boundary++;
+      else if (incidence == 2) n_interior++;
+      if (incidence > max_incidence) max_incidence = incidence;
+    }
+    return {static_cast<unsigned>(adj.size()), n_boundary, n_interior, max_incidence};
+  }
 
   // Builds the `facets` lookup (vertex-node-set -> boundary indices) used by the
   // facet-based setup_boundary_element_info above, from the mesh template's own
@@ -5496,7 +9399,7 @@ namespace pyoomph
       for (unsigned int i=0;i<templ->get_nodes().size();i++)
       {
         //MeshTemplateNode *tnode = templ->get_nodes()[i];
-        //pyoomph::Node *onode = dynamic_cast<pyoomph::Node *>(tnode->oomph_node);
+        //pyoomph::Node *onode = static_cast<pyoomph::Node *>(tnode->oomph_node);
         /*std::cout << "Template Node " << i << " is on boundaries: ";
         for (unsigned b : tnode->on_boundaries)
         {
@@ -5546,7 +9449,7 @@ namespace pyoomph
 
         for (nodeindex_t nindex : tfacet->nodeinds)
         {
-          pyoomph::Node *tnode = dynamic_cast<pyoomph::Node *>(templ_nodes[nindex]->oomph_node);
+          pyoomph::Node *tnode = static_cast<pyoomph::Node *>(templ_nodes[nindex]->oomph_node);
           oomph::BoundaryNodeBase *bn = dynamic_cast<oomph::BoundaryNodeBase *>(tnode);
           if (!bn || !tnode)
           {
@@ -5604,170 +9507,5 @@ namespace pyoomph
       }
   }
 
-  ////////////////
-
-  // Builds a KD-tree over all distinct nodes of `mesh`, indexed by their zeta
-  // coordinate (Lagrangian if use_lagrangian, else Eulerian) at the given history
-  // time index. zeta_time_history/zeta_coordinate_type are temporary global hooks
-  // read by BulkElementBase::zeta_nodal while building the tree, reset to their
-  // default (0) afterwards. Also records, per node, the set of elements touching it
-  // (nodes_to_elem, used later by find_element) and estimates a generous
-  // max_search_radius (10x the largest nearest-neighbour distance seen) used as the
-  // starting radius for the expanding-radius search in find_element.
-  MeshKDTree::MeshKDTree(pyoomph::Mesh *mesh, bool use_lagrangian, unsigned time_index) : lagrangian(use_lagrangian), tindex(time_index), tree(NULL)
-  {
-    std::map<pyoomph::Node *, unsigned> nodeinds;
-    BulkElementBase::zeta_time_history = time_index;
-    BulkElementBase::zeta_coordinate_type = (use_lagrangian ? 0 : 1);
-    max_search_radius = 0.0;
-    unsigned int dim = 0;
-    std::vector<double> coords;
-    for (unsigned int ie = 0; ie < mesh->nelement(); ie++)
-    {
-      auto *elpt = dynamic_cast<BulkElementBase *>(mesh->element_pt(ie));
-      for (unsigned int in = 0; in < elpt->nnode(); in++)
-      {
-        pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(elpt->node_pt(in));
-        unsigned int index;
-        if (nodeinds.count(n))
-        {
-          index = nodeinds[n];
-        }
-        else
-        {
-          index = nodes_by_index.size();
-          nodeinds[n] = index;
-          nodes_by_index.push_back(n);
-          if (!dim)
-            dim = (use_lagrangian ? n->nlagrangian() : n->ndim());
-          for (unsigned int d = 0; d < dim; d++)
-            coords.push_back(elpt->zeta_nodal(in, 0, d));
-        }
-        if (!nodes_to_elem.count(n))
-          nodes_to_elem[n] = std::set<pyoomph::BulkElementBase *>();
-        nodes_to_elem[n].insert(elpt);
-
-        for (unsigned int jn = in + 1; jn < elpt->nnode(); jn++)
-        {
-          double nndist = 0.0;
-          for (unsigned int d = 0; d < dim; d++)
-          {
-            double zdist = elpt->zeta_nodal(in, 0, d) - elpt->zeta_nodal(jn, 0, d);
-            nndist += zdist * zdist;
-          }
-          if (nndist > max_search_radius)
-            max_search_radius = nndist;
-        }
-      }
-    }
-    max_search_radius = sqrt(max_search_radius) * 10;
-    BulkElementBase::zeta_time_history = 0;
-    BulkElementBase::zeta_coordinate_type = 0;
-    tree = new KDTree(coords, dim);
-  }
-
-  // Returns the mesh node nearest to `coord` (in the tree's coordinate space); the
-  // squared/actual distance can optionally be returned via distreturn.
-  pyoomph::Node *MeshKDTree::find_node(const oomph::Vector<double> &coord, double *distreturn)
-  {
-    int index = -1;
-    if (coord.size() == 1)
-      index = tree->nearest_point(coord[0], 0.0, 0.0, distreturn);
-    else if (coord.size() == 2)
-      index = tree->nearest_point(coord[0], coord[1], 0.0, distreturn);
-    else if (coord.size() == 3)
-      index = tree->nearest_point(coord[0], coord[1], coord[2], distreturn);
-
-    if (index < 0)
-      return NULL;
-
-    return nodes_by_index[index];
-  }
-
-  // Locates the element containing the point `zeta` (in the tree's coordinate
-  // space) and the corresponding local coordinates, returned in sreturn. Strategy:
-  // first try all elements attached to the nearest node (cheap, succeeds in the
-  // common case); if that fails, fall back to an expanding-radius search over
-  // increasingly distant nodes (see below) until an element containing zeta is found
-  // or the search radius exceeds max_search_radius.
-  pyoomph::BulkElementBase *MeshKDTree::find_element(oomph::Vector<double> zeta, oomph::Vector<double> &sreturn)
-  {
-    // std::cout << "ENTERINF FIND ELEMENT " << std::endl;
-    BulkElementBase::zeta_time_history = tindex;
-    BulkElementBase::zeta_coordinate_type = (lagrangian ? 0 : 1);
-
-    std::set<BulkElementBase *> processed_elems;
-    std::set<pyoomph::Node *> processed_nodes;
-
-    sreturn.resize(zeta.size(), 0.0);
-
-    // First, process the nearest node and all attached elements
-    pyoomph::Node *n = this->find_node(zeta);
-    if (!n)
-    {
-      BulkElementBase::zeta_time_history = 0;
-      BulkElementBase::zeta_coordinate_type = 0;
-      return NULL;
-    }
-
-    oomph::GeomObject *ret = NULL;
-    for (auto &e : nodes_to_elem[n])
-    {
-      //  std::cout << " TRY TO FIND ZETA " << zeta[0] << "  " << zeta[1] << " BASED ON NODE POS " << n->x(0) << "  " <<  n->x(1) << std::endl;
-      oomph::Vector<double> zeta_in = zeta; // Why ever... But without I had issues
-                                            //  std::cout << " BEF ZETA " << zeta[0] << "  " << zeta[1] << "  IN "  << zeta_in[0] << "  " << zeta_in[1] << std::endl;
-      e->locate_zeta(zeta_in, ret, sreturn);
-      //  std::cout << " AFTER ZETA " << zeta[0] << "  " << zeta[1] << "   IN "  << zeta_in[0] << "  " << zeta_in[1] << "  " << ret << std::endl;
-      if (ret)
-      {
-        BulkElementBase::zeta_time_history = 0;
-        BulkElementBase::zeta_coordinate_type = 0;
-        return e;
-      }
-      processed_elems.insert(e);
-    }
-    processed_nodes.insert(n);
-
-    // Then, go by increasing radius
-    double rad = max_search_radius;
-    double x = zeta[0], y = 0.0, z = 0.0;
-    if (zeta.size() >= 2)
-    {
-      y = zeta[1];
-      if (zeta.size() >= 3)
-      {
-        z = zeta[2];
-      }
-    }
-    std::vector<std::pair<uint32_t, double>> search_res = tree->radius_search(rad, x, y, z);
-
-    for (auto &sr : search_res)
-    {
-      //     std::cout << "ITERATING OVER SERACH RES " << sr.first << "  " << sr.second << std::endl;
-      pyoomph::Node *n = nodes_by_index[sr.first];
-      //     std::cout << " TRY TO FIND ZETA " << zeta[0] << "  " << zeta[1] << " BASED ON NODE POS " << n->x(0) << "  " <<  n->x(1) << std::endl;
-      if (processed_nodes.count(n))
-        continue;
-      for (auto &e : nodes_to_elem[n])
-      {
-        if (processed_elems.count(e))
-          continue;
-        oomph::Vector<double> zeta_in = zeta; // Why ever... But without I had issues
-        e->locate_zeta(zeta_in, ret, sreturn);
-        if (ret)
-        {
-          BulkElementBase::zeta_time_history = 0;
-          BulkElementBase::zeta_coordinate_type = 0;
-          return e;
-        }
-        processed_elems.insert(e);
-      }
-      processed_nodes.insert(n);
-    }
-
-    BulkElementBase::zeta_time_history = 0;
-    BulkElementBase::zeta_coordinate_type = 0;
-    return NULL;
-  }
 
 }

@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -29,7 +30,8 @@
  
 from ..materials.generic import AnyFluidProperties
 from ..meshes.mesh import AnyMesh, InterfaceMesh
-from ..generic import Equations,InterfaceEquations,CombinedEquations
+from ..generic import Equations,InterfaceEquations
+from ..generic.codegen import EquationTree
 from ..equations.generic import SpatialErrorEstimator,InitialCondition,ConnectFieldsAtInterface
 from ..expressions import *  # Import grad et al
 from ..expressions.units import meter
@@ -164,7 +166,7 @@ class PorousFront(InterfaceEquations):
 ## The ones to use for multi-component flow
 
 # Darcy + Advection diffusion
-def CompositionDarcyEquations(fluid_props:AnyFluidProperties,compo_space:FiniteElementSpaceEnum="C2",permeability:ExpressionOrNum=1e-15*meter**2,porosity:ExpressionOrNum=0.3,with_IC:bool=True,spatial_errors:Optional[float]=None,isothermal:bool=True,initial_temperature:Optional[ExpressionOrNum]=None,thermal_overrides:Optional[Dict[str,ExpressionOrNum]]=None) -> CombinedEquations:
+def CompositionDarcyEquations(fluid_props:AnyFluidProperties,compo_space:FiniteElementSpaceEnum="C2",permeability:ExpressionOrNum=1e-15*meter**2,porosity:ExpressionOrNum=0.3,with_IC:bool=True,spatial_errors:float | None=None,isothermal:bool=True,initial_temperature:ExpressionOrNum | None=None,thermal_overrides:dict[str, ExpressionOrNum] | None=None) -> EquationTree:
     from .multi_component import CompositionAdvectionDiffusionEquations,TemperatureAdvectionConductionEquation
     dc=DarcyEquation(fluid_props,permeability=permeability,porosity=porosity,solve_also_velocity=True)
 
@@ -175,12 +177,14 @@ def CompositionDarcyEquations(fluid_props:AnyFluidProperties,compo_space:FiniteE
         u_advect=porosity*var("velocity") # I think it is more reasonable that the temperature is transported with the slower one...
         #u_advect=var("velocity")
         if thermal_overrides is None:
-            thermal_kwargs={}
+            rho_override=cp_override=lambda_override=None
         else:
-            thermal_kwargs={"rho_override":thermal_overrides.get("mass_density",None),"cp_override":thermal_overrides.get("specific_heat_capacity",None),"lambda_override":thermal_overrides.get("thermal_conductivity",None)}
-        res += TemperatureAdvectionConductionEquation(fluid_props, space=compo_space,wind=u_advect,**thermal_kwargs)
+            rho_override=thermal_overrides.get("mass_density",None)
+            cp_override=thermal_overrides.get("specific_heat_capacity",None)
+            lambda_override=thermal_overrides.get("thermal_conductivity",None)
+        res += TemperatureAdvectionConductionEquation(fluid_props, space=compo_space,wind=u_advect,rho_override=rho_override,cp_override=cp_override,lambda_override=lambda_override)
     if with_IC:
-        req_adv_diff = fluid_props.required_adv_diff_fields
+        req_adv_diff = sorted(fluid_props.required_adv_diff_fields)
         ic = fluid_props.initial_condition
         icsettings = {"massfrac_"+n: ic["massfrac_" + n] for n in req_adv_diff if "massfrac_" + n in ic.keys()}
         if not isothermal:
@@ -191,12 +195,12 @@ def CompositionDarcyEquations(fluid_props:AnyFluidProperties,compo_space:FiniteE
                 else:
                     icT0=initial_temperature
             icsettings["temperature"]=icT0
-        res+=InitialCondition(**icsettings)
+        res+=InitialCondition(**icsettings) #type:ignore
 
     if spatial_errors is not None:
         if spatial_errors is True:
-            compo_fields = {"massfrac_" + n: 1.0 for n in fluid_props.required_adv_diff_fields}
-            res += SpatialErrorEstimator(velocity=1, **compo_fields)
+            compo_fields = {"massfrac_" + n: 1.0 for n in sorted(fluid_props.required_adv_diff_fields)}
+            res += SpatialErrorEstimator(velocity=1, **compo_fields) #type:ignore
         elif spatial_errors is not False:
             raise RuntimeError("TODO")
 
@@ -204,7 +208,11 @@ def CompositionDarcyEquations(fluid_props:AnyFluidProperties,compo_space:FiniteE
 
 # Connection to a Navier-Stokes multi-component domain (imposing continuity of the composition)
 def CompositionPorousNavierStokesConnection(fluid_props:AnyFluidProperties):
-    psinter=PorousNavierStokesConnection()
-    connfields = ["massfrac_" + n for n in fluid_props.required_adv_diff_fields]
+    psinter:Equations=PorousNavierStokesConnection()
+    connfields = ["massfrac_" + n for n in sorted(fluid_props.required_adv_diff_fields)]
     psinter += ConnectFieldsAtInterface(connfields)
     return psinter
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

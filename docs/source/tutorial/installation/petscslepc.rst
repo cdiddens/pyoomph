@@ -3,21 +3,24 @@
 Optional installation of PETSc/SLEPc
 ------------------------------------
 
-If you want to solve for eigenvalue problems, pyoomph by default will invoke `scipy's eigensolver <https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.linalg.eigs.html>`__ based on `ARPACK <https://github.com/opencollab/arpack-ng>`__.
-However, for unsymmetric matrices which usually arise in complicated problems, `SLEPc <https://slepc.upv.es/>`__ provides a much more stable alternative, since it also supports nonsymmetric mass matrices.
-So whenever you want to investigate linear stability, you should consider performing the following steps. In any case, it is advised to occasionally check your eigenvalues by adding ``report_accuracy=True`` to calls of :py:meth:`~pyoomph.generic.problem.Problem.solve_eigenproblem`. 
+pyoomph ships with the `Spectra <https://spectralib.org>`__ eigensolver built in, which handles the unsymmetric and singular mass matrices that arise in complicated problems, and can target a given (also complex) eigenvalue -- so everything the tutorial does with eigenvalues, azimuthal and normal mode stability analysis included, runs out of the box on any platform, Windows included. What PETSc/SLEPc still buys you is described below; if none of it applies to you, you can skip this page entirely.
+
+pyoomph selects the best eigensolver it can find on your machine, in this order: `SLEPc <https://slepc.upv.es/>`__ with MUMPS if PETSc/SLEPc are installed with MUMPS support, otherwise the built-in Spectra, otherwise `ARPACK <https://github.com/opencollab/arpack-ng>`__ with MKL Pardiso as backend, otherwise `scipy's eigensolver <https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.linalg.eigs.html>`__, which is ARPACK as well, but with a plain scipy backend. The two ARPACK entries come last because they cannot target an eigenvalue at all.
+
+SLEPc keeps the first place for two reasons: it is the only backend that solves an eigenproblem **distributed** over several MPI processes (Spectra is serial, and gathers the matrices onto one rank under ``--distribute``), and it offers a contour-integral region search (``SlepcEigenSolver.set_eigenvalue_region()``, which searches a whole rectangle of the complex plane) that Spectra has no equivalent for. Beyond that you may of course simply prefer it, e.g. for very large problems. In any case, it is advised to occasionally check your eigenvalues by adding ``report_accuracy=True`` to calls of :py:meth:`~pyoomph.generic.problem.Problem.solve_eigenproblem`. 
 
 Also on Mac arm64, we recommend using PETSc with MUMPS as linear solver backend for the linear solves during Newton's method, since the default MKL Pardiso backend is not yet fully supported on arm64.
 
 We unfortunately do not really know how to install PETSc/SLEPc natively on Windows, so you have to find your own way of installing it (and let us know the steps. A good start can be found `here <https://petsc.org/release/install/windows/>`__). 
 If you are on Windows, the easiest way to get PETSc/SLEPc working is to install pyoomph inside the Windows Subsystem for Linux (WSL) and follow the normal Linux instructions below -- see :numref:`installwsl` for step-by-step instructions.
+On Windows, however, this is now only worth the trouble if you specifically need distributed (MPI) eigensolves or PETSc as linear solver: for eigenvalue problems as such, the built-in Spectra eigensolver covers the native Windows wheel.
 
 SLEPc depends on `PETSc <https://petsc.org>`__, so it is advisable to install both of these packages together. Also, since we often will obtain matrices with a zero on a diagonal (mainly due to Lagrange multipliers, incompressibility constraints, etc.) we need a suitable linear solver backend in PETSc which can perform pivoting. We usually use `MUMPS <https://mumps-solver.org/>`__ for that.
 
 PETSc/SLEPc are compiled for exactly one scalar type -- either real or complex -- and pyoomph picks up whichever ``petsc4py``/``slepc4py`` happens to be first on ``PYTHONPATH`` when the process starts. Which one you need depends on what you do with it:
 
 * The **real** build is used for the linear solves during Newton's method (with PETSc/MUMPS as linear solver backend) and for conventional, non-normal-mode eigenvalue problems (with SLEPc).
-* The **complex** build is mandatory if you want to solve normal mode eigenvalue problems (cf. :numref:`azimuthalstabana` and :numref:`cartesiannormalstabana`), since these introduce an explicit imaginary prefactor into the equations. If you try to solve such a problem with only a real build available, pyoomph will raise a ``RuntimeError`` telling you to switch to a complex installation.
+* The **complex** build is what you need if you want to solve normal mode eigenvalue problems (cf. :numref:`azimuthalstabana` and :numref:`cartesiannormalstabana`) *with SLEPc*, since these introduce an explicit imaginary prefactor into the equations. A real build cannot do it: if SLEPc is selected and only a real build is available, pyoomph raises a ``RuntimeError`` telling you to switch to a complex installation. This is no longer a hard requirement for the problems themselves, though -- the built-in Spectra eigensolver does complex arithmetic unconditionally (it is simply a second template instantiation of the same header-only solver), so a normal mode analysis runs without any PETSc at all. Build the complex arch if you want SLEPc for these problems, in particular if you want to run them distributed.
 
 Since most users will want both at some point, we recommend building both a real and a complex arch of PETSc/SLEPc side by side in the same source tree (they can share one ``PETSC_DIR``, just use two different ``PETSC_ARCH`` names), and then select the one you currently need via ``PETSC_ARCH``/``PYTHONPATH`` before running a particular script. If you only ever need conventional (real) eigenvalue problems, you can of course skip the complex build and just do the real one.
 
@@ -92,7 +95,7 @@ To use one of the two builds within pyoomph, ``PETSC_DIR``, ``PETSC_ARCH`` and `
 
 or, analogously, with ``pyoomph_petsc_arch_complex`` for the complex build. Since only one of the two can be active in a given terminal/process, do **not** put both blocks unconditionally into your ``.bashrc``/``.zshrc`` -- the second one would just shadow the first on ``PYTHONPATH``. Instead, either export the variables for the arch you currently need right before running your script, or wrap each block in a shell function (e.g. ``pyoomph_petsc_real()`` / ``pyoomph_petsc_complex()``) that you call as needed. If you only installed one arch, it is fine to export it unconditionally in your shell startup file as before.
 
-To use SLEPc with MUMPS as eigensolver, either set it in python during your driver code, e.g.
+Once installed, SLEPc with MUMPS is picked automatically as eigensolver, so nothing has to be done to activate it. To select it explicitly anyhow, e.g. to override a different choice made in the driver code, either set it in python during your driver code, e.g.
 
 .. code:: python
 
@@ -103,3 +106,5 @@ or supply the flag ``--slepc_mumps`` when calling your driver code:
 .. code:: bash
 
 	python my_eigenvalue_simulation.py --slepc_mumps
+
+Conversely, to go back to the built-in eigensolver on a machine where PETSc/SLEPc *is* installed -- to compare the two, for instance -- use ``problem.set_eigensolver("spectra")`` or the flag ``--spectra``.

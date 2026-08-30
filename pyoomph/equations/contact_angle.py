@@ -1,37 +1,41 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
 from ..expressions import *
+from ..typings import *
 from ..expressions.units import meter,second,joule,newton,degree,milli
 import scipy.optimize #type:ignore
-from ..generic.codegen import EquationTree,InterfaceEquations,GlobalLagrangeMultiplier,WeakContribution,BaseEquations,ODEEquations,Equations
+from ..generic.codegen import EquationTree,InterfaceEquations,BaseEquations,ODEEquations,Equations
+from .generic import GlobalLagrangeMultiplier,WeakContribution
 from ..equations.generic import InitialCondition,DependentIntegralObservable
 from ..meshes.mesh import InterfaceMesh, ODEStorageMesh, AnyMesh
 from .multi_component import MultiComponentNavierStokesInterface
+from .navier_stokes import _cox_voinov_angle_at_contact_line
 
 _DefaultCLSpeed=1e-5*meter/second
 
@@ -44,11 +48,11 @@ class GenericContactLineModel:
         It contains the basic methods that are common to all contact line models.
     """
     def __init__(self):
-        self._dyn_cl_equation:Optional[Union["DynamicContactLineEquations","SimplePopovContactLineEquations"]]=None
+        self._dyn_cl_equation:"DynamicContactLineEquations | SimplePopovContactLineEquations | None"=None
         self._starts_pinned:bool=False
-        self._ic_for_dyncl:Dict[str,ExpressionOrNum]={}
+        self._ic_for_dyncl:dict[str,ExpressionOrNum]={}
 
-    def _setup_for_equation(self,dyn_cl_eq:Union["DynamicContactLineEquations","SimplePopovContactLineEquations"]):
+    def _setup_for_equation(self,dyn_cl_eq:"DynamicContactLineEquations | SimplePopovContactLineEquations"):
         if (self._dyn_cl_equation is not None) and self._dyn_cl_equation!=dyn_cl_eq:
             raise RuntimeError("Contact line model used for different equations")
         self._dyn_cl_equation=dyn_cl_eq
@@ -81,7 +85,7 @@ class PinnedContactLine(GenericContactLineModel):
             enforcing_condition: Optional. An expression that can be used to enforce the contact line to be pinned.
     """        
 
-    def __init__(self,enforcing_condition:Optional[Expression]=None):
+    def __init__(self,enforcing_condition:Expression | None=None):
         super(PinnedContactLine, self).__init__()
         self._starts_pinned=True
         self.enforcing_condition=enforcing_condition
@@ -110,7 +114,7 @@ class PinnedContactLineWithCollapsePrevention(PinnedContactLine):
             contact_line_position: Optional. The position of the contact line. If not set, it will be set to the initial contact line position. Default is None.
             shift_velocity: The velocity with which the contact line is shifted to prevent collapse. Default is 0.1 mm/s.
     """
-    def __init__(self,min_local_contact_angle:ExpressionOrNum=5*degree,contact_line_position:Optional[ExpressionOrNum]=None,shift_velocity:ExpressionOrNum=0.1*milli*meter/second):
+    def __init__(self,min_local_contact_angle:ExpressionOrNum=5*degree,contact_line_position:ExpressionOrNum | None=None,shift_velocity:ExpressionOrNum=0.1*milli*meter/second):
         super(PinnedContactLine, self).__init__()
         self.min_local_contact_angle=min_local_contact_angle
         self.contact_line_position=contact_line_position
@@ -150,7 +154,7 @@ class UnpinnedContactLine(GenericContactLineModel):
         self.cl_speed_scale=cl_speed_scale
         self.cl_speed_exponent=1 # set to 3 for Cox-Voinov
 
-    def get_unpinned_motion_velocity_expression(self,dyncl:Optional["DynamicContactLineEquations"],theta_act_for_popov:ExpressionNumOrNone=None) -> Expression:
+    def get_unpinned_motion_velocity_expression(self,dyncl:"DynamicContactLineEquations | None",theta_act_for_popov:ExpressionNumOrNone=None) -> Expression:
         """
         Get the velocity with which the contact line moves towards the equilibrium contact angle. In this method, we just return a Cox-Voinov-like expression:
         The velocity of the contact line is proportional to the difference between the equilibrium contact angle and the actual contact angle, possibly raised to a power given by ``cl_speed_exponent``.
@@ -162,7 +166,7 @@ class UnpinnedContactLine(GenericContactLineModel):
         Returns:
             The velocity with which the contact line moves towards the equilibrium contact angle.
         """
-        theta_eq=self.get_equilibrium_contact_angle_expression(dyncl)
+        theta_eq=self.get_imposed_contact_angle_expression(dyncl)
         if dyncl is None:
             theta_act=theta_act_for_popov
         else:
@@ -170,20 +174,31 @@ class UnpinnedContactLine(GenericContactLineModel):
         assert theta_act is not None
         assert self.cl_speed_scale is not None
         if self.cl_speed_exponent==1:
-            return self.cl_speed_scale*(theta_eq-theta_act)
+            return Expression(self.cl_speed_scale*(theta_eq-theta_act))
         else:
-            return self.cl_speed_scale*(theta_eq**self.cl_speed_exponent-theta_act**self.cl_speed_exponent)
+            return Expression(self.cl_speed_scale*(theta_eq**self.cl_speed_exponent-theta_act**self.cl_speed_exponent))
 
-    def get_unpinned_indicator(self,dyncl:Optional["DynamicContactLineEquations"],simple_popov_unpinned_indicator_name:Optional[str]=None)->Expression:
+    def get_unpinned_indicator(self,dyncl:"DynamicContactLineEquations | None",simple_popov_unpinned_indicator_name:str | None=None)->Expression:
         return Expression(1) # Always unpinned
 
-    def get_equilibrium_contact_angle_expression(self,dyncl:Optional["DynamicContactLineEquations"]) -> Expression:
+    def get_equilibrium_contact_angle_expression(self,dyncl:"DynamicContactLineEquations | None") -> Expression:
         if self.theta_eq is None:
             raise RuntimeError("Unpinned contact line has no equilibrium contact angle set. Set it in the constructor or use the set_missing_information to pass the initial contact angle as default value in the Problem.define_problem method")
         return subexpression(self.theta_eq)
 
-    def equations_for_simple_popov_model(self,theta_act_name:str,rc_name:str)->Equations:
-        eqs=GlobalLagrangeMultiplier(theta_eq=var("theta_eq")-self.get_equilibrium_contact_angle_expression(None))
+    def get_imposed_contact_angle_expression(self,dyncl:"DynamicContactLineEquations | None") -> ExpressionOrNum:
+        """
+        The angle the contact line is actually driven towards. This is the equilibrium angle of the model, but bent by
+        the Cox-Voinov relation up to the mesh size if the :py:class:`DynamicContactLineEquations` were set up with
+        ``cox_voinov``. The simple Popov model has no mesh at all, so it is always the plain equilibrium angle there.
+        """
+        theta_eq=self.get_equilibrium_contact_angle_expression(dyncl)
+        if dyncl is None:
+            return theta_eq
+        return dyncl.apply_cox_voinov_correction(theta_eq)
+
+    def equations_for_simple_popov_model(self,theta_act_name:str,rc_name:str)->BaseEquations:
+        eqs:BaseEquations=GlobalLagrangeMultiplier(theta_eq=var("theta_eq")-self.get_equilibrium_contact_angle_expression(None))
         theta_eq=var("theta_eq")
         theta_act=var(theta_act_name)
         eqs+=InitialCondition(theta_eq=self._ic_for_dyncl["initial_contact_angle"])
@@ -200,7 +215,6 @@ class UnpinnedContactLine(GenericContactLineModel):
 
             eqs+=WeakContribution(actual_cl_velo - desired_cl_velo, testfunction(theta_act)/test_scale_factor(theta_act_name)*scale_factor("temporal")/scale_factor("spatial"))
         return eqs
-        pass
 
     def define_residuals(self,dyncl:"DynamicContactLineEquations"):
         X = var("mesh")  # contact line position
@@ -211,14 +225,14 @@ class UnpinnedContactLine(GenericContactLineModel):
 
         # Impose weakly the equilibrium contact angle (e.g. in case of stationary solves)
         sigma_value=dyncl.get_surface_tension_at_cl_expression()
-        theta_eq=self.get_equilibrium_contact_angle_expression(dyncl)
+        theta_eq=self.get_imposed_contact_angle_expression(dyncl)
         m = sin(theta_eq) * dyncl.wall_normal + cos(theta_eq) * dyncl.wall_tangent
         dyncl.add_residual(weak(sigma_value, dot(m, u_test)))
 
 
         if self.cl_speed_scale is None:
             # Impose contact angle directly via Lagrange
-            theta_desired=self.get_equilibrium_contact_angle_expression(dyncl)
+            theta_desired=self.get_imposed_contact_angle_expression(dyncl)
             theta_present=dyncl.get_actual_contact_angle_expression()
             dyncl.add_residual(weak(theta_present-theta_desired,vl_test*scale_factor("velocity")))
             dyncl.add_residual(weak(vl, dot(u_test, dyncl.wall_tangent)))
@@ -243,6 +257,10 @@ class UnpinnedContactLine(GenericContactLineModel):
         dx=dyncl.get_dx()
         dyncl.add_integral_function("_theta_eq_integral",self.get_equilibrium_contact_angle_expression(dyncl)*dx)
         dyncl.add_dependent_integral_function("eq_contact_angle",lambda _theta_eq_integral,_cl_integral:_theta_eq_integral/_cl_integral)
+        if dyncl.cox_voinov:
+            # eq_contact_angle stays the microscopic angle, so also output the bent one that is actually imposed
+            dyncl.add_integral_function("_theta_imposed_integral",self.get_imposed_contact_angle_expression(dyncl)*dx)
+            dyncl.add_dependent_integral_function("imposed_contact_angle",lambda _theta_imposed_integral,_cl_integral:_theta_imposed_integral/_cl_integral)
         if nd>0:
             dyncl.add_integral_function("_clpos_integral_x",var("coordinate_x")*dx)
             dyncl.add_dependent_integral_function("cl_pos_x",lambda _clpos_integral_x,_cl_integral:_clpos_integral_x/_cl_integral)
@@ -271,16 +289,16 @@ class StickSlipContactLine(UnpinnedContactLine):
     def __init__(self,theta_eq:ExpressionNumOrNone=None,cl_speed_scale:ExpressionNumOrNone=_DefaultCLSpeed,cl_speed_exponent:int=1):
         super(StickSlipContactLine, self).__init__(theta_eq=theta_eq,cl_speed_scale=cl_speed_scale,cl_speed_exponent=cl_speed_exponent)
         self._initial_pin_info=[1,0] # unpinned, but not forced
-        self._dynamics:Dict[Tuple[bool,bool,int],Tuple[ExpressionOrNum,bool,bool,float]]= {} # maps keys (unpinned,requid dtheta/dt sign) -> angle, factor
+        self._dynamics:dict[tuple[bool,bool,int],tuple[ExpressionOrNum,bool,bool,float]]= {} # maps keys (unpinned,requid dtheta/dt sign) -> angle, factor
 
 
     def _set_dynamics_info(self,unpin:bool,above:bool,angle:ExpressionOrNum,explicit:bool,as_factor:bool,required_dthetasign:int,heaviside_smoothing:float):
-        entry:Tuple[bool,bool,int]=(unpin,above,required_dthetasign)
+        entry:tuple[bool,bool,int]=(unpin,above,required_dthetasign)
         if angle is None:
             if entry in self._dynamics.keys():
                 del self._dynamics[entry]
         else:
-            self._dynamics[entry]=cast(Tuple[ExpressionOrNum,bool,bool,float],(angle,explicit,as_factor,heaviside_smoothing))
+            self._dynamics[entry]=cast(tuple[ExpressionOrNum,bool,bool,float],(angle,explicit,as_factor,heaviside_smoothing))
 
     def set_receding_unpin_below_angle(self,angle:ExpressionOrNum,explicit:bool=True,as_factor:bool=False,only_if_decaying:bool=True,heaviside_smoothing:float=0.0):
         """
@@ -363,14 +381,14 @@ class StickSlipContactLine(UnpinnedContactLine):
         return eqs
 
 
-    def get_unpinned_indicator(self,dyncl:Optional["DynamicContactLineEquations"],simple_popov_unpinned_indicator_name:Optional[str]=None):
+    def get_unpinned_indicator(self,dyncl:"DynamicContactLineEquations | None",simple_popov_unpinned_indicator_name:str | None=None):
         if dyncl is not None:
             return var(dyncl.unpinned_indicator_name)
         else:
             assert simple_popov_unpinned_indicator_name is not None
             return var(simple_popov_unpinned_indicator_name)
 
-    def define_stick_slip_dynamics_residuals(self,dyncl:Optional["DynamicContactLineEquations"],simple_popov_theta_act_name:Optional[str]=None)->Optional[BaseEquations]:
+    def define_stick_slip_dynamics_residuals(self,dyncl:"DynamicContactLineEquations | None",simple_popov_theta_act_name:str | None=None)->BaseEquations | None:
         if dyncl is not None:
             up, up_test = var_and_test(dyncl.unpinned_indicator_name)
             oc = var(dyncl.override_dynamics_name)
@@ -390,7 +408,9 @@ class StickSlipContactLine(UnpinnedContactLine):
         pin_when = None
         unpin_when = None
 
-        theta_eq = self.get_equilibrium_contact_angle_expression(dyncl)
+        # Thresholds given as factors scale the angle the contact line is driven towards, and they are compared against
+        # the measured angle, which lives on the mesh scale as well. So use the bent angle here, not the microscopic one.
+        theta_eq = self.get_imposed_contact_angle_expression(dyncl)
 
         # Now add the dynamics
         for entry, info in self._dynamics.items():
@@ -443,13 +463,13 @@ class StickSlipContactLine(UnpinnedContactLine):
         dynamics = pin_value * pin_when + unpin_value * unpin_when + as_it_is_when * as_it_is_value
         dynamics = subexpression(dynamics)
         if dyncl is not None:
-            dyncl.add_residual(weak(up - dynamics, up_test, coordinate_system=cartesian))
+            dyncl.add_residual(weak(up - dynamics, up_test, coordsys=cartesian))
             if self._initial_pin_info is not None:
                 dyncl.set_initial_condition(dyncl.unpinned_indicator_name, self._initial_pin_info[0], True)
                 dyncl.set_initial_condition(dyncl.override_dynamics_name, self._initial_pin_info[1], True)
-            return
+            return None
         else:
-            eqs=WeakContribution(up-dynamics,up_test)
+            eqs:BaseEquations=WeakContribution(up-dynamics,up_test)
             if self._initial_pin_info is not None:
                 eqs+=InitialCondition(unpinned_indicator= self._initial_pin_info[0],override_cl_dynamics=self._initial_pin_info[1])
             return eqs
@@ -515,7 +535,7 @@ class StickSlipContactLine(UnpinnedContactLine):
 
     def add_additional_functions(self,dyncl:"DynamicContactLineEquations"):
         super(StickSlipContactLine, self).add_additional_functions(dyncl)
-        theta_eq = self.get_equilibrium_contact_angle_expression(dyncl)
+        theta_eq = self.get_imposed_contact_angle_expression(dyncl) # as in define_stick_slip_dynamics_residuals
         dx=dyncl.get_dx()
         for entry, info in self._dynamics.items():
             unpin, above, _ = entry
@@ -548,13 +568,10 @@ class YoungDupreContactLine(StickSlipContactLine):
         self._delta_sigma:ExpressionNumOrNone=None
         self.line_tension=line_tension
 
-    def get_equilibrium_contact_angle_expression(self,dyncl:Optional["DynamicContactLineEquations"]):
+    def get_equilibrium_contact_angle_expression(self,dyncl:"DynamicContactLineEquations | None"):
         assert self._delta_sigma is not None
         assert dyncl is not None
-        if self.line_tension is None:
-            line_tension=0
-        else:
-            line_tension=self.line_tension
+        line_tension:ExpressionOrNum=0 if self.line_tension is None else self.line_tension
         return acos(maximum(-1, (self._delta_sigma+line_tension/var("coordinate_x")) / dyncl.get_surface_tension_at_cl_expression()))
 
     def set_missing_information(self,initial_contact_angle:ExpressionOrNum,initial_surface_tension:ExpressionOrNum,initial_contact_line_position:ExpressionOrNum):
@@ -587,7 +604,7 @@ class KwokNeumannContactLine(StickSlipContactLine):
         self.beta=beta
         self.sigma_sg_0:ExpressionNumOrNone=sigma_sg_0
 
-    def get_equilibrium_contact_angle_expression(self,dyncl:Optional["DynamicContactLineEquations"]):
+    def get_equilibrium_contact_angle_expression(self,dyncl:"DynamicContactLineEquations | None"):
         assert dyncl is not None
         sigma = dyncl.get_surface_tension_at_cl_expression()
         assert self.sigma_sg_0 is not None
@@ -624,7 +641,7 @@ class WenzelContactLine(YoungDupreContactLine):
         super(WenzelContactLine, self).__init__(sigma_sg=sigma_sg,sigma_sl=sigma_sl,cl_speed_scale=cl_speed_scale,cl_speed_exponent=cl_speed_exponent)
         self.roughness=roughness
 
-    def get_equilibrium_contact_angle_expression(self, dyncl:Optional["DynamicContactLineEquations"]):
+    def get_equilibrium_contact_angle_expression(self, dyncl:"DynamicContactLineEquations | None"):
         assert self._delta_sigma is not None
         assert dyncl is not None
         return acos(maximum(-1, self.roughness*self._delta_sigma / dyncl.get_surface_tension_at_cl_expression()))
@@ -650,7 +667,7 @@ class CassieBaxterContactLine(YoungDupreContactLine):
         super(CassieBaxterContactLine, self).__init__(sigma_sg=sigma_sg, sigma_sl=sigma_sl,cl_speed_scale=cl_speed_scale,cl_speed_exponent=cl_speed_exponent)
         self.pillar_fraction = pillar_fraction # between 0 (all air) and 1 (all solid)
 
-    def get_equilibrium_contact_angle_expression(self,dyncl:Optional["DynamicContactLineEquations"]):
+    def get_equilibrium_contact_angle_expression(self,dyncl:"DynamicContactLineEquations | None"):
         assert dyncl is not None
         sigma_cl=dyncl.get_surface_tension_at_cl_expression()        
         assert self._delta_sigma is not None
@@ -682,18 +699,24 @@ class DynamicContactLineEquations(InterfaceEquations):
             surface_tension_name: Optional. The name of the surface tension. Default is "surf_tens_at_cl".
             override_dynamics_name: Optional. The name of the override dynamics field. Default is "_override_cl_dynamics".
             with_observables: Optional. If True, the observables for the contact line will be added. Default is False.
+            cox_voinov: Optional. If True, the angle imposed by the model is bent by the Cox-Voinov relation from the microscopic cutoff length up to the mesh size, which makes the result considerably less sensitive to the mesh size at the contact line. Default is False.
+            U_wall: Optional. Velocity vector of the substrate, only used for ``cox_voinov``. The contact line speed entering the capillary number is measured relative to it, so that advancing and receding sides get the correct sign automatically. Default is 0, i.e. a substrate at rest.
+            cox_voinov_microscopic_length: Optional. Microscopic cutoff length (e.g. the slip length) of the Cox-Voinov relation. Must be set whenever ``cox_voinov`` is used.
+            cox_voinov_min_angle: Optional. Lower clamp of the bent angle. Default is 1 degree.
     """
     required_parent_type = MultiComponentNavierStokesInterface
 
-    def __init__(self,model:GenericContactLineModel,wall_normal:ExpressionOrNum=vector(0,1),wall_tangent:ExpressionOrNum=None,unpinned_indicator_name:str="_is_unpinned",velocity_enforcing_name:str="_cl_velo_lagr",actual_theta_name:str="measured_contact_angle",surface_tension_name:str="surf_tens_at_cl",override_dynamics_name:str="_override_cl_dynamics",with_observables:bool=False):
+    def __init__(self,model:GenericContactLineModel,wall_normal:ExpressionOrNum=vector(0,1),wall_tangent:ExpressionNumOrNone=None,unpinned_indicator_name:str="_is_unpinned",velocity_enforcing_name:str="_cl_velo_lagr",actual_theta_name:str="measured_contact_angle",surface_tension_name:str="surf_tens_at_cl",override_dynamics_name:str="_override_cl_dynamics",with_observables:bool=False,cox_voinov:bool=False,U_wall:ExpressionOrNum=0,cox_voinov_microscopic_length:ExpressionNumOrNone=None,cox_voinov_min_angle:ExpressionOrNum=1*degree):
         super(DynamicContactLineEquations, self).__init__()
         self.model=model
         self.wall_normal=wall_normal
-        self.wall_tangent=wall_tangent
-        if self.wall_tangent is None:
+        self.wall_tangent:ExpressionOrNum
+        if wall_tangent is None:
             # bac-cab rule assuming the wall_normal is normalized. Pointing inward to the bulk domain, along the substrate (i.e. orthogonal to the wall normal)
             self.wall_tangent=self.wall_normal*dot(self.wall_normal,var("normal",domain=".."))-var("normal",domain="..")
             self.wall_tangent=subexpression(self.wall_tangent/square_root(dot(self.wall_tangent,self.wall_tangent)))
+        else:
+            self.wall_tangent=wall_tangent
         self.unpinned_indicator_name=unpinned_indicator_name
         self.override_dynamics_name:str = override_dynamics_name
         self.velocity_enforcing_name=velocity_enforcing_name
@@ -702,8 +725,12 @@ class DynamicContactLineEquations(InterfaceEquations):
         self.enforce_proj_interface_velo_for_surfs_name="_enforce_uinterf_proj"
         self.project_surface_tension=True
         self.with_observables=with_observables
-        self.model._setup_for_equation(self) 
-        self._on_mesh:Optional[InterfaceMesh]=None
+        self.cox_voinov=cox_voinov
+        self.U_wall=U_wall
+        self.cox_voinov_microscopic_length=cox_voinov_microscopic_length
+        self.cox_voinov_min_angle=cox_voinov_min_angle
+        self.model._setup_for_equation(self)
+        self._on_mesh:InterfaceMesh | None=None
 
     def define_fields(self):
         self.define_scalar_field(self.velocity_enforcing_name,"C2",scale=1/test_scale_factor("velocity"),testscale=1/scale_factor("velocity"))
@@ -713,7 +740,11 @@ class DynamicContactLineEquations(InterfaceEquations):
         self.model.define_fields(self)
         inter=self.get_parent_equations()
         assert isinstance(inter,MultiComponentNavierStokesInterface)
-        if len(inter.interface_props._surfactants)>0: 
+        # Only the legacy surfactant transport has a projected advection velocity to constrain. The
+        # conservative form integrates the advection by parts, so its natural end condition already
+        # is zero flux out of the contact line and this multiplier has nothing left to do - see the
+        # module docstring of pyoomph.equations.surfactants.
+        if inter.uses_projected_surfactant_velocity():
             self.define_vector_field(self.enforce_proj_interface_velo_for_surfs_name,inter.surfactant_advect_velo_space,scale=1/test_scale_factor(inter.surfactant_advect_velo_name),testscale=1/scale_factor(inter.surfactant_advect_velo_name))
 
     def get_surface_tension_at_cl_expression(self)->ExpressionOrNum:
@@ -728,6 +759,17 @@ class DynamicContactLineEquations(InterfaceEquations):
 
     def get_actual_contact_angle_expression(self):
         return var(self.actual_theta_name)
+
+    def apply_cox_voinov_correction(self,microscopic_angle:ExpressionOrNum)->ExpressionOrNum:
+        """
+        Bends the angle the contact line model wants to impose from the microscopic cutoff length up to the size of the
+        attached free surface element, cf. :py:func:`~pyoomph.equations.navier_stokes.cox_voinov_apparent_angle`. Since
+        the measured contact angle is a mesh scale quantity as well, this is the angle all model dynamics compare with.
+        Returns the angle unchanged unless ``cox_voinov`` was set.
+        """
+        if not self.cox_voinov:
+            return microscopic_angle
+        return subexpression(_cox_voinov_angle_at_contact_line(self,microscopic_angle,self.get_surface_tension_at_cl_expression(),self.wall_tangent,self.U_wall,self.cox_voinov_microscopic_length,self.cox_voinov_min_angle))
 
     def define_residuals(self):
         theta_act, theta_act_test = var_and_test(self.actual_theta_name)
@@ -751,8 +793,11 @@ class DynamicContactLineEquations(InterfaceEquations):
                 assert sigma0 is not None
                 self.set_initial_condition(self.surface_tension_name,sigma0,degraded_start=True)
 
-        # In case of surfactants, enforce the velocity of the contact line for the projected velocity        
-        if len(parent.interface_props._surfactants) > 0: 
+        # In case of surfactants, enforce the velocity of the contact line for the projected velocity.
+        # Legacy transport only: that form does not integrate the advection by parts, so it retains a
+        # genuine advective outflow of surfactant at the contact line, and pinning the projected
+        # velocity to the mesh velocity is what cancels it. The conservative form has no such term.
+        if parent.uses_projected_surfactant_velocity():
             upro,upro_test=var_and_test(parent.surfactant_advect_velo_name)
             enf_upro,enf_upro_test=var_and_test(self.enforce_proj_interface_velo_for_surfs_name)
             self.add_residual(weak(enf_upro,upro_test))
@@ -774,7 +819,7 @@ class DynamicContactLineEquations(InterfaceEquations):
         assert isinstance(eqtree._mesh,InterfaceMesh) 
         self._on_mesh=eqtree._mesh 
 
-    def _init_output(self,eqtree:EquationTree,continue_info:Optional[Dict[str,Any]],rank:int): # Not for the output, but used to store the mesh information here
+    def _init_output(self,eqtree:EquationTree,continue_info:dict[str, Any] | None,rank:int): # Not for the output, but used to store the mesh information here
         super()._init_output(eqtree,continue_info,rank)
         assert isinstance(eqtree._mesh,InterfaceMesh) 
         self._on_mesh = eqtree._mesh 
@@ -794,9 +839,13 @@ class DynamicContactLineEquations(InterfaceEquations):
 class SimplePopovContactLineEquations(ODEEquations):
     def __init__(self):
         super(SimplePopovContactLineEquations, self).__init__()
-        self._on_mesh:Optional[ODEStorageMesh]=None
+        self._on_mesh:ODEStorageMesh | None=None
 
-    def _init_output(self,eqtree:EquationTree,continue_info:Optional[Dict[str,Any]],rank:int): # Not for the output, but used to store the mesh information here
+    def _init_output(self,eqtree:EquationTree,continue_info:dict[str, Any] | None,rank:int): # Not for the output, but used to store the mesh information here
         super()._init_output(eqtree,continue_info,rank)
         assert isinstance(eqtree._mesh,ODEStorageMesh) 
         self._on_mesh = eqtree._mesh 
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

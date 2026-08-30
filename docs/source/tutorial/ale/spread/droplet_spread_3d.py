@@ -1,24 +1,25 @@
+#  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -44,7 +45,10 @@ class DropletSpreading3d(Problem):
         eqs = NavierStokesEquations(mass_density=0.01, dynamic_viscosity=1)  # flow
         # PseudoElasticMesh is a bit more expensive to calculate, but is more stable in terms of larger deformations than LaplaceSmoothedMesh
         eqs += PseudoElasticMesh()
-        eqs += RefineToLevel(2)  # Since the SphericalOctanctMesh is really coarse
+        eqs += RefineToLevel(2)  # The SphericalOctantMesh only has four elements, so resolve it a bit
+        # The shell of the SphericalOctantMesh carries a curved entity, so the nodes created by this
+        # refinement land exactly on the sphere rather than on the polyhedron through the coarse
+        # mesh's corners -- without it, the initial droplet would be short of its volume by 23%.
 
         # No flow through the boundaries and
         eqs += DirichletBC(mesh_x=0, velocity_x=0) @ "plane_x0"

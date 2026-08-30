@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -29,9 +30,14 @@
 from ..generic import Equations,InterfaceEquations
 from ..expressions import *  # Import grad et al
 from ..typings import *
+from ..materials.generic import AnyFluidProperties
 
 if TYPE_CHECKING:
-    from ..materials.generic import PureLiquidProperties,PureGasProperties,MixtureLiquidProperties,MixtureGasProperties
+    # AnyFluidProperties is a string-valued TypeAlias (see materials/generic.py) whose members
+    # (PureLiquidProperties, PureGasProperties, ...) are only resolvable via a wildcard import -
+    # needed so tools that resolve forward references in type annotations (e.g. sphinx_autodoc_typehints)
+    # can look them up in this module's namespace too, same as materials/generic.py itself does.
+    from ..materials.generic import *
 
 
 class CahnHilliardEquation(Equations):
@@ -126,9 +132,9 @@ class CahnHilliardWettingInterface(InterfaceEquations):
     """
     TODO: Add description    
     """
-    required_parent_type=CahnHilliardEquation
+    required_parent_type:type[Equations] | None=CahnHilliardEquation
 
-    def __init__(self,sigma_fs_plus:Optional[ExpressionOrNum]=None,sigma_fs_minus:Optional[ExpressionOrNum]=None,contact_angle_plus:Optional[ExpressionOrNum]=None,contact_angle_minus:Optional[ExpressionOrNum]=None):
+    def __init__(self,sigma_fs_plus:ExpressionOrNum | None=None,sigma_fs_minus:ExpressionOrNum | None=None,contact_angle_plus:ExpressionOrNum | None=None,contact_angle_minus:ExpressionOrNum | None=None):
         super(CahnHilliardWettingInterface, self).__init__()
         self.sigma_fs_plus=sigma_fs_plus
         self.sigma_fs_minus=sigma_fs_minus
@@ -155,6 +161,7 @@ class CahnHilliardWettingInterface(InterfaceEquations):
             if self.contact_angle_plus is not None:
                 delta_sigma=parent.sigma*cos(self.contact_angle_plus)
             else:
+                assert self.contact_angle_minus is not None
                 delta_sigma=-parent.sigma * cos(self.contact_angle_minus)
         else:
             assert self.sigma_fs_minus is not None
@@ -184,7 +191,6 @@ class SimpleNSCH(Equations):
     """
     TODO: Add description    
     """
-    from ..materials.generic import AnyFluidProperties
     def __init__(self,fluid_plus:AnyFluidProperties,fluid_minus:AnyFluidProperties,sigma:ExpressionOrNum=1,epsilon:ExpressionOrNum=1,mobility:ExpressionOrNum=1,space:FiniteElementSpaceEnum="C2",phase_name:str="c",potential_name:str="mu",velocity_name:str="velocity",temporal_error_factor:float=0,dyadic_forcing:bool=False):
         super(SimpleNSCH, self).__init__()
         self.mobility=mobility
@@ -266,6 +272,9 @@ class SimpleNSCHWettingInterface(CahnHilliardWettingInterface):
     """
     required_parent_type=SimpleNSCH
 
-    def __init__(self,sigma_fs_plus:Optional[ExpressionOrNum]=None,sigma_fs_minus:Optional[ExpressionOrNum]=None,contact_angle_plus:Optional[ExpressionOrNum]=None,contact_angle_minus:Optional[ExpressionOrNum]=None):
+    def __init__(self,sigma_fs_plus:ExpressionOrNum | None=None,sigma_fs_minus:ExpressionOrNum | None=None,contact_angle_plus:ExpressionOrNum | None=None,contact_angle_minus:ExpressionOrNum | None=None):
         super(SimpleNSCHWettingInterface, self).__init__(sigma_fs_plus, sigma_fs_minus, contact_angle_plus, contact_angle_minus)
 
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

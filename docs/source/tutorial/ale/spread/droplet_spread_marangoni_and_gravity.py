@@ -1,24 +1,25 @@
+#  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -126,13 +127,13 @@ if __name__=="__main__":
 
 		# Ramp up gravity by arclength continuation
 		problem.go_to_param(gravity_factor=1,startstep=0.2,final_adaptive_solve=False)
-		problem.output_at_increased_time()
+		problem.output(increase_time_for_PVD=True)
 
 		# Ramp up the contact angle by arclength continuation
 		problem.go_to_param(contact_angle=110*degree, startstep=5*degree,final_adaptive_solve=False)
-		problem.output_at_increased_time()
+		problem.output(increase_time_for_PVD=True)
 
 		# Ramp up Marangoni flow by arclength continuation
 		problem.go_to_param(sigma_gradient=0.001, startstep=0.001,final_adaptive_solve=True)
-		problem.output_at_increased_time()
+		problem.output(increase_time_for_PVD=True)
 

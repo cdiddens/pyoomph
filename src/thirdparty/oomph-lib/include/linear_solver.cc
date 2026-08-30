@@ -265,19 +265,15 @@ namespace oomph
     // Note that we need to use the mantissa, exponent formulation to
     // avoid underflow errors
     double determinant_mantissa = 1.0;
-    int determinant_exponent = 0, iexp;
+    int iexp;
     for (unsigned i = 0; i < n; i++)
     {
       // Multiply by the next diagonal entry's mantissa
       // and return the exponent
       determinant_mantissa *= frexp(LU_factors[n * i + i], &iexp);
 
-      // Add the new exponent to the current exponent
-      determinant_exponent += iexp;
-
       // normalise
       determinant_mantissa = frexp(determinant_mantissa, &iexp);
-      determinant_exponent += iexp;
     }
 
     // If paranoid issue a warning that the matrix is near singular
@@ -862,6 +858,22 @@ namespace oomph
 
       LinearAlgebraDistribution dist(
         problem_pt->communicator_pt(), n_dof, !Dist_use_global_solver);
+      // FOR PYOOMPH: the UNIFORM split above is not necessarily the one the problem needs. Static
+      // condensation requires the rank owning a row of the Jacobian to be the rank that can invert the
+      // element-local block that row belongs to (dev_docs/static_condensation.md section 9.1), which
+      // the uniform split breaks; the problem names the distribution it wants through this hook. Null
+      // by default, so nothing else changes; where it is used on a distributed problem it only removes
+      // the redistribute() that newton_solve() does afterwards anyway.
+      if (!Dist_use_global_solver)
+      {
+        LinearAlgebraDistribution* preferred_pt = 0;
+        problem_pt->preferred_linear_solver_distribution(preferred_pt);
+        if (preferred_pt != 0)
+        {
+          dist.build(preferred_pt);
+          delete preferred_pt;
+        }
+      }
       this->build_distribution(dist);
       // FOR PYOOMPH: We need to handle the distribution differently in pyoomph: Solving is always distributed, however, we must pay attention to the dof blocks when running without --distribute
       /*if (problem_pt->distributed())
@@ -933,7 +945,8 @@ namespace oomph
         // Storage for the residuals vector
         // A non-distriubted residuals vector
         LinearAlgebraDistribution dist(
-          problem_pt->communicator_pt(), problem_pt->ndof(), /*problem_pt->is_block_dof_arrangement_used() ? problem_pt->block_dof_pt_start() : Vector<unsigned long>(),*/ false);
+          problem_pt->communicator_pt(), problem_pt->ndof(),
+          /*FOR PYOOMPH: block-dof arrangement, see problem.h*/ false);
         DoubleVector residuals(&dist, 0.0);
         CRDoubleMatrix jacobian(&dist);
 
@@ -983,7 +996,8 @@ namespace oomph
     {
       // set the solver distribution
       LinearAlgebraDistribution dist(
-        problem_pt->communicator_pt(), problem_pt->ndof(), /*problem_pt->is_block_dof_arrangement_used() ? problem_pt->block_dof_pt_start() : Vector<unsigned long>(),*/ false);
+        problem_pt->communicator_pt(), problem_pt->ndof(),
+        /*FOR PYOOMPH: block-dof arrangement, see problem.h*/ false);
       this->build_distribution(dist);
 
       // Allocate storage for the residuals vector
@@ -1241,6 +1255,12 @@ namespace oomph
     // Doc time for solve
     double t_factorise_start = TimingHelpers::timer();
 
+    //FOR PYOOMPH: read the size before factorising. On more than one process
+    // solve(Problem*) forces Dist_delete_matrix_data, so factorise_distributed()
+    // clear()s the Jacobian to free it before the solve; the timing line below then
+    // reported "ndof=0" for every distributed Newton step.
+    unsigned long n_row_before_factorise = matrix_pt->nrow();
+
     // Factorise the matrix
     factorise(matrix_pt);
 
@@ -1318,7 +1338,7 @@ namespace oomph
         << TimingHelpers::convert_secs_to_formatted_string(factorise_time)
         << "\nTime for back-substitution: "
         << TimingHelpers::convert_secs_to_formatted_string(backsub_time)
-        << "\nTime for LinearSolver solve (ndof=" << matrix_pt->nrow() << "): " //FOR PYOOMPH: Replaced SuperLUSolver by LinearSolver, since it is not always superlu doing the job
+        << "\nTime for LinearSolver solve (ndof=" << n_row_before_factorise << "): " //FOR PYOOMPH: Replaced SuperLUSolver by LinearSolver, since it is not always superlu doing the job
         << TimingHelpers::convert_secs_to_formatted_string(Solution_time)
         << std::endl;
     }
@@ -1724,6 +1744,9 @@ namespace oomph
     // Doc time for solve
     double t_factorise_start = TimingHelpers::timer();
 
+    //FOR PYOOMPH: read the size before factorising -- see the same guard in solve()
+    unsigned long n_row_before_factorise = matrix_pt->nrow();
+
     // Factorise the matrix
     factorise(matrix_pt);
 
@@ -1800,7 +1823,7 @@ namespace oomph
         << TimingHelpers::convert_secs_to_formatted_string(factorise_time)
         << "\nTime for back-substitution: "
         << TimingHelpers::convert_secs_to_formatted_string(backsub_time)
-        << "\nTime for LinearSolver solve (ndof=" << matrix_pt->nrow() << "): " //FOR PYOOMPH: Replaced SuperLUSolver by LinearSolver, since it is not always superlu doing the job
+        << "\nTime for LinearSolver solve (ndof=" << n_row_before_factorise << "): " //FOR PYOOMPH: Replaced SuperLUSolver by LinearSolver, since it is not always superlu doing the job
         << TimingHelpers::convert_secs_to_formatted_string(Solution_time)
         << std::endl;
     }
@@ -2814,17 +2837,28 @@ namespace oomph
 
       Dist_solver_data_pt = 0;
 
-      // Delete internal copy of the matrix
-      delete[] Dist_value_pt;
-      delete[] Dist_index_pt;
-      delete[] Dist_start_pt;
-      Dist_value_pt = 0;
-      Dist_index_pt = 0;
-      Dist_start_pt = 0;
-
       // and the distribution
       this->clear_distribution();
     }
+
+    //FOR PYOOMPH: the internal copy of the matrix is deleted here, OUTSIDE the
+    // "if (Dist_solver_data_pt != 0)" above, which is where upstream deletes it.
+    // pyoomph replaces SuperLU_DIST with its own shim
+    // (superlu_dist_distributed_matrix() in src/nanobind/solver.cpp), which keeps the
+    // factorisation on the Python side and never writes a handle into the "data"
+    // out-parameter. Dist_solver_data_pt therefore stays NULL for the whole run and
+    // upstream's block never executes, while factorise_distributed() new[]s a fresh copy
+    // of the local matrix on every single factorisation. Nothing ever deleted it:
+    // ~3.8 MB per Newton step per rank on the mcflow/marangoni_instability tutorial, which
+    // grew without bound until the OOM killer took the job down under mpirun -n 4.
+    // Guarding on the pointers themselves rather than on the solver handle is what makes
+    // the delete happen in both cases, and it stays a no-op when it has already run.
+    delete[] Dist_value_pt;
+    delete[] Dist_index_pt;
+    delete[] Dist_start_pt;
+    Dist_value_pt = 0;
+    Dist_index_pt = 0;
+    Dist_start_pt = 0;
 #endif
   }
 

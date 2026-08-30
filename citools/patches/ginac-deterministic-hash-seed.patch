@@ -1,0 +1,41 @@
+Make GiNaC::make_hash_seed() deterministic across process runs on every
+platform, not just _WIN32/__APPLE__.
+
+GiNaC::basic::compare() (used to canonically order the terms of every
+sum/product, and by extension any std::set/std::map<GiNaC::ex, ...,
+GiNaC::ex_is_less> pyoomph's code generator builds) sorts primarily by
+GiNaC::basic::gethash(). The default make_hash_seed() hashes the *address*
+of the RTTI type-name string (type_info::name()), which moves every process
+run under ASLR - so the same input script can produce a differently-ordered
+(but equally correct) generated C++ file on every run.
+
+GiNaC already ships a deterministic alternative (crc32 of the mangled type
+name string) behind GINAC_HASH_USE_MANGLED_NAME, but only turns it on for
+_WIN32/__APPLE__. This patch turns it on unconditionally so Linux builds get
+reproducible code generation too. See pyoomph branch deterministic_codegen.
+
+--- a/ginac/hash_seed.h
++++ b/ginac/hash_seed.h
+@@ -8,9 +8,20 @@
+ #include <typeinfo>
+ #include <cstring>
+ #include "utils.h"
+-#if defined(_WIN32) || defined(__APPLE__)
++// pyoomph: always use the mangled-name (CRC32) hash seed below, on every
++// platform, instead of only on _WIN32/__APPLE__. The alternative path hashes
++// the *address* of the RTTI type-name string, which shifts every process run
++// under ASLR. Since GiNaC::basic::compare() sorts primarily by hash, that
++// makes the term order of every sum/product - and the iteration order of any
++// std::set/std::map<GiNaC::ex, GiNaC::ex_is_less> built on top of GiNaC types
++// (pyoomph's code generator builds several) - non-deterministic across
++// separate runs of the exact same input, even though it is perfectly
++// self-consistent within one run. The mangled name string itself is stable
++// across runs of the same binary, so hashing it instead makes code generation
++// reproducible. Cost: one CRC32 over a short (~10-60 byte) string, computed
++// once per node the first time its hash is requested and cached afterwards
++// (status_flags::hash_calculated) - not a per-comparison cost.
+ #define GINAC_HASH_USE_MANGLED_NAME 1
+-#endif
+
+ #ifdef GINAC_HASH_USE_MANGLED_NAME
+ #include "crc32.h"

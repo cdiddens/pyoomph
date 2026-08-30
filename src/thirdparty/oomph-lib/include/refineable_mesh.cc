@@ -34,6 +34,7 @@
 #include <limits>
 
 #include "refineable_mesh.h"
+#include <algorithm>
 // Include to fill in additional_synchronise_hanging_nodes() function
 #include "refineable_mesh.template.cc"
 
@@ -304,26 +305,25 @@ namespace oomph
   /// - Store # of refined/unrefined elements.
   /// - Doc refinement process (if required)
   //========================================================================
-  void TreeBasedRefineableMeshBase::adapt(const Vector<double>& elemental_error)
+  //========================================================================
+  /// Split out of adapt() below so that a caller can interpose between the two
+  /// halves: this one only translates the elemental errors into per-element
+  /// refine/unrefine FLAGS, without acting on them. pyoomph uses that gap to make
+  /// two separately-adapted meshes that share an interface agree about which
+  /// elements they refine, which has to happen after the decision is taken and
+  /// before it is executed (see pyoomph's dev_docs/interface_refinement_coupling.md).
+  /// adapt() itself is unchanged in behaviour -- it is now just the composition.
+  //========================================================================
+  //FOR PYOOMPH: adapt() split into this half and execute_selected_adaptation() below;
+  // adapt() is now the composition of the two. See src/thirdparty/INFO_oomph-lib.
+  void TreeBasedRefineableMeshBase::select_elements_for_refinement_and_unrefinement(
+    const Vector<double>& elemental_error, unsigned& n_refine, unsigned& n_unrefine)
   {
     // Set the refinement tolerance to be the max permissible error
     double refine_tol = max_permitted_error();
 
     // Set the unrefinement tolerance to be the min permissible error
     double unrefine_tol = min_permitted_error();
-
-    // Setup doc info
-    DocInfo local_doc_info;
-    if (doc_info_pt() == 0)
-    {
-      local_doc_info.disable_doc();
-    }
-    else
-    {
-      local_doc_info = doc_info();
-    }
-
-
     // Check that the errors make sense
     if (refine_tol <= unrefine_tol)
     {
@@ -337,8 +337,6 @@ namespace oomph
       throw OomphLibError(
         error_stream.str(), OOMPH_CURRENT_FUNCTION, OOMPH_EXCEPTION_LOCATION);
     }
-
-
     // Select elements for refinement and unrefinement
     //================================================
     // Reset counter for number of elements that would like to be
@@ -350,7 +348,7 @@ namespace oomph
     std::map<RefineableElement*, bool> wants_to_be_unrefined;
 
     // Initialise a variable to store the number of elements for refinment
-    unsigned n_refine = 0;
+    n_refine = 0; // out-param, see the signature (was a local before adapt() was split)
 
     // Loop over all elements and mark them according to the error criterion
     unsigned long Nelement = this->nelement();
@@ -430,7 +428,7 @@ namespace oomph
     // all brothers want to be unrefined.
     // Loop over all elements again and let the first set of sons check if their
     // brothers also want to be unrefined
-    unsigned n_unrefine = 0;
+    n_unrefine = 0; // out-param, see the signature (was a local before adapt() was split)
     for (unsigned long e = 0; e < Nelement; e++)
     {
       //(Cast) pointer to the element
@@ -481,8 +479,26 @@ namespace oomph
     oomph_info << " \n Number of elements to be merged : " << n_unrefine
                << std::endl
                << std::endl;
+  }
 
-
+  //========================================================================
+  /// The other half of adapt(): act on the flags that
+  /// select_elements_for_refinement_and_unrefinement() has already set.
+  //========================================================================
+  //FOR PYOOMPH: the acting half of the original adapt(); see the note above.
+  void TreeBasedRefineableMeshBase::execute_selected_adaptation(unsigned n_refine,
+                                                                unsigned n_unrefine)
+  {
+    // Setup doc info
+    DocInfo local_doc_info;
+    if (doc_info_pt() == 0)
+    {
+      local_doc_info.disable_doc();
+    }
+    else
+    {
+      local_doc_info = doc_info();
+    }
     // Now do the actual mesh adaptation
     //---------------------------------
 
@@ -822,6 +838,18 @@ namespace oomph
       Nunrefined = 0;
       Nrefined = 0;
     }
+  }
+
+  //========================================================================
+  /// Adapt mesh in response to a vector of elemental errors: select, then execute.
+  //========================================================================
+  void TreeBasedRefineableMeshBase::adapt(const Vector<double>& elemental_error)
+  {
+    unsigned n_refine = 0;
+    unsigned n_unrefine = 0;
+    select_elements_for_refinement_and_unrefinement(
+      elemental_error, n_refine, n_unrefine);
+    execute_selected_adaptation(n_refine, n_unrefine);
   }
 
   //========================================================================
@@ -1275,6 +1303,13 @@ namespace oomph
       {
         this->setup_boundary_element_info();
       }
+
+      //FOR PYOOMPH: correct the nodal boundary membership of the nodes this adapt has just created.
+      // Deliberately OUTSIDE the block above -- it works off the per-face boundary tags, not off
+      // Boundary_element_pt -- and deliberately here rather than at the end of adapt_mesh(): the
+      // repositioning of hanging boundary nodes onto their macro element further down reads boundary
+      // membership, and would otherwise snap a spuriously marked node onto a boundary it is not on.
+      this->reconcile_boundary_node_membership_locally();
 
       if (Global_timings::Doc_comprehensive_timings)
       {
@@ -1752,6 +1787,12 @@ namespace oomph
       } // End of documentation
     } // End if (this->nelement()>0)
 
+    //FOR PYOOMPH: push the boundary memberships just removed above onto the other ranks' halo copies.
+    // This communicates, so it has to be here and not inside the block that just ended: a rank can
+    // legitimately hold no elements of a given submesh, and a collective in there would deadlock it.
+    // It also has to be before classify_halo_and_haloed_nodes() has rebuilt anything, since it is
+    // driven by the halo/haloed ELEMENT lists -- the node lists are still stale at this point.
+    this->reconcile_boundary_node_membership_across_processes();
 
 #ifdef OOMPH_HAS_MPI
 
@@ -2268,12 +2309,29 @@ namespace oomph
   /// Need to translate this into a scheme where all
   /// hanging  nodes only depend on non-hanging nodes...
   //==================================================================
+  // FOR PYOOMPH: comparator for the canonical master ordering in complete_hanging_nodes below.
+  // Compares only the index, so std::stable_sort keeps the original relative order of any entries
+  // that share one (which only happens for a master that is not a node of this mesh).
+  static bool pyoomph_compare_master_by_index(
+    const std::pair<unsigned, std::pair<Node*, double> >& a,
+    const std::pair<unsigned, std::pair<Node*, double> >& b)
+  {
+    return a.first < b.first;
+  }
+
   void TreeBasedRefineableMeshBase::complete_hanging_nodes(
     const int& ncont_interpolated_values)
   {
     // Number of nodes in mesh
     unsigned long n_node = this->nnode();
     double min_weight = 1.0e-8; // RefineableBrickElement::min_weight_value();
+
+    // FOR PYOOMPH: node -> position in this mesh's node vector, used below to give each hanging
+    // scheme's master list a reproducible order. Built once per call; the node ordering itself is
+    // reproducible across runs, which is what makes it a usable canonical key (heap addresses are not).
+    std::map<Node*, unsigned> pyoomph_canonical_node_index;
+    for (unsigned long n = 0; n < n_node; n++)
+      pyoomph_canonical_node_index[this->node_pt(n)] = static_cast<unsigned>(n);
 
     // Loop over the nodes in the mesh
     for (unsigned long n = 0; n < n_node; n++)
@@ -2312,13 +2370,38 @@ namespace oomph
             // Create new hanging data (we know how many data there are)
             HangInfo* hang_pt = new HangInfo(hang_weights.size());
 
-            unsigned hang_weights_index = 0;
-            // Copy the map into the HangInfo object
+            // FOR PYOOMPH: write the masters in a CANONICAL order (their index in this mesh's node
+            // vector), not in the std::map's order. The map above is keyed by Node*, so iterating it
+            // yields the masters sorted by heap ADDRESS -- which varies from run to run. Every sum
+            // over masters afterwards (hanging values, hanging positions, the constrained rows the
+            // assembly builds) then adds the same terms in a different order, and floating-point
+            // addition is not associative, so results moved by ~1 ulp between two runs of the same
+            // binary. That is small until it flips a refinement decision at a threshold, after which
+            // meshes diverge outright -- observed as two MPI ranks refining opposite ends of a bubble
+            // and disagreeing about ndof. See dev_docs/replicated_mpi_correctness.md §4.
+            std::vector<std::pair<unsigned, std::pair<Node*, double> > > ordered_masters;
+            ordered_masters.reserve(hang_weights.size());
             typedef std::map<Node*, double>::iterator IT;
             for (IT it = hang_weights.begin(); it != hang_weights.end(); ++it)
             {
-              hang_pt->set_master_node_pt(
-                hang_weights_index, it->first, it->second);
+              std::map<Node*, unsigned>::const_iterator ix =
+                pyoomph_canonical_node_index.find(it->first);
+              // Masters are nodes of this mesh, so the lookup succeeds. A master from elsewhere would
+              // have no canonical index here; sort those last, keeping their relative map order.
+              const unsigned key = (ix == pyoomph_canonical_node_index.end())
+                                     ? static_cast<unsigned>(n_node)
+                                     : ix->second;
+              ordered_masters.push_back(std::make_pair(key, *it));
+            }
+            std::stable_sort(ordered_masters.begin(), ordered_masters.end(),
+                             pyoomph_compare_master_by_index);
+
+            unsigned hang_weights_index = 0;
+            for (unsigned im = 0; im < ordered_masters.size(); im++)
+            {
+              hang_pt->set_master_node_pt(hang_weights_index,
+                                          ordered_masters[im].second.first,
+                                          ordered_masters[im].second.second);
               ++hang_weights_index;
             }
 
@@ -2562,8 +2645,6 @@ namespace oomph
       // No halo with yourself
       if (d != my_rank)
       {
-        unsigned discrepancy_count = 0;
-        unsigned discrepancy_count_buff = 0;
 
         // Storage for hanging information that needs to be sent to the
         // relevant process if there is a discrepancy in the hanging status
@@ -2602,7 +2683,6 @@ namespace oomph
                 (haloed_hanging[d][count] != halo_hanging[d][count]))
             {
               discrepancy_buff = 1;
-              discrepancy_count_buff++;
 
               // Flag to check if all masters of this node have been found
               bool found_all_masters = true;
@@ -2961,7 +3041,6 @@ namespace oomph
               {
                 // All masters were found, so populate send data from buffer
                 discrepancy = discrepancy_buff;
-                discrepancy_count += discrepancy_count_buff;
                 for (unsigned i = 0; i < send_data_buff.size(); i++)
                 {
                   send_data.push_back(send_data_buff[i]);
@@ -2973,7 +3052,6 @@ namespace oomph
 
                 // Clear buffers and reset
                 discrepancy_buff = 0;
-                discrepancy_count_buff = 0;
                 send_data_buff.clear();
                 send_double_data_buff.clear();
               }
@@ -2986,7 +3064,6 @@ namespace oomph
 
                 // Clear buffers and reset
                 discrepancy_buff = 0;
-                discrepancy_count_buff = 0;
                 send_data_buff.clear();
                 send_double_data_buff.clear();
 
@@ -3001,7 +3078,6 @@ namespace oomph
                      (halo_hanging[d][count] > 0))
             {
               discrepancy = 1;
-              discrepancy_count++;
               send_data.push_back(-1);
             }
             // Both halo and haloed node have the same number of masters
@@ -3841,10 +3917,21 @@ namespace oomph
                       el_pt->get_x(t, s, x_exp);
 
                       // Get actual position
+                      //FOR PYOOMPH: compare like-for-like at the SAME
+                      // history level t. The original oomph-lib code read the
+                      // current position nod_pt->x(dir) here while x_exp is
+                      // interpolated at history level t via get_x(t,...). On
+                      // meshes whose position history at t>=1 is left at zero
+                      // (e.g. simplex meshes on stationary problems, where
+                      // ntstorage()>1 but only t=0/1 are initialised) this
+                      // falsely flagged every non-hanging node as "position
+                      // differs", generating spurious halo synchronisation
+                      // records. Reading x(t,dir) makes the comparison
+                      // consistent so conforming nodes are not flagged.
                       Vector<double> x_act(n_dim);
                       for (unsigned dir = 0; dir < n_dim; dir++)
                       {
-                        x_act[dir] = nod_pt->x(dir);
+                        x_act[dir] = nod_pt->x(t, dir);
                       }
 
                       // Compare actual and expected positions

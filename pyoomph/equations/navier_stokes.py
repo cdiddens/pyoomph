@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -27,21 +28,24 @@
  
 
 
+from .._deprecation import deprecated_kwargs as _deprecated_kwargs, deprecated_attribute_alias as _deprecated_attribute_alias
 from .. import WeakContribution, GlobalLagrangeMultiplier
 from ..generic import Equations, InterfaceEquations
 from .generic import get_interface_field_connection_space, TestScaling, Scaling
-from ..meshes.bcs import BoundaryCondition,DirichletBC
-from ..meshes.mesh import AnyMesh, InterfaceMesh
+from .generic import DirichletBC
+from ..meshes.mesh import AnyMesh, InterfaceMesh, assert_spatial_mesh
 from ..expressions import *  # Import grad et al
+from ..typings import *
 from ..expressions.units import degree
 
 
 if TYPE_CHECKING:
     from .._pyoomph_core import Node
     from ..solvers.generic import GenericEigenSolver
-    from ..generic.codegen import EquationTree
-    from ..materials.generic import AnyFluidProperties,PureLiquidProperties,PureGasProperties,MixtureLiquidProperties,MixtureGasProperties
+    from ..generic.codegen import EquationTree,FiniteElementCodeGenerator
+    from ..materials.generic import AnyFluidProperties
     from ..generic.problem import Problem
+    from ..meshes import AnySpatialMesh
 
 
 
@@ -53,43 +57,161 @@ if TYPE_CHECKING:
 # These will take care of it by either pinning one nodal pressure dof (TH) or one elemental pressure dof (CR)
 # The corresponding BC can be created via StokesElement.create_pressure_fixation()
 
-class PressureFixationTaylorHood(BoundaryCondition):
-    def __init__(self, pname,value:Optional[float]):
+# A pressure fixation must select ONE degree of freedom for the whole problem. Picking it as
+# "element_pt(0)" is only well defined in serial: on a distributed (MPI) mesh element 0 is the rank-LOCAL
+# first element, so every rank would pin a different dof -- the global system ends up inconsistently
+# constrained (and PETSc then segfaults during the solve). The helpers below instead select the candidate
+# with the lexicographically smallest coordinate among all NON-HALO entities, agree on it across ranks with
+# an MPI min-reduction, and let every rank pin whichever local copy (owned or halo) matches -- halo copies
+# must mirror the owner's pinned state, or the per-rank dof counts diverge. Serially this reduces to a
+# deterministic, mesh-ordering-independent choice.
+
+def _mpi_agree_on_smallest(local_key:"tuple[float,...] | None")->"tuple[float,...] | None":
+    """Agree across all ranks on the smallest of the per-rank candidate keys (None = "this rank has no
+    candidate"). MUST be reached by every rank, including ones with no local elements at all, since the
+    reduction is collective. Candidates are tagged (0,key) and the no-candidate marker is (1,), so the
+    marker always loses regardless of key length -- an inf-filled tuple would not (``(inf,) < (inf,inf)``)."""
+    from ..generic.mpi import get_mpi_nproc, get_mpi_world_comm
+    if get_mpi_nproc() <= 1:
+        return local_key
+    from mpi4py import MPI  # type:ignore
+    comm = get_mpi_world_comm()
+    assert comm is not None
+    tagged = (0, local_key) if local_key is not None else (1,)
+    best = comm.allreduce(tagged, op=MPI.MIN)
+    return best[1] if best[0] == 0 else None
+
+
+def _coord_key(entity, ndim:int, rounding:int=9)->"tuple[float,...]":
+    return tuple(round(entity.x(i), rounding) for i in range(ndim))
+
+
+def _element_centroid_key(el, ndim:int, rounding:int=9)->"tuple[float,...]":
+    n=el.nnode()
+    return tuple(round(sum(el.node_pt(k).x(i) for k in range(n))/n, rounding) for i in range(ndim))
+
+
+def _select_global_element_index(mesh)->"int | None":
+    """Local index of the one globally agreed element whose element-internal pressure dof gets pinned
+    (Crouzeix-Raviart / Scott-Vogelius). Selected by smallest centroid among non-halo elements, agreed
+    across ranks. Unlike the nodal case, an element-internal dof lives only on its owner, so a rank that
+    does not own the winner pins nothing."""
+    best, best_ie = None, None
+    if mesh.nelement() > 0:
+        ndim = mesh.element_pt(0).node_pt(0).ndim()
+        for ie in range(mesh.nelement()):
+            el = mesh.element_pt(ie)
+            if el.non_halo_proc_ID() >= 0:
+                continue
+            key = _element_centroid_key(el, ndim)
+            if best is None or key < best:
+                best, best_ie = key, ie
+    target = _mpi_agree_on_smallest(best)  # collective: reached even with no local elements
+    if target is None or best != target:
+        return None  # another rank owns the winning element
+    return best_ie
+
+
+class _PressureFixation(Equations):
+    """
+    Base of the three pressure fixations below: an equation that pins one pressure degree of freedom
+    by reaching into the mesh from Python, because which degree that is cannot be stated as an
+    expression - it depends on the elements and nodes the mesh actually has, and under MPI on which
+    rank owns them.
+
+    ``setup()`` resolves what is fixed for a given mesh and runs once per mesh; ``apply()`` does the
+    pinning and runs on every application of the boundary conditions.
+    """
+
+    def __init__(self):
+        super(_PressureFixation, self).__init__()
+        self.mesh:"AnySpatialMesh | None" = None
+        self.active = True
+
+    def setup(self):
+        pass
+
+    def apply(self):
+        pass
+
+    def on_apply_boundary_conditions(self, mesh:"AnyMesh"):
+        mesh=assert_spatial_mesh(mesh)
+        if (self.mesh is None) or (self.mesh != mesh):
+            self.mesh = mesh
+            self.setup()
+        self.apply()
+
+
+class PressureFixationTaylorHood(_PressureFixation):
+    def __init__(self, pname,value:float | None):
         super().__init__()
-        self.value:Optional[float] = value
-        self.node:Optional["Node"] = None
+        self.value:float | None = value
+        self.node:"Node | None" = None
         self.pname=pname
-        
+
 
     def setup(self):
         assert self.mesh is not None
-        self.pindex = self.mesh.element_pt(0).get_code_instance().get_nodal_field_index(self.pname)
+        # Off the code generator, not off element 0: a rank need not own an element of this domain
+        # under --distribute, and the error below has to be raised by all ranks or by none. Same
+        # DynamicJITCode object, one that does not depend on the partition - the reasoning is spelled
+        # out at PythonDirichletBC.setup().
+        assert self.mesh._codegen is not None
+        jitcode = self.mesh._codegen.get_code()
+        self.pindex = jitcode.get_nodal_field_index(self.pname)
         if self.pindex < 0:
-            allfields = self.mesh.element_pt(0).get_code_instance().get_nodal_field_indices()
+            allfields = jitcode.get_nodal_field_indices()
             for k,v in allfields.items():
-                print(k,v,self.mesh.element_pt(0).get_code_instance().get_nodal_field_index(k))
+                print(k,v,jitcode.get_nodal_field_index(k))
             raise RuntimeError("Missing nodal data for 'pressure'. Found only: "+str(allfields))
-        if self.node is None:
-            self.node = self.mesh.element_pt(0).node_pt(0)  # Is definitely a C1 node
-            ps=[self.node.x(i) for i in range(self.node.ndim())]
-            print("Got Node at " + str(ps))
+
+    def _select_node(self)->"Node | None":
+        assert self.mesh is not None
+        # Candidates: vertex (C1) nodes of non-halo elements. node_pt(0) of a bulk element is always a
+        # vertex node, hence always carries the Taylor-Hood (C1) pressure.
+        best:"tuple[float,...] | None" = None
+        ndim = 0
+        if self.mesh.nelement() > 0:
+            ndim = self.mesh.element_pt(0).node_pt(0).ndim()
+            for ie in range(self.mesh.nelement()):
+                el = self.mesh.element_pt(ie)
+                if el.non_halo_proc_ID() >= 0:
+                    continue  # halo copy -- its owner offers the same candidate
+                key = _coord_key(el.node_pt(0), ndim)
+                if best is None or key < best:
+                    best = key
+        target = _mpi_agree_on_smallest(best)  # collective: reached even with no local elements
+        if target is None or ndim == 0:
+            return None  # no candidate anywhere, or this rank holds no elements at all
+        # Now find that node locally -- including on ranks where it exists only as a halo copy, and where
+        # it may not be the local element's node_pt(0). The target is a vertex node, so a coordinate match
+        # over all local nodes identifies exactly it.
+        for nd in self.mesh.nodes():
+            if _coord_key(nd, ndim) == target:
+                return nd
+        return None  # the winning node is simply not present on this rank
 
     def apply(self):
-        assert self.node is not None
+        # Re-selected on every application rather than cached: refinement/unrefinement and mesh
+        # distribution both rebuild the node objects, and after distribution the winning node may live on
+        # a different rank than before. apply() runs on all ranks in lockstep (it is driven by the global
+        # reapply_boundary_conditions()), so the collective inside _select_node() is safe here.
+        self.node = self._select_node()
+        if self.node is None:
+            return  # the globally selected pressure node does not live on this rank
         self.node.pin(self.pindex)
         if self.value is not None:
             self.node.set_value(self.pindex, self.value)
-        print("PINNING some pressure with value",self.value)
 
-    def _before_eigen_solve(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver",angular_m:Optional[int]) -> bool:
+    def _before_eigen_solve(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver",angular_m:int | None=None,normal_k:float | None=None) -> bool:
         if angular_m is not None:
             raise RuntimeError("Do not use pressure_fixation with angular eigensolving. Use [Navier]StokesEquation(...).with_pressure_integral_constraint(problem) instead...")
         return False
 
 
 
-class PressureFixationScottVogelius(BoundaryCondition):
-    def __init__(self, pname,value:Optional[float]):
+class PressureFixationScottVogelius(_PressureFixation):
+    def __init__(self, pname,value:float | None):
         super().__init__()
         self.value = value
         self.pname= pname
@@ -100,25 +222,29 @@ class PressureFixationScottVogelius(BoundaryCondition):
             fl=e.get_field_data_list(self.pname,False)
             for d,ind in fl:
                 d.unpin(ind)
-        fl=self.mesh.element_pt(0).get_field_data_list(self.pname,False)[0]
+        ei=_select_global_element_index(self.mesh)  # see the note above PressureFixationTaylorHood
+        if ei is None:
+            return
+        fl=self.mesh.element_pt(ei).get_field_data_list(self.pname,False)[0]
         fl[0].pin(fl[1])
         if self.value is not None:
             fl[0].set_value(fl[1], self.value)
 
-    def _before_eigen_solve(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver",angular_m:Optional[float]) -> bool:
+    def _before_eigen_solve(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver",angular_m:float | None=None,normal_k:float | None=None) -> bool:
         if angular_m is not None:
             raise RuntimeError("Do not use pressure_fixation with angular eigensolving. Use [Navier]StokesEquation(...).with_pressure_integral_constraint(problem) instead...")
         return False
 
-class PressureFixationCrouzeixRaviart(BoundaryCondition):
-    def __init__(self, pname, value:Optional[float]):
+class PressureFixationCrouzeixRaviart(_PressureFixation):
+    def __init__(self, pname, value:float | None):
         super().__init__()
         self.value = value
         self.pname=pname
 
     def setup(self):
         assert self.mesh is not None
-        self.pindex = self.mesh.element_pt(0).get_code_instance().get_discontinuous_field_index(self.pname)
+        assert self.mesh._codegen is not None   # off the generator, not element 0: see the Taylor-Hood one above
+        self.pindex = self.mesh._codegen.get_code().get_discontinuous_field_index(self.pname)
         if self.pindex < 0:
             raise RuntimeError("Missing internal data for 'pressure'")
 
@@ -126,23 +252,18 @@ class PressureFixationCrouzeixRaviart(BoundaryCondition):
         assert self.mesh is not None
         for ei in range(self.mesh.nelement()):
             self.mesh.element_pt(ei).internal_data_pt(self.pindex).unpin(0)
-        self.mesh.element_pt(0).internal_data_pt(self.pindex).pin(0)
+        ei=_select_global_element_index(self.mesh)  # see the note above PressureFixationTaylorHood
+        if ei is None:
+            return
+        self.mesh.element_pt(ei).internal_data_pt(self.pindex).pin(0)
         if self.value is not None:
-            self.mesh.element_pt(0).internal_data_pt(self.pindex).set_value(0, self.value)
+            self.mesh.element_pt(ei).internal_data_pt(self.pindex).set_value(0, self.value)
 
-    def _before_eigen_solve(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver",angular_m:Optional[float]) -> bool:
+    def _before_eigen_solve(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver",angular_m:float | None=None,normal_k:float | None=None) -> bool:
         if angular_m is not None:
             raise RuntimeError("Do not use pressure_fixation with angular eigensolving. Use [Navier]StokesEquation(...).with_pressure_integral_constraint(problem) instead...")
         return False
 
-
-###################################
-
-class PFEMOptions:
-    def __init__(self,*,active:bool=True,first_order_system:bool=False,direct_position_update:bool=False) -> None:
-        self.active=active
-        self.first_order_system=first_order_system
-        self.direct_position_update=direct_position_update
 
 ###################################
 
@@ -176,30 +297,35 @@ class StokesEquations(Equations):
         pressure_sign_flip (bool, optional): Reverse the pressure sign to get a symmetric matrix. Defaults to False.
         momentum_scheme (TimeSteppingScheme, optional): Time-stepping scheme for the momentum equation. Defaults to "BDF2".
         continuity_scheme (TimeSteppingScheme, optional): Time-stepping scheme for the continuity equation. Defaults to "BDF2".
-        wrong_strain (bool, optional): Use mu*grad(u) instead of 2*mu*sym(grad(u)) for strain. Defaults to False.
         pressure_factor (ExpressionOrNum, optional): Multiplicative factor for the pressure in the momentum equation. Defaults to 1.
-        PFEM (Union[PFEMOptions,bool], optional): Options for Particle Finite Element Method (PFEM). Defaults to False.
-        stress_tensor (ExpressionNumOrNone, optional): Custom stress tensor. Defaults to None.
+        stress_tensor (ExpressionNumOrNone, optional): Custom stress tensor, *replacing* the Newtonian one. Defaults to None.
+        extra_stress (ExpressionNumOrNone, optional): Additional stress tensor, *added* to whichever stress tensor is in force. This is where a Maxwell, polymeric or active stress goes; see :py:class:`~pyoomph.equations.electrohydrodynamics.MaxwellStressEquations` for the electric one. Defaults to None.
         velocity_name (str, optional): Name of the velocity field. Defaults to "velocity".
-        pressure_name (str, optional): Name of the pressure field. Defaults to "pressure".        
+        pressure_name (str, optional): Name of the pressure field. Defaults to "pressure".
         DG_alpha (ExpressionNumOrNone, optional): If using Discontinuous Galerkin discretisation, set penalty coefficient alpha for jump terms of the stress tensor. Defaults to None.
         symmetric_test_function (Union[Literal['auto'],bool], optional): Use symmetric test functions for the momentum equation. Defaults to 'auto'.
         pressure_test_scaling_factor (float, optional): Multiplicative scaling factor for the pressure test function. Defaults to 1.0.
         hele_shaw_thickness (ExpressionOrNum, optional): Adds a Hele-Shaw drag term to the bulk force i.e -12*mu*u/delta**2, with the given thickness as parameter. Defaults to None.
         GCL (bool, optional): If True, the Geometric Conservation Law is enforced in the ALE formulation of the (Navier-)Stokes equations. Defaults to False.
+
+    .. note::
+        **Scaling to set on problem level.** With ``GCL=True`` and a non-Boussinesq density, the
+        continuity equation is tested with ``1/scale_factor("mass_density")``. ``mass_density`` is
+        no field of the system, so it has to be set by ``problem.set_scaling(mass_density=...)`` --
+        an unset scale is unity, which silently mis-scales a dimensional problem.
     """
-    def __init__(self, *, dynamic_viscosity:ExpressionOrNum=1.0, mode:Literal["TH","CR","SV","C1","D2D1","D1D0","D2TBD1","mini","C2DL"]="TH", bulkforce:ExpressionNumOrNone=None, fluid_props:Optional["AnyFluidProperties"]=None, gravity:ExpressionNumOrNone=None, boussinesq:bool=False, mass_density:ExpressionNumOrNone=None,
-                 pressure_sign_flip:bool=False,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",wrong_strain:bool=False,pressure_factor:ExpressionOrNum=1, PFEM:Union[PFEMOptions,bool]=False, stress_tensor:ExpressionNumOrNone=None,velocity_name="velocity",pressure_name="pressure",DG_alpha:ExpressionNumOrNone=None,symmetric_test_function:Union[Literal['auto'],bool]='auto',pressure_test_scaling_factor:float=1, hele_shaw_thickness:ExpressionOrNum=None,GCL:bool=False ):
+    def __init__(self, *, dynamic_viscosity:ExpressionOrNum=1.0, mode:Literal["TH","CR","SV","C1","C2","D2D1","D1D0","D2TBD1","mini","C2DL"]="TH", bulkforce:ExpressionNumOrNone=None, fluid_props:"AnyFluidProperties | None"=None, gravity:ExpressionNumOrNone=None, boussinesq:bool=False, mass_density:ExpressionNumOrNone=None,
+                 pressure_sign_flip:bool=False,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",pressure_factor:ExpressionOrNum=1, stress_tensor:ExpressionNumOrNone=None,extra_stress:ExpressionNumOrNone=None,velocity_name="velocity",pressure_name="pressure",DG_alpha:ExpressionNumOrNone=None,symmetric_test_function:Literal['auto'] | bool='auto',pressure_test_scaling_factor:float=1, hele_shaw_thickness:ExpressionNumOrNone=None,GCL:bool=False ):
         super().__init__()
         self.gravity = gravity  # Some gravity direction, i.e. g*<unit vector of direction>
         if mode not in {"CR","TH","C1","C2","SV","D2TBD1","D2D1","D1D0","mini","C2DL"}:
             raise ValueError(
                 "(Navier-)Stokes equations argument 'mode' needs to be 'CR' for Crouzeix-Raviart element or 'TH' for Taylor-Hood equations. Experimentally also 'C1' and 'C2' are possible. If the mesh is constructed correctly, 'SV' for Scott-Vogelius also works. 'mini' elements are only possible on triangles. Also, discontinuous variants 'D2D1' and 'D1D0' are currently in development, i.e. experimental")
-        self.mode:Literal["TH","CR","C1","C2","SV","D2D1","D1D0","mini","C2DL"] = mode
+        self.mode:Literal["TH","CR","C1","C2","SV","D2D1","D1D0","D2TBD1","mini","C2DL"] = mode
         self.requires_interior_facet_terms=self.mode in {"D2D1","D1D0","D2TBD1"}
         self.DG_alpha=DG_alpha
         self.pressure_test_scaling_factor=pressure_test_scaling_factor
-        if self.mode in {"D2D1","D1D0"}:
+        if self.mode in {"D2D1","D1D0","D2TBD1"}:
             if self.DG_alpha is None:
                 raise RuntimeError(f"Must set DG_alpha if mode=='{self.mode}'")
             if symmetric_test_function=="auto":
@@ -211,14 +337,18 @@ class StokesEquations(Equations):
         self.GCL = GCL
         self.boussinesq = boussinesq  # If set, we only solve div(u)=0, else we solve div(u)=-1/rho*(partial_t(rho)+u*grad(rho))
         if fluid_props is not None:
-            self.fluid_props = fluid_props
-            self.dynamic_viscosity = fluid_props.dynamic_viscosity
-            self.mass_density = fluid_props.mass_density
+            self.fluid_props:"AnyFluidProperties | None" = fluid_props
+            self.dynamic_viscosity:ExpressionOrNum = fluid_props.dynamic_viscosity
+            self.mass_density:ExpressionNumOrNone = fluid_props.mass_density
         else:
             self.fluid_props = None
             self.dynamic_viscosity = dynamic_viscosity
             self.mass_density = mass_density
 
+        # Kept as an attribute, not just folded into bulkforce: the drag is a *linear* term in u, i.e.
+        # a reaction rate of the momentum operator, and a residual-based stabilization has to know
+        # about it to size tau. It cannot be recovered from bulkforce, which is an arbitrary vector.
+        self.hele_shaw_thickness = hele_shaw_thickness
         if hele_shaw_thickness is not None:
             hsdamp = -12 * self.dynamic_viscosity * var("velocity") / hele_shaw_thickness ** 2
             bulkforce = hsdamp if bulkforce is None else bulkforce+hsdamp
@@ -227,25 +357,46 @@ class StokesEquations(Equations):
         self.pressure_sign_flip=pressure_sign_flip
         self.momentum_scheme:TimeSteppingScheme=momentum_scheme        
         self.continuity_scheme:TimeSteppingScheme=continuity_scheme
-        if PFEM:
-            if PFEM==True:
-                self.PFEM_options=PFEMOptions()
-            else:
-                self.PFEM_options=PFEM
-            if not self.PFEM_options.first_order_system:
-                self.momentum_scheme="Newmark2"
-                self.continuity_scheme="Newmark2"
-        else:
-            self.PFEM_options=False
-        self.wrong_strain=wrong_strain
         self.pressure_factor=pressure_factor
         self.stress_tensor=stress_tensor
+        self.extra_stress=extra_stress
         self.velocity_name=velocity_name
         self.pressure_name=pressure_name
         
 
-    def get_velocity_space_from_mode(self,for_interface=False):
-        velospace={"C1":"C1","CR":"C2TB","TH":"C2","SV":"C2","D2D1":"D2","D1D0":"D1","D2TBD1":"D2TB","mini":"C1TB","C2DL":"C2","C2":"C2"}
+    def get_stabilization_traction(self,normal:Expression,bulk_domain:"str | FiniteElementCodeGenerator | None"=None)->Expression:
+        """
+        Traction that *bulk* stabilization terms deposit on a boundary.
+
+        Any bulk term written against ``grad(v)`` leaves a surface integral behind when it is
+        integrated by parts, so the natural boundary condition of a stabilized formulation is not
+        :math:`\\vec{n}\\cdot\\vec{\\vec{\\sigma}} = \\vec{t}` but
+        :math:`\\vec{n}\\cdot\\vec{\\vec{\\sigma}} + \\vec{t}_\\text{stab} = \\vec{t}`. That is
+        consistent -- every :math:`\\vec{t}_\\text{stab}` here is proportional to a residual that
+        vanishes for the exact solution -- but it is not zero on a finite mesh, so a boundary that
+        is meant to carry a prescribed traction (a free surface, an imposed normal traction, a
+        far field) has to subtract it to impose the *physical* traction.
+
+        The interface equations of this module do that automatically. They call this method with
+        the outward normal and with the *parent* (bulk) domain, which matters: on an interface
+        :py:func:`~pyoomph.expressions.generic.grad` is the surface gradient, so a strong residual
+        assembled without ``evaluate_in_domain`` would silently lose all normal derivatives.
+
+        The base (unstabilized) equations return zero, i.e. nothing changes for them. See
+        :py:class:`~pyoomph.equations.stabilized_ns.StabilizedNavierStokes` for the override.
+
+        Args:
+            normal: The outward normal of the boundary.
+            bulk_domain: Domain in which the strong residual must be evaluated, i.e. the parent
+                domain of the interface the correction is added on.
+
+        Returns:
+            The traction vector to be subtracted, zero here.
+        """
+        return Expression(0)
+
+    def get_velocity_space_from_mode(self,for_interface=False)->FiniteElementSpaceEnum:
+        velospace:dict[str,FiniteElementSpaceEnum]={"C1":"C1","CR":"C2TB","TH":"C2","SV":"C2","D2D1":"D2","D1D0":"D1","D2TBD1":"D2TB","mini":"C1TB","C2DL":"C2","C2":"C2"}
         res=velospace[self.mode]
         if for_interface:
             if res=="C2TB":
@@ -255,83 +406,50 @@ class StokesEquations(Equations):
             elif res[0]=="D":
                 raise RuntimeError("Discont here")
         return res
-    
-    def get_pressure_space_from_mode(self):
-        pspace={"C1":"C1","CR":"DL","TH":"C1","SV":"D1","D2D1":"D1","D1D0":"D0","D2TBD1":"D1","mini":"C1","C2DL":"DL","C2":"C2"}
+
+    def get_pressure_space_from_mode(self)->FiniteElementSpaceEnum:
+        pspace:dict[str,FiniteElementSpaceEnum]={"C1":"C1","CR":"DL","TH":"C1","SV":"D1","D2D1":"D1","D1D0":"D0","D2TBD1":"D1","mini":"C1","C2DL":"DL","C2":"C2"}
         return pspace[self.mode]
 
     def define_fields(self):
         vspace=self.get_velocity_space_from_mode()
         pspace=self.get_pressure_space_from_mode()
 
-        if self.PFEM_options and self.PFEM_options.active:
-            self.activate_coordinates_as_dofs(coordinate_space=vspace)            
-            if self.PFEM_options.first_order_system:
-                self.define_vector_field(self.velocity_name, vspace)
-        else:
-            self.define_vector_field(self.velocity_name, vspace)
+        self.define_vector_field(self.velocity_name, vspace)
         self.define_scalar_field(self.pressure_name, pspace)
 
     def define_scaling(self):
         U = self.get_scaling(self.velocity_name)
         X = self.get_scaling("spatial")
         P = self.get_scaling(self.pressure_name)
-        self.set_test_scaling(**{self.velocity_name:X / P})
-        if self.PFEM_options and self.PFEM_options.active:
-            if self.PFEM_options.first_order_system:
-                self.set_test_scaling(mesh_x=scale_factor("temporal")/scale_factor(self.velocity_name))
-                self.set_test_scaling(mesh_y=scale_factor("temporal")/scale_factor(self.velocity_name))
-                self.set_test_scaling(mesh_z=scale_factor("temporal")/scale_factor(self.velocity_name))
-            else:
-                self.set_test_scaling(mesh_x=self.velocity_name)
-                self.set_test_scaling(mesh_y=self.velocity_name)
-                self.set_test_scaling(mesh_z=self.velocity_name)
+        self.set_test_scaling({self.velocity_name:X / P})
         self.set_test_scaling(pressure=X / U*self.pressure_test_scaling_factor)
-        self.add_named_numerical_factor(p_in_momentum_eq=scale_factor(self.pressure_name)*test_scale_factor(self.velocity_name)/scale_factor("spatial")*self.pressure_test_scaling_factor)
-        self.add_named_numerical_factor(div_u__in_conti_eq=scale_factor(self.velocity_name) * test_scale_factor(self.pressure_name) / scale_factor("spatial"))
+        self._add_named_numerical_factor(p_in_momentum_eq=scale_factor(self.pressure_name)*test_scale_factor(self.velocity_name)/scale_factor("spatial")*self.pressure_test_scaling_factor)
+        self._add_named_numerical_factor(div_u__in_conti_eq=scale_factor(self.velocity_name) * test_scale_factor(self.pressure_name) / scale_factor("spatial"))
 
-    def define_stress_tensor(self):
+    def define_stress_tensor(self)->Expression:
         u = var(self.velocity_name)
         p = var(self.pressure_name)
 
         visc = self.dynamic_viscosity
         if visc is None:
             raise RuntimeError("viscosity not set")
-        if self.wrong_strain:
-            strain=grad(u)/2
-        else:
-            strain = sym(grad(u))  # 1/2*(grad(u)+grad(u)^t)
-        
+        strain = sym(grad(u))  # 1/2*(grad(u)+grad(u)^t)
+
         # Newtonian fluid
         if self.stress_tensor==None:
             stress_tensor = 2 * visc * strain - identity_matrix() * self.pressure_factor*p*(-1 if self.pressure_sign_flip else 1)
         else:
             stress_tensor = self.stress_tensor
-        return stress_tensor
+        # stress_tensor REPLACES the Newtonian expression, extra_stress ADDS to whichever of the two
+        # is in force. Kept apart because almost every extra stress -- Maxwell, polymeric, active --
+        # is an addition, and expressing that through stress_tensor means restating the solvent part.
+        if self.extra_stress is not None:
+            stress_tensor = stress_tensor + self.extra_stress
+        return convert_to_expression(stress_tensor)
 
     def define_residuals(self):
-        if self.PFEM_options and self.PFEM_options.active:
-            if not self.PFEM_options.first_order_system:
-                x, u_test = var_and_test("mesh")
-                u=mesh_velocity(scheme=self.momentum_scheme)
-                vectcomps:List[str]=[]
-                for i,direct in enumerate((["x","y","z"])[:self.get_nodal_dimension()]):
-                    vectcomps.append("velocity_"+direct)
-                    self.define_field_by_substitution("velocity_"+direct,mesh_velocity(scheme=self.momentum_scheme)[i],also_on_interface=True)
-                    self.define_testfunction_by_substitution("velocity_"+direct,testfunction("mesh_"+direct),also_on_interface=True)
-                self.define_testfunction_by_substitution(self.velocity_name,vector(*[testfunction(f)/test_scale_factor(self.velocity_name) for f in vectcomps]),also_on_interface=True)
-                self.define_testfunction_by_substitution("mesh",vector(*[testfunction(f)/test_scale_factor(self.velocity_name) for f in vectcomps]),also_on_interface=True)
-                self.define_field_by_substitution(self.velocity_name,vector(*[var(f)/scale_factor(self.velocity_name) for f in vectcomps]),also_on_interface=True)
-                self.add_local_function(self.velocity_name,var(self.velocity_name))
-                self._get_combined_element()._vectorfields[self.velocity_name]=vectcomps
-            else:
-                u, u_test = var_and_test(self.velocity_name)
-                if self.PFEM_options.direct_position_update:
-                    self.add_residual(weak(var("mesh")-evaluate_in_past(var("mesh"))-var(self.velocity_name)*timestepper_weight(1,0,"BDF2"),testfunction("mesh")))
-                else:
-                    self.add_residual(weak(partial_t(var("mesh"))-var(self.velocity_name),testfunction("mesh")))
-        else:
-            u, u_test = var_and_test(self.velocity_name)
+        u, u_test = var_and_test(self.velocity_name)
         p, p_test = var_and_test(self.pressure_name)
 
         # Get stress tensor
@@ -343,13 +461,28 @@ class StokesEquations(Equations):
         else:
             Dv=grad(u_test)
         self.add_residual(weak(time_scheme(self.momentum_scheme,stress_tensor), Dv))  # total stress
-        self.add_residual(weak(time_scheme(self.continuity_scheme,div(u)), p_test))  # Incompressibility
+        # The conservative (GCL) continuity equation below is complete on its own: d/dt(int rho*q) +
+        # int div(rho*(u-w))*q is exactly int (dt_rho + div(rho*u))*q, so it already contains div(rho*u).
+        # Adding div(u) on top of it would be a second, independently weighted copy of the same
+        # constraint (the pressure row of the Jacobian came out exactly twice as large).
+        GCL_continuity = self.GCL and not self.boussinesq and self.mass_density is not None
+        if not GCL_continuity:
+            self.add_residual(weak(time_scheme(self.continuity_scheme,div(u)), p_test))  # Incompressibility
         if not self.boussinesq and self.mass_density is not None:
             rho = self.mass_density
             if self.GCL:
+                # Note the weight: the non-GCL branch below tests the continuity equation divided by the
+                # local rho, this one by the density scale. 1/rho cannot be moved inside d/dt(int rho*q),
+                # that would turn it into d/dt(int q) and lose the mass balance.
                 self.add_dweak_dt(rho,p_test/scale_factor("mass_density"),scheme=self.continuity_scheme).add_weak((div(rho*(u-mesh_velocity(scheme=self.continuity_scheme)))),p_test/scale_factor("mass_density"))
             else:
-                self.add_residual(weak(time_scheme(self.continuity_scheme,partial_t(rho, ALE=False) / rho + dot(u, grad(rho)) / rho), p_test))  # Incompressibility
+                # ALE, not ALE=False: the continuity equation wants d(rho)/dt at a fixed point in space,
+                # whereas ALE=False gives it at fixed nodal values, which on a moving mesh differs by
+                # w.grad(rho). Each keyword variable already defines its own nodal time derivative --
+                # zero for "coordinate_*", the mesh velocity for "mesh_*" -- so the ALE correction turns
+                # any of them into the Eulerian one. Note that a density meant to be attached to
+                # laboratory space must therefore be written with var("mesh_y"), not var("coordinate_y").
+                self.add_residual(weak(time_scheme(self.continuity_scheme,partial_t(rho, ALE="auto") / rho + dot(u, grad(rho)) / rho), p_test))  # Incompressibility
 
         if self.bulkforce is not None:
             self.add_residual(-weak(time_scheme(self.momentum_scheme,self.bulkforce), u_test))  # bulk force
@@ -361,11 +494,13 @@ class StokesEquations(Equations):
         if self.requires_interior_facet_terms:
             n,h=var(["normal","element_length_h"])
             # optionally, at_facet=True can be added to all jumps/averages that don't have grad in their argument
-            Du=grad(u)/2 if self.wrong_strain else sym(grad(u))
+            Du=sym(grad(u))
             Dv=grad(u_test) if not self.symmetric_test_function else sym(grad(u_test))
-            facet_terms=weak(-matproduct(2*self.dynamic_viscosity*avg(Du),n),jump(u_test)) 
+            dg_alpha=self.DG_alpha
+            assert dg_alpha is not None  # guaranteed non-None in __init__ whenever requires_interior_facet_terms is set
+            facet_terms=weak(-matproduct(2*self.dynamic_viscosity*avg(Du),n),jump(u_test))
             facet_terms+=weak(-jump(u),matproduct(avg(Dv),n))
-            facet_terms+=weak(self.DG_alpha*2**(2 if self.mode=="D2D1" else 1)/h*jump(u),jump(u_test))
+            facet_terms+=weak(dg_alpha*2**(2 if self.mode=="D2D1" else 1)/h*jump(u),jump(u_test))
             facet_terms+=weak(dot(jump(u),n),avg(p_test))  # okay
             facet_terms+=weak(avg(p),dot(jump(u_test),n))
 
@@ -373,8 +508,12 @@ class StokesEquations(Equations):
 
     # In case of complete Dirichlet velocity conditions, we need to fix a single dof of pressure
     # A single node is selected in case of Taylor hood, otherwise a single element is selected
-    def create_pressure_fixation(self, *, value:Optional[float]=None)->Union[PressureFixationTaylorHood,PressureFixationCrouzeixRaviart,PressureFixationScottVogelius]:
-        if self.mode in {"TH","C1","mini"}:
+    def create_pressure_fixation(self, *, value:float | None=None)->PressureFixationTaylorHood | PressureFixationCrouzeixRaviart | PressureFixationScottVogelius:
+        # "C2" is the equal-order C2/C2 pair: its pressure is nodal just like Taylor-Hood's, and
+        # PressureFixationTaylorHood pins node_pt(0), a vertex node, which carries every continuous
+        # space. Equal-order pairs still need this: PSPG leaves the constant pressure mode in the
+        # nullspace, because grad(q) annihilates constants.
+        if self.mode in {"TH","C1","C2","mini"}:
             return PressureFixationTaylorHood(self.pressure_name,value)
         elif self.mode == "CR":
             return PressureFixationCrouzeixRaviart(self.pressure_name,value)
@@ -384,7 +523,7 @@ class StokesEquations(Equations):
             raise RuntimeError("Cannot add a pressure fixation for this mode")
 
     # To be used a StokesEquation(...).with_pressure_fixation()
-    def with_pressure_fixation(self,*,nondim_p_value:Optional[float]=None) -> Equations:
+    def with_pressure_fixation(self,*,nondim_p_value:float | None=None) -> Equations:
         """
         Instead of adding ``StokesEquation``, add ``StokesEquation.with_pressure_fixation(...)`` to remove the pressure nullspace in case of pure Dirichlet boundary conditions for the normal flow.
         With this method, a single pressure dof is pinned to remove the nullspace.
@@ -418,11 +557,11 @@ class StokesEquations(Equations):
         Returns:
             The (Navier-)Stokes equations with the pressure integral constraint.
         """
-        eq_additions = self
+        eq_additions:Equations = self
 
         eq_additions += WeakContribution(var(self.pressure_name), testfunction(lagrange_name, domain=ode_domain_name),dimensional_dx=False)
         eq_additions += WeakContribution(var(lagrange_name, domain=ode_domain_name), testfunction(self.pressure_name),dimensional_dx=False)
-        ode_additions = GlobalLagrangeMultiplier(**{lagrange_name:integral_value},set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve)
+        ode_additions:Equations = GlobalLagrangeMultiplier(**{lagrange_name:integral_value},set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve) #type:ignore
         ode_additions +=TestScaling(**{lagrange_name:1/scale_factor(self.pressure_name)})
         ode_additions += Scaling(**{lagrange_name: 1 / test_scale_factor(self.pressure_name)})
         problem.add_equations(ode_additions @ ode_domain_name)
@@ -432,7 +571,10 @@ class StokesEquations(Equations):
 ##################################
 
 class NavierStokesEquations(StokesEquations):   
-    """Represents the Navier-Stokes-Equations, defined by the second-order partial differential equations (PDEs):
+    """    
+    .. _NavierStokesEquations:
+    
+    Represents the Navier-Stokes-Equations, defined by the second-order partial differential equations (PDEs):
 
     .. math:: \\partial_t \\rho + \\nabla \\cdot (\\rho \\vec{u}) = 0 \\,
     .. math:: \\rho (\\partial_t \\vec{u} + \\vec{u} \\cdot \\nabla \\vec{u} ) = \\nabla \\cdot [-\\nabla p \\vec{\\vec{I}} + \\mu (\\nabla \\vec{u} + (\\nabla \\vec{u})^\\text{T})] + f \\,
@@ -460,25 +602,30 @@ class NavierStokesEquations(StokesEquations):
         pressure_sign_flip (bool, optional): Reverse the pressure sign to get a symmetric matrix. Defaults to False.
         momentum_scheme (TimeSteppingScheme, optional): Time-stepping scheme for the momentum equation. Defaults to "BDF2".
         continuity_scheme (TimeSteppingScheme, optional): Time-stepping scheme for the continuity equation. Defaults to "BDF2".
-        wrong_strain (bool, optional): Use mu*grad(u) instead of 2*mu*sym(grad(u)) for strain. Defaults to False.
         pressure_factor (ExpressionOrNum, optional): Multiplicative factor for the pressure in the momentum equation. Defaults to 1.
-        PFEM (Union[PFEMOptions,bool], optional): Options for Particle Finite Element Method (PFEM). Defaults to False.
-        stress_tensor (ExpressionNumOrNone, optional): Custom stress tensor. Defaults to None.
+        stress_tensor (ExpressionNumOrNone, optional): Custom stress tensor, *replacing* the Newtonian one. Defaults to None.
+        extra_stress (ExpressionNumOrNone, optional): Additional stress tensor, *added* to whichever stress tensor is in force. This is where a Maxwell, polymeric or active stress goes; see :py:class:`~pyoomph.equations.electrohydrodynamics.MaxwellStressEquations` for the electric one. Defaults to None.
         velocity_name (str, optional): Name of the velocity field. Defaults to "velocity".
-        pressure_name (str, optional): Name of the pressure field. Defaults to "pressure".        
+        pressure_name (str, optional): Name of the pressure field. Defaults to "pressure".
         DG_alpha (ExpressionNumOrNone, optional): If using Discontinuous Galerkin discretisation, set coefficient alpha for stress tensor. Defaults to None.
         symmetric_test_function (Union[Literal['auto'],bool], optional): Use symmetric test functions for the momentum equation. Defaults to 'auto'.
         dt_factor (ExpressionOrNum, optional): Multiplicative factor to scale or deactivate the time derivative. Defaults to 1.
         nonlinear_factor (ExpressionNumOrNone, optional): Multiplicative factor to scale or deactivate the nonlinearity, i.e. dot(u,grad(u))). Defaults to None.        
         wrap_params_in_subexpressions (bool, optional): Wrap parameters in subexpressions using GiNaC. Defaults to True.
         GCL (bool, optional): If True, the Geometric Conservation Law is enforced in the ALE formulation of the (Navier-)Stokes equations. Defaults to False.
+
+    .. note::
+        **Scaling to set on problem level.** The nondimensionalization of the inertia term, and
+        with ``GCL`` also the test scale of the continuity equation (see
+        :ref:`StokesEquations <StokesEquations>`), uses ``scale_factor("mass_density")``. Being no
+        field of the system, it has to be set by ``problem.set_scaling(mass_density=...)``.
     """
                  
         
-    def __init__(self, *, dynamic_viscosity:ExpressionOrNum=1.0, mode:Literal["TH","CR","SV","mini"]="TH", mass_density:ExpressionOrNum=1.0, bulkforce:ExpressionNumOrNone=None, fluid_props:Optional["AnyFluidProperties"]=None,
-                 dt_factor:ExpressionOrNum=1, nonlinear_factor:ExpressionNumOrNone=None, gravity:ExpressionNumOrNone=None, boussinesq:bool=False,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",wrong_strain:bool=False,pressure_factor:ExpressionOrNum=1,wrap_params_in_subexpressions:bool=True,PFEM:Union[PFEMOptions,bool]=False, stress_tensor:ExpressionNumOrNone=None,velocity_name="velocity",pressure_name="pressure",symmetric_test_function:Union[Literal['auto'],bool]='auto',pressure_test_scaling_factor:float=1, hele_shaw_thickness:ExpressionOrNum=None,GCL:bool=False):
+    def __init__(self, *, dynamic_viscosity:ExpressionOrNum=1.0, mode:Literal["TH","CR","SV","mini"]="TH", mass_density:ExpressionOrNum=1.0, bulkforce:ExpressionNumOrNone=None, fluid_props:"AnyFluidProperties | None"=None,
+                 dt_factor:ExpressionOrNum=1, nonlinear_factor:ExpressionNumOrNone=None, gravity:ExpressionNumOrNone=None, boussinesq:bool=False,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",pressure_factor:ExpressionOrNum=1,wrap_params_in_subexpressions:bool=True, stress_tensor:ExpressionNumOrNone=None,extra_stress:ExpressionNumOrNone=None,velocity_name="velocity",pressure_name="pressure",symmetric_test_function:Literal['auto'] | bool='auto',pressure_test_scaling_factor:float=1, hele_shaw_thickness:ExpressionNumOrNone=None,GCL:bool=False):
         super().__init__(dynamic_viscosity=dynamic_viscosity, mode=mode, bulkforce=bulkforce, fluid_props=fluid_props,
-                         gravity=gravity, boussinesq=boussinesq,momentum_scheme=momentum_scheme,continuity_scheme=continuity_scheme,wrong_strain=wrong_strain,pressure_factor=pressure_factor,PFEM=PFEM, stress_tensor=stress_tensor,velocity_name=velocity_name,pressure_name=pressure_name,symmetric_test_function=symmetric_test_function,pressure_test_scaling_factor=pressure_test_scaling_factor, hele_shaw_thickness=hele_shaw_thickness,GCL=GCL)
+                         gravity=gravity, boussinesq=boussinesq,momentum_scheme=momentum_scheme,continuity_scheme=continuity_scheme,pressure_factor=pressure_factor, stress_tensor=stress_tensor,extra_stress=extra_stress,velocity_name=velocity_name,pressure_name=pressure_name,symmetric_test_function=symmetric_test_function,pressure_test_scaling_factor=pressure_test_scaling_factor, hele_shaw_thickness=hele_shaw_thickness,GCL=GCL)
         if self.fluid_props is not None:
             self.mass_density = self.fluid_props.mass_density
         else:
@@ -494,30 +641,25 @@ class NavierStokesEquations(StokesEquations):
 
     def define_scaling(self):
         super(NavierStokesEquations, self).define_scaling()
-        self.add_named_numerical_factor(inertia_in_momentum_eq=self.dt_factor*scale_factor("mass_density") * scale_factor(self.velocity_name)*test_scale_factor(self.velocity_name) / scale_factor("temporal"))
+        self._add_named_numerical_factor(inertia_in_momentum_eq=self.dt_factor*scale_factor("mass_density") * scale_factor(self.velocity_name)*test_scale_factor(self.velocity_name) / scale_factor("temporal"))
 
     def define_residuals(self):
         super().define_residuals()  # add the Stokes part
-        if self.PFEM_options and self.PFEM_options.active and self.PFEM_options.first_order_system:
-            x, u_test = var_and_test("mesh")
-            u=mesh_velocity(scheme=self.momentum_scheme)
-        else:
-            u, u_test = var_and_test(self.velocity_name)
+        u, u_test = var_and_test(self.velocity_name)
+        assert self.mass_density is not None # unlike the Stokes base, the inertia here needs a density (default 1)
         if self.wrap_params_in_subexpressions:
             rho = subexpression(self.mass_density)
         else:
             rho=self.mass_density
-        if self.PFEM_options and self.PFEM_options.active and self.PFEM_options.first_order_system:
-            if self.dt_factor!=1 or self.nonlinear_factor!=1:
-                raise RuntimeError("Can only use entirely Lagrangian mode if dt_factor and nonlinear_factor==1")
-            self.add_residual(weak(time_scheme(self.momentum_scheme,rho*partial_t(x,2,ALE=False)), u_test))
-            #self.add_residual(weak(time_scheme(self.momentum_scheme,rho*partial_t(u,1,ALE=False)), u_test))
-#        elif self.PFEM_options and self.PFEM_options.active and self.PFEM_options.direct_position_update:
- #           raise RuntimeError("TODO")
-        elif not self.GCL:
+        if not self.GCL:
             self.add_residual(weak(time_scheme(self.momentum_scheme,rho*material_derivative(u,u,dt_factor=self.dt_factor,advection_factor=self.nonlinear_factor)), u_test))
         else:
             w=mesh_velocity(scheme=self.momentum_scheme)
+            # dyadic(u,u-w), not dyadic(u-w,u): div contracts the SECOND index, and the momentum flux of
+            # the conservative ALE form is the mass flux rho*(u-w) carrying the momentum u, i.e.
+            # F_ij = rho*u_i*(u_j-w_j). Written the other way round it does not even preserve a uniform
+            # flow on a moving mesh: the free-stream error then stays at 3e-2 however far dt is refined,
+            # whereas this ordering converges away at first order, as the discrete GCL error should.
             self.add_dweak_dt(rho*u,u_test,scheme=self.momentum_scheme).add_weak(time_scheme(self.momentum_scheme, div(rho*dyadic(u,u-w))),u_test)
 
 
@@ -542,6 +684,9 @@ class NavierStokesNormalTraction(InterfaceEquations):
         _, utest = var_and_test(peqs.velocity_name)
         n = self.get_normal()
         self.add_residual(weak(self.normal_traction, dot(n, utest)))
+        # With a stabilized formulation the natural BC is n.sigma + t_stab = t, so subtract t_stab
+        # to make the *prescribed* traction the physical one. Zero for the unstabilized equations.
+        self.add_residual(-weak(peqs.get_stabilization_traction(n,self.get_parent_domain()),utest))
 
 
 class NavierStokesFreeSurface(InterfaceEquations):
@@ -568,15 +713,18 @@ class NavierStokesFreeSurface(InterfaceEquations):
         additional_normal_traction (ExpressionOrNum, optional): Additional normal traction. Defaults to 0.
         mass_transfer_rate (ExpressionOrNum, optional): Mass transfer rate in case there is mass transfer across the interface. Defaults to 0.        
         impose_marangoni_directly (bool, optional): If False, the weak form of grad_s(sigma) is integrated by parts. Defaults to False.
-        kinematic_bc_coordinate_sys (Optional[BaseCoordinateSystem], optional): Coordinate system for the kinematic boundary condition. Defaults to None.
+        kinematic_bc_coordsys (Optional[BaseCoordinateSystem], optional): Coordinate system for the kinematic boundary condition. Defaults to None.
         remove_redundant_kinematic_bcs (bool, optional): If True, redundant kinematic boundary conditions are removed. Defaults to True.
     """
 
 
     required_parent_type = StokesEquations
 
-    def __init__(self, *, surface_tension:ExpressionOrNum=1, kinbc_name:str="_kin_bc", static_interface:Union[Literal["auto"],bool]="auto", additional_normal_traction:ExpressionOrNum=0,
-                 mass_transfer_rate:ExpressionOrNum=0,impose_marangoni_directly:bool=False,kinematic_bc_coordinate_sys:Optional[BaseCoordinateSystem]=None,remove_redundant_kinematic_bcs=True):
+    kinematic_bc_coordinate_sys = _deprecated_attribute_alias("kinematic_bc_coordinate_sys","kinematic_bc_coordsys")
+
+    @_deprecated_kwargs(kinematic_bc_coordinate_sys="kinematic_bc_coordsys")
+    def __init__(self, *, surface_tension:ExpressionOrNum=1, kinbc_name:str="_kin_bc", static_interface:Literal["auto"] | bool="auto", additional_normal_traction:ExpressionOrNum=0,
+                 mass_transfer_rate:ExpressionOrNum=0,impose_marangoni_directly:bool=False,kinematic_bc_coordsys:BaseCoordinateSystem | None=None,remove_redundant_kinematic_bcs=True):
         super(NavierStokesFreeSurface, self).__init__()
         self.kinbc_name = kinbc_name
         self.static_interface = static_interface
@@ -584,7 +732,7 @@ class NavierStokesFreeSurface(InterfaceEquations):
         self.mass_transfer_rate = mass_transfer_rate
         self.additional_normal_traction = additional_normal_traction
         self.impose_marangoni_directly=impose_marangoni_directly
-        self.kinematic_bc_coordinate_sys=kinematic_bc_coordinate_sys
+        self.kinematic_bc_coordsys=kinematic_bc_coordsys
         self.remove_redundant_kinematic_bcs=remove_redundant_kinematic_bcs
 
 
@@ -593,40 +741,42 @@ class NavierStokesFreeSurface(InterfaceEquations):
         if flow_eqs == []:
             raise RuntimeError("No (Navier-)Stokes defined on domain "+self.get_parent_domain().get_domain_name())
         assert isinstance(flow_eqs,StokesEquations)
-        if not flow_eqs.PFEM_options or not flow_eqs.PFEM_options.active or flow_eqs.PFEM_options.first_order_system:                    
-            vspace=flow_eqs.get_velocity_space_from_mode(for_interface=True)
-            static=self.static_interface
-            if static=="auto":
-                static=not self.get_current_code_generator().get_parent_domain()._coordinates_as_dofs
+        vspace=flow_eqs.get_velocity_space_from_mode(for_interface=True)
+        static=self.static_interface
+        parent_domain=self.get_current_code_generator().get_parent_domain()
+        assert parent_domain is not None
+        if static=="auto":
+            static=not parent_domain._coordinates_as_dofs
 
-            if not static in {"auto",False,True}:
-                raise RuntimeError("property static_interface must be either 'auto', True or False")
-            if not static:
-                vspace=self.get_current_code_generator().get_parent_domain()._coordinate_space
-                #raise RuntimeError("Find out the position space for the kinbc")
-            if vspace=="C2TB":
-                vspace="C2"
-            elif vspace=="C1TB":
-                vspace="C1"
-            self.define_scalar_field(self.kinbc_name, vspace)
+        if not static in {"auto",False,True}:
+            raise RuntimeError("property static_interface must be either 'auto', True or False")
+        if not static:
+            vspace=cast(FiniteElementSpaceEnum,parent_domain._coordinate_space)
+            #raise RuntimeError("Find out the position space for the kinbc")
+        if vspace=="C2TB":
+            vspace="C2"
+        elif vspace=="C1TB":
+            vspace="C1"
+        self.define_scalar_field(self.kinbc_name, vspace)
 
     def define_scaling(self):
         flow_eqs=self.get_parent_equations(StokesEquations)
         assert isinstance(flow_eqs,StokesEquations)
-        if not flow_eqs.PFEM_options or not flow_eqs.PFEM_options.active:                    
-            static=self.static_interface
-            if static=="auto":
-                static=not self.get_current_code_generator().get_parent_domain()._coordinates_as_dofs
+        static=self.static_interface
+        if static=="auto":
+            parent_domain=self.get_current_code_generator().get_parent_domain()
+            assert parent_domain is not None
+            static=not parent_domain._coordinates_as_dofs
 
-            if not static in {"auto",False,True}:
-                raise RuntimeError("property static_interface must be either 'auto', True or False")
+        if not static in {"auto",False,True}:
+            raise RuntimeError("property static_interface must be either 'auto', True or False")
 
-            if static:
-                self.set_scaling(**{self.kinbc_name:1/test_scale_factor(flow_eqs.velocity_name)})
-                self.set_test_scaling(**{self.kinbc_name: 1 / scale_factor(flow_eqs.velocity_name)})
-            else:
-                self.set_scaling(**{self.kinbc_name: 1 /test_scale_factor("mesh")})
-                self.set_test_scaling(**{self.kinbc_name: 1 / scale_factor(flow_eqs.velocity_name)})
+        if static:
+            self.set_scaling({self.kinbc_name:1/test_scale_factor(flow_eqs.velocity_name)})
+            self.set_test_scaling({self.kinbc_name: 1 / scale_factor(flow_eqs.velocity_name)})
+        else:
+            self.set_scaling({self.kinbc_name: 1 /test_scale_factor("mesh")})
+            self.set_test_scaling({self.kinbc_name: 1 / scale_factor(flow_eqs.velocity_name)})
 
 
     def define_residuals(self):
@@ -634,45 +784,41 @@ class NavierStokesFreeSurface(InterfaceEquations):
         assert isinstance(flow_eqs,StokesEquations)
         #n = self.get_normal()
         n=var("normal")
-        if not flow_eqs.PFEM_options or not flow_eqs.PFEM_options.active:                    
-            u, u_test = var_and_test(flow_eqs.velocity_name)
-            R, R_test = var_and_test("mesh")
-            l, l_test = var_and_test(self.kinbc_name)            
-            static=self.static_interface
-            if static=="auto":
-                static=not self.get_current_code_generator()._coordinates_as_dofs
+        u, u_test = var_and_test(flow_eqs.velocity_name)
+        R, R_test = var_and_test("mesh")
+        l, l_test = var_and_test(self.kinbc_name)
+        static=self.static_interface
+        if static=="auto":
+            static=not self.get_current_code_generator()._coordinates_as_dofs
 
-            if not static in {"auto",False,True}:
-                raise RuntimeError("property static_interface must be either 'auto', True or False")
+        if not static in {"auto",False,True}:
+            raise RuntimeError("property static_interface must be either 'auto', True or False")
 
-            kbc_sign=1
-            if static:
-                    
-                kin_bc = -dot(u, n)
-                if self.mass_transfer_rate is not None and self.mass_transfer_rate!=0:
-                    bulkeqs = self.get_parent_domain().get_equations()
-                    nsbulk = bulkeqs.get_equation_of_type(StokesEquations)
-                    assert isinstance(nsbulk,StokesEquations)
-                    assert nsbulk.mass_density is not None
-                    kin_bc+= self.mass_transfer_rate / nsbulk.mass_density
-                self.add_residual(kbc_sign*weak(kin_bc , l_test,coordinate_system=self.kinematic_bc_coordinate_sys))
-                self.add_residual(kbc_sign*weak(l , dot(n, u_test),coordinate_system=self.kinematic_bc_coordinate_sys))
-            else:
-                
+        kbc_sign=1
+        if static:
 
-                kin_bc = dot(mesh_velocity() - u, n)
-                if self.mass_transfer_rate is not None and self.mass_transfer_rate!=0:
-                    bulkeqs = self.get_parent_domain().get_equations()
-                    nsbulk = bulkeqs.get_equation_of_type(StokesEquations)
-                    assert isinstance(nsbulk,StokesEquations)
-                    assert nsbulk.mass_density is not None
-                    kin_bc+= self.mass_transfer_rate / nsbulk.mass_density
-                self.add_residual(kbc_sign*weak( kin_bc , l_test,coordinate_system=self.kinematic_bc_coordinate_sys))
-
-                dt_weight = 1
-                self.add_residual(-dt_weight*weak(l, dot(n,  R_test),coordinate_system=self.kinematic_bc_coordinate_sys))
+            kin_bc = -dot(u, n)
+            if self.mass_transfer_rate is not None and self.mass_transfer_rate!=0:
+                bulkeqs = self.get_parent_domain().get_equations()
+                nsbulk = bulkeqs.get_equation_of_type(StokesEquations)
+                assert isinstance(nsbulk,StokesEquations)
+                assert nsbulk.mass_density is not None
+                kin_bc+= self.mass_transfer_rate / nsbulk.mass_density
+            self.add_residual(kbc_sign*weak(kin_bc , l_test,coordsys=self.kinematic_bc_coordsys))
+            self.add_residual(kbc_sign*weak(l , dot(n, u_test),coordsys=self.kinematic_bc_coordsys))
         else:
-            x, u_test = var_and_test("mesh")
+
+            kin_bc = dot(mesh_velocity() - u, n)
+            if self.mass_transfer_rate is not None and self.mass_transfer_rate!=0:
+                bulkeqs = self.get_parent_domain().get_equations()
+                nsbulk = bulkeqs.get_equation_of_type(StokesEquations)
+                assert isinstance(nsbulk,StokesEquations)
+                assert nsbulk.mass_density is not None
+                kin_bc+= self.mass_transfer_rate / nsbulk.mass_density
+            self.add_residual(kbc_sign*weak( kin_bc , l_test,coordsys=self.kinematic_bc_coordsys))
+
+            dt_weight = 1
+            self.add_residual(-dt_weight*weak(l, dot(n,  R_test),coordsys=self.kinematic_bc_coordsys))
 
         if self.impose_marangoni_directly:
             if not static:
@@ -682,11 +828,15 @@ class NavierStokesFreeSurface(InterfaceEquations):
         else:
             self.add_residual(weak(self.surface_tension, div(u_test)) )
         self.add_residual(weak(self.additional_normal_traction ,dot(n, u_test)) )
+        # A stabilized bulk leaves its own traction on this boundary (see
+        # StokesEquations.get_stabilization_traction); subtract it so that the free surface balances
+        # the *physical* stress against the surface tension. Zero without stabilization.
+        self.add_residual(-weak(flow_eqs.get_stabilization_traction(n,self.get_parent_domain()),u_test))
 
     def before_assigning_equations_postorder(self, mesh:"AnyMesh"):
         flow_eqs=self.get_parent_equations(StokesEquations)
         assert isinstance(flow_eqs,StokesEquations)
-        if (not flow_eqs.PFEM_options or not flow_eqs.PFEM_options.active) and (self.remove_redundant_kinematic_bcs):                    
+        if self.remove_redundant_kinematic_bcs:
             static=self.static_interface
             if static=="auto":
                 static=not self.get_current_code_generator()._coordinates_as_dofs
@@ -698,6 +848,36 @@ class NavierStokesFreeSurface(InterfaceEquations):
                 self.pin_redundant_lagrange_multipliers(mesh,self.kinbc_name,flow_eqs.velocity_name)
             else:
                 self.pin_redundant_lagrange_multipliers(mesh, self.kinbc_name, "mesh")
+
+    def with_balanced_end(self,*boundaries:str):
+        """
+        Adds the NavierStokesFreeSurfaceBalancedEnd equations to the given boundaries of the interface.
+        Thereby, the Neumann force is balanced at the specified end points.
+        Use this when you neither want to fix the position nor the contact angle at specific end points
+        """
+        res:"Equations | EquationTree"=self
+        for b in boundaries:
+            res+=NavierStokesFreeSurfaceBalancedEnd() @ b
+        return res
+
+class NavierStokesFreeSurfaceBalancedEnd(InterfaceEquations):
+    """
+    The NavierStokesFreeSurface without ``impose_marangoni_directly`` uses the surface divergence theorem to integrate the surface tension term by parts. This results in a Neumann term at the end points of the interface, which is not balanced by default. This Neumann terms can be used e.g. for contact angles, but if you do not want to impose any, you can cancel out the Neumann term by adding this equation to the end points of the interface. This will balance the surface tension at the end points, resulting in a free contact angle.
+    """
+    required_parent_type = NavierStokesFreeSurface
+    def define_residuals(self):
+        inter_eqs=self.get_parent_equations(NavierStokesFreeSurface)
+        assert isinstance(inter_eqs,NavierStokesFreeSurface)
+        if not inter_eqs.impose_marangoni_directly: # Only when we used the surface divergence theorem, the Neumann terms are there
+            # Evaluated on the interface, not on this point domain: identical for a continuous field,
+            # but a discontinuous one lives in the interface element's internal data and cannot be read
+            # here unrestricted at all.
+            sigma=evaluate_in_domain(0+inter_eqs.surface_tension,"..")
+            n = self.get_normal() # Outward pointing tangent at the interface boundary
+            ns=inter_eqs.get_parent_equations(StokesEquations)
+            assert isinstance(ns,StokesEquations)
+            u_test=testfunction(ns.velocity_name)
+            self.add_weak(-sigma*n, u_test) # Balance the surface tension at the end points
 
 
 # TODO: Merge this with the free surface and activate it if there is an opposite side
@@ -724,7 +904,7 @@ class ConnectVelocityAtInterface(InterfaceEquations):
         self.use_highest_space=use_highest_space
         self.normal_velocity_jump=normal_velocity_jump
 
-    def get_required_fields(self) -> List[str]:
+    def get_required_fields(self) -> list[str]:
         flow_eqs=self.get_parent_equations(StokesEquations)
         assert isinstance(flow_eqs,StokesEquations)
         fields = [flow_eqs.velocity_name+ "_x", flow_eqs.velocity_name+"_y", flow_eqs.velocity_name+"_z"]
@@ -740,17 +920,19 @@ class ConnectVelocityAtInterface(InterfaceEquations):
         for f in fields:
             if self.get_opposite_side_of_interface(raise_error_if_none=False) is None:
                 raise RuntimeError("Cannot connect any fields at the interface if no opposite side is present")
-            inside_space = cast(Union[FiniteElementSpaceEnum,Literal[""]], self.get_parent_domain().get_space_of_field(f))
+            inside_space = cast(FiniteElementSpaceEnum|Literal[""], self.get_parent_domain().get_space_of_field(f))
             if inside_space == "":
                 raise RuntimeError(
                     "Cannot connect field " + f + " at the interface, since it cannot find in the inner domain")            
             opp_parent=self.get_opposite_side_of_interface().get_parent_domain()
             assert opp_parent is not None
-            outside_space = cast(Union[FiniteElementSpaceEnum,Literal[""]], opp_parent.get_space_of_field(f))
+            outside_space = cast(FiniteElementSpaceEnum|Literal[""], opp_parent.get_space_of_field(f))
             if outside_space == "":
                 raise RuntimeError(
                     "Cannot connect field " + f + " at the interface, since it cannot find in the outer domain")
-            space=get_interface_field_connection_space(inside_space,outside_space,self.use_highest_space)
+            space=get_interface_field_connection_space(inside_space,outside_space,self.use_highest_space,
+                                                       parent_space=str(self.get_parent_domain()._coordinate_space),
+                                                       parent_dim=int(self.get_parent_domain().dimension))
             assert space!=""
             self.define_scalar_field(self.lagr_mult_prefix + f, space)
             
@@ -770,8 +952,8 @@ class ConnectVelocityAtInterface(InterfaceEquations):
         flow_eqs=self.get_parent_equations(StokesEquations)
         assert isinstance(flow_eqs,StokesEquations)
         for f in fields:
-            self.set_test_scaling(**{self.lagr_mult_prefix + f:1/scale_factor(flow_eqs.velocity_name)})
-            self.set_scaling(**{self.lagr_mult_prefix + f: 1 / test_scale_factor(flow_eqs.velocity_name)})
+            self.set_test_scaling({self.lagr_mult_prefix + f:1/scale_factor(flow_eqs.velocity_name)})
+            self.set_scaling({self.lagr_mult_prefix + f: 1 / test_scale_factor(flow_eqs.velocity_name)})
 
 
     def define_residuals(self):
@@ -833,28 +1015,14 @@ class NoSlipBC(DirichletBC):
         dim = self.get_nodal_dimension()
         dirs = ["x", "y", "z"]
 
-        ns=self.get_parent_domain().get_equations().get_equation_of_type(StokesEquations)
-        lagr=False
-        if isinstance(ns,StokesEquations) and ns.PFEM_options and ns.PFEM_options.active:
-            for i in range(dim):
-                self._dcs["mesh_"+dirs[i]]=True
-            lagr=True
-            if ns.PFEM_options.first_order_system:
-                for i in range(dim):
-                    self._dcs[self.veloname+"_"+dirs[i]]=0
-        else:
-            for i in range(dim):
-                self._dcs[self.veloname+"_"+dirs[i]]=0
+        for i in range(dim):
+            self._dcs[self.veloname+"_"+dirs[i]]=0
         cs=self.get_coordinate_system()
         if cs is not None:
             if isinstance(cs,AxisymmetryBreakingCoordinateSystem):
-                if lagr:
-                    raise RuntimeError("TODO")
                 self._dcs[self.veloname+"_phi"]=0
             elif isinstance(cs,CartesianCoordinateSystemWithAdditionalNormalMode):
-                if lagr:
-                    raise RuntimeError("TODO")
-                self._dcs[self.veloname+"_normal"]=0                
+                self._dcs[self.veloname+"_normal"]=0
         super(NoSlipBC, self).define_residuals()
 
 
@@ -893,6 +1061,10 @@ class NavierStokesSlipLength(InterfaceEquations):
         mu=peqs.dynamic_viscosity
         factor = mu / (self.sliplength)
         self.add_residual(factor * weak(utang-utang_wall, utest_tang))
+        # Only the tangential part here: the normal direction of this boundary is not traction-free
+        # but constrained by whatever enforces no penetration, which absorbs the normal footprint.
+        tstab = flow_eqs.get_stabilization_traction(n,self.get_parent_domain())
+        self.add_residual(-weak(tstab - dot(tstab, n) * n, utest_tang))
         if self.surface_tension is not None:
             impose_surface_tension_directly=False
             if impose_surface_tension_directly:
@@ -936,6 +1108,10 @@ class NavierStokesPrescribedNormalVelocity(InterfaceEquations):
         l,ltest=var_and_test(self.lagrange_multiplier_name)
         self.add_residual(weak(dot(u,n)-self.normal_velocity,ltest))
         self.add_residual(weak(l,dot(utest,n)))
+        # Tangentially this boundary is do-nothing, so it inherits the stabilization traction there;
+        # normally the Lagrange multiplier absorbs it (it *is* the normal traction).
+        tstab = flow_eqs.get_stabilization_traction(n,self.get_parent_domain())
+        self.add_residual(-weak(tstab - dot(tstab, n) * n, utest - dot(utest, n) * n))
 
     def before_assigning_equations_postorder(self, mesh:"AnyMesh"):
         assert isinstance(mesh,InterfaceMesh)
@@ -1049,26 +1225,88 @@ class NavierStokesAzimuthalComponent(Equations):
 
 
 
-class NavierStokesContactAngle(InterfaceEquations):
-        
+def cox_voinov_apparent_angle(microscopic_angle:ExpressionOrNum,capillary_number:ExpressionOrNum,element_length:ExpressionOrNum,microscopic_length:ExpressionOrNum,min_angle:ExpressionOrNum=1*degree)->Expression:
     """
-        Enforces a constant contact angle for a droplet. 
+    Cox-Voinov relation (doi:10.1017/S0022112086000332), i.e. the viscous bending of the interface between a microscopic
+    cutoff length and a distance ``element_length`` from the contact line:
+
+    .. math:: \\theta^3=\\theta_\\text{micro}^3+9\\,\\mathrm{Ca}\\,\\ln\\left(h/\\ell\\right)
+
+    Imposing this angle instead of the microscopic one at the numerical contact line supplies the bending that happens
+    below the mesh resolution, so that the imposed angle follows the mesh size and the macroscopic shape does not.
+
+    Args:
+        microscopic_angle: The microscopic (equilibrium) contact angle.
+        capillary_number: :math:`\\mathrm{Ca}=\\mu U/\\sigma`, positive for an advancing contact line.
+        element_length: Distance from the contact line up to which the bending is unresolved, i.e. the mesh size.
+        microscopic_length: The microscopic cutoff length, e.g. the slip length.
+        min_angle: Lower clamp of the resulting angle, see below.
+
+    Returns:
+        The apparent contact angle at the distance ``element_length`` from the contact line.
+    """
+    # A mesh finer than the cutoff leaves nothing unresolved to correct for, hence the clamp at zero.
+    log_ratio=maximum(log(element_length/microscopic_length),0)
+    cubed=microscopic_angle**3+9*capillary_number*log_ratio
+    # A strongly receding contact line drives the cube negative, where the cube root is not real anymore. Cox-Voinov has
+    # broken down well before that point anyway (this is the film deposition regime), so clamp rather than produce NaNs.
+    return square_root(maximum(cubed,min_angle**3),3)
+
+
+def _cox_voinov_angle_at_contact_line(cl_eqs:InterfaceEquations,microscopic_angle:ExpressionOrNum,surface_tension:ExpressionOrNum,wall_tangent:ExpressionOrNum,U_wall:ExpressionOrNum,microscopic_length:ExpressionNumOrNone,min_angle:ExpressionOrNum)->Expression:
+    """
+    Assembles the Cox-Voinov corrected contact angle for equations defined on a contact line, i.e. on the boundary of a
+    free surface. Everything but the microscopic length and the substrate velocity is taken from the surroundings: the
+    unresolved length is the size of the attached free surface element, the viscosity comes from the flow equations in
+    the bulk below the free surface and the surface tension from the free surface itself.
+    """
+    if microscopic_length is None:
+        raise RuntimeError("The Cox-Voinov correction requires a microscopic cutoff length, e.g. the slip length. Please set cox_voinov_microscopic_length")
+    free_surface=cl_eqs.get_parent_domain()
+    bulk=free_surface.get_parent_domain()
+    if bulk is None:
+        raise RuntimeError("The Cox-Voinov correction must be applied at a contact line, i.e. at the boundary of a free surface of a bulk domain")
+    flow_eqs=bulk.get_equations().get_equation_of_type(StokesEquations)
+    if isinstance(flow_eqs,(list,tuple)):
+        if len(flow_eqs)!=1:
+            raise RuntimeError("Found "+str(len(flow_eqs))+" flow equations in the bulk domain "+bulk.get_full_name()+", cannot get a unique viscosity for the Cox-Voinov correction")
+        flow_eqs=flow_eqs[0]
+    if flow_eqs is None:
+        raise RuntimeError("The Cox-Voinov correction requires (Navier-)Stokes equations in the bulk domain below the free surface to get the viscosity from")
+    assert isinstance(flow_eqs,StokesEquations)
+    # Mesh size at the contact line: the length (or sqrt(area) in 3d) of the adjacent free surface element
+    h=var("cartesian_element_length_h",domain="..")
+    # Contact line speed relative to the substrate. The wall tangent points into the liquid, so a contact line moving
+    # against it wets new substrate, i.e. advances, which is where Cox-Voinov bends the interface upwards.
+    u_cl=-dot(mesh_velocity()-U_wall,wall_tangent)
+    Ca=subexpression(flow_eqs.dynamic_viscosity*u_cl/surface_tension)
+    return cox_voinov_apparent_angle(microscopic_angle,Ca,h,microscopic_length,min_angle)
+
+
+class NavierStokesContactAngle(InterfaceEquations):
+
+    """
+        Enforces a constant contact angle for a droplet.
 
         This class requires the parent equations to be of type StokesEquations, meaning that if StokesEquations (or subclasses) are not defined in the parent domain, an error will be raised.
 
-        Args:    
+        Args:
             contact_angle (ExpressionOrNum): Contact angle of the droplet. Defaults to 90 * degree.
             wall_normal (Expression): Normal vector of the wall (should be normalized). Defaults to vector([0, 1]).
             wall_tangent: Tangential vector of the wall (should be normalized). If None, it is calculated using the bac-cab rule to point inward to the bulk domain, along the substrate (i.e. orthogonal to the wall normal).            with_respect_to_tangent (bool): If True, the contact angle is defined with respect to the tangent vector. Defaults to None.
+            cox_voinov (bool): Impose the Cox-Voinov bent angle at the mesh scale instead of ``contact_angle`` itself, which makes the result considerably less sensitive to the mesh size at the contact line. Defaults to False.
+            U_wall (ExpressionOrNum): Velocity vector of the substrate, only used for ``cox_voinov``. The contact line speed entering the capillary number is measured relative to it, so that advancing and receding sides get the correct sign automatically. Defaults to 0, i.e. a substrate at rest.
+            cox_voinov_microscopic_length (ExpressionNumOrNone): Microscopic cutoff length (e.g. the slip length) of the Cox-Voinov relation. Must be set whenever ``cox_voinov`` is used.
+            cox_voinov_min_angle (ExpressionOrNum): Lower clamp of the bent angle. Defaults to 1 degree.
     """
-    
+
     #required_parent_type = NavierStokesFreeSurface
 
-    def __init__(self, contact_angle:ExpressionOrNum=90 * degree, *, wall_normal:Expression=vector([0, 1]), wall_tangent:Expression=None,
-                 with_respect_to_tangent:bool=True):
+    def __init__(self, contact_angle:ExpressionOrNum=90 * degree, *, wall_normal:Expression=vector([0, 1]), wall_tangent:Expression | None=None,
+                 with_respect_to_tangent:bool=True,cox_voinov:bool=False,U_wall:ExpressionOrNum=0,cox_voinov_microscopic_length:ExpressionNumOrNone=None,cox_voinov_min_angle:ExpressionOrNum=1*degree):
         super(NavierStokesContactAngle, self).__init__()
         self.wall_normal = 0+wall_normal
-        
+
         if wall_tangent is None:
             # bac-cab rule assuming the wall_normal is normalized. Pointing inward to the bulk domain, along the substrate (i.e. orthogonal to the wall normal)
             self.wall_tangent=self.wall_normal*dot(self.wall_normal,var("normal",domain=".."))-var("normal",domain="..")
@@ -1077,13 +1315,14 @@ class NavierStokesContactAngle(InterfaceEquations):
             self.wall_tangent = 0+wall_tangent
         self.contact_angle = 0+contact_angle
         self.with_respect_to_tangent = with_respect_to_tangent
+        self.cox_voinov=cox_voinov
+        self.U_wall=U_wall
+        self.cox_voinov_microscopic_length=cox_voinov_microscopic_length
+        self.cox_voinov_min_angle=cox_voinov_min_angle
 
     def define_residuals(self):
-        if self.with_respect_to_tangent:
-            m = sin(self.contact_angle) * self.wall_normal + cos(self.contact_angle) * self.wall_tangent
-        else:
-            m = cos(self.contact_angle) * self.wall_normal + sin(self.contact_angle) * self.wall_tangent
         _, utest = var_and_test("velocity")
+        from ..equations.multi_component import MultiComponentNavierStokesInterface
         nseq = self.get_parent_equations(of_type=NavierStokesFreeSurface)
         if isinstance(nseq,list):
             if len(nseq)==0:
@@ -1091,9 +1330,8 @@ class NavierStokesContactAngle(InterfaceEquations):
             elif len(nseq)>1:
                 raise RuntimeError("Multiple NavierStokesFreeSurface equations found")
             else:
-                nseq=nseq[0]                
+                nseq=nseq[0]
         if nseq is None:
-            from ..equations.multi_component import MultiComponentNavierStokesInterface
             nseq=self.get_parent_equations(of_type=MultiComponentNavierStokesInterface)
             if isinstance(nseq,list):
                 if len(nseq)==0:
@@ -1104,12 +1342,26 @@ class NavierStokesContactAngle(InterfaceEquations):
                     nseq=nseq[0]
         if nseq is None:
             raise RuntimeError("Must be applied on NavierStokesFreeSurface or a MultiComponentNavierStokesInterface")
+        # The surface tension is a property of the *interface*, so it is evaluated there rather than on
+        # this point domain. For a continuous field the two are the same number, but a discontinuous
+        # one - a D0 surfactant, say - lives in the interface element's internal data and is simply not
+        # visible from a co-dimension-2 domain unrestricted: without this, sigma(Gamma) fails outright
+        # with "Cannot expand the field 'surfconc_...'".
         if isinstance(nseq,NavierStokesFreeSurface):
-            sigma = 0+nseq.surface_tension
+            sigma = evaluate_in_domain(0+nseq.surface_tension,"..")
         else:
-            # TODO: Use surface tension projection if present
-            sigma = 0+nseq.interface_props.surface_tension
-        
+            assert isinstance(nseq,MultiComponentNavierStokesInterface)
+            sigma = evaluate_in_domain(0+nseq.interface_props.surface_tension,"..")
+
+        theta=self.contact_angle
+        if self.cox_voinov:
+            theta=_cox_voinov_angle_at_contact_line(self,theta,sigma,self.wall_tangent,self.U_wall,self.cox_voinov_microscopic_length,self.cox_voinov_min_angle)
+
+        if self.with_respect_to_tangent:
+            m = sin(theta) * self.wall_normal + cos(theta) * self.wall_tangent
+        else:
+            m = cos(theta) * self.wall_normal + sin(theta) * self.wall_tangent
+
         #self.add_local_function("mx",m[0])
         #self.add_local_function("my",m[1])
         self.add_residual( weak(sigma , dot(m, utest)))
@@ -1137,3 +1389,8 @@ class StokesFlowRadialFarField(InterfaceEquations):
         normstrain=matproduct(strain,n)
         p,ptest=var_and_test(stokes_eqs.pressure_name)
         self.add_weak(-normstrain+self.pinfty*n,utest)
+        self.add_weak(-stokes_eqs.get_stabilization_traction(n,self.get_parent_domain()),utest)
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

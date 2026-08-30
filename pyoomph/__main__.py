@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -32,8 +33,6 @@ import json
 import argparse
 import tempfile
 
-import subprocess
-from typing import Dict, Tuple, Set, List
 
 class _BaseMainEntry:
    def show(self):
@@ -49,9 +48,9 @@ entries = {"check": _CheckEntry()}
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
-    "command", help="Use one of the following commands: check, cbrange")
+    "command", help="Use one of the following commands: check, cbrange, cache")
 parser.add_argument("check_type", nargs='?',
-                    help="What to check: solver, eigen or compiler. If command=='cbrange', it is the mode (currently only 'merge')", default="")
+                    help="What to check: solver, eigen, compiler or mpi. If command=='cbrange', it is the mode (currently only 'merge'). If command=='cache', it is the action ('usage' or 'clear')", default="")
 parser.add_argument("check_name", nargs='?',
                     help="Which solver/eigensolver/compiler to check. If command=='cbrange', it is the output dir", default="")
 parser.add_argument("cbrange_in", nargs='*',
@@ -107,11 +106,47 @@ def test_compiler(compiler):
 
          p.initialise()
 
+def check_jit_cache(compiler):
+   # Verifies the JIT code cache (pyoomph/generic/jit_cache.py) actually gets used, not just
+   # that it fails to crash: run the same tiny problem twice against a fresh, empty cache
+   # directory. The first pass can't possibly find anything cached yet ("ignoring the cache"
+   # in the sense of not benefiting from whatever might already be in the real default cache
+   # location), but writes its result into it normally. The second pass reuses that same
+   # (now populated) directory, and should be served entirely from what the first pass wrote -
+   # checked via the cache's own hit counter, since test_compiler() runs quiet() and the
+   # ordinary "JIT cache hit" progress message is suppressed.
+   from .generic.jit_cache import get_jit_cache, is_enabled as jit_cache_is_enabled
+   import shutil
+
+   if not jit_cache_is_enabled():
+      print("","","JIT code cache is disabled (see pyoomph.generic.jit_cache), skipping cache verification")
+      return
+
+   old_cache_dir_env = os.environ.get("PYOOMPH_JIT_CACHE_DIR")
+   tempdir = tempfile.mkdtemp(prefix="pyoomph_jitcache_check_")
+   os.environ["PYOOMPH_JIT_CACHE_DIR"] = tempdir
+   try:
+      test_compiler(compiler)  # Pass 1: populates the fresh cache directory
+      cache = get_jit_cache()
+      if cache is None:
+         print("","","JIT code cache is disabled (see pyoomph.generic.jit_cache), skipping cache verification")
+         return
+      hits_before = cache.hits
+      test_compiler(compiler)  # Pass 2: should be served entirely from pass 1's writes
+      if cache.hits > hits_before:
+         print("","","JIT code cache seems to work ("+str(cache.hits-hits_before)+" hit(s) on the second pass)")
+      else:
+         print("","","JIT code cache does NOT seem to be used (0 hits on the second pass, "+str(cache.misses)+" entries were written on the first pass)")
+   finally:
+      if old_cache_dir_env is None:
+         os.environ.pop("PYOOMPH_JIT_CACHE_DIR", None)
+      else:
+         os.environ["PYOOMPH_JIT_CACHE_DIR"] = old_cache_dir_env
+      shutil.rmtree(tempdir, ignore_errors=True)
+
 def test_eigen(eigensolver):
    from . generic.problem import Problem
    from . equations.harmonic_oscillator import HarmonicOscillator
-   from . equations.generic import InitialCondition
-   from . expressions import var
    
    with tempfile.TemporaryDirectory(prefix="pyoomph_test_"+eigensolver+"_") as tempdir:
       # See test_solver() above: release the compiled DLL before the TemporaryDirectory
@@ -146,13 +181,13 @@ if arglist.command == "cbrange":
    if len(rest) < 2:
       raise RuntimeError(
          "Require at least two input plot directories to merge the cb_ranges")
-   merged:Dict[int,Dict[str,List[float]]] = {}
+   merged:dict[int,dict[str,list[float]]] = {}
    for d in rest:
       gl = glob(os.path.join(d, "cb_ranges_*.txt"))
-      gldict={}
+      gldict:dict[int,str]={}
       for entry in gl:
          num=int(entry.split("_")[-1].rstrip(".txt"))
-         data:Dict[str,List[float]]=json.load(open(entry,"r"))
+         data:dict[str,list[float]]=json.load(open(entry,"r"))
          if num in merged.keys():
             for d,v in data.items():
                if d in merged[num].keys():
@@ -167,14 +202,14 @@ if arglist.command == "cbrange":
 
 elif arglist.command=="check":
 
-   checkopts={"solver","eigen","compiler"}
+   checkopts={"solver","eigen","compiler","mpi"}
    if arglist.check_type=="all":
       check_types=checkopts
       arglist.check_name="all"
    elif arglist.check_type not in checkopts:
-      raise RuntimeError("Please specify 'check all', 'check solver', 'check eigen' or 'check compiler'")
+      raise RuntimeError("Please specify 'check all', 'check solver', 'check eigen', 'check compiler' or 'check mpi'")
    else:
-      check_types=[arglist.check_type]
+      check_types={arglist.check_type}
    for check_type in check_types:
       if check_type=="solver":
 
@@ -220,7 +255,7 @@ elif arglist.command=="check":
          from .solvers.generic import GenericEigenSolver
          p=Problem()
                
-         sublist={"pardiso","scipy","accelerate","slepc","slepc_mumps"}
+         sublist={"pardiso","scipy","spectra","accelerate","slepc","slepc_mumps"}
          #if arglist.check_name not in sublist:
          #   raise RuntimeError("Can only check the following: "+str(sublist))
          if arglist.check_name=="all":
@@ -266,11 +301,17 @@ elif arglist.command=="check":
             cc=None
             try:
                cc=BaseCCompiler.factory_compiler(to_check)
+               # factory_compiler is declared to return the C++ base class _pyoomph.CCompiler,
+               # but at runtime it always instantiates one of the registered BaseCCompiler
+               # subclasses (see BaseCCompiler._registered_compilers), which is where
+               # check_avail()/toolchain_located() are actually defined.
+               assert isinstance(cc,BaseCCompiler)
                if cc.check_avail():
                   print("","loading seems to work")
                   try:
                      test_compiler(to_check)
                      print("","","running seems to work")
+                     check_jit_cache(to_check)
                   except Exception as e:
                      print("","","C compilation seems to work: "+str(e.with_traceback(None)))
                else:
@@ -284,6 +325,7 @@ elif arglist.command=="check":
                # diagnostic than the raw exception below.
                located=None
                if cc is not None:
+                  assert isinstance(cc,BaseCCompiler)
                   try:
                      located=cc.toolchain_located()
                   except Exception:
@@ -297,9 +339,88 @@ elif arglist.command=="check":
                else:
                   print("","does not work: "+str(e.with_traceback(None)))
                   print("","For instructions on how to install a compiler, see "+install_doc_url)
+      elif check_type=="mpi":
+         # has_mpi() reflects the pyoomph/NO_MPI marker written by CMake depending on
+         # PYOOMPH_USE_MPI, i.e. how the core was actually compiled. Note that a broken
+         # mpi4py cannot be diagnosed here: in an MPI build, `python -m pyoomph` imports
+         # the package (and thereby mpi4py) before this file even runs.
+         from .generic.mpi import has_mpi, have_pymetis, PYMETIS_MISSING_MESSAGE
+         print("Checking mpi / build")
+         if not has_mpi():
+            print("","pyoomph was compiled WITHOUT MPI support (marker file pyoomph/NO_MPI is present)")
+            print("","","skipping the pymetis check - it is only needed to partition meshes for distributed (MPI) runs")
+         else:
+            print("","pyoomph was compiled WITH MPI support")
+            import mpi4py
+            from mpi4py import MPI
+            print("","","mpi4py "+mpi4py.__version__+" works, MPI library: "+MPI.Get_library_version().splitlines()[0])
+            print("Checking mpi / pymetis")
+            if not have_pymetis():
+               print("","does not work: "+PYMETIS_MISSING_MESSAGE)
+            else:
+               print("","loading seems to work")
+               try:
+                  import pymetis #type:ignore
+                  # Partition a tiny 4-cycle through the same API the partitioning callback
+                  # in pyoomph/__init__.py uses (CSRAdjacency, Options, part_graph): a pymetis
+                  # that merely imports but lacks this newer interface must be caught here,
+                  # not on rank 0 in the middle of a distributed run.
+                  adj=pymetis.CSRAdjacency([0,2,4,6,8],[1,3,0,2,1,3,0,2]) #type:ignore
+                  opts=pymetis.Options() #type:ignore
+                  opts.set_defaults() #type:ignore
+                  opts.objtype=pymetis.ObjType.CUT #type:ignore
+                  edgecut,part=pymetis.part_graph(2,adjacency=adj,vweights=None) #type:ignore
+                  if len(part)!=4:
+                     raise RuntimeError("partitioning a 4-vertex test graph returned "+str(len(part))+" vertex assignments")
+                  print("","","running seems to work")
+               except Exception as e:
+                  print("","","running does not work: "+str(e.with_traceback(None)))
+                  print("","","Hint: pyoomph requires a pymetis providing CSRAdjacency/Options; try 'pip install --upgrade pymetis'")
+
       else:
          raise RuntimeError("TODO: ")
+
+elif arglist.command=="cache":
+   from .generic.jit_cache import get_cache_dir, is_enabled as jit_cache_is_enabled, JITCache, clear_cache
+
+   def _format_bytes(n):
+      f = float(n)
+      for unit in ("B","KB","MB","GB","TB"):
+         if f < 1024 or unit=="TB":
+            return "{:.1f} {}".format(f,unit) if unit!="B" else "{:.0f} {}".format(f,unit)
+         f/=1024
+      return "{:.1f} TB".format(f) # unreachable, keeps type checkers happy
+
+   action = arglist.check_type
+   if action not in {"usage","clear"}:
+      raise RuntimeError("Please specify 'cache usage' or 'cache clear'")
+
+   cache_dir = get_cache_dir()
+
+   if action=="usage":
+      print("Cache directory: "+cache_dir)
+      if jit_cache_is_enabled():
+         print("JIT code cache is currently ACTIVE")
+      else:
+         print("JIT code cache is currently DISABLED (see pyoomph.generic.jit_cache for why - "
+               "e.g. GiNaC was not built with the deterministic-hash patches, or PYOOMPH_JIT_CACHE=0)")
+      if not os.path.isdir(cache_dir):
+         print("","Cache directory does not exist yet (nothing has been cached so far)")
+      else:
+         stats=JITCache(cache_dir).get_usage_stats()
+         print("","Compiled code objects: "+str(stats["objects_count"])+" entries, "
+               +_format_bytes(stats["objects_bytes"])+" / "+_format_bytes(stats["objects_max_bytes"])
+               +" (PYOOMPH_JIT_CACHE_MAX_MB)")
+         print("","Tier-2 fingerprint bookkeeping: "+str(stats["fingerprints_count"])+" entries "
+               +"/ "+str(stats["fingerprints_max_count"])+" (PYOOMPH_JIT_CACHE_MAX_FINGERPRINTS)")
+
+   elif action=="clear":
+      if clear_cache(cache_dir):
+         print("Cleared JIT code cache directory: "+cache_dir)
+      else:
+         print("Cache directory did not exist, nothing to clear: "+cache_dir)
+
 else:
-   raise RuntimeError("Please use one of the following commands: check")
+   raise RuntimeError("Please use one of the following commands: check, cbrange, cache")
 
 

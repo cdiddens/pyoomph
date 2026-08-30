@@ -41,7 +41,7 @@ Before building pyoomph, we first have to make sure that additional python packa
 
 .. code:: bash
 
-      python3 -m pip install pybind11 gmsh mpi4py matplotlib numpy pygmsh scipy meshio pybind11-stubgen setuptools scikit_build_core
+      python3 -m pip install nanobind gmsh mpi4py matplotlib numpy pygmsh scipy meshio setuptools scikit_build_core
 
 The ``python3`` command might be also ``python``, depending on the system. Be sure to use the more recent version of python.
 

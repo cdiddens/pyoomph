@@ -3,7 +3,9 @@
 Installing pyoomph (with PETSc/SLEPc) on Windows via WSL
 ----------------------------------------------------------
 
-PETSc/SLEPc cannot be built natively on Windows (see :numref:`petscslepc`). If you are on Windows and want a good, stable eigensolver, the recommended route is to install pyoomph inside the `Windows Subsystem for Linux (WSL) <https://learn.microsoft.com/windows/wsl/>`__. WSL2 runs a real Linux kernel, so once you are inside it, pyoomph and PETSc/SLEPc are installed exactly as on native Linux -- the restrictions that apply to native Windows builds simply do not apply anymore.
+PETSc/SLEPc cannot be built natively on Windows (see :numref:`petscslepc`). If you need it on Windows, the recommended route is to install pyoomph inside the `Windows Subsystem for Linux (WSL) <https://learn.microsoft.com/windows/wsl/>`__. WSL2 runs a real Linux kernel, so once you are inside it, pyoomph and PETSc/SLEPc are installed exactly as on native Linux -- the restrictions that apply to native Windows builds simply do not apply anymore.
+
+Note that you no longer need this merely to get a good eigensolver: the native Windows wheel ships with the built-in Spectra eigensolver, which handles unsymmetric and singular mass matrices and can target a complex eigenvalue, so linear stability analysis including azimuthal and normal mode problems works without WSL. Take this route if you want PETSc as linear solver, MPI-parallel runs, or an eigensolve distributed over several processes.
 
 Install WSL
 ~~~~~~~~~~~
@@ -34,7 +36,7 @@ Open the Ubuntu terminal and treat it exactly like a normal Linux installation (
 .. code:: bash
 
 	sudo apt update
-	sudo apt install gcc libopenmpi-dev pybind11-dev flex bison
+	sudo apt install gcc libopenmpi-dev flex bison
 	python3 -m pip install --upgrade pyoomph
 
 Or, for an editable install from source:

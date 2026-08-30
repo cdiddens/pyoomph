@@ -1,0 +1,141 @@
+name: Test JIT cache
+
+# Downloads the wheels built by a Wheels workflow run (see wheels.yml) and verifies, on
+# every platform, that pyoomph's JIT code cache (pyoomph/generic/jit_cache.py) actually
+# gets used - not just that it fails to crash. Deliberately narrow/small: installs the
+# single cp312-abi3 Stable ABI wheel on every platform (see test_wheels_multiversion.yml
+# for the fuller cross-Python-version story) and just exercises the cache itself via
+# `python -m pyoomph check compiler`/`cache usage`/`cache clear`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      wheels_run_id:
+        description: Wheels workflow run id to pull wheel artifacts from (defaults to the latest successful run)
+        required: false
+        type: string
+  workflow_run:
+    workflows:
+      - Wheels
+    types:
+      - completed
+
+jobs:
+  test_jit_cache:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    name: ${{ matrix.os_entry.label }}
+    runs-on: ${{ matrix.os_entry.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os_entry:
+          - label: linux-x86_64
+            runner: ubuntu-latest
+            artifact: wheels-linux-x86_64
+          - label: macos-intel-x86_64
+            runner: macos-15-intel
+            artifact: wheels-macos-intel-x86_64
+          - label: macos-arm64
+            runner: macos-14
+            artifact: wheels-macos-arm64
+          - label: windows-msys2-ucrt64
+            runner: windows-latest
+            artifact: wheels-windows-msys2-ucrt64
+
+    steps:
+      - name: Resolve Wheels run id
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+          MANUAL_RUN_ID: ${{ github.event.inputs.wheels_run_id }}
+        shell: bash
+        run: |
+          if [[ "${EVENT_NAME}" == "workflow_run" ]]; then
+            RUN_ID="${WORKFLOW_RUN_ID}"
+          elif [[ -n "${MANUAL_RUN_ID}" ]]; then
+            RUN_ID="${MANUAL_RUN_ID}"
+          else
+            RUN_ID="$(gh run list \
+              --workflow wheels.yml \
+              --repo "${GITHUB_REPOSITORY}" \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+          fi
+
+          if [[ -z "${RUN_ID}" || "${RUN_ID}" == "null" ]]; then
+            echo "Could not resolve a successful Wheels run id" >&2
+            exit 1
+          fi
+
+          echo "Using Wheels run id ${RUN_ID}"
+          echo "run_id=${RUN_ID}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download wheel artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          rm -rf wheelhouse
+          mkdir -p wheelhouse
+          gh run download "${{ steps.resolve.outputs.run_id }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --name "${{ matrix.os_entry.artifact }}" \
+            --dir wheelhouse
+          ls -la wheelhouse
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Bare ubuntu-latest runners don't have these; pygmsh/gmsh (a runtime dependency,
+      # pulled in by installing the wheel below) needs them at import time. Matches
+      # wheels.yml's own CIBW_BEFORE_TEST_LINUX step.
+      - name: Install runtime dependencies (Linux)
+        if: matrix.os_entry.label == 'linux-x86_64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglu1-mesa libxcursor1 libopengl0 libxinerama1
+
+      - name: Install the built wheel
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          WHEEL=$(ls wheelhouse/pyoomph-*-cp312-abi3-*.whl)
+          echo "Installing ${WHEEL}"
+          python -m pip install "${WHEEL}"
+
+      - name: Verify the JIT cache is active and actually gets used
+        shell: bash
+        run: |
+          python -m pyoomph cache usage
+          echo "----------------------------------------"
+          python -m pyoomph check compiler all 2>&1 | tee cache_check_output.log
+          echo "----------------------------------------"
+          if grep -q "does NOT seem to be used" cache_check_output.log; then
+            echo "::error::JIT cache does not seem to be used on this platform -- see cache_check_output.log above"
+            exit 1
+          fi
+          if ! grep -q "JIT code cache seems to work" cache_check_output.log; then
+            echo "::error::Expected to see a JIT cache verification result, but found none -- see cache_check_output.log above"
+            exit 1
+          fi
+          echo "JIT cache verified working."
+
+      - name: Clear the cache and verify usage reports empty afterward
+        shell: bash
+        run: |
+          python -m pyoomph cache clear
+          python -m pyoomph cache usage
+
+      - name: Upload cache check output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jit-cache-check-${{ matrix.os_entry.label }}
+          path: cache_check_output.log
+          if-no-files-found: warn

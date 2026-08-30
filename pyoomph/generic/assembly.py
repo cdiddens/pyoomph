@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -36,11 +37,16 @@ if TYPE_CHECKING:
 
 class CustomAssemblyBase:    
     def __init__(self) -> None:
-        self.problem:Optional["Problem"]=None            
+        self.problem:"Problem | None"=None            
 
     def _set_problem(self,problem:"Problem"):
         self.problem=problem
-        
+
+    def get_problem(self)->"Problem":
+        assert self.problem is not None, "The problem has not been set yet on this "+type(self).__name__
+        return self.problem
+
+
     def has_custom_solve_routine(self)->bool:
         # You can override the default solve routine for J*dU=R
         return False
@@ -75,17 +81,17 @@ class CustomAssemblyBase:
         pass
 
     @overload
-    def get_residuals_and_jacobian(self,require_jacobian:Literal[False],dparameter:Optional[str]=None)->NPFloatArray: ...
+    def get_residuals_and_jacobian(self,require_jacobian:Literal[False],dparameter:str | None=None)->NPFloatArray: ...
 
     @overload
-    def get_residuals_and_jacobian(self,require_jacobian:Literal[True],dparameter:Optional[str]=None)->Tuple[NPFloatArray,csr_matrix]: ...
+    def get_residuals_and_jacobian(self,require_jacobian:Literal[True],dparameter:str | None=None)->tuple[NPFloatArray,csr_matrix]: ...
 
-    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:Optional[str]=None)->Union[NPFloatArray,Tuple[NPFloatArray,csr_matrix]]:
+    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, csr_matrix]:
         raise RuntimeError("Must be implemented")
         pass
 
     # Optionally: Return mass and jacobian matrices of the last step, can be used e.g. for Lyapunov exponent calculation
-    def get_last_mass_and_jacobian_matrices(self)->Tuple[Optional[csr_matrix],Optional[csr_matrix]]:
+    def get_last_mass_and_jacobian_matrices(self)->tuple[csr_matrix | None,csr_matrix | None]:
         return None,None
         
 
@@ -113,7 +119,7 @@ class FixedMeshMaxQuadraticNonlinearAssembly(CustomAssemblyBase):
     In particular, the mesh(es) must be non-moving, as moving meshes are usually highly nonlinear.
     """
 
-    def __init__(self,cache_at_fixed_parameters:Union[bool,Set[str]]=True) -> None:
+    def __init__(self,cache_at_fixed_parameters:bool | set[str]=True) -> None:
         super().__init__()
         self._tensor_cache_valid=False
         self._M0:csr_matrix
@@ -122,13 +128,13 @@ class FixedMeshMaxQuadraticNonlinearAssembly(CustomAssemblyBase):
         self._HMat:csr_matrix
         self._HTens:_pyoomph.SparseRank3Tensor
         self._ndof:int=-1
-        self._history_dofs:Dict[float,NPFloatArray]={}
-        self._last_current_dofs:Optional[NPFloatArray]=None
+        self._history_dofs:dict[float,NPFloatArray]={}
+        self._last_current_dofs:NPFloatArray | None=None
         self._cache_at_fixed_parameters=cache_at_fixed_parameters
-        self._param_values:Dict[str,float]={} # Parameter values at cache assembly 
-        self._param_contribs:Dict[str,Tuple[NPFloatArray,csr_matrix,csr_matrix]] # Parameter contributions R,J,M
-        self._lastMatM:Optional[csr_matrix]=None
-        self._lastMatJ:Optional[csr_matrix]=None
+        self._param_values:dict[str,float]={} # Parameter values at cache assembly 
+        self._param_contribs:dict[str,tuple[NPFloatArray,csr_matrix,csr_matrix]] # Parameter contributions R,J,M
+        self._lastMatM:csr_matrix | None=None
+        self._lastMatJ:csr_matrix | None=None
 
     def invalidate_time_history(self)->None:
         """Since obtaining the history dofs takes some time, we store them in a ring buffer. This routine clears the buffer
@@ -170,10 +176,10 @@ class FixedMeshMaxQuadraticNonlinearAssembly(CustomAssemblyBase):
             ts.make_steady()
 
         pnames=self.problem.get_global_parameter_names()
-        paramvals:Dict[str,float]={}
+        paramvals:dict[str,float]={}
         self._param_values={}
         self._param_contribs={}
-        needs_contrib:List[str]=[]
+        needs_contrib:list[str]=[]
         for pname in pnames:
             paramvals[pname]=self.problem.get_global_parameter(pname).value
         
@@ -192,6 +198,7 @@ class FixedMeshMaxQuadraticNonlinearAssembly(CustomAssemblyBase):
 
         t1=time.time()
         print("UPDATING TENSOR CACHE")
+        self.problem._require_non_distributed("The multi-assembly tensor cache")
         self._R0=numpy.array(self.problem.get_residuals()) #type:ignore # Initial residual
         n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = self.problem.assemble_eigenproblem_matrices(0.0) #type:ignore # Mass and zero Jacobian
         self._M0=csr_matrix((M_val, M_ci, M_rs), shape=(n, n)).copy()	#type:ignore
@@ -268,7 +275,7 @@ class FixedMeshMaxQuadraticNonlinearAssembly(CustomAssemblyBase):
                 self._history_dofs[t]=res
 
         if len(self._history_dofs)>3: #Get rid of some history to not overcrowd memory
-            times:List[float]=list(sorted(self._history_dofs.keys()))
+            times:list[float]=list(sorted(self._history_dofs.keys()))
             times_to_rem=times[:-3] # Let 3 entries alive
             for trem in times_to_rem:
                 del self._history_dofs[trem]                   
@@ -276,12 +283,12 @@ class FixedMeshMaxQuadraticNonlinearAssembly(CustomAssemblyBase):
         
 
     @overload
-    def get_residuals_and_jacobian(self,require_jacobian:Literal[False],dparameter:Optional[str]=None)->NPFloatArray: ...
+    def get_residuals_and_jacobian(self,require_jacobian:Literal[False],dparameter:str | None=None)->NPFloatArray: ...
 
     @overload
-    def get_residuals_and_jacobian(self,require_jacobian:Literal[True],dparameter:Optional[str]=None)->Tuple[NPFloatArray,csr_matrix]: ...
+    def get_residuals_and_jacobian(self,require_jacobian:Literal[True],dparameter:str | None=None)->tuple[NPFloatArray,csr_matrix]: ...
 
-    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:Optional[str]=None)->Union[NPFloatArray,Tuple[NPFloatArray,csr_matrix]]:
+    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, csr_matrix]:
         """Get the residual vector (and potentially the Jacobian) based on the current and history dofs using the cached tensors.
 
         When a parameter changes, for which we have evaluted the tensor, we have to recalculate the cache. 
@@ -364,5 +371,9 @@ class FixedMeshMaxQuadraticNonlinearAssembly(CustomAssemblyBase):
             return residual,matJ #type:ignore
 
 
-    def get_last_mass_and_jacobian_matrices(self)->Tuple[Optional[csr_matrix],Optional[csr_matrix]]:
+    def get_last_mass_and_jacobian_matrices(self)->tuple[csr_matrix | None,csr_matrix | None]:
         return self._lastMatM,self._lastMatJ
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

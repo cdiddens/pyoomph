@@ -11,6 +11,7 @@ Submodules
    pyoomph.output.latex
    pyoomph.output.meshio
    pyoomph.output.plotting
+   pyoomph.output.plotting1d
    pyoomph.output.states
 
 Module contents

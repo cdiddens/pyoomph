@@ -184,32 +184,32 @@ namespace oomph
     ExplicitTimeStepHandler() {}
 
     /// Return the number of degrees of freedom in the element elem_pt
-    unsigned ndof(GeneralisedElement* const& elem_pt);
+    unsigned ndof(GeneralisedElement* const& elem_pt) override;
 
     /// Return the global equation number of the local unknown ieqn_local
     /// in elem_pt.
     unsigned long eqn_number(GeneralisedElement* const& elem_pt,
-                             const unsigned& ieqn_local);
+                             const unsigned& ieqn_local) override;
 
     /// Return the contribution to the residuals of the element elem_pt
     /// This is deliberately broken in our eigenproblem
     void get_residuals(GeneralisedElement* const& elem_pt,
-                       Vector<double>& residuals);
+                       Vector<double>& residuals) override;
 
     /// Calculate the elemental Jacobian matrix "d equation
     /// / d variable" for elem_pt. Again deliberately broken in the eigenproblem
     void get_jacobian(GeneralisedElement* const& elem_pt,
                       Vector<double>& residuals,
-                      DenseMatrix<double>& jacobian);
+                      DenseMatrix<double>& jacobian) override;
 
     /// Calculate all desired vectors and matrices
     /// provided by the element elem_pt.
     void get_all_vectors_and_matrices(GeneralisedElement* const& elem_pt,
                                       Vector<Vector<double>>& vec,
-                                      Vector<DenseMatrix<double>>& matrix);
+                                      Vector<DenseMatrix<double>>& matrix) override;
 
     /// Empty virtual destructor
-    ~ExplicitTimeStepHandler() {}
+    ~ExplicitTimeStepHandler() override {}
   };
 
 
@@ -229,32 +229,32 @@ namespace oomph
     EigenProblemHandler(const double& sigma_real) : Sigma_real(sigma_real) {}
 
     /// Return the number of degrees of freedom in the element elem_pt
-    unsigned ndof(GeneralisedElement* const& elem_pt);
+    unsigned ndof(GeneralisedElement* const& elem_pt) override;
 
     /// Return the global equation number of the local unknown ieqn_local
     /// in elem_pt.
     unsigned long eqn_number(GeneralisedElement* const& elem_pt,
-                             const unsigned& ieqn_local);
+                             const unsigned& ieqn_local) override;
 
     /// Return the contribution to the residuals of the element elem_pt
     /// This is deliberately broken in our eigenproblem
     void get_residuals(GeneralisedElement* const& elem_pt,
-                       Vector<double>& residuals);
+                       Vector<double>& residuals) override;
 
     /// Calculate the elemental Jacobian matrix "d equation
     /// / d variable" for elem_pt. Again deliberately broken in the eigenproblem
     void get_jacobian(GeneralisedElement* const& elem_pt,
                       Vector<double>& residuals,
-                      DenseMatrix<double>& jacobian);
+                      DenseMatrix<double>& jacobian) override;
 
     /// Calculate all desired vectors and matrices
     /// provided by the element elem_pt.
     void get_all_vectors_and_matrices(GeneralisedElement* const& elem_pt,
                                       Vector<Vector<double>>& vec,
-                                      Vector<DenseMatrix<double>>& matrix);
+                                      Vector<DenseMatrix<double>>& matrix) override;
 
     /// Empty virtual destructor
-    ~EigenProblemHandler() {}
+    ~EigenProblemHandler() override {}
   };
 
 
@@ -279,7 +279,7 @@ namespace oomph
 
     /// Use underlying assembly handler to return the number of
     /// degrees of freedom in the element elem_pt
-    unsigned ndof(GeneralisedElement* const& elem_pt)
+    unsigned ndof(GeneralisedElement* const& elem_pt) override
     {
       return Assembly_handler_pt->ndof(elem_pt);
     }
@@ -287,7 +287,7 @@ namespace oomph
     /// Use underlying AssemblyHandler to return the
     /// global equation number of the local unknown ieqn_local in elem_pt.
     unsigned long eqn_number(GeneralisedElement* const& elem_pt,
-                             const unsigned& ieqn_local)
+                             const unsigned& ieqn_local) override
     {
       return Assembly_handler_pt->eqn_number(elem_pt, ieqn_local);
     }
@@ -295,7 +295,7 @@ namespace oomph
     /// Use underlying AssemblyHandler to return
     /// the contribution to the residuals of the element elem_pt
     void get_residuals(GeneralisedElement* const& elem_pt,
-                       Vector<double>& residuals)
+                       Vector<double>& residuals) override
     {
       Assembly_handler_pt->get_residuals(elem_pt, residuals);
     }
@@ -306,7 +306,7 @@ namespace oomph
     /// / d variable" for elem_pt.
     void get_jacobian(GeneralisedElement* const& elem_pt,
                       Vector<double>& residuals,
-                      DenseMatrix<double>& jacobian)
+                      DenseMatrix<double>& jacobian) override
     {
       Assembly_handler_pt->get_jacobian(elem_pt, residuals, jacobian);
     }
@@ -318,13 +318,13 @@ namespace oomph
     /// with the original assembly handler
     void get_all_vectors_and_matrices(GeneralisedElement* const& elem_pt,
                                       Vector<Vector<double>>& vec,
-                                      Vector<DenseMatrix<double>>& matrix)
+                                      Vector<DenseMatrix<double>>& matrix) override
     {
       Assembly_handler_pt->get_residuals(elem_pt, vec[0]);
     }
 
     /// Empty virtual destructor
-    ~ParallelResidualsHandler() {}
+    ~ParallelResidualsHandler() override {}
   };
 
 
@@ -353,7 +353,7 @@ namespace oomph
 
     /// Return the number of degrees of freedom in the element elem_pt
     /// Pass through to the original assembly handler
-    unsigned ndof(GeneralisedElement* const& elem_pt)
+    unsigned ndof(GeneralisedElement* const& elem_pt) override
     {
       return Assembly_handler_pt->ndof(elem_pt);
     }
@@ -361,7 +361,7 @@ namespace oomph
     /// Return the global equation number of the local unknown ieqn_local
     /// in elem_pt.Pass through to the original assembly handler
     unsigned long eqn_number(GeneralisedElement* const& elem_pt,
-                             const unsigned& ieqn_local)
+                             const unsigned& ieqn_local) override
     {
       return Assembly_handler_pt->eqn_number(elem_pt, ieqn_local);
     }
@@ -369,7 +369,7 @@ namespace oomph
     /// Return the contribution to the residuals of the element elem_pt
     /// by using the derivatives
     void get_residuals(GeneralisedElement* const& elem_pt,
-                       Vector<double>& residuals)
+                       Vector<double>& residuals) override
     {
       Assembly_handler_pt->get_dresiduals_dparameter(
         elem_pt, Parameter_pt, residuals);
@@ -381,7 +381,7 @@ namespace oomph
     /// Overloaded to return the derivatives wrt the parameter
     void get_jacobian(GeneralisedElement* const& elem_pt,
                       Vector<double>& residuals,
-                      DenseMatrix<double>& jacobian)
+                      DenseMatrix<double>& jacobian) override
     {
       Assembly_handler_pt->get_djacobian_dparameter(
         elem_pt, Parameter_pt, residuals, jacobian);
@@ -415,16 +415,16 @@ namespace oomph
     }
 
     /// Destructor: clean up the allocated memory
-    ~AugmentedBlockFoldLinearSolver();
+    ~AugmentedBlockFoldLinearSolver() override;
 
     /// The solve function uses the block factorisation
-    void solve(Problem* const& problem_pt, DoubleVector& result);
+    void solve(Problem* const& problem_pt, DoubleVector& result) override;
 
     /// The linear-algebra-type solver does not make sense.
     /// The interface is deliberately broken
     void solve(DoubleMatrixBase* const& matrix_pt,
                const DoubleVector& rhs,
-               DoubleVector& result)
+               DoubleVector& result) override
     {
       throw OomphLibError(
         "Linear-algebra interface does not make sense for this linear solver\n",
@@ -436,7 +436,7 @@ namespace oomph
     /// The interface is deliberately broken
     void solve(DoubleMatrixBase* const& matrix_pt,
                const Vector<double>& rhs,
-               Vector<double>& result)
+               Vector<double>& result) override
     {
       throw OomphLibError(
         "Linear-algebra interface does not make sense for this linear solver\n",
@@ -445,7 +445,7 @@ namespace oomph
     }
 
     /// The resolve function also uses the block factorisation
-    void resolve(const DoubleVector& rhs, DoubleVector& result);
+    void resolve(const DoubleVector& rhs, DoubleVector& result) override;
 
     /// Access function to the original linear solver
     LinearSolver* linear_solver_pt() const
@@ -534,61 +534,61 @@ namespace oomph
 
     /// Destructor, return the problem to its original state
     /// before the augmented system was added
-    ~FoldHandler();
+    ~FoldHandler() override;
 
     /// Get the number of elemental degrees of freedom
-    unsigned ndof(GeneralisedElement* const& elem_pt);
+    unsigned ndof(GeneralisedElement* const& elem_pt) override;
 
     /// Get the global equation number of the local unknown
     unsigned long eqn_number(GeneralisedElement* const& elem_pt,
-                             const unsigned& ieqn_local);
+                             const unsigned& ieqn_local) override;
 
     /// Get the residuals
     void get_residuals(GeneralisedElement* const& elem_pt,
-                       Vector<double>& residuals);
+                       Vector<double>& residuals) override;
 
     /// Calculate the elemental Jacobian matrix "d equation
     /// / d variable".
     void get_jacobian(GeneralisedElement* const& elem_pt,
                       Vector<double>& residuals,
-                      DenseMatrix<double>& jacobian);
+                      DenseMatrix<double>& jacobian) override;
 
     /// Overload the derivatives of the residuals with respect to
     /// a parameter to apply to the augmented system
     void get_dresiduals_dparameter(GeneralisedElement* const& elem_pt,
                                    double* const& parameter_pt,
-                                   Vector<double>& dres_dparam);
+                                   Vector<double>& dres_dparam) override;
 
     /// Overload the derivative of the residuals and jacobian
     /// with respect to a parameter so that it breaks
     void get_djacobian_dparameter(GeneralisedElement* const& elem_pt,
                                   double* const& parameter_pt,
                                   Vector<double>& dres_dparam,
-                                  DenseMatrix<double>& djac_dparam);
+                                  DenseMatrix<double>& djac_dparam) override;
 
     /// Overload the hessian vector product function so that
     /// it breaks
     void get_hessian_vector_products(GeneralisedElement* const& elem_pt,
                                      Vector<double> const& Y,
                                      DenseMatrix<double> const& C,
-                                     DenseMatrix<double>& product);
+                                     DenseMatrix<double>& product) override;
 
     /// Indicate that we are tracking a fold bifurcation by returning 1
-    int bifurcation_type() const
+    int bifurcation_type() const override
     {
       return 1;
     }
 
     /// Return a pointer to the
     /// bifurcation parameter in bifurcation tracking problems
-    double* bifurcation_parameter_pt() const
+    double* bifurcation_parameter_pt() const override
     {
       return Parameter_pt;
     }
 
     /// Return the eigenfunction(s) associated with the bifurcation that
     /// has been detected in bifurcation tracking problems
-    void get_eigenfunction(Vector<DoubleVector>& eigenfunction);
+    void get_eigenfunction(Vector<DoubleVector>& eigenfunction) override;
 
     /// Set to solve the augmented block system
     void solve_augmented_block_system();
@@ -639,16 +639,16 @@ namespace oomph
     }
 
     /// Destructor: clean up the allocated memory
-    ~BlockPitchForkLinearSolver();
+    ~BlockPitchForkLinearSolver() override;
 
     /// The solve function uses the block factorisation
-    void solve(Problem* const& problem_pt, DoubleVector& result);
+    void solve(Problem* const& problem_pt, DoubleVector& result) override;
 
     /// The linear-algebra-type solver does not make sense.
     /// The interface is deliberately broken
     void solve(DoubleMatrixBase* const& matrix_pt,
                const DoubleVector& rhs,
-               DoubleVector& result)
+               DoubleVector& result) override
     {
       throw OomphLibError(
         "Linear-algebra interface does not make sense for this linear solver\n",
@@ -660,7 +660,7 @@ namespace oomph
     /// The interface is deliberately broken
     void solve(DoubleMatrixBase* const& matrix_pt,
                const Vector<double>& rhs,
-               Vector<double>& result)
+               Vector<double>& result) override
     {
       throw OomphLibError(
         "Linear-algebra interface does not make sense for this linear solver\n",
@@ -670,7 +670,7 @@ namespace oomph
 
 
     /// The resolve function also uses the block factorisation
-    void resolve(const DoubleVector& rhs, DoubleVector& result);
+    void resolve(const DoubleVector& rhs, DoubleVector& result) override;
 
     /// Access function to the original linear solver
     LinearSolver* linear_solver_pt() const
@@ -706,16 +706,16 @@ namespace oomph
     }
 
     /// Destructor: clean up the allocated memory
-    ~AugmentedBlockPitchForkLinearSolver();
+    ~AugmentedBlockPitchForkLinearSolver() override;
 
     /// The solve function uses the block factorisation
-    void solve(Problem* const& problem_pt, DoubleVector& result);
+    void solve(Problem* const& problem_pt, DoubleVector& result) override;
 
     /// The linear-algebra-type solver does not make sense.
     /// The interface is deliberately broken
     void solve(DoubleMatrixBase* const& matrix_pt,
                const DoubleVector& rhs,
-               DoubleVector& result)
+               DoubleVector& result) override
     {
       throw OomphLibError(
         "Linear-algebra interface does not make sense for this linear solver\n",
@@ -727,7 +727,7 @@ namespace oomph
     /// The interface is deliberately broken
     void solve(DoubleMatrixBase* const& matrix_pt,
                const Vector<double>& rhs,
-               Vector<double>& result)
+               Vector<double>& result) override
     {
       throw OomphLibError(
         "Linear-algebra interface does not make sense for this linear solver\n",
@@ -737,7 +737,7 @@ namespace oomph
 
 
     /// The resolve function also uses the block factorisation
-    void resolve(const DoubleVector& rhs, DoubleVector& result);
+    void resolve(const DoubleVector& rhs, DoubleVector& result) override;
 
     /// Access function to the original linear solver
     LinearSolver* linear_solver_pt() const
@@ -870,70 +870,70 @@ namespace oomph
 
     /// Destructor, return the problem to its original state,
     /// before the augmented system was added
-    ~PitchForkHandler();
+    ~PitchForkHandler() override;
 
     // Has this been called
 
     /// Get the number of elemental degrees of freedom
-    unsigned ndof(GeneralisedElement* const& elem_pt);
+    unsigned ndof(GeneralisedElement* const& elem_pt) override;
 
     /// Get the global equation number of the local unknown
     unsigned long eqn_number(GeneralisedElement* const& elem_pt,
-                             const unsigned& ieqn_local);
+                             const unsigned& ieqn_local) override;
 
     /// Get the residuals
     void get_residuals(GeneralisedElement* const& elem_pt,
-                       Vector<double>& residuals);
+                       Vector<double>& residuals) override;
 
     /// Calculate the elemental Jacobian matrix "d equation
     /// / d variable".
     void get_jacobian(GeneralisedElement* const& elem_pt,
                       Vector<double>& residuals,
-                      DenseMatrix<double>& jacobian);
+                      DenseMatrix<double>& jacobian) override;
 
     /// Overload the derivatives of the residuals with respect to
     /// a parameter to apply to the augmented system
     void get_dresiduals_dparameter(GeneralisedElement* const& elem_pt,
                                    double* const& parameter_pt,
-                                   Vector<double>& dres_dparam);
+                                   Vector<double>& dres_dparam) override;
 
     /// Overload the derivative of the residuals and jacobian
     /// with respect to a parameter so that it breaks
     void get_djacobian_dparameter(GeneralisedElement* const& elem_pt,
                                   double* const& parameter_pt,
                                   Vector<double>& dres_dparam,
-                                  DenseMatrix<double>& djac_dparam);
+                                  DenseMatrix<double>& djac_dparam) override;
 
     /// Overload the hessian vector product function so that
     /// it breaks
     void get_hessian_vector_products(GeneralisedElement* const& elem_pt,
                                      Vector<double> const& Y,
                                      DenseMatrix<double> const& C,
-                                     DenseMatrix<double>& product);
+                                     DenseMatrix<double>& product) override;
 
 
     /// Indicate that we are tracking a pitchfork
     /// bifurcation by returning 2
-    int bifurcation_type() const
+    int bifurcation_type() const override
     {
       return 2;
     }
 
     /// Return a pointer to the
     /// bifurcation parameter in bifurcation tracking problems
-    double* bifurcation_parameter_pt() const
+    double* bifurcation_parameter_pt() const override
     {
       return Parameter_pt;
     }
 
     /// Return the eigenfunction(s) associated with the bifurcation that
     /// has been detected in bifurcation tracking problems
-    void get_eigenfunction(Vector<DoubleVector>& eigenfunction);
+    void get_eigenfunction(Vector<DoubleVector>& eigenfunction) override;
 
 #ifdef OOMPH_HAS_MPI
     /// Function that is used to perform any synchronisation
     /// required during the solution
-    void synchronise();
+    void synchronise() override;
 #endif
 
 
@@ -980,7 +980,7 @@ namespace oomph
     }
 
     /// Destructor: clean up the allocated memory
-    ~BlockHopfLinearSolver();
+    ~BlockHopfLinearSolver() override;
 
     /// Solve for two right hand sides
     void solve_for_two_rhs(Problem* const& problem_pt,
@@ -989,13 +989,13 @@ namespace oomph
                            DoubleVector& result2);
 
     /// The solve function uses the block factorisation
-    void solve(Problem* const& problem_pt, DoubleVector& result);
+    void solve(Problem* const& problem_pt, DoubleVector& result) override;
 
     /// The linear-algebra-type solver does not make sense.
     /// The interface is deliberately broken
     void solve(DoubleMatrixBase* const& matrix_pt,
                const DoubleVector& rhs,
-               DoubleVector& result)
+               DoubleVector& result) override
     {
       throw OomphLibError(
         "Linear-algebra interface does not make sense for this linear solver\n",
@@ -1007,7 +1007,7 @@ namespace oomph
     /// The interface is deliberately broken
     void solve(DoubleMatrixBase* const& matrix_pt,
                const Vector<double>& rhs,
-               Vector<double>& result)
+               Vector<double>& result) override
     {
       throw OomphLibError(
         "Linear-algebra interface does not make sense for this linear solver\n",
@@ -1017,7 +1017,7 @@ namespace oomph
 
 
     /// The resolve function also uses the block factorisation
-    void resolve(const DoubleVector& rhs, DoubleVector& result);
+    void resolve(const DoubleVector& rhs, DoubleVector& result) override;
 
     /// Access function to the original linear solver
     LinearSolver* linear_solver_pt() const
@@ -1099,62 +1099,62 @@ namespace oomph
 
     /// Destructor, return the problem to its original state,
     /// before the augmented system was added
-    ~HopfHandler();
+    ~HopfHandler() override;
 
     /// Get the number of elemental degrees of freedom
-    unsigned ndof(GeneralisedElement* const& elem_pt);
+    unsigned ndof(GeneralisedElement* const& elem_pt) override;
 
     /// Get the global equation number of the local unknown
     unsigned long eqn_number(GeneralisedElement* const& elem_pt,
-                             const unsigned& ieqn_local);
+                             const unsigned& ieqn_local) override;
 
     /// Get the residuals
     void get_residuals(GeneralisedElement* const& elem_pt,
-                       Vector<double>& residuals);
+                       Vector<double>& residuals) override;
 
     /// Calculate the elemental Jacobian matrix "d equation
     /// / d variable".
     void get_jacobian(GeneralisedElement* const& elem_pt,
                       Vector<double>& residuals,
-                      DenseMatrix<double>& jacobian);
+                      DenseMatrix<double>& jacobian) override;
 
     /// Overload the derivatives of the residuals with respect to
     /// a parameter to apply to the augmented system
     void get_dresiduals_dparameter(GeneralisedElement* const& elem_pt,
                                    double* const& parameter_pt,
-                                   Vector<double>& dres_dparam);
+                                   Vector<double>& dres_dparam) override;
 
     /// Overload the derivative of the residuals and jacobian
     /// with respect to a parameter so that it breaks
     void get_djacobian_dparameter(GeneralisedElement* const& elem_pt,
                                   double* const& parameter_pt,
                                   Vector<double>& dres_dparam,
-                                  DenseMatrix<double>& djac_dparam);
+                                  DenseMatrix<double>& djac_dparam) override;
 
     /// Overload the hessian vector product function so that
     /// it breaks
     void get_hessian_vector_products(GeneralisedElement* const& elem_pt,
                                      Vector<double> const& Y,
                                      DenseMatrix<double> const& C,
-                                     DenseMatrix<double>& product);
+                                     DenseMatrix<double>& product) override;
 
     /// Indicate that we are tracking a Hopf
     /// bifurcation by returning 3
-    int bifurcation_type() const
+    int bifurcation_type() const override
     {
       return 3;
     }
 
     /// Return a pointer to the
     /// bifurcation parameter in bifurcation tracking problems
-    double* bifurcation_parameter_pt() const
+    double* bifurcation_parameter_pt() const override
     {
       return Parameter_pt;
     }
 
     /// Return the eigenfunction(s) associated with the bifurcation that
     /// has been detected in bifurcation tracking problems
-    void get_eigenfunction(Vector<DoubleVector>& eigenfunction);
+    void get_eigenfunction(Vector<DoubleVector>& eigenfunction) override;
 
     /// Return the frequency of the bifurcation
     const double& omega() const

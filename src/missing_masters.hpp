@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -51,6 +51,13 @@ The main author may be contacted at c.diddens@utwente.nl
 #include "Qelements.h"
 #include "element_with_external_element.h"
 #include "missing_masters.h"
+
+// The rest of pyoomph relies on EVERY node in a mesh being a pyoomph::Node (see the typedef in
+// nodes.hpp), which is what lets the downcast from oomph::Node be a static_cast. External-halo
+// master nodes are reconstructed here rather than by an element, so this file has to honour that
+// invariant too - hence pyoomph::Node/pyoomph::BoundaryNode below instead of oomph::SolidNode and
+// oomph::BoundaryNode<SolidNode>, which is what upstream builds.
+#include "nodes.hpp"
 
 namespace oomph
 {
@@ -1000,11 +1007,11 @@ namespace oomph
         // Construct a new boundary node
         if (time_stepper_pt != 0)
         {
-          new_master_nod_pt = new BoundaryNode<SolidNode>(time_stepper_pt, n_lag_dim, n_lag_type, n_dim, n_position_type, n_value);
+          new_master_nod_pt = new pyoomph::BoundaryNode(time_stepper_pt, n_lag_dim, n_lag_type, n_dim, n_position_type, n_value);
         }
         else
         {
-          new_master_nod_pt = new BoundaryNode<SolidNode>(n_lag_dim, n_lag_type, n_dim, n_position_type, n_value);
+          new_master_nod_pt = new pyoomph::BoundaryNode(n_lag_dim, n_lag_type, n_dim, n_position_type, n_value);
         }
 
         // How many boundaries does the macro element master node live on?
@@ -1098,11 +1105,11 @@ namespace oomph
         // Construct an ordinary (non-boundary) node
         if (time_stepper_pt != 0)
         {
-          new_master_nod_pt = new SolidNode(time_stepper_pt, n_lag_dim, n_lag_type, n_dim, n_position_type, n_value);
+          new_master_nod_pt = new pyoomph::Node(time_stepper_pt, n_lag_dim, n_lag_type, n_dim, n_position_type, n_value);
         }
         else
         {
-          new_master_nod_pt = new SolidNode(n_lag_dim, n_lag_type, n_dim, n_position_type, n_value);
+          new_master_nod_pt = new pyoomph::Node(n_lag_dim, n_lag_type, n_dim, n_position_type, n_value);
         }
       }
 
@@ -1124,6 +1131,12 @@ namespace oomph
     }
     else // Just an ordinary node!
     {
+      // Unreachable in pyoomph: every element builds SolidNodes (BulkElementBase::construct_node),
+      // so the haloed side always reports a solid node and the branch above is taken. Left in place
+      // rather than deleted because it is upstream code, but it must not run: it would build a plain
+      // oomph::Node, and the "every node is a pyoomph::Node" invariant that the static_cast downcasts
+      // elsewhere rest on would be broken by a node nothing else can see coming.
+      throw_runtime_error("External halo master node arrived as a non-solid node, which pyoomph never builds");
 #ifdef ANNOTATE_MISSING_MASTERS_COMMUNICATION
       oomph_info << "Rec:" << counter_for_recv_unsigneds
                  << "  Bool node is on boundary "

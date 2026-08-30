@@ -1,25 +1,26 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -32,6 +33,7 @@ from ..expressions.generic import ExpressionOrNum, Expression, scale_factor
 from ..typings import *
 import scipy.interpolate #type:ignore
 from .cb import CustomMathExpression,CustomMultiReturnExpression
+from ..generic.mpi import get_mpi_nproc,get_mpi_bcast
 
 
 
@@ -39,14 +41,26 @@ class DeterministicRandomField(CustomMathExpression):
   """
   Creates a random field in 1d, 2d or 3d. The field is created by a random cloud of points, which is interpolated using scipy's RegularGridInterpolator. The field is then evaluated at the given point.  Ranges must be set via min_x=[xmin,<ymin>,<zmin>] and same for max_x.
 
+  "Deterministic" means that evaluating the created field twice at the same point gives the same
+  value, which is what pyoomph requires of any :py:class:`~pyoomph.expressions.cb.CustomMathExpression`.
+  The cloud itself is drawn afresh on every run unless a ``seed`` is passed.
+
+  Under MPI, the cloud is broadcast from rank 0, so that every process gets the same field. It must
+  be: with each rank drawing its own numbers, the ranks start from different initial conditions,
+  their spatial error estimates differ, and they end up refining to different numbers of degrees of
+  freedom - after which the linear solver is handed matrices of mismatched size. Being collective,
+  the constructor has to be reached by all ranks, which it is as long as the problem is set up
+  identically everywhere (as pyoomph requires anyway).
+
   Args:
     min_x: Minimum values of the field in each dimension. If a single value is given, it is assumed that the field is 1D.
     max_x: Maximum values of the field in each dimension. If a single value is given, it is assumed that the field is 1D.
     amplitude: Amplitude of the random field.
     Nresolution: Number of points in each dimension of the random cloud.
-    interpolation: Interpolation method. Default is "linear".    
+    interpolation: Interpolation method. Default is "linear".
+    seed: If given, the cloud is drawn from a private generator seeded with it, so the same run gives the same field again. If None (default), numpy's global random state is used, i.e. the field differs from run to run.
   """
-  def __init__(self ,min_x:Union[float,List[float]]=[0] ,max_x:Union[float,List[float]]=[1] ,amplitude:float=1.0 ,Nresolution:int=100,interpolation:str="linear"):
+  def __init__(self ,min_x:float | list[float]=[0] ,max_x:float | list[float]=[1] ,amplitude:float=1.0 ,Nresolution:int=100,interpolation:str="linear",seed:Optional[int]=None):
     super(DeterministicRandomField, self).__init__()
     self.min_x = min_x
     self.max_x= max_x
@@ -57,12 +71,16 @@ class DeterministicRandomField(CustomMathExpression):
     if len(self.min_x) !=len(self.max_x):
       raise RuntimeError("Non-matching min and max dimensions")
     self.amplitude =amplitude
-    self.Nresolution =Nresolution
-    if not isinstance(self.Nresolution ,(tuple ,list,numpy.ndarray)):
-      self.Nresolution =[self.Nresolution ] *len(self.min_x)
+    # One number means the same resolution in every direction; kept as the per-direction list
+    self.Nresolution:list[int] =[Nresolution] *len(self.min_x) if not isinstance(Nresolution ,(tuple ,list,numpy.ndarray)) else list(Nresolution)
     if len(self.Nresolution ) != len(self.min_x):
       raise RuntimeError("Non-matching Nresolution array")
-    random_cloud =(numpy.random.rand(*self.Nresolution ) -0.5 ) *self.amplitude
+    if seed is None:
+      random_cloud =(numpy.random.rand(*self.Nresolution ) -0.5 ) *self.amplitude
+    else:
+      random_cloud =(numpy.random.default_rng(seed).random(tuple(self.Nresolution)) -0.5 ) *self.amplitude
+    if get_mpi_nproc()>1:
+      random_cloud=get_mpi_bcast(random_cloud) # see the class docstring: the ranks must agree
     coords =[] #type:ignore
     for direct in range(len(self.Nresolution)):
       coords.append(numpy.linspace(0 ,1 ,num=self.Nresolution[direct])) #type:ignore
@@ -72,6 +90,21 @@ class DeterministicRandomField(CustomMathExpression):
 
   def eval(self ,arg_array:NPFloatArray)->float:
     return self.interp((arg_array -self.min_x ) *self.coord_denom)[0] #type:ignore
+
+  def evaluate_at(self ,points:NPFloatArray)->NPFloatArray:
+    """Evaluate the field at many points at once.
+
+    Args:
+      points: array of shape ``(N,dim)``, one point per row.
+
+    Returns:
+      The ``N`` field values. Points outside ``[min_x,max_x]`` give 0, as for :py:meth:`eval`.
+    """
+    pts=numpy.asarray(points ,dtype=float)
+    dim=int(numpy.atleast_1d(self.min_x).size) # min_x is a numpy array after __init__, but not by declaration
+    if pts.ndim!=2 or pts.shape[1]!=dim:
+      raise RuntimeError("Expected an array of shape (N,"+str(dim)+"), got "+str(pts.shape))
+    return numpy.asarray(self.interp((pts -self.min_x ) *self.coord_denom)) #type:ignore
 		
 		
 		
@@ -84,7 +117,7 @@ class DeterministicRandomField(CustomMathExpression):
 # Otherwise, it will return C[:]
 # For dimensional problems, please define Ascale(=Cscale) and Bscale. epsilon will be always nondimensional!
 class MultiSafeDivide(CustomMultiReturnExpression):
-    def __init__(self,Ascale:Union[str,ExpressionOrNum]=1,Bscale:Union[str,ExpressionOrNum]=1) -> None:
+    def __init__(self,Ascale:str | ExpressionOrNum=1,Bscale:str | ExpressionOrNum=1) -> None:
           super().__init__()
           if isinstance(Ascale,str):
                 Ascale=scale_factor(Ascale)
@@ -100,10 +133,10 @@ class MultiSafeDivide(CustomMultiReturnExpression):
             raise RuntimeError("Unsupported number of arguments, expected: A[n],B,epsilon,C[n] to calculate A[:]/B if |B|>=epsilon, otherwise return C[:]")          
 
     # Before calling eval, we can decompose our arguments. E.g. tensors split into scalars. The returning list may not have any phyiscal dimensions
-    def process_args_to_scalar_list(self, *args: "ExpressionOrNum") -> List["ExpressionOrNum"]:
+    def process_args_to_scalar_list(self, *args: "ExpressionOrNum") -> list["ExpressionOrNum"]:
         nargs=len(args)
         nret=self.get_num_returned_scalars(nargs)
-        res=[]
+        res:list["ExpressionOrNum"]=[]
         for i,arg in enumerate(args):
               if i<nret:
                     res.append(arg/self.Ascale) #A
@@ -116,7 +149,7 @@ class MultiSafeDivide(CustomMultiReturnExpression):
         return res
 
     # Before returning, we can assemble things back to e.g. tensors or multiple returnals
-    def process_result_list_to_results(self, result_list: List["Expression"]) -> Tuple["ExpressionOrNum", ...]:
+    def process_result_list_to_results(self, result_list: list["Expression"]) -> tuple["ExpressionOrNum", ...]:
         fact=self.Ascale/self.Bscale
         return tuple(r*fact for r in result_list)          
         
@@ -198,3 +231,7 @@ class MultiSafeDivide(CustomMultiReturnExpression):
         }
         
         """
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

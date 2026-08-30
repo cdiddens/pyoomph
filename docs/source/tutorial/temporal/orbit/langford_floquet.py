@@ -2,24 +2,24 @@
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -74,9 +74,7 @@ class LangfordProblem(Problem):
 if __name__=="__main__":
      with LangfordProblem() as problem:
         # Use again an analytic Hessian for the determination of the first Lyapunov coefficient
-        problem.setup_for_stability_analysis(analytic_hessian=True)        
-        # We also need the SLEPc eigensolver here
-        problem.set_eigensolver("slepc").use_mumps() 
+        problem.setup_for_stability_analysis(analytic_hessian=True)                
         
         problem+=InitialCondition(x=0.01,z=1.1)@"langford"  # Some non-trivial initial position        
         
@@ -95,20 +93,12 @@ if __name__=="__main__":
                 maxds=ds*100 # Limit the maximum step size
                 while problem.mu.value<2.05:
                         ds=problem.arclength_continuation("mu",ds,max_ds=maxds)                      
-                        F=orbit.get_floquet_multipliers(n=3,shift=3) # Calculate some Floquet multipliers 
-                        # However, not always three multipliers are found. We have to consider the cases                                                             
-                        if len(F)==3:
-                                # Three multipliers found: The trivial one and two complex conjugate ones
-                                F=numpy.delete(F,numpy.argmin(numpy.abs(F-1)))
-                                nontrivial_floquet=F[0] # Take one of the complex conjugate multipliers
-                        elif len(F)==2:
-                                # Only two multipliers found: The trivial one and one real one
-                                F=numpy.delete(F,numpy.argmin(numpy.abs(F-1)))
-                                nontrivial_floquet=F[0] # Take the remaining multiplier                         
-                        else:
-                                # Only one multiplier found: The trivial one
-                                nontrivial_floquet=0 # The others are then very close to 0
-                                
+                        # All three Floquet multipliers, sorted by magnitude. There are always
+                        # exactly as many as the system has degrees of freedom.
+                        F=orbit.get_floquet_multipliers()
+                        F=numpy.delete(F,numpy.argmin(numpy.abs(F-1))) # Remove the trivial multiplier
+                        nontrivial_floquet=F[-1] # Sorted by magnitude, so this is the relevant one
+
                         if numpy.imag(nontrivial_floquet)<0:
                                 # conjugate a multiplier with negative imaginary part
                                 nontrivial_floquet=numpy.conjugate(nontrivial_floquet)

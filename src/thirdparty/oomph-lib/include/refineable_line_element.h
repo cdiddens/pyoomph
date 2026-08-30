@@ -89,7 +89,7 @@ namespace oomph
     /*void operator=(const RefineableQElement<1>&) = delete;*/
 
     /// Destructor
-    virtual ~RefineableQElement()
+    ~RefineableQElement() override
     {
 #ifdef LEAK_CHECK
       LeakCheckNames::RefineableQElement<1> _build -= 1;
@@ -97,7 +97,7 @@ namespace oomph
     }
 
     /// A refineable line element has two sons
-    unsigned required_nsons() const
+    unsigned required_nsons() const override
     {
       return 2;
     }
@@ -128,14 +128,14 @@ namespace oomph
     /// etc. Pointers to any new nodes will be returned in new_node_pt.
     /// If it is open, the positions of the new nodes will be written to
     /// the file stream new_nodes_file.
-    virtual void build(Mesh*& mesh_pt,
+    void build(Mesh*& mesh_pt,
                        Vector<Node*>& new_node_pt,
                        bool& was_already_built,
-                       std::ofstream& new_nodes_file);
+                       std::ofstream& new_nodes_file) override;
 
     /// Check the integrity of the element: ensure that the position
     /// and values are continuous across the element edges.
-    void check_integrity(double& max_error);
+    void check_integrity(double& max_error) override;
 
     ///  Print corner nodes, using colour
     void output_corners(std::ostream& outfile, const std::string& colour) const;
@@ -153,7 +153,7 @@ namespace oomph
     }
 
     /// Line elements have no hanging nodes so this is deliberately left empty
-    void setup_hanging_nodes(Vector<std::ofstream*>& output_stream) {}
+    void setup_hanging_nodes(Vector<std::ofstream*>& output_stream) override {}
 
   protected:
     /// Coincidence between son nodal points and father boundaries:
@@ -210,18 +210,18 @@ namespace oomph
     /*void operator=(const RefineableSolidQElement<1>&) = delete;*/
 
     /// Virtual Destructor
-    virtual ~RefineableSolidQElement() {}
+    ~RefineableSolidQElement() override {}
 
 
     /// Final over-ride: Use version in QSolidElementBase
-    void set_macro_elem_pt(MacroElement* macro_elem_pt)
+    void set_macro_elem_pt(MacroElement* macro_elem_pt) override
     {
       QSolidElementBase::set_macro_elem_pt(macro_elem_pt);
     }
 
     /// Final over-ride: Use version in QSolidElementBase
     void set_macro_elem_pt(MacroElement* macro_elem_pt,
-                           MacroElement* undeformed_macro_elem_pt)
+                           MacroElement* undeformed_macro_elem_pt) override
     {
       QSolidElementBase::set_macro_elem_pt(macro_elem_pt,
                                            undeformed_macro_elem_pt);
@@ -229,7 +229,7 @@ namespace oomph
 
     /// Use the generic finite difference routine defined in
     /// RefineableSolidElement to calculate the Jacobian matrix
-    void get_jacobian(Vector<double>& residuals, DenseMatrix<double>& jacobian)
+    void get_jacobian(Vector<double>& residuals, DenseMatrix<double>& jacobian) override
     {
       RefineableSolidElement::get_jacobian(residuals, jacobian);
     }
@@ -240,7 +240,7 @@ namespace oomph
     void build(Mesh*& mesh_pt,
                Vector<Node*>& new_node_pt,
                bool& was_already_built,
-               std::ofstream& new_nodes_file)
+               std::ofstream& new_nodes_file) override
     {
       throw OomphLibError("This function has not been implemented yet:",
                           OOMPH_CURRENT_FUNCTION,

@@ -2,24 +2,24 @@
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -66,16 +66,23 @@ class HelmholtzEquation(Equations):
 
     def define_residuals(self):
         if self.complex:
-            I=imaginary_i
+            I=imaginary_i()
             uR, uRtest = var_and_test(self.name+"_Re")
             uI, uItest = var_and_test(self.name + "_Im")
             u=uR+I*uI
             utest = uRtest + I * uItest
         else:
             u,utest=var_and_test(self.name)
+        # contract, not matproduct: coeff defaults to the scalar 1 and matproduct rejects non-matrices. With a tensorial
+        # coeff this is coeff.grad(u), i.e. coeff_ij*d_j u, which is what the standard contraction convention gives; it
+        # used to be transpose(coeff).grad(u), identical for the symmetric coefficient tensors that make sense here.
         eq=weak(contract(self.coeff,grad(u)),contract(self.test_coeff,grad(utest)))-self.k**2*weak(u,utest)
 
         if self.complex:
             self.add_residual(real_part(eq)+imag_part(eq))
         else:
             self.add_residual(eq)
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"
