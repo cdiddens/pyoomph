@@ -63,7 +63,8 @@ on:
         required: false
         type: choice
         default: all
-        options: [all, linux, macos, windows, linux-and-macos]
+        options: [all, linux, macos, windows, linux-and-macos,
+                  linux-x86_64, macos-intel-x86_64, macos-arm64, windows-msys2-ucrt64]
       script_timeout:
         description: Kill any single script that runs longer than this many seconds (0 waits forever)
         required: false
@@ -126,14 +127,19 @@ jobs:
         env:
           WANTED: ${{ inputs.platforms }}
           PLATFORM: ${{ matrix.platform }}
+          LABEL: ${{ matrix.label }}
         run: |
+          # A LABEL as well as a platform group, so a single job can be re-run on its own. Both Mac
+          # jobs share platform "macos", so "macos" could never mean just one of them - and when the
+          # arm64 job alone fails, which is what the PETSc/SLEPc build makes likely, repeating the
+          # Intel one costs another forty minutes to learn nothing.
           case "${WANTED}" in
             all) yes=1 ;;
             linux-and-macos) [[ "${PLATFORM}" == "linux" || "${PLATFORM}" == "macos" ]] && yes=1 || yes=0 ;;
-            *) [[ "${WANTED}" == "${PLATFORM}" ]] && yes=1 || yes=0 ;;
+            *) [[ "${WANTED}" == "${PLATFORM}" || "${WANTED}" == "${LABEL}" ]] && yes=1 || yes=0 ;;
           esac
           echo "run=${yes}" >> "${GITHUB_OUTPUT}"
-          [[ "${yes}" == "1" ]] || echo "Skipping ${PLATFORM}: only '${WANTED}' was requested"
+          [[ "${yes}" == "1" ]] || echo "Skipping ${LABEL}: only '${WANTED}' was requested"
 
       - uses: actions/checkout@v4
         if: steps.want.outputs.run == '1'
