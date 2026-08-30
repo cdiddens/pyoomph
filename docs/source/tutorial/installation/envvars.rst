@@ -16,6 +16,9 @@ Threading
 ``PYOOMPH_OMP_NUM_THREADS``
       Value pyoomph sets ``OMP_NUM_THREADS`` to on import, again only if that variable is not already set. It defaults to the ``--omp N`` given on the command line, or to ``1`` without it -- pyoomph's own threaded element loop takes its thread count from ``--omp``/:py:meth:`~pyoomph.generic.problem.Problem.set_num_threads` and not from the environment, so the pin only keeps a third-party OpenMP runtime in the same process from opening a second pool of threads. See :numref:`secopenmp`.
 
+``PYOOMPH_ASSEMBLY_CHUNK_DOUBLES``
+      Size, in doubles, of the scratch buffer the threaded element assembly (``--omp N``, see :numref:`secopenmp`) fills before gathering it into the global matrices. Defaults to ``131072``, i.e. 1 MB per matrix, and is divided by the number of matrices being assembled. Chunking is what keeps the threaded summation order identical to the serial one, so this only trades cache behaviour against barrier overhead and never changes the result. The default was measured, and everything from about 16 K upwards lies within a few percent of it -- much smaller chunks pay their two barriers for too little work.
+
 JIT code cache
 ~~~~~~~~~~~~~~
 
@@ -61,6 +64,9 @@ Compilation and debugging
 
 ``PYOOMPH_DEBUG``
       Set to ``1`` to compile the just-in-time generated code with debug information/flags instead of the default optimized build. Useful when debugging a crash inside generated code with e.g. ``gdb``.
+
+``PYOOMPH_FULL_UNIT_ERROR``
+      Set to ``1`` to print the offending expression in full when a residual contribution does not come out dimensionless. By default such an expression is truncated, since a single Navier-Stokes contribution prints as tens of thousands of characters and buries the part of the message that says what is actually wrong.
 
 Plotting
 ~~~~~~~~

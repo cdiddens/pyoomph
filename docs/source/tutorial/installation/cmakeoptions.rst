@@ -27,6 +27,12 @@ Feature switches
 ``PYOOMPH_ENABLE_JIT_CACHE`` (default ``ON``)
       Build-time kill switch for the JIT code cache (see :numref:`installenvvars`). If set to ``OFF``, the cache is permanently disabled for this build, regardless of any runtime flag or environment variable (``--no-cache``, ``PYOOMPH_JIT_CACHE``, ...) -- those can only ever narrow an ``ON`` down to ``OFF``, never override an ``OFF`` set here.
 
+``PYOOMPH_HAS_TQMESH`` (default ``ON``)
+      Build with the `TQMesh <https://github.com/FloSewn/TQMesh>`__ two-dimensional triangle/quad mesh generator. With ``OFF``, TQMesh is not downloaded and its sources are dropped from the build: the extension module then reports ``has_tqmesh == False`` and none of the ``TQMesh*`` classes exist.
+
+``PYOOMPH_HAS_SPECTRA`` (default ``ON``)
+      Build with the built-in `Spectra <https://spectralib.org>`__/`Eigen <https://eigen.tuxfamily.org>`__ serial eigensolver (the ``--spectra`` backend, see :numref:`installcmdlineoptions`). It is the only eigensolver that can target a given eigenvalue without PETSc/SLEPc, which is what makes it the fallback on Windows. With ``OFF``, neither library is downloaded, ``has_spectra == False``, ``pyoomph.solvers.spectra`` refuses to import, and the eigensolver autodetection falls back to the ARPACK-based backends, which cannot target an eigenvalue at all.
+
 ``PYOOMPH_GENERATE_STUBS`` (default ``ON``)
       Generate ``.pyi`` type stubs for the compiled ``_core`` extension via nanobind's ``stubgen`` (best effort, failures are non-fatal).
 
@@ -63,6 +69,20 @@ If you use a system-installed CLN/GiNaC instead (``PYOOMPH_DOWNLOAD_CLN``/``PYOO
 
 ``PYOOMPH_CLN_INCLUDE_DIR`` / ``PYOOMPH_CLN_LIB_DIR``
       Directory containing ``cln/cln.h`` / the directory containing ``libcln``.
+
+Downloaded TQMesh/Spectra/Eigen
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+TQMesh, Spectra and Eigen are header-only and, unlike CLN/GiNaC, are always downloaded rather than taken from the system. Each of the three has the same trio of options, which is what allows an offline build from an already available source tree:
+
+``PYOOMPH_TQMESH_REF`` / ``PYOOMPH_SPECTRA_REF`` / ``PYOOMPH_EIGEN_REF``
+      Git ref (commit, tag or branch) to download. Defaults to a pinned commit for TQMesh and Spectra and to ``3.4.0`` for Eigen.
+
+``PYOOMPH_TQMESH_URL`` / ``PYOOMPH_SPECTRA_URL`` / ``PYOOMPH_EIGEN_URL`` (default: empty)
+      Full URL of a source archive to download, overriding the corresponding ``..._REF``.
+
+``PYOOMPH_TQMESH_SOURCE_DIR`` / ``PYOOMPH_SPECTRA_SOURCE_DIR`` / ``PYOOMPH_EIGEN_SOURCE_DIR`` (default: empty)
+      An already available source tree to use instead of downloading anything. It is copied into the build directory and left untouched, since the sources are patched afterwards.
 
 Other standard CMake settings
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

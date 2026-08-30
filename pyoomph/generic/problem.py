@@ -3507,7 +3507,7 @@ class Problem(_pyoomph.Problem):
         eigen_solver_group.add_argument('--slepc',help="use SLEPc as eigensolver. Specify your own backend for the matrix inversion during eigensolve here",action="store_true")
         eigen_solver_group.add_argument('--slepc_mumps',help="use SLEPc as eigensolver with MUMPS as backend",action="store_true")
         eigen_solver_group.add_argument('--spectra',help="use the built-in Spectra eigensolver (needs no PETSc, but is serial)",action="store_true")
-        eigen_solver_group.add_argument('--arpack',action="store_true")
+        eigen_solver_group.add_argument('--arpack',help="use scipy's ARPACK-based eigensolver (serial, cannot target an eigenvalue)",action="store_true")
         # Mutually exclusive for the same reason as linear_solver_group above.
         ccompiler_group = self.cmdlineparser.add_mutually_exclusive_group()
         ccompiler_group.add_argument('--tcc', help="use internal TCC compiler", action='store_true')

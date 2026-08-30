@@ -541,6 +541,43 @@ class PETSCSolver(GenericLinearSystemSolver):
         """MUMPS' INFOG(which) from the current factorisation, or None if MUMPS did not do it."""
         return _mumps_infog_from_pc(self.ksp.getPC() if self.ksp is not None else None, which) #type:ignore
 
+    def _one_ksp_solve(self,rhs:NPFloatArray,comm:Any=None)->NPFloatArray:
+        """One KSP solve of J x = rhs, as an ordinary callable returning its own array.
+
+        This is what _solve_newton_step hands to a custom assembler's solve routine, and calling it
+        twice is cheap: _setup_solver_if_needed keeps the KSP - and with a direct PC its
+        factorisation - alive across solves, so a second call is a back substitution.
+
+        It used to be refused instead ("Cannot use an augmented assembly handler's custom solve
+        routine with PETSc yet"), on the grounds that an augmented handler wants to drive several
+        re-solves of one factorisation. But the only in-tree implementer of
+        has_custom_solve_routine() is deflation's DeflationAssemblyHandler shell, which solves once
+        and rescales the increment - the C++ bifurcation trackers never come through this hook - so
+        the refusal cost the shell every machine whose default linear solver is PETSc: every arm64
+        Mac with PETSc installed, and every mpirun.
+
+        The array is copied because self.x is reused by the next call.
+        """
+        v = PETSc.Vec().createWithArray(rhs,comm=comm) if comm is not None else PETSc.Vec().createWithArray(rhs) #type:ignore
+        previous_rhs=self.petsc_rhs
+        try:
+            self.petsc_rhs=v
+            import time
+            start_time = time.time()
+            self._ksp_solve_checked(v)
+            if not self.problem.is_quiet():
+                print("PETSc KSP solve time:", time.time() - start_time, "seconds")
+            xv = self.x.getArray() #type:ignore
+            # On a complex PETSc build (the one the eigensolvers need) the solution vector is complex
+            # even though this system is real, so the imaginary part is pure roundoff -- drop it
+            # explicitly instead of letting numpy discard it with a ComplexWarning.
+            if xv.dtype.kind == "c" and rhs.dtype.kind != "c":
+                xv = xv.real
+            return numpy.array(xv,copy=True)
+        finally:
+            self.petsc_rhs=previous_rhs
+            v.destroy() #type:ignore
+
     def _ksp_solve_checked(self,bv:Any)->None:
         """Solve, and turn a failed *factorisation* into a retry, and then into an error.
 
@@ -741,24 +778,11 @@ class PETSCSolver(GenericLinearSystemSolver):
             self.petsc_rhs=bv
             self._setup_solver_if_needed()
 
-            # An augmented handler wants to drive the solve itself (several re-solves of one
-            # factorisation), which the KSP path does not offer. Deflation is not in that class -- it
-            # only rescales the increment, applied below -- so it is no longer refused here.
-            if self._custom_solve_routine_active():
-                raise RuntimeError("Cannot use an augmented assembly handler's custom solve routine with PETSc yet. Also, iterative solving might require different handling here")
-            else:
-                import time
-                start_time = time.time()
-                self._ksp_solve_checked(bv)
-                end_time = time.time()
-                if not self.problem.is_quiet():
-                    print("PETSc KSP solve time:", end_time - start_time, "seconds")
-                xv = self.x.getArray() #type:ignore
-            # On a complex PETSc build (the one the eigensolvers need) the solution vector is complex
-            # even though this system is real, so the imaginary part is pure roundoff -- drop it
-            # explicitly instead of letting numpy discard it with a ComplexWarning.
+            # Through _solve_newton_step, like every other backend: it applies the deflation rescale,
+            # and hands a custom assembler's solve routine the solve as a callable (see
+            # _one_ksp_solve, which used to be a refusal).
             # Serial entry point: b is the whole system, so no row offset and no reduction.
-            b[:] = self._postprocess_newton_step(xv.real if xv.dtype.kind == "c" and b.dtype.kind != "c" else xv) #type:ignore
+            b[:] = self._solve_newton_step(lambda rhs: self._one_ksp_solve(rhs,comm=PETSc.COMM_SELF), b) #type:ignore
 
             #print('Converged in', self.ksp.getIterationNumber(), 'iterations.') #type:ignore
 
@@ -846,26 +870,11 @@ class PETSCSolver(GenericLinearSystemSolver):
 
             self._setup_solver_if_needed()
 
-            # An augmented handler wants to drive the solve itself (several re-solves of one
-            # factorisation), which the KSP path does not offer. Deflation is not in that class -- it
-            # only rescales the increment, applied below -- so it is no longer refused here.
-            if self._custom_solve_routine_active():
-                raise RuntimeError("Cannot use an augmented assembly handler's custom solve routine with PETSc yet. Also, iterative solving might require different handling here")
-            else:
-                import time
-                start_time = time.time()
-                self._ksp_solve_checked(bv)
-                end_time = time.time()
-                if not self.problem.is_quiet():
-                    print("PETSc KSP solve time:", end_time - start_time, "seconds")
-                xv = self.x.getArray() #type:ignore
-            # On a complex PETSc build (the one the eigensolvers need) the solution vector is complex
-            # even though this system is real, so the imaginary part is pure roundoff -- drop it
-            # explicitly instead of letting numpy discard it with a ComplexWarning.
+            # Through _solve_newton_step, like every other backend: see the serial branch.
             # Distributed entry point: b is this rank's row block, so the deflation dot product is
             # an allreduce over the same split. first_row comes from the caller, never from len(b).
-            b[:] = self._postprocess_newton_step(xv.real if xv.dtype.kind == "c" and b.dtype.kind != "c" else xv,
-                                                 first_row=self._solve_first_row, reduce_dot=True) #type:ignore
+            b[:] = self._solve_newton_step(self._one_ksp_solve, b,
+                                           first_row=self._solve_first_row, reduce_dot=True) #type:ignore
 
             #print('Converged in', self.ksp.getIterationNumber(), 'iterations.') #type:ignore
 
@@ -1377,7 +1386,11 @@ class SlepcEigenSolver(GenericEigenSolver):
             # Only a distributed assembly hands back rows that are already this rank's own; without
             # --distribute oomph replicates the assembled matrices, so they still have to be sliced.
             rows_are_local=distributed
-            upscale_to_complex=complex_mat and (PETSc.ScalarType in {numpy.float64,numpy.float128,numpy.float32}) #type:ignore
+            # issubdtype, not a set of named types: numpy.float128 does not EXIST on macOS arm64
+            # (no 128-bit long double there), so naming it raised AttributeError on every complex
+            # eigensolve on Apple silicon - the one platform where PETSc is also the default linear
+            # solver, and one nothing in CI ran until now.
+            upscale_to_complex=complex_mat and numpy.issubdtype(PETSc.ScalarType,numpy.floating) #type:ignore
             if upscale_to_complex:
                 raise RuntimeError("Your PETSc/SLEPc installation cannot handle a complex eigenvalue problem. Please compile another PETSc/SLEPc version with complex number and adjust the PYTHONPATH accordingly so that the complex petsc4py / slepc4py is used.")
             M=self._create_petsc_matrix(Min,n,nrow_local,first_row,parallel,rows_are_local)
