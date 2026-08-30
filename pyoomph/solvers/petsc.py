@@ -90,14 +90,20 @@ _MUMPS_ICNTL23_ERROR = -19
 
 
 # INFOG(28) is the number of null pivots MUMPS detected and REPLACED under ICNTL(24)=1, which
-# use_mumps() turns on. A nonzero count means the vector that comes back is a pseudo-solution: the
-# component along the null space is set to zero rather than solved for, and the KSP still reports
-# success. Newton then applies an update that leaves the residual untouched, which is how the macOS
-# arm64 tutorial run of 30th August 2026 spent 443 of its 1378 solves in blocks of seven or eight
-# steps with the residual frozen to every digit, until the iteration limit rejected the step.
-# Opt-in and print-only for now: reading INFOG costs a PETSc call per solve, and whether a
-# substituted pivot should be an error rather than a warning is a question about the problem, not
-# about the solver.
+# use_mumps() turns on. A nonzero count means the vector that came back MAY be a pseudo-solution:
+# the component along the null space is set rather than solved for, and the KSP still reports
+# success.
+#
+# A nonzero count is NOT by itself an error, which is why this does not simply fail on it. The case
+# ICNTL(24)=1 was introduced for (dev_docs/linear_solvers.md section 7c) has 158 structurally zero
+# diagonals -- interface Lagrange multipliers and pressure dofs, whose self-coupling is zero by
+# construction -- and there the substitution turns a garbage answer into a correct one. What
+# separates that from the macOS arm64 droplet_spread_3d run, where 383 solves in 700 s came back as
+# pseudo-solutions and Newton sat on a residual frozen to every digit for seven or eight steps until
+# the iteration limit rejected the timestep, is not the count: it is whether the vector actually
+# solves the system. So when MUMPS reports a substitution, ask.
+#
+# Set PYOOMPH_DEBUG_MUMPS_NULL_PIVOTS=1 to print every substitution, including the ones that verify.
 _MUMPS_NULL_PIVOT_DEBUG = bool(os.environ.get("PYOOMPH_DEBUG_MUMPS_NULL_PIVOTS"))
 
 
@@ -189,6 +195,18 @@ class PETSCSolver(GenericLinearSystemSolver):
         # for a genuine factorisation failure -- an iterative KSP that merely stops on its iteration
         # limit is never affected by this, whichever way it is set.
         self.raise_on_failed_solve=True
+
+        # Whether a solve in which MUMPS substituted a null pivot and whose answer does not satisfy
+        # J x = b is rejected, rather than handed to Newton as an update that cannot move the
+        # residual. See _reject_null_pivot_pseudo_solution.
+        self.raise_on_null_pivot_pseudo_solution=True
+        #: How far ||J x - b|| / ||b|| may sit above zero before such a solve counts as a
+        #: pseudo-solution. Loose on purpose: this separates "solved" from "not solved at all",
+        #: not one direct solver's accuracy from another's. The two legitimate substitutions in
+        #: droplet_spread_3d measure 5e-8 and 7e-8, and a pseudo-solution whose update cannot move
+        #: the residual at all is O(1), so anything in between does; this sits four orders below
+        #: the bad case and three above the good ones.
+        self.null_pivot_residual_tolerance=1e-4
 
         # Whether the CURRENT KSP/PC were configured for a proven-symmetric matrix (see
         # _use_symmetric_factorisation_now). Tracked so a flip - a bifurcation tracker toggled -
@@ -591,6 +609,56 @@ class PETSCSolver(GenericLinearSystemSolver):
             self.petsc_rhs=previous_rhs
             v.destroy() #type:ignore
 
+    def _reject_null_pivot_pseudo_solution(self,bv:Any)->None:
+        """Raise if MUMPS substituted a null pivot and the vector it returned is not a solution.
+
+        MUMPS is asked to detect null pivots rather than divide by them (ICNTL(24)=1, see use_mumps),
+        and reports how many it replaced in INFOG(28). It then returns successfully either way, so
+        without this the Newton solver cannot tell a solution from a pseudo-solution.
+
+        The count alone does not decide it -- see the comment on _MUMPS_NULL_PIVOT_DEBUG -- so the
+        answer is verified directly: ||J x - b|| / ||b||. One MatMult on the solves where MUMPS
+        actually substituted something, and nothing at all on the ones where it did not.
+
+        Raising is what makes this recoverable. PETScSolverError is a SolverError, so an adaptive
+        timestep or an arclength step rejects and retries with a smaller one -- which is exactly what
+        the same case does on Pardiso, where a perturbed pivot yields a wrong but nonzero update and
+        the step is rejected within one or two Newton iterations instead of eight.
+
+        Collective-safe: INFOG is global, so every rank sees the same count and takes the same branch,
+        and the norms are on the matrix's own communicator.
+        """
+        if not self.raise_on_null_pivot_pseudo_solution and not _MUMPS_NULL_PIVOT_DEBUG:
+            return
+        null_pivots = self._mumps_infog(28)
+        if not null_pivots:
+            return
+        r = self.petsc_mat.createVecLeft() #type:ignore
+        try:
+            self.petsc_mat.mult(self.x, r) #type:ignore
+            r.axpy(-1.0, bv) #type:ignore
+            rhs_norm = bv.norm() #type:ignore
+            # An all-zero right-hand side is already solved by x = 0; relative is meaningless there.
+            relative = r.norm() / rhs_norm if rhs_norm > 0.0 else r.norm() #type:ignore
+        finally:
+            r.destroy() #type:ignore
+        if _MUMPS_NULL_PIVOT_DEBUG:
+            print("MUMPS INFOG(28)=" + str(null_pivots) + " null pivot(s) replaced, INFOG(12)="
+                  + str(self._mumps_infog(12)) + " off-diagonal pivots; ||Jx-b||/||b|| = "
+                  + repr(relative))
+        if relative <= self.null_pivot_residual_tolerance:
+            return   # substituted, but the answer solves the system - the structurally-zero case
+        msg = ("MUMPS replaced " + str(null_pivots) + " null pivot(s) (INFOG(28)) and the vector it "
+               "returned does not solve the system: ||Jx-b||/||b|| = " + repr(relative) + ". That is "
+               "a pseudo-solution, and applying it as a Newton update leaves the residual where it "
+               "was, so the solve is rejected here rather than costing the whole Newton iteration. "
+               "The Jacobian is numerically singular at this state; a smaller step usually clears it. "
+               "Set problem.get_la_solver().raise_on_null_pivot_pseudo_solution=False to accept these "
+               "solves as before.")
+        if self.raise_on_null_pivot_pseudo_solution:
+            raise PETScSolverError(msg)
+        print("WARNING: " + msg)
+
     def _ksp_solve_checked(self,bv:Any)->None:
         """Solve, and turn a failed *factorisation* into a retry, and then into an error.
 
@@ -625,14 +693,9 @@ class PETSCSolver(GenericLinearSystemSolver):
         """
         assert self.ksp is not None
         self.ksp.solve(bv, self.x) #type:ignore
-        if _MUMPS_NULL_PIVOT_DEBUG:
-            null_pivots = self._mumps_infog(28)
-            if null_pivots:
-                print("MUMPS INFOG(28)=" + str(null_pivots) + ": null pivots were detected and "
-                      "replaced (ICNTL(24)=1), so this solve returned a pseudo-solution, not the "
-                      "solution. INFOG(12)=" + str(self._mumps_infog(12)) + " off-diagonal pivots.")
         reason:int = self.ksp.getConvergedReason() #type:ignore
         if reason >= 0:
+            self._reject_null_pivot_pseudo_solution(bv)
             return
 
         def described(r:int)->str:
@@ -664,6 +727,7 @@ class PETSCSolver(GenericLinearSystemSolver):
         self.ksp.solve(bv, self.x) #type:ignore
         reason = self.ksp.getConvergedReason() #type:ignore
         if reason >= 0:
+            self._reject_null_pivot_pseudo_solution(bv)
             return
 
         msg = ("The PETSc linear solver failed: " + described(reason)
