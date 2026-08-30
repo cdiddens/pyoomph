@@ -84,6 +84,15 @@ option(PYOOMPH_ENABLE_JIT_CACHE "Enable the JIT code cache at build time" ON)
 # has_tqmesh == False and none of the TQMesh* classes exist.
 option(PYOOMPH_HAS_TQMESH "Build with the TQMesh two-dimensional mesh generator" ON)
 
+# Spectra (https://spectralib.org) is a header-only Arnoldi eigensolver on top of Eigen, both
+# downloaded by cmake/ThirdPartySpectra.cmake and exposed to python by src/nanobind/spectra/*.cpp as
+# the eigensolver named "spectra". It exists for the platforms that have no PETSc/SLEPc at all -
+# Windows above all - where it is the only backend that can target an eigenvalue. Switching this OFF
+# skips the download and drops those sources; the extension module then reports has_spectra == False,
+# pyoomph.solvers.spectra refuses to import, and the eigensolver autodetection falls back to the
+# ARPACK-based "pardiso"/"scipy" backends, which cannot handle a target at all.
+option(PYOOMPH_HAS_SPECTRA "Build with the Spectra/Eigen serial eigensolver backend" ON)
+
 # Left empty by default: ginac.de only ever hosts the *current* release
 # tarball, so a version pinned here goes dead as soon as a new release is
 # published. When empty, cmake/ThirdPartyGiNaC.cmake auto-detects the
@@ -127,6 +136,9 @@ endif()
 include(cmake/ThirdPartyGiNaC.cmake)
 if(PYOOMPH_HAS_TQMESH)
   include(cmake/ThirdPartyTQMesh.cmake)
+endif()
+if(PYOOMPH_HAS_SPECTRA)
+  include(cmake/ThirdPartySpectra.cmake)
 endif()
 
 # ----------------------------------------------------------------------------
@@ -316,6 +328,19 @@ if(PYOOMPH_HAS_TQMESH)
   list(APPEND PYOOMPH_NANOBIND_SOURCES ${PYOOMPH_TQMESH_SOURCES})
 endif()
 
+# Same arrangement for the Spectra bindings: their own subdirectory, because they are the only
+# translation units that may include Eigen's and Spectra's headers (see the include scoping further
+# down for why that matters here in particular), and the only ones that must not be compiled when
+# PYOOMPH_HAS_SPECTRA is off.
+if(PYOOMPH_HAS_SPECTRA)
+  file(GLOB PYOOMPH_SPECTRA_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/nanobind/spectra/*.cpp")
+  if(NOT PYOOMPH_SPECTRA_SOURCES)
+    message(FATAL_ERROR "PYOOMPH_HAS_SPECTRA is ON, but no .cpp sources were found under "
+                        "src/nanobind/spectra - pass -DPYOOMPH_HAS_SPECTRA=OFF to build without Spectra.")
+  endif()
+  list(APPEND PYOOMPH_NANOBIND_SOURCES ${PYOOMPH_SPECTRA_SOURCES})
+endif()
+
 if(NOT PYOOMPH_NANOBIND_SOURCES)
   message(FATAL_ERROR "No .cpp sources found under src/nanobind - "
                        "cannot build the Python extension module.")
@@ -368,6 +393,7 @@ target_compile_definitions(_pyoomph_core PRIVATE
   $<$<BOOL:${PYOOMPH_USE_MPI}>:OOMPH_HAS_MPI>
   $<$<BOOL:${PYOOMPH_PARANOID}>:PARANOID>
   $<$<BOOL:${PYOOMPH_HAS_TQMESH}>:PYOOMPH_HAS_TQMESH>
+  $<$<BOOL:${PYOOMPH_HAS_SPECTRA}>:PYOOMPH_HAS_SPECTRA>
 )
 
 if(PYOOMPH_HAS_TQMESH)
@@ -381,6 +407,19 @@ if(PYOOMPH_HAS_TQMESH)
   set_source_files_properties(${PYOOMPH_TQMESH_SOURCES}
     PROPERTIES INCLUDE_DIRECTORIES "${PYOOMPH_TQMESH_INCLUDE_DIRS}")
   add_dependencies(_pyoomph_core tqmesh_external)
+endif()
+
+if(PYOOMPH_HAS_SPECTRA)
+  # Scoped to the Spectra sources for the same reason as TQMesh above, and here it is not a
+  # hypothetical: Eigen's include root contains extensionless headers named Core, Dense,
+  # Eigenvalues, LU, SVD and Householder. A target-wide include directory would put those in front
+  # of every other TU in _pyoomph_core, and on a case-insensitive filesystem they collide with
+  # pyoomph's own core.h. PYOOMPH_SPECTRA_DEPENDS is empty when the user supplied both source trees.
+  set_source_files_properties(${PYOOMPH_SPECTRA_SOURCES}
+    PROPERTIES INCLUDE_DIRECTORIES "${PYOOMPH_SPECTRA_INCLUDE_DIRS}")
+  if(PYOOMPH_SPECTRA_DEPENDS)
+    add_dependencies(_pyoomph_core ${PYOOMPH_SPECTRA_DEPENDS})
+  endif()
 endif()
 
 if(PYOOMPH_USE_MPI)

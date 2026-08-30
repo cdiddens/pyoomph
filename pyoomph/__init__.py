@@ -267,6 +267,14 @@ def _have_pardiso() -> bool:
 		return False
 
 
+def _have_spectra() -> bool:
+	try:
+		from .solvers.spectra import SpectraEigenSolver
+		return True
+	except:
+		return False
+
+
 def _have_petsc_mumps() -> bool:
 	try:
 		from .solvers.petsc import PETSc,PETSCMUMPSSolver,SlepcMUMPSEigenSolver #type:ignore
@@ -371,10 +379,16 @@ else:
 			_warn_suboptimal_solver("superlu")
 
 
-# Eigensolver default: SLEPc with MUMPS first, then Pardiso, then ARPACK (i.e. what --arpack selects,
-# scipy's ARPACK, rather than the ARPACK shipped with Pardiso). Accelerate stays ahead of scipy on
-# macOS, where it is the platform-native option and the only fast one left once Pardiso is out - on
-# arm64 Macs there is no MKL at all.
+# Eigensolver default: SLEPc with MUMPS first, then Spectra, then Pardiso, then ARPACK (i.e. what
+# --arpack selects, scipy's ARPACK, rather than the ARPACK shipped with Pardiso). Accelerate stays
+# ahead of scipy on macOS, where it is the platform-native option and the only fast one left once
+# Pardiso is out - on arm64 Macs there is no MKL at all.
+#
+# Spectra outranks Pardiso because "pardiso" and "accelerate" are scipy's ARPACK with a different
+# factorisation behind it, and that backend raises on any target at all. Spectra targets both real and
+# complex eigenvalues, which is what Hopf tracking and the normal-form calculations need, and it uses
+# MKL Pardiso for the factorisation itself when MKL is there - so it is strictly more capable than the
+# entry it displaces, not merely different. Unlike _have_petsc_mumps() the probe below is cheap.
 #
 # This deliberately does not follow the linear solver chosen above: on Linux, Pardiso is the better
 # linear solver but SLEPc/MUMPS is the better eigensolver, so the two defaults now differ there.
@@ -385,6 +399,8 @@ else:
 def _autodetect_eigen_solver() -> CoreEigenSolverEnum:
 	if _have_petsc_mumps():
 		return "slepc_mumps"
+	if _have_spectra():
+		return "spectra"
 	if _have_pardiso():
 		return "pardiso"
 	if _is_macos and _have_accelerate():

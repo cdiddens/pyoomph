@@ -255,7 +255,7 @@ elif arglist.command=="check":
          from .solvers.generic import GenericEigenSolver
          p=Problem()
                
-         sublist={"pardiso","scipy","accelerate","slepc","slepc_mumps"}
+         sublist={"pardiso","scipy","spectra","accelerate","slepc","slepc_mumps"}
          #if arglist.check_name not in sublist:
          #   raise RuntimeError("Can only check the following: "+str(sublist))
          if arglist.check_name=="all":

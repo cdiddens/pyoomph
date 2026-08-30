@@ -67,7 +67,7 @@ _TypeGenericLASolver=TypeVar("_TypeGenericLASolver",bound=type["GenericLinearSys
 _TypeGenericEigenSolver=TypeVar("_TypeGenericEigenSolver",bound=type["GenericEigenSolver"])
 
 CoreLinearSolverEnum:TypeAlias=Literal["superlu","umfpack","petsc","pardiso","accelerate","petsc_mumps"]
-CoreEigenSolverEnum:TypeAlias=Literal["scipy","pardiso","slepc","accelerate","slepc_mumps"]
+CoreEigenSolverEnum:TypeAlias=Literal["scipy","pardiso","spectra","slepc","accelerate","slepc_mumps"]
 EigenSolverWhich:TypeAlias=Literal["LM","SM","LR","SR","SI"]
 _default_la_solver:"GenericLinearSystemSolver | CoreLinearSolverEnum | None"=None
 _default_eigen_solver:"GenericEigenSolver | CoreEigenSolverEnum | None"=None
@@ -1042,6 +1042,63 @@ class GenericEigenSolver:
 		eigenproblem assembled is the base state's -- see Problem::BaseDofDistributionScope.
 		"""
 		return self.problem._get_base_dof_distribution_info() #type:ignore
+
+	def _solve_gathered_on_root(self,neval:int,**kwargs:Any)->tuple[NPComplexArray,NPComplexArray,DefaultMatrixType,DefaultMatrixType]:
+		"""Solve a distributed eigenproblem by gathering J and M onto rank 0.
+
+		Under --distribute each rank assembles only its own (nrow_local x n) row block, which a serial
+		eigensolver cannot work with. Gathering them into one square matrix on rank 0 and solving there
+		is not parallel -- SLEPc is, and is preferred -- but it is correct, and it is the difference
+		between the serial backends (scipy, pardiso, spectra) being usable under --distribute and not
+		being usable at all.
+		"""
+		from ..generic.mpi import (get_mpi_rank,get_mpi_world_comm,mpi_row_layout,mpi_gather_csr_rows,
+								   mpi_share_root_failure)
+		from scipy.sparse import csr_matrix #type:ignore
+		# Collective, and it must run on every rank: it is what assembles the local blocks.
+		J,M,n,_is_complex=self.get_J_M_n_and_type()
+		_n,nrow_local,first_row,_distributed=self.get_eigen_row_layout()
+
+		def _gather(mat:DefaultMatrixType):
+			layout=mpi_row_layout(n,first_row,nrow_local,mat.nnz)
+			assert layout is not None
+			got=mpi_gather_csr_rows(layout,mat.data,mat.indices,mat.indptr,
+									context="gathering the eigenproblem onto rank 0")
+			if got is None:
+				return None
+			vals,cols,rs=got
+			return csr_matrix((vals,cols,rs),shape=(n,n))
+
+		Jg,Mg=_gather(J),_gather(M)
+		evals:Any=None
+		evects:Any=None
+		error:BaseException | None=None
+		# Everything inside this block runs on rank 0 ALONE, with the other ranks already waiting at
+		# mpi_share_root_failure below. Nothing called from here may be collective: the two sides then
+		# block in different collectives and the job hangs rather than failing, which is how the
+		# distributed scipy eigen tests turned into 900 s timeouts (see the PSD screen's `collective`).
+		if get_mpi_rank()==0:
+			assert Jg is not None and Mg is not None
+			try:
+				# get_J_M_n_and_type() skips the matrix manipulators when the problem is distributed --
+				# they rewrite whole rows of a square global matrix, which is not what a rank holds
+				# there. Here it is, so they apply.
+				for manip in self.matrix_manipulators:
+					Jg,Mg=manip.apply_on_J_and_M(self,Jg,Mg)
+				evals,evects,_,_=self.solve(neval,custom_J_and_M=(Jg,Mg),**kwargs)
+			except BaseException as e:
+				error=e
+		# Ends the job on every rank if rank 0 failed, rather than leaving them in the broadcast below.
+		mpi_share_root_failure(error,context="solving the gathered eigenproblem on rank 0")
+		comm=get_mpi_world_comm()
+		assert comm is not None
+		# Eigenvectors are contractually replicated at full global length on every rank (see
+		# Problem.rotate_eigenvectors), so a broadcast is exactly the right shape here.
+		evals,evects=comm.bcast((evals,evects) if get_mpi_rank()==0 else None,root=0) #type:ignore
+		# The LOCAL blocks are returned, not the gathered ones: the caller's accuracy report multiplies
+		# them by a globally replicated eigenvector and reduces over the ranks, which only works if each
+		# rank contributes its own rows.
+		return evals,evects,J,M
 
 	def get_parallel_row_split(self,n:int)->tuple[int,int,bool]:
 		"""``(nrow_local, first_row, parallel)`` for the PETSc/MPI matrices of an n-row eigenproblem.

@@ -168,13 +168,15 @@ _PROBLEMS = {"diffusion": DiffusionProblem, "azimuthal": AzimuthalProblem,
 
 
 def solve_case(N=8, neigen=3, eigensolver="slepc", azimuthal_m=None, problem="diffusion",
-               outdir=None):
+               outdir=None, linear_solver="petsc_mumps"):
     prob = _PROBLEMS[problem](N=N)
     with prob as p:
         if outdir is not None:
             p.set_output_directory(outdir)
         p.quiet()
-        p.set_linear_solver("petsc_mumps")
+        # Overridable so the serial eigensolvers can be A/B-compared against SLEPc on a machine (or a
+        # platform, i.e. Windows) that has no PETSc at all. The MPI tests keep the default.
+        p.set_linear_solver(linear_solver)
         p.set_eigensolver(eigensolver)
         if azimuthal_m is not None:
             p.setup_for_stability_analysis(azimuthal_stability=True, analytic_hessian=False)
@@ -282,6 +284,7 @@ def main():
     ap.add_argument("--size", type=int, default=8)
     ap.add_argument("--neigen", type=int, default=3)
     ap.add_argument("--eigensolver", default="slepc")
+    ap.add_argument("--linear-solver", default="petsc_mumps")
     ap.add_argument("--azimuthal-m", type=int, default=-1)
     ap.add_argument("--problem", default="diffusion", choices=sorted(_PROBLEMS))
     ap.add_argument("--mode", default="eigen", choices=["eigen", "rotate"])
@@ -299,6 +302,7 @@ def main():
         else:
             payload.update(solve_case(N=args.size, neigen=args.neigen,
                                       eigensolver=args.eigensolver, azimuthal_m=azi,
+                                      linear_solver=args.linear_solver,
                                       problem=args.problem, outdir=args.outdir))
     except Exception as e:
         payload["error"] = type(e).__name__ + ": " + str(e)

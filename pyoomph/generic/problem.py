@@ -2136,7 +2136,13 @@ class Problem(_pyoomph.Problem):
 
     def set_eigensolver(self,solv:str | GenericEigenSolver):
         """
-        Set the eigensolver backend. "scipy", "pardiso", "slepc" are available (the latter two only if the packages MKL and/or petsc4py/slepc4py are installed)
+        Set the eigensolver backend. "scipy", "pardiso", "spectra", "slepc" and "slepc_mumps" are available
+        ("pardiso" only with MKL installed, the "slepc" ones only with petsc4py/slepc4py, and "spectra" only
+        if the build was configured with PYOOMPH_HAS_SPECTRA=ON, which is the default).
+
+        "scipy" and "pardiso" are both scipy's ARPACK and cannot target an eigenvalue at all. "spectra" and
+        the "slepc" ones can; only "slepc" with a complex PETSc build, and the "slepc" ones alone run in
+        parallel. Use ``python -m pyoomph check eigen all`` to see what this installation actually has.
 
         Returns:
             The eigenproblem solver instance after setting
@@ -3500,6 +3506,7 @@ class Problem(_pyoomph.Problem):
         eigen_solver_group = self.cmdlineparser.add_mutually_exclusive_group()
         eigen_solver_group.add_argument('--slepc',help="use SLEPc as eigensolver. Specify your own backend for the matrix inversion during eigensolve here",action="store_true")
         eigen_solver_group.add_argument('--slepc_mumps',help="use SLEPc as eigensolver with MUMPS as backend",action="store_true")
+        eigen_solver_group.add_argument('--spectra',help="use the built-in Spectra eigensolver (needs no PETSc, but is serial)",action="store_true")
         eigen_solver_group.add_argument('--arpack',action="store_true")
         # Mutually exclusive for the same reason as linear_solver_group above.
         ccompiler_group = self.cmdlineparser.add_mutually_exclusive_group()
@@ -3578,6 +3585,8 @@ class Problem(_pyoomph.Problem):
             self.set_eigensolver("slepc_mumps")
         elif self.cmdlineargs.slepc:
             self.set_eigensolver("slepc")
+        elif self.cmdlineargs.spectra:
+            self.set_eigensolver("spectra")
 
 
 

@@ -50,6 +50,13 @@ void PyReg_Vector(nb::module_ &m);
 // neither this function nor its translation unit exists.
 void PyReg_TQMesh(nb::module_ &m);
 #endif
+#ifdef PYOOMPH_HAS_SPECTRA
+// Bindings for the Spectra Arnoldi eigensolver (src/nanobind/spectra; the library itself, and Eigen,
+// are downloaded by cmake/ThirdPartySpectra.cmake).
+// Optional in the same way as TQMesh above: with PYOOMPH_HAS_SPECTRA off, neither this function nor
+// its translation unit exists.
+void PyReg_Spectra(nb::module_ &m);
+#endif
 
 // Compiled and installed as pyoomph/_pyoomph_core*.so, i.e. importable as pyoomph._pyoomph_core.
 #define PYOOMPH_MODULE_NAME _pyoomph_core
@@ -111,5 +118,15 @@ NB_MODULE(PYOOMPH_MODULE_NAME, m)
     PyReg_TQMesh(m);
 #else
     m.attr("has_tqmesh") = false;
+#endif
+
+    // Likewise for the Spectra eigensolver backend. pyoomph.solvers.spectra refuses to import when
+    // this is false, which is what keeps it out of the eigensolver autodetection - relevant mainly on
+    // Windows, where it is the only backend that can target an eigenvalue at all.
+#ifdef PYOOMPH_HAS_SPECTRA
+    m.attr("has_spectra") = true;
+    PyReg_Spectra(m);
+#else
+    m.attr("has_spectra") = false;
 #endif
 }
