@@ -3,7 +3,7 @@
 Optional installation of PETSc/SLEPc
 ------------------------------------
 
-**PETSc/SLEPc is no longer required to solve eigenvalue problems.** pyoomph ships with the `Spectra <https://spectralib.org>`__ eigensolver built in, which handles the unsymmetric and singular mass matrices that arise in complicated problems, and can target a given (also complex) eigenvalue -- so everything the tutorial does with eigenvalues, azimuthal and normal mode stability analysis included, runs out of the box on any platform, Windows included. What PETSc/SLEPc still buys you is described below; if none of it applies to you, you can skip this page entirely.
+pyoomph ships with the `Spectra <https://spectralib.org>`__ eigensolver built in, which handles the unsymmetric and singular mass matrices that arise in complicated problems, and can target a given (also complex) eigenvalue -- so everything the tutorial does with eigenvalues, azimuthal and normal mode stability analysis included, runs out of the box on any platform, Windows included. What PETSc/SLEPc still buys you is described below; if none of it applies to you, you can skip this page entirely.
 
 pyoomph selects the best eigensolver it can find on your machine, in this order: `SLEPc <https://slepc.upv.es/>`__ with MUMPS if PETSc/SLEPc are installed with MUMPS support, otherwise the built-in Spectra, otherwise `ARPACK <https://github.com/opencollab/arpack-ng>`__ with MKL Pardiso as backend, otherwise `scipy's eigensolver <https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.linalg.eigs.html>`__, which is ARPACK as well, but with a plain scipy backend. The two ARPACK entries come last because they cannot target an eigenvalue at all.
 
