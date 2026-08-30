@@ -91,10 +91,46 @@ from . import _pyoomph_core as _pyoomph
 _pyoomph.set_jit_include_dir(os.path.join(os.path.dirname(os.path.abspath(__file__)), "jitbridge"))
 
 _default_c_compiler:Literal["tcc","system"]="system"
+_resolved_default_c_compiler:str | None=None
 
 
 def get_default_c_compiler():
-	return _default_c_compiler
+	"""The compiler a fresh Problem starts with: "system", unless that one cannot compile here.
+
+	The preference is unchanged - the system toolchain is faster than the bundled tcc and is what
+	every working installation ends up with - but it is now VERIFIED once per process instead of
+	being asserted. On Windows "system" means MSVC whatever else is installed (distutils has no
+	other default there), and an MSVC that cannot compile is not hypothetical: the Windows job of
+	the full-suite run of 30th August 2026 got one whose vcvars returned an INCLUDE without the
+	Windows SDK, so every JIT compile died on "Cannot open include file: 'math.h'" - on an image
+	carrying a Visual Studio 18 preview, and not reproducible on the next runner. tccbox was
+	installed and working the whole time, and nothing consulted it, because this function returned
+	a hardcoded name that Problem.__init__ passes straight to set_c_compiler.
+
+	check_avail() compiles and links a small program, so it is memoised: it would otherwise be paid
+	per Problem, and tests/test_multiple_problems.py builds plenty.
+	"""
+	global _resolved_default_c_compiler
+	if _resolved_default_c_compiler is not None:
+		return _resolved_default_c_compiler
+	from .generic.ccompiler import BaseCCompiler
+	resolved=_default_c_compiler
+	try:
+		avail=BaseCCompiler.available_compilers()
+	except Exception:
+		avail={}   # a probe that raises must not stop a run before it starts
+	if avail and resolved not in avail:
+		best=max(avail,key=lambda k:avail[k])
+		import warnings
+		warnings.warn(
+			"The '"+resolved+"' C compiler cannot compile on this machine, so pyoomph will JIT with "
+			"'"+best+"' instead. On Windows this usually means the Visual Studio installation has no "
+			"Windows SDK on its include path (the symptom is \"Cannot open include file: 'math.h'\"); "
+			"the fallback works, but it is slower.",
+			RuntimeWarning,stacklevel=2)
+		resolved=best
+	_resolved_default_c_compiler=resolved
+	return resolved
 
 
 ###DEVELOPMENT FLAGS, REMOVE AFTER SUCCESSFUL IMPLEMENTATION

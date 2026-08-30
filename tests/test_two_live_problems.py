@@ -194,3 +194,36 @@ def test_pinned_colliding_code_dir_is_refused(tmp_path):
     assert "DONE" in out, out
     assert "RAISED True True" in out, \
         "the pinned collision was not refused with an actionable message: %r" % out
+
+
+def test_the_default_compiler_falls_back_when_the_system_one_cannot_compile(monkeypatch):
+    """A broken system toolchain must cost speed, not the run.
+
+    get_default_c_compiler() used to return a hardcoded "system", which on Windows means MSVC
+    whatever else is installed. The Windows job of the full-suite run of 30th August 2026 got an
+    MSVC whose vcvars returned an INCLUDE without the Windows SDK - every JIT compile died on
+    "Cannot open include file: 'math.h'" while a working tccbox sat there unconsulted. Not
+    reproducible on the next runner, which is exactly why the fallback is worth having rather than
+    the image being blamed.
+
+    Faked here rather than waited for: check_avail() is what a missing SDK makes false.
+    """
+    import warnings
+
+    import pyoomph
+    from pyoomph.generic.ccompiler import BaseCCompiler, SystemCCompiler
+
+    monkeypatch.setattr(SystemCCompiler, "check_avail", staticmethod(lambda: False))
+    monkeypatch.setattr(pyoomph, "_resolved_default_c_compiler", None)
+    assert "tccbox" in BaseCCompiler.available_compilers(), \
+        "the fallback this test is about needs tccbox installed (pyoomph depends on it)"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        got = pyoomph.get_default_c_compiler()
+    assert got == "tccbox", got
+    assert any("cannot compile on this machine" in str(w.message) for w in caught), \
+        [str(w.message) for w in caught]
+
+    # ... and the answer is memoised, since check_avail() compiles and links a program.
+    monkeypatch.setattr(SystemCCompiler, "check_avail", staticmethod(lambda: True))
+    assert pyoomph.get_default_c_compiler() == "tccbox"
