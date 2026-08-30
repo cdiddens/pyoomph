@@ -181,13 +181,14 @@ jobs:
             cmake.define.PYOOMPH_USE_MPI=OFF
             cmake.define.PYOOMPH_PARANOID=OFF
             ${{ matrix.platform == 'macos' && 'cmake.define.PYOOMPH_USE_GCD=ON' || 'cmake.define.PYOOMPH_USE_OPENMP=ON' }}
+            cmake.define.PYOOMPH_HAS_SPECTRA=ON
           # The backend define above (OpenMP on Linux, GCD on macOS) already turns a missing backend
           # into a CONFIGURE error; this only covers what CMake cannot see: an extension that reports
           # the capability but whose runtime never actually threads the element loop. EXPECT_OPENMP
           # asserts OpenMP specifically (Linux), EXPECT_THREADED asserts either backend (macOS/GCD,
           # where has_openmp is false). Without it tests/test_openmp_present.py skips - a from-source
           # build defaults to AUTO and is entitled to whatever backend the platform provides.
-          CIBW_TEST_ENVIRONMENT: ${{ matrix.platform == 'macos' && 'PYOOMPH_EXPECT_THREADED=1' || 'PYOOMPH_EXPECT_OPENMP=1' }}
+          CIBW_TEST_ENVIRONMENT: ${{ matrix.platform == 'macos' && 'PYOOMPH_EXPECT_THREADED=1 PYOOMPH_EXPECT_SPECTRA=1' || 'PYOOMPH_EXPECT_OPENMP=1 PYOOMPH_EXPECT_SPECTRA=1' }}
         uses: pypa/cibuildwheel@v4.1.0
         with:
           output-dir: wheelhouse
@@ -231,9 +232,10 @@ jobs:
             cmake.define.PYOOMPH_USE_MPI=OFF
             cmake.define.PYOOMPH_PARANOID=OFF
             ${{ matrix.platform == 'macos' && 'cmake.define.PYOOMPH_USE_GCD=ON' || 'cmake.define.PYOOMPH_USE_OPENMP=ON' }}
+            cmake.define.PYOOMPH_HAS_SPECTRA=ON
             wheel.py-api=cp312
           # See the same variables in the legacy step above.
-          CIBW_TEST_ENVIRONMENT: ${{ matrix.platform == 'macos' && 'PYOOMPH_EXPECT_THREADED=1' || 'PYOOMPH_EXPECT_OPENMP=1' }}
+          CIBW_TEST_ENVIRONMENT: ${{ matrix.platform == 'macos' && 'PYOOMPH_EXPECT_THREADED=1 PYOOMPH_EXPECT_SPECTRA=1' || 'PYOOMPH_EXPECT_OPENMP=1 PYOOMPH_EXPECT_SPECTRA=1' }}
         uses: pypa/cibuildwheel@v4.1.0
         with:
           output-dir: wheelhouse
@@ -270,7 +272,7 @@ jobs:
           export CIBW_ENVIRONMENT_WINDOWS="CC=gcc CXX=g++ CXXFLAGS='-static-libgcc -static-libstdc++' LDFLAGS='-static-libgcc -static-libstdc++' PYOOMPH_GINAC_INCLUDE_DIR=${PREBUILT_WIN}/include PYOOMPH_GINAC_LIB_DIR=${PREBUILT_WIN}/lib PYOOMPH_CLN_INCLUDE_DIR=${PREBUILT_WIN}/include PYOOMPH_CLN_LIB_DIR=${PREBUILT_WIN}/lib"
           export CIBW_REPAIR_WHEEL_COMMAND_WINDOWS="delvewheel repair --add-path C:/msys64/ucrt64/bin -w {dest_dir} {wheel}"
           # See the Linux/macOS steps above: makes tests/test_openmp_present.py assert instead of skip.
-          export CIBW_TEST_ENVIRONMENT="PYOOMPH_EXPECT_OPENMP=1"
+          export CIBW_TEST_ENVIRONMENT="PYOOMPH_EXPECT_OPENMP=1 PYOOMPH_EXPECT_SPECTRA=1"
 
           mkdir -p wheelhouse
 
@@ -286,11 +288,11 @@ jobs:
             LEGACY_SELECTOR="${LEGACY_SELECTOR:+$LEGACY_SELECTOR }cp${v//./}-win_amd64"
           done
           export CIBW_BUILD="${LEGACY_SELECTOR}"
-          export CIBW_CONFIG_SETTINGS="cmake.args=-GUnix\ Makefiles cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON cmake.define.PYOOMPH_USE_MPI=OFF cmake.define.PYOOMPH_PARANOID=OFF cmake.define.PYOOMPH_USE_OPENMP=ON"
+          export CIBW_CONFIG_SETTINGS="cmake.args=-GUnix\ Makefiles cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON cmake.define.PYOOMPH_USE_MPI=OFF cmake.define.PYOOMPH_PARANOID=OFF cmake.define.PYOOMPH_USE_OPENMP=ON cmake.define.PYOOMPH_HAS_SPECTRA=ON"
           python -m cibuildwheel --output-dir wheelhouse
 
           export CIBW_BUILD="cp${PYTHON_STABLE_ABI_BASE//./}-win_amd64"
-          export CIBW_CONFIG_SETTINGS="cmake.args=-GUnix\ Makefiles cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON cmake.define.PYOOMPH_USE_MPI=OFF cmake.define.PYOOMPH_PARANOID=OFF cmake.define.PYOOMPH_USE_OPENMP=ON wheel.py-api=cp312"
+          export CIBW_CONFIG_SETTINGS="cmake.args=-GUnix\ Makefiles cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON cmake.define.PYOOMPH_USE_MPI=OFF cmake.define.PYOOMPH_PARANOID=OFF cmake.define.PYOOMPH_USE_OPENMP=ON cmake.define.PYOOMPH_HAS_SPECTRA=ON wheel.py-api=cp312"
           python -m cibuildwheel --output-dir wheelhouse
 
       - name: Verify NO_MPI marker in wheel

@@ -34,11 +34,15 @@ fi
 
 # The ${arr[@]+"${arr[@]}"} form (rather than plain "${PEP668[@]}") is needed because macOS ships
 # bash 3.2, where expanding an empty array under `set -u` raises "unbound variable".
+# PYOOMPH_HAS_SPECTRA is ON by default in CMakeLists.txt, but passed explicitly because the CMake
+# CACHE wins over the default: a build/ directory that was once configured with -DPYOOMPH_HAS_SPECTRA=OFF
+# would otherwise keep rebuilding without the Spectra eigensolver, and nothing about the build says so.
 $PYTHON -m pip install ${PEP668[@]+"${PEP668[@]}"} --no-build-isolation -e . -v \
     --config-settings=editable.mode=redirect \
     --config-settings=build-dir=build \
     --config-settings=build.verbose=true \
     --config-settings=build.tool-args=-j4 \
     --config-settings=cmake.build-type=RelWithDebInfo \
-    --config-settings=cmake.define.PYOOMPH_USE_MPI=ON     
+    --config-settings=cmake.define.PYOOMPH_USE_MPI=ON \
+    --config-settings=cmake.define.PYOOMPH_HAS_SPECTRA=ON
 

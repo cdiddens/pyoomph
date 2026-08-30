@@ -237,6 +237,7 @@ jobs:
             cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON
             cmake.define.PYOOMPH_USE_MPI=OFF
             cmake.define.PYOOMPH_PARANOID=OFF
+            cmake.define.PYOOMPH_HAS_SPECTRA=ON
         uses: pypa/cibuildwheel@v4.1.0
         with:
           output-dir: wheelhouse
@@ -279,7 +280,7 @@ jobs:
           export CIBW_TEST_SOURCES=""
           export CIBW_ENVIRONMENT_WINDOWS="CC=gcc CXX=g++ CXXFLAGS='-static-libgcc -static-libstdc++' LDFLAGS='-static-libgcc -static-libstdc++' PYOOMPH_GINAC_INCLUDE_DIR=${PREBUILT_WIN}/include PYOOMPH_GINAC_LIB_DIR=${PREBUILT_WIN}/lib PYOOMPH_CLN_INCLUDE_DIR=${PREBUILT_WIN}/include PYOOMPH_CLN_LIB_DIR=${PREBUILT_WIN}/lib"
           export CIBW_REPAIR_WHEEL_COMMAND_WINDOWS="delvewheel repair --add-path C:/msys64/ucrt64/bin -w {dest_dir} {wheel}"
-          export CIBW_CONFIG_SETTINGS="cmake.args=-GUnix\ Makefiles cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON cmake.define.PYOOMPH_USE_MPI=OFF cmake.define.PYOOMPH_PARANOID=OFF"
+          export CIBW_CONFIG_SETTINGS="cmake.args=-GUnix\ Makefiles cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON cmake.define.PYOOMPH_USE_MPI=OFF cmake.define.PYOOMPH_PARANOID=OFF cmake.define.PYOOMPH_HAS_SPECTRA=ON"
 
           "$DRIVER" -m cibuildwheel --output-dir wheelhouse
 

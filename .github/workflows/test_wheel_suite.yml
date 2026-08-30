@@ -215,10 +215,11 @@ jobs:
             cmake.define.PYOOMPH_USE_MPI=OFF
             cmake.define.PYOOMPH_PARANOID=OFF
             ${{ matrix.platform == 'macos' && 'cmake.define.PYOOMPH_USE_GCD=ON' || 'cmake.define.PYOOMPH_USE_OPENMP=ON' }}
+            cmake.define.PYOOMPH_HAS_SPECTRA=ON
           # Turns tests/test_openmp_present.py from a skip into a hard failure: the built extension
           # must report a threaded loop back to Python, not merely have CMake find one. EXPECT_OPENMP
           # asserts OpenMP specifically (Linux); EXPECT_THREADED asserts either backend (macOS/GCD).
-          CIBW_TEST_ENVIRONMENT: ${{ matrix.platform == 'macos' && 'PYOOMPH_EXPECT_THREADED=1' || 'PYOOMPH_EXPECT_OPENMP=1' }}
+          CIBW_TEST_ENVIRONMENT: ${{ matrix.platform == 'macos' && 'PYOOMPH_EXPECT_THREADED=1 PYOOMPH_EXPECT_SPECTRA=1' || 'PYOOMPH_EXPECT_OPENMP=1 PYOOMPH_EXPECT_SPECTRA=1' }}
         uses: pypa/cibuildwheel@v4.1.0
         with:
           output-dir: wheelhouse
@@ -268,8 +269,8 @@ jobs:
           TK_DONOR="$(dirname "$(cygpath -m '${{ steps.tkdonor.outputs.python-path }}')")"
           export CIBW_BEFORE_TEST_WINDOWS="python {project}/citools/windows_add_tkinter.py ${TK_DONOR} ${{ inputs.python_version }}"
           # See the Linux/macOS step above.
-          export CIBW_TEST_ENVIRONMENT="PYOOMPH_EXPECT_OPENMP=1"
-          export CIBW_CONFIG_SETTINGS="cmake.args=-GUnix\ Makefiles cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON cmake.define.PYOOMPH_USE_MPI=OFF cmake.define.PYOOMPH_PARANOID=OFF cmake.define.PYOOMPH_USE_OPENMP=ON"
+          export CIBW_TEST_ENVIRONMENT="PYOOMPH_EXPECT_OPENMP=1 PYOOMPH_EXPECT_SPECTRA=1"
+          export CIBW_CONFIG_SETTINGS="cmake.args=-GUnix\ Makefiles cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON cmake.define.PYOOMPH_USE_MPI=OFF cmake.define.PYOOMPH_PARANOID=OFF cmake.define.PYOOMPH_USE_OPENMP=ON cmake.define.PYOOMPH_HAS_SPECTRA=ON"
 
           python -m cibuildwheel --output-dir wheelhouse
 

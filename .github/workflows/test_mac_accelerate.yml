@@ -81,6 +81,7 @@ jobs:
           set -eux
           python -m pip install . -v \
             --config-settings=cmake.define.PYOOMPH_USE_MPI=OFF \
+            --config-settings=cmake.define.PYOOMPH_HAS_SPECTRA=ON \
             --config-settings=cmake.define.PYOOMPH_PARANOID=OFF
 
       - name: Show what was built
