@@ -30,6 +30,7 @@ from .generic import GenericLinearSystemSolver, GenericEigenSolver, EigenSolverW
 from ..meshes.mesh import AnyMesh
 import atexit
 import hashlib
+import os
 from collections import OrderedDict
 import petsc4py #type:ignore
 import sys
@@ -86,6 +87,18 @@ _MUMPS_ICNTL14_ERRORS = (-8, -9, -11, -12, -14, -15, -17, -20)
 # a cap only asks for more of something already forbidden. The lever there is ICNTL(23) itself, which
 # is the user's to set (pyoomph never does), so this is reported rather than escalated.
 _MUMPS_ICNTL23_ERROR = -19
+
+
+# INFOG(28) is the number of null pivots MUMPS detected and REPLACED under ICNTL(24)=1, which
+# use_mumps() turns on. A nonzero count means the vector that comes back is a pseudo-solution: the
+# component along the null space is set to zero rather than solved for, and the KSP still reports
+# success. Newton then applies an update that leaves the residual untouched, which is how the macOS
+# arm64 tutorial run of 30th August 2026 spent 443 of its 1378 solves in blocks of seven or eight
+# steps with the residual frozen to every digit, until the iteration limit rejected the step.
+# Opt-in and print-only for now: reading INFOG costs a PETSc call per solve, and whether a
+# substituted pivot should be an error rather than a warning is a question about the problem, not
+# about the solver.
+_MUMPS_NULL_PIVOT_DEBUG = bool(os.environ.get("PYOOMPH_DEBUG_MUMPS_NULL_PIVOTS"))
 
 
 def _mumps_infog_from_pc(pc:Any,which:int)->int | None:
@@ -612,6 +625,12 @@ class PETSCSolver(GenericLinearSystemSolver):
         """
         assert self.ksp is not None
         self.ksp.solve(bv, self.x) #type:ignore
+        if _MUMPS_NULL_PIVOT_DEBUG:
+            null_pivots = self._mumps_infog(28)
+            if null_pivots:
+                print("MUMPS INFOG(28)=" + str(null_pivots) + ": null pivots were detected and "
+                      "replaced (ICNTL(24)=1), so this solve returned a pseudo-solution, not the "
+                      "solution. INFOG(12)=" + str(self._mumps_infog(12)) + " off-diagonal pivots.")
         reason:int = self.ksp.getConvergedReason() #type:ignore
         if reason >= 0:
             return
@@ -707,6 +726,11 @@ class PETSCSolver(GenericLinearSystemSolver):
 
     def solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPAnyIntArray,colptr:NPAnyIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
         if op_flag == 1:
+            # oomph-lib calls this "factorise" and times it as such, but nothing here factorises:
+            # the CSR is copied into a Mat and that is all. PETSc builds the factors lazily, inside
+            # the KSPSolve of op_flag==2, so on this backend the cost lands in what the log calls
+            # the backsub() call and this line is the matrix upload alone. See the FOR PYOOMPH note
+            # on the timing print in thirdparty/oomph-lib/include/linear_solver.cc.
             self._update_symmetry_engagement()
             if self._can_reuse_structure(n,nnz,colptr,rowind):
                 # Same nonzero pattern, new values. Overwriting them in place (rather than destroying
@@ -766,6 +790,10 @@ class PETSCSolver(GenericLinearSystemSolver):
 
             self.x = PETSc.Vec().createSeq(n) #type:ignore
         elif op_flag == 2:
+            # oomph-lib times this as the back-substitution, and for a direct PC it is usually the
+            # FACTORISATION that dominates it: KSPSetUp/PCSetUp run on the first solve after the
+            # matrix changed (see _setup_solver_if_needed and _one_ksp_solve). A second solve on an
+            # unchanged Mat really is only a back substitution, which is what makes re-solves cheap.
             #print("Solving linear system with PETSc", op_flag, n, nnz, nrhs, transpose, "SPLIT INFO",self._dofs_to_field_info)
             # _dofs_to_field_info is reset to None whenever the equations are reassigned
             # (_before_assigning_equation_numbers), so this only recomputes the field split after a
