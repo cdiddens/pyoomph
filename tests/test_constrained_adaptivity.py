@@ -241,8 +241,30 @@ class _TwoDomainMesh2d(MeshTemplate):
 
 
 class _ConnectTAtInterface(InterfaceEquations):
+    """Lagrange multiplier enforcing T continuity across the interface.
+
+    The multiplier lives in the space T actually has independent values in, which is NOT always the
+    space T was declared in: with ConstrainFieldsToC1Space("T") the C2 field is flattened to C1, so
+    its only free values are at the corners. A C2 multiplier then writes one continuity equation per
+    C2 node while only the corner ones are independent, and every mid-side equation is a linear
+    combination of them - the system is singular by exactly the number of mid-side nodes. Measured:
+    at refinement levels 1, 2 and 3 the null space was 8, 16 and 32 against 17, 33 and 65 multiplier
+    dofs (9+8, 17+16, 33+32 corners plus mid-sides), lying entirely in domainA/interface/lam, and
+    zero with the constraint switched off.
+
+    It went unnoticed because MKL Pardiso's pivot perturbation regularises a singular system without
+    saying so: Linux and macOS Intel passed throughout, while macOS arm64 - which falls back to
+    Accelerate, and pivots nothing away - took a Newton residual from 1.016 to 9.0e15 in one step.
+    Matching the spaces takes the condition number from 1.8e17 to 4.3e4 and the residual to machine
+    zero.
+    """
+
+    def __init__(self, space="C2"):
+        super().__init__()
+        self.space = space
+
     def define_fields(self):
-        self.define_scalar_field("lam", "C2")  # Lagrange multiplier enforcing T continuity
+        self.define_scalar_field("lam", self.space)
 
     def define_residuals(self):
         my, myt = var_and_test("T")
@@ -267,7 +289,8 @@ class TwoDomainInterfaceProblem(Problem):
             if self.constrain:
                 eqs += ConstrainFieldsToC1Space("T")
             self += eqs @ dom
-        self += _ConnectTAtInterface() @ "domainA/interface"
+        # C1 when T is constrained to C1: see the class docstring for what a mismatch costs.
+        self += _ConnectTAtInterface("C1" if self.constrain else "C2") @ "domainA/interface"
 
 
 def test_two_domain_interface_constrained_adaptivity():
@@ -278,10 +301,11 @@ def test_two_domain_interface_constrained_adaptivity():
         problem += RefineToLevel(3) @ "domainA/interface"
         problem += RefineToLevel(3) @ "domainB/interface"
         problem.solve()
-        # Saddle-point (Lagrange multiplier + C1 constraint) conditioning limits the residual to ~1e-12
-        # rather than machine zero; a separate analytic-vs-FD Jacobian check confirms the hangbuffers
-        # (incl. the opposite-domain path) are exact.
-        assert _max_abs_residual(problem) < 1e-8
+        # Machine zero, not the ~1e-12 this used to excuse as "saddle-point conditioning": that was
+        # the multiplier space not matching the constrained field, i.e. a singular system that Pardiso
+        # was quietly regularising. With the spaces matched the condition number is 4.3e4 and the
+        # residual is 2.8e-15, so the bound is tight enough to notice if the mismatch ever returns.
+        assert _max_abs_residual(problem) < 1e-12
 
 
 # --- Mixed spaces: a C2 field partially constrained to C1 alongside a genuinely-C1 field ---
