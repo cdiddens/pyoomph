@@ -165,7 +165,9 @@ def run(args):
         problem.set_output_directory(os.path.join(args.outdir, "out"))
         problem.quiet()
         problem.setup_for_stability_analysis(analytic_hessian=True)
-        problem.set_eigensolver("slepc").use_mumps()
+        # No backend named on purpose: the autodetection takes SLEPc/MUMPS where PETSc is
+        # installed (and that is what a distributed run needs) and the built-in spectra
+        # otherwise. Both can target the complex Hopf pair this computation is about.
         to_the_hopf_point(problem)
 
         res = {"nproc": get_mpi_nproc(), "case": args.case, "sigma": args.sigma,

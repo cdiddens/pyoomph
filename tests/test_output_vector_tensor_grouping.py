@@ -49,6 +49,8 @@ import os
 import numpy
 import pytest
 
+from conftest import has_complex_target_eigensolver
+
 from pyoomph import Problem, Equations, DirichletBC
 from pyoomph.expressions import (var, var_and_test, testfunction, weak, grad, vector, matrix, dyadic,
                                  identity_matrix, partial_t)
@@ -510,19 +512,26 @@ def test_rotational_extrusion_keeps_a_symmetric_tensor_at_six_components(tmp_pat
 # eigenmodes under the extrusions. Some of these need a complex PETSc on PYTHONPATH, see CLAUDE.md.
 # ----------------------------------------------------------------------------------------------
 
-def _complex_petsc_skip_reason():
-    """Importing slepc4py is not enough: a REAL build imports fine and then raises out of the solve.
+def _complex_eigensolver_skip_reason():
+    """These tests hand the solver a genuinely complex matrix pair (an I*m*u term), so they need a
+    backend that does complex arithmetic - unlike the tensor relaxation above, which stays real.
 
-    The tensor relaxation below stays real, so it only needs slepc4py at all; the mode-convention
-    tests carry an I*m*u term and hand the solver a genuinely complex pair, which a real
-    PETSc/SLEPc refuses with a RuntimeError rather than a skip."""
+    The built-in spectra backend does, always: its complex support is a second template instantiation
+    of the same header-only solver, compiled in unconditionally. With SLEPc it depends on the BUILD -
+    importing slepc4py is not enough, since a real-scalar PETSc imports fine and then raises out of
+    the solve rather than skipping."""
+    from pyoomph import _pyoomph_core
+    if getattr(_pyoomph_core, "has_spectra", False):
+        return None
     try:
         import slepc4py  # type:ignore  # noqa: F401
         from petsc4py import PETSc  # type:ignore
     except Exception:
-        return "petsc4py/slepc4py not available (PYTHONPATH must carry a complex PETSc build)"
+        return ("no complex-capable eigensolver: this build has no spectra, and petsc4py/slepc4py "
+                "is not available either (PYTHONPATH must carry a complex PETSc build)")
     if PETSc.ScalarType is not numpy.complex128:
-        return "the PETSc on PYTHONPATH is a real build; a complex eigenproblem needs a complex one"
+        return ("this build has no spectra, and the PETSc on PYTHONPATH is a real build; a complex "
+                "eigenproblem needs a complex one")
     return None
 
 
@@ -576,7 +585,9 @@ def test_rotational_extrusion_of_an_azimuthal_eigen_tensor(tmp_path, m):
     The mode reconstruction and the basis rotation are fused into one outer product, so this checks
     them together against the two halves as they come out unextruded. A tensor unknown rather than a
     local expression, since only a field has real and imaginary halves to recombine."""
-    pytest.importorskip("slepc4py", reason="the azimuthal eigensolve needs slepc4py")
+    if not has_complex_target_eigensolver():
+        pytest.skip("the azimuthal eigensolve needs an eigensolver that can target a complex "
+                    "eigenvalue (the built-in spectra, or slepc4py)")
     combine = MeshDataCombineWithEigenfunction(0)
     flat = _eigen_tensor_output(tmp_path / "flat", combine, True, azimuthal_m=m)
     ext = _eigen_tensor_output(tmp_path / "ext",
@@ -607,7 +618,9 @@ def test_cartesian_extrusion_of_a_normal_mode_eigen_tensor(tmp_path, k):
     The base state therefore needs nothing a plain tile would not do -- asserted, so that a future
     rotation added by mistake shows up -- while the eigenmode still has to be recombined from its
     two halves."""
-    pytest.importorskip("slepc4py", reason="the normal-mode eigensolve needs slepc4py")
+    if not has_complex_target_eigensolver():
+        pytest.skip("the normal-mode eigensolve needs an eigensolver that can target a complex "
+                    "eigenvalue (the built-in spectra, or slepc4py)")
     combine = MeshDataCombineWithEigenfunction(0)
     flat = _eigen_tensor_output(tmp_path / "flat", combine, False, normal_mode_k=k)
     ext = _eigen_tensor_output(tmp_path / "ext",
@@ -800,7 +813,7 @@ def test_stored_eigen_pair_is_the_amplitude_of_a_positive_exponential(tmp_path, 
 
     This is what fixes the sign of every reconstruction below, so it is checked first and against
     the coordinate system rather than against any of them."""
-    reason = _complex_petsc_skip_reason()
+    reason = _complex_eigensolver_skip_reason()
     if reason is not None:
         pytest.skip(reason)
     wavenumber = 2.0
@@ -817,7 +830,7 @@ def test_stored_eigen_pair_is_the_amplitude_of_a_positive_exponential(tmp_path, 
 @pytest.mark.parametrize("azimuthal", [True, False])
 def test_extruded_scalar_eigenmode_uses_minus_sin_times_the_imaginary_part(tmp_path, azimuthal):
     """The extruded field is Re[u_hat*exp(I*m*phi)], with phi right-handed about the axis."""
-    reason = _complex_petsc_skip_reason()
+    reason = _complex_eigensolver_skip_reason()
     if reason is not None:
         pytest.skip(reason)
     wavenumber = 2.0

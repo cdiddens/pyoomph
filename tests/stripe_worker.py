@@ -91,7 +91,7 @@ class Prob(Problem):
 def main():
     with Prob() as problem:
         problem.set_output_directory(sys.argv[1])
-        problem.set_eigensolver("slepc")
+        # Eigensolver left to the autodetection (SLEPc where available, else the built-in spectra)
         problem.get_global_parameter("mu").value = 1.0
         problem.quiet()
 

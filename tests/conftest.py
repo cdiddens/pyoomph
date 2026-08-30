@@ -124,3 +124,21 @@ def _output_below_tmp_path(tmp_path, monkeypatch):
     ~/.cache, not in the output directory (pyoomph/generic/jit_cache.py).
     """
     monkeypatch.chdir(tmp_path)
+
+
+def has_complex_target_eigensolver():
+    """Is an eigensolver that can TARGET a complex eigenvalue available in this installation?
+
+    Used by tests that need a Hopf pair or an azimuthal/normal-mode eigenfunction. The ARPACK-based
+    backends ("scipy", "pardiso", "accelerate") cannot do it at all - they raise on any target - so
+    such a test used to be skipped without slepc4py. The built-in "spectra" backend answers the same
+    question without PETSc, which is what makes these tests run on a plain wheel, so either will do.
+    """
+    from pyoomph import _pyoomph_core
+    if getattr(_pyoomph_core, "has_spectra", False):
+        return True
+    try:
+        import slepc4py  # type:ignore  # noqa: F401
+        return True
+    except Exception:
+        return False
