@@ -58,6 +58,11 @@ on:
         required: false
         type: boolean
         default: true
+      omp:
+        description: Assemble the elements on this many threads (0 = serial). Standard runners have 4 vCPU, macos-14 arm64 has 3
+        required: false
+        type: string
+        default: "0"
       platforms:
         description: Which platforms to run on
         required: false
@@ -248,10 +253,13 @@ jobs:
             PYOOMPH_CLN_INCLUDE_DIR=$PWD/prebuilt/GiNaC_static/install/include
             PYOOMPH_CLN_LIB_DIR=$PWD/prebuilt/GiNaC_static/install/lib
             MACOSX_DEPLOYMENT_TARGET=10.13
-          # Deliberately no PYOOMPH_USE_OPENMP / PYOOMPH_USE_GCD here, unlike test_wheel_suite.yml:
-          # the tutorial scripts run on the serial element loop anyway (nothing passes --omp), and
-          # pinning a threading backend on would tie this workflow, which lives on main, to whether
-          # the branch under `ref` already has that backend.
+          # The threading backend is pinned ON, because the omp input is worthless without it: with
+          # CMake's AUTO default a runner that cannot find one produces a serial wheel, and --omp N
+          # then does nothing at all while the report looks like a threaded run. OpenMP on Linux,
+          # GCD on macOS - never both, and never OpenMP on macOS, where it would load a second
+          # runtime beside MKL's libiomp5 (that collision is what src/mac_accelerate.cpp and the GCD
+          # backend exist for). This does tie the workflow to a `ref` that HAS the GCD backend, which
+          # is why it was left out before; anything from 93d014c8 onwards has it.
           CIBW_CONFIG_SETTINGS: >
             cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF
             cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF
@@ -259,6 +267,7 @@ jobs:
             cmake.define.PYOOMPH_USE_MPI=OFF
             cmake.define.PYOOMPH_PARANOID=OFF
             cmake.define.PYOOMPH_HAS_SPECTRA=ON
+            ${{ matrix.platform == 'macos' && 'cmake.define.PYOOMPH_USE_GCD=ON' || 'cmake.define.PYOOMPH_USE_OPENMP=ON' }}
         uses: pypa/cibuildwheel@v4.1.0
         with:
           output-dir: wheelhouse
@@ -419,6 +428,7 @@ jobs:
           QUICK: ${{ inputs.quick_test && '--quick-test' || '' }}
           SKIPS: ${{ inputs.skip_folders }}
           TIMEOUT: ${{ inputs.script_timeout }}
+          OMP: ${{ inputs.omp }}
         run: |
           set -o pipefail
           # --no-petsc unless the PETSc prebuild was installed above (macOS arm64), which is what
@@ -429,10 +439,14 @@ jobs:
           # stop right here.
           NO_PETSC="--no-petsc"
           if [[ -n "${PETSC_DIR:-}" ]]; then NO_PETSC=""; fi
+          # Only when asked for: --omp 0 would still take the threaded code path with one thread,
+          # which is not the serial element loop every previous run of this workflow measured.
+          OMP_FLAG=""
+          if [[ "${OMP:-0}" != "0" ]]; then OMP_FLAG="--omp ${OMP}"; fi
           # The harness exits 0 whatever happens - the verdict comes from the report in the next
           # step - so nothing here can hide a failing script.
           "${TUTORIAL_PYTHON}" -u citools/test_all_tutorial_scripts.py \
-            ${NO_PETSC} ${QUICK} --timeout "${TIMEOUT:-0}" \
+            ${NO_PETSC} ${QUICK} --timeout "${TIMEOUT:-0}" ${OMP_FLAG} \
             --report-json tutorial_report.json \
             ${SKIPS} 2>&1 | tail -n 4000
 
@@ -444,6 +458,7 @@ jobs:
           QUICK: ${{ inputs.quick_test && '--quick-test' || '' }}
           SKIPS: ${{ inputs.skip_folders }}
           TIMEOUT: ${{ inputs.script_timeout }}
+          OMP: ${{ inputs.omp }}
         run: |
           set -o pipefail
           cd "$(cygpath -u "$GITHUB_WORKSPACE")"
@@ -451,8 +466,10 @@ jobs:
           # pyoomph picks for the generated element code, and without it every single script would
           # fall back to tccbox (or fail outright).
           export PATH="/ucrt64/bin:$PATH"
+          OMP_FLAG=""
+          if [[ "${OMP:-0}" != "0" ]]; then OMP_FLAG="--omp ${OMP}"; fi
           "$(cygpath -u "${TUTORIAL_PYTHON}")" -u citools/test_all_tutorial_scripts.py \
-            --no-petsc ${QUICK} --timeout "${TIMEOUT:-0}" \
+            --no-petsc ${QUICK} --timeout "${TIMEOUT:-0}" ${OMP_FLAG} \
             --report-json tutorial_report.json \
             ${SKIPS} 2>&1 | tail -n 4000
 
