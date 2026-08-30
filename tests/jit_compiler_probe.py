@@ -14,9 +14,12 @@ chose. get_ccompiler() ranks by BaseCCompiler.compiler_quality (SystemCCompiler 
 among those whose check_avail() says yes, so the question is which environment makes MSVC claim to
 be available when it cannot compile stdlib.h.
 
-Run through .github/workflows/debug_wheel_case.yml's `command` input, which needs no quoting:
+It lives in tests/ rather than citools/ so that it travels with CIBW_TEST_SOURCES: the environment
+worth probing is cibuildwheel's own test venv, which is where the failure is and which no other lane
+reproduces. pytest ignores it (the name does not start with test_). Two ways to run it:
 
-    python -P citools/windows_jit_compiler_probe.py
+    python -P tests/jit_compiler_probe.py                      # debug_wheel_case.yml's `command`
+    test_wheel_suite.yml -f platforms=windows -f test_command_override='python -P {package}/tests/jit_compiler_probe.py'
 
 It reports the current process and then re-runs itself as a child under several environments, since
 the parent/child difference is the whole point. Every line is prefixed PROBE and is JSON.
@@ -78,6 +81,22 @@ def report(tag):
         out["distutils_default"] = dcc.get_default_compiler()
     except Exception as e:
         out["distutils_default"] = repr(e)
+    # The MSVC support moved to setuptools' compilers/C/ layout, and the failing job's command line
+    # carried the VC include dirs as -I flags while the working one had them only in %INCLUDE% - two
+    # different code paths, so the version is worth knowing.
+    for mod in ("setuptools", "pyoomph"):
+        try:
+            import importlib.metadata as md
+            out[mod + "_version"] = md.version(mod)
+        except Exception as e:
+            out[mod + "_version"] = repr(e)
+    # What a Problem ACTUALLY uses: pyoomph.get_default_c_compiler() is a hardcoded "system", not the
+    # quality ranking in get_ccompiler(None), so available_compilers() above is not the whole story.
+    try:
+        import pyoomph
+        out["default_c_compiler"] = pyoomph.get_default_c_compiler()
+    except Exception as e:
+        out["default_c_compiler"] = repr(e)
     try:
         from pyoomph.generic.ccompiler import BaseCCompiler
         out["available_compilers"] = BaseCCompiler.available_compilers()
