@@ -152,6 +152,46 @@ def _which_libm_symbols_link(outdir):
         _say("not probed: " + ", ".join(skipped))
 
 
+def _try_alternative_c_runtimes(outdir):
+    """Can tcc be pointed at a C runtime that HAS the C99 functions?
+
+    tcc links msvcrt by default, and msvcrt predates C99: erf, erfc, asinh, acosh, atanh, fmax and
+    fmin are all absent from it, which is why the JIT compile fails. The host CPython is UCRT-based
+    and ucrtbase.dll exports every one of them, so if tcc can be given that instead - it resolves
+    imports through .def files in its own lib directory - the whole class of failure goes away with
+    one flag and no numerics of our own. This reports which .def files exist and which -l name links.
+    """
+    try:
+        import tccbox
+    except Exception as e:
+        _say("tccbox is not importable here (%r)" % (e,))
+        return
+    root = os.path.dirname(os.path.abspath(tccbox.__file__))
+    defs = sorted(glob.glob(os.path.join(root, "**", "*.def"), recursive=True))
+    _say("tccbox ships %d .def files: %s" % (len(defs), ", ".join(os.path.basename(d) for d in defs[:20]) or "none"))
+
+    workdir = os.path.join(os.path.abspath(outdir), "runtimecheck")
+    os.makedirs(workdir, exist_ok=True)
+    src = os.path.join(workdir, "probe.c")
+    with open(src, "w") as f:
+        # One function from each missing family, so a partial answer is still informative.
+        f.write("double acosh(double);\ndouble erf(double);\ndouble fmax(double,double);\n"
+                "double f(double x){ return acosh(x) + erf(x) + fmax(x, 0.5); }\n")
+    for lib in ("ucrtbase", "ucrt", "api-ms-win-crt-math-l1-1-0", "msvcr120", "m"):
+        dst = os.path.join(workdir, "with_%s%s" % (lib, ".dll" if os.name == "nt" else ".so"))
+        cmd = [sys.executable, "-m", "tccbox", "-shared", src, "-l" + lib, "-o", dst]
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        except (OSError, subprocess.SubprocessError) as e:
+            _say("-l%-28s could not run (%s)" % (lib, e))
+            continue
+        if os.path.exists(dst):
+            _say("-l%-28s LINKS - this runtime has the C99 functions" % (lib,))
+        else:
+            first = (out.stderr or out.stdout or "").strip().splitlines()
+            _say("-l%-28s no (%s)" % (lib, first[0] if first else "no diagnostic"))
+
+
 def main():
     outdir = sys.argv[1] if len(sys.argv) > 1 else "tccdiag_out"
 
@@ -222,6 +262,7 @@ def main():
         if sources:
             _rerun_the_compile(sources[0])
         _which_libm_symbols_link(outdir)
+        _try_alternative_c_runtimes(outdir)
         return 0
     for dll in produced:
         _dump_imports(dll)
