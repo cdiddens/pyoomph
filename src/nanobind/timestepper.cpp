@@ -25,6 +25,7 @@ namespace nb = nanobind;
 
 #include "../oomph_lib.hpp"
 #include "../timestepper.hpp"
+#include "../exception.hpp"
 
 void PyReg_TimeStepper(nb::module_ &m)
 {
@@ -49,7 +50,18 @@ void PyReg_TimeStepper(nb::module_ &m)
 			 "Return the value of the nondimensional  time steps ``t``-th stored time step size (t=0: current/most recent step size, t>0: further in the past).")
 		.def(
 			"set_dt", [](oomph::Time *self, const unsigned &index, const double &v)
-			{ self->dt(index) = v; },
+			{
+				// Bounds-checked, because oomph::Time::dt(i) is not: it returns Dt[i] straight out of
+				// its vector, so an index past ndt() was an eight-byte heap write past the end of that
+				// block from PYTHON, with nothing to see on Linux and a process that dies later in an
+				// unrelated destructor on macOS. Found by valgrind on the floquet worker, coming from
+				// Problem.set_orbit_history's loop over a three-entry history against a Time holding
+				// two steps.
+				if (index >= self->ndt())
+					throw_runtime_error("set_dt(" + std::to_string(index) + "): this Time stores only " +
+										std::to_string(self->ndt()) + " step sizes");
+				self->dt(index) = v;
+			},
 			nb::arg("index"), nb::arg("value"), "Set the value of the ``index``-th stored nondimensional time step size.");
 
 	nb::class_<oomph::TimeStepper>(

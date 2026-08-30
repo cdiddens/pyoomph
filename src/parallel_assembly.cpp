@@ -58,6 +58,38 @@ The main author may be contacted at c.diddens@utwente.nl
 #ifdef PYOOMPH_HAS_OPENMP
 #include <omp.h>
 #endif
+#ifdef PYOOMPH_HAS_GCD
+#include <dispatch/dispatch.h>
+#endif
+#include <chrono>
+
+// One umbrella for "the threaded element loop is compiled in", whichever backend provides it:
+// OpenMP (Linux/Windows, and macOS when a libomp is linked) or GCD/libdispatch (macOS only). The
+// GCD backend exists so a macOS wheel can thread the assembly WITHOUT shipping a second OpenMP
+// runtime (LLVM libomp) alongside MKL's Intel libiomp5 - the two collide as "OMP: Error #15" and
+// crash Pardiso on an Intel mac. The gather design (chunks in element order, a per-slot gather) is
+// backend-agnostic and bit-identical to serial either way; only the parallel region below differs.
+#if defined(PYOOMPH_HAS_OPENMP) || defined(PYOOMPH_HAS_GCD)
+#define PYOOMPH_HAS_PARALLEL_ASSEMBLY 1
+#endif
+
+namespace
+{
+	// A portable monotonic clock in seconds, so the phase timings and the PYOOMPH_REPORT_OMP_ASSEMBLY
+	// report do not depend on omp_get_wtime (which only exists with OpenMP). Used by both backends.
+	inline double pa_now()
+	{
+		return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+	}
+#ifdef PYOOMPH_HAS_GCD
+	// dispatch_apply_f takes a C function pointer and a context; this trampoline lets that context be
+	// an ordinary C++ lambda with by-reference capture, so the GCD blocks below can reference the same
+	// locals the OpenMP region does without the block-capture gymnastics (atomics and the plan are not
+	// copyable, which a plain ^{} capture would try to do).
+	template <class F>
+	void pa_apply_trampoline(void *ctx, size_t i) { (*static_cast<F *>(ctx))(i); }
+#endif
+}
 
 namespace pyoomph
 {
@@ -73,10 +105,11 @@ namespace pyoomph
 		// A refusal already reported may not apply any more (going back to one thread, say), and a new
 		// setting deserves to hear about the ones that still do.
 		reported_parallel_refusals.clear();
-#ifndef PYOOMPH_HAS_OPENMP
+#ifndef PYOOMPH_HAS_PARALLEL_ASSEMBLY
 		if (n > 1)
 			oomph::oomph_info << "pyoomph: set_num_threads(" << n << ") was asked for, but this build has no "
-								 "OpenMP - the element loop stays serial. The linear solver still gets the count."
+								 "threaded-assembly backend (neither OpenMP nor GCD) - the element loop stays "
+								 "serial. The linear solver still gets the count."
 							  << std::endl;
 #endif
 	}
@@ -121,8 +154,9 @@ namespace pyoomph
 	bool Problem::parallel_assembly_possible()
 	{
 		if (num_threads <= 1) return false; // The normal case: nothing to report, nothing to do
-#ifndef PYOOMPH_HAS_OPENMP
-		report_parallel_refusal("this build has no OpenMP (the CMake configuration did not find it)");
+#ifndef PYOOMPH_HAS_PARALLEL_ASSEMBLY
+		report_parallel_refusal("this build has no threaded-assembly backend (the CMake configuration found "
+								"neither OpenMP nor, on macOS, enabled the GCD backend)");
 		return false;
 #else
 		for (const char *const *e = __assembly_diagnostic_env; *e; e++)
@@ -434,7 +468,7 @@ namespace pyoomph
 		return (int)pslot;
 	}
 
-#ifdef PYOOMPH_HAS_OPENMP
+#ifdef PYOOMPH_HAS_PARALLEL_ASSEMBLY
 	namespace
 	{
 		// The per-thread state a worker must own for the duration of the region: its own residual-form
@@ -607,7 +641,7 @@ namespace pyoomph
 
 	bool Problem::parallel_assemble_frozen(const FrozenAssemblyRequest &req)
 	{
-#ifndef PYOOMPH_HAS_OPENMP
+#ifndef PYOOMPH_HAS_PARALLEL_ASSEMBLY
 		(void)req;
 		return false;
 #else
@@ -632,11 +666,11 @@ namespace pyoomph
 		// threads is the load imbalance, and it is the only way to tell "the element kernel does not
 		// scale" from "one thread did most of the work" - the two look identical in the phase totals.
 		std::vector<double> busy(nt, 0.0);
-		if (report_phases) t0 = omp_get_wtime();
+		if (report_phases) t0 = pa_now();
 
 		// Hanging values are pushed into the nodes ONCE, here, and the workers adopt the stamp.
 		const unsigned long pass_id = prepare_hanging_values_for_parallel_assembly(plan);
-		if (report_phases) { t_pre = omp_get_wtime() - t0; }
+		if (report_phases) { t_pre = pa_now() - t0; }
 
 		// Scratch for one chunk, held on the Problem so that a Newton step does not reallocate it.
 		// Never zeroed: an element's block is written in full by get_all_vectors_and_matrices() (which
@@ -670,6 +704,7 @@ namespace pyoomph
 			// they hold no GIL. Handing it over here lets the trampolines take it one at a time.
 			GILReleaseScope gil;
 
+#if defined(PYOOMPH_HAS_OPENMP)
 #pragma omp parallel num_threads(nt)
 			{
 				AssemblyWorkerScope worker(pass_id);
@@ -689,8 +724,8 @@ namespace pyoomph
 					// paying for a shared counter per element.
 					const int gran = (int)std::max(1L, std::min(8L, chunk_len / (8L * (long)nt_actual)));
 					double tc = 0.0;
-					if (report_phases && tid == 0) tc = omp_get_wtime();
-					const double t_busy0 = (report_phases ? omp_get_wtime() : 0.0);
+					if (report_phases && tid == 0) tc = pa_now();
+					const double t_busy0 = (report_phases ? pa_now() : 0.0);
 					// ---- phase 1: every element's block, in parallel, into its own slice
 					// nowait plus the explicit barrier below rather than the implicit one: identical
 					// semantics, but it leaves a place to read each thread's busy time before it waits.
@@ -763,10 +798,10 @@ namespace pyoomph
 						catch (const std::exception &err) { record_error(err.what()); }
 						catch (...) { record_error("unknown exception during threaded element assembly"); }
 					}
-					if (report_phases) busy[tid] += omp_get_wtime() - t_busy0;
+					if (report_phases) busy[tid] += pa_now() - t_busy0;
 #pragma omp barrier
 					// every block of this chunk is now written
-					if (report_phases && tid == 0) { t_p1 += omp_get_wtime() - tc; tc = omp_get_wtime(); }
+					if (report_phases && tid == 0) { t_p1 += pa_now() - tc; tc = pa_now(); }
 
 					// ---- phase 2: each thread owns a range of TARGET SLOTS, so nothing is shared
 					if (!failed.load(std::memory_order_relaxed))
@@ -815,9 +850,160 @@ namespace pyoomph
 						}
 					}
 #pragma omp barrier
-					if (report_phases && tid == 0) t_p2 += omp_get_wtime() - tc;
+					if (report_phases && tid == 0) t_p2 += pa_now() - tc;
 				}
 			}
+#else  // PYOOMPH_HAS_GCD
+			// The same two-phase chunk sweep as the OpenMP region above, but dispatch_apply IS the
+			// parallel-for and its synchronous completion IS the barrier - no OpenMP runtime is linked,
+			// so nothing collides with MKL's libiomp5 on an Intel mac. One libdispatch block per intended
+			// thread; phase 1 hands out elements through an atomic counter, reproducing
+			// schedule(dynamic, gran). The gather in phase 2 is byte-for-byte the OpenMP one.
+			dispatch_queue_t pa_queue = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+			for (unsigned c = 0; c < nchunk; c++)
+			{
+				const long cstart = plan.chunk_start[c];
+				const long cend = plan.chunk_start[c + 1];
+				const long chunk_len = cend - cstart;
+				const int gran = (int)std::max(1L, std::min(8L, chunk_len / (8L * (long)nt)));
+				double tc = (report_phases ? pa_now() : 0.0);
+
+				std::atomic<long> next(cstart);
+				auto phase1 = [&](size_t widx)
+				{
+					const double t_busy0 = (report_phases ? pa_now() : 0.0);
+					try
+					{
+						AssemblyWorkerScope worker(pass_id);
+						oomph::Vector<oomph::Vector<double>> el_res(n_vector);
+						oomph::Vector<oomph::DenseMatrix<double>> el_jac(n_matrix);
+						for (;;)
+						{
+							if (failed.load(std::memory_order_relaxed)) break;
+							const long i0 = next.fetch_add((long)gran, std::memory_order_relaxed);
+							if (i0 >= cend) break;
+							const long i1 = std::min(i0 + (long)gran, cend);
+							for (long i = i0; i < i1; i++)
+							{
+								try
+								{
+									oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(plan.elements[i]);
+									const unsigned nv = (unsigned)plan.nvar[i];
+									for (unsigned v = 0; v < n_vector; v++) el_res[v].resize(nv);
+									for (unsigned m = 0; m < n_matrix; m++) el_jac[m].resize(nv);
+									if (n_matrix)
+										handler->get_all_vectors_and_matrices(elem_pt, el_res, el_jac);
+									else
+										handler->get_residuals(elem_pt, el_res[0]);
+									const size_t nblock = (size_t)nv * nv;
+									for (unsigned m = 0; m < n_matrix; m++)
+									{
+										const double *flat = &el_jac[m](0, 0);
+										std::copy(flat, flat + nblock, blocks[m].begin() + plan.block_base[i]);
+										if (req.verify)
+										{
+											const int *eoff = req.element_offset[m];
+											const int *src = req.scatter_source[m];
+											const int e = plan.elements[i];
+											unsigned all = 0, taken = 0;
+											for (size_t q = 0; q < nblock; q++) all += (flat[q] != 0.0);
+											for (int k = eoff[e]; k < eoff[e + 1]; k++) taken += (flat[src[k]] != 0.0);
+											if (all > taken)
+											{
+												std::string where;
+												unsigned shown = 0;
+												std::vector<bool> covered(nblock, false);
+												for (int k = eoff[e]; k < eoff[e + 1]; k++) covered[src[k]] = true;
+												for (size_t q = 0; q < nblock && shown < 6; q++)
+												{
+													if (flat[q] == 0.0 || covered[q]) continue;
+													where += (shown ? ", " : "") + std::string("(") +
+															 std::to_string(q / nv) + "," + std::to_string(q % nv) +
+															 ")=" + std::to_string(flat[q]);
+													shown++;
+												}
+												const std::string msg =
+													"A Jacobian entry appeared outside the symbolic sparsity pattern "
+													"(matrix " + std::to_string(m) + ", element " + std::to_string(e) +
+													", nvar " + std::to_string(nv) + "). Positions missing from the "
+													"pattern: " + where + ". Refusing rather than truncating the matrix. "
+													"Workaround: problem.use_frozen_sparsity=False.";
+												if (req.violation_out) record_violation(msg); else throw_runtime_error(msg);
+											}
+										}
+									}
+									for (unsigned v = 0; v < n_vector; v++)
+										std::copy(el_res[v].begin(), el_res[v].begin() + nv,
+												  resbuf[v].begin() + plan.res_base[i]);
+								}
+								catch (const std::exception &err) { record_error(err.what()); }
+								catch (...) { record_error("unknown exception during threaded element assembly"); }
+							}
+						}
+					}
+					catch (const std::exception &err) { record_error(err.what()); }
+					catch (...) { record_error("unknown exception during threaded element assembly"); }
+					if (report_phases) busy[widx] += pa_now() - t_busy0;
+				};
+				dispatch_apply_f((size_t)nt, pa_queue, &phase1, &pa_apply_trampoline<decltype(phase1)>);
+				if (report_phases) { t_p1 += pa_now() - tc; tc = pa_now(); }
+
+				if (!failed.load(std::memory_order_relaxed))
+				{
+					auto phase2 = [&](size_t widx)
+					{
+						const int tid = (int)widx;
+						const int nt_actual = nt;
+						try
+						{
+							for (unsigned m = 0; m < n_matrix; m++)
+							{
+								const ParallelAssemblyPlan::Gather &gt = plan.mat_gather[req.map_of_matrix[m]];
+								const long lo = gt.chunk_gather_start[c], hi = gt.chunk_gather_start[c + 1];
+								long a, b;
+								gather_range_for_thread(gt.slot.data(), lo, hi, tid, nt_actual, a, b);
+								const int *gslot = gt.slot.data();
+								const int *gsrc = gt.src.data();
+								const double *src_block = blocks[m].data();
+								double *val = req.value[m];
+								long k = a;
+								while (k < b)
+								{
+									const int s = gslot[k];
+									double acc = val[s];
+									while (k < b && gslot[k] == s) { acc += src_block[gsrc[k]]; k++; }
+									val[s] = acc;
+								}
+							}
+							{
+								const ParallelAssemblyPlan::Gather &gt = plan.res_gather;
+								const long lo = gt.chunk_gather_start[c], hi = gt.chunk_gather_start[c + 1];
+								long a, b;
+								gather_range_for_thread(gt.slot.data(), lo, hi, tid, nt_actual, a, b);
+								const int *gslot = gt.slot.data();
+								const int *gsrc = gt.src.data();
+								for (unsigned v = 0; v < n_vector; v++)
+								{
+									const double *src_res = resbuf[v].data();
+									double *out = req.residual[v];
+									long k = a;
+									while (k < b)
+									{
+										const int s = gslot[k];
+										double acc = out[s];
+										while (k < b && gslot[k] == s) { acc += src_res[gsrc[k]]; k++; }
+										out[s] = acc;
+									}
+								}
+							}
+						}
+						catch (...) { record_error("unknown exception during threaded gather"); }
+					};
+					dispatch_apply_f((size_t)nt, pa_queue, &phase2, &pa_apply_trampoline<decltype(phase2)>);
+				}
+				if (report_phases) t_p2 += pa_now() - tc;
+			}
+#endif
 		}
 		if (report_phases)
 		{
@@ -825,7 +1011,7 @@ namespace pyoomph
 			for (int t = 0; t < nt; t++) { bmax = std::max(bmax, busy[t]); bsum += busy[t]; }
 			const double bmean = (nt ? bsum / nt : 0.0);
 			oomph::oomph_info << "pyoomph OMP assembly: " << nchunk << " chunks, " << nt << " threads, total "
-							  << (omp_get_wtime() - t0) * 1000 << " ms = hang pre-pass " << t_pre * 1000
+							  << (pa_now() - t0) * 1000 << " ms = hang pre-pass " << t_pre * 1000
 							  << " + phase 1 " << t_p1 * 1000 << " + phase 2 " << t_p2 * 1000
 							  << " ms; phase-1 imbalance max/mean " << (bmean > 0 ? bmax / bmean : 1.0)
 							  << " (busiest " << bmax * 1000 << " ms, mean " << bmean * 1000 << " ms)"

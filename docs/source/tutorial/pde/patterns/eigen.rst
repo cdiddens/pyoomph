@@ -70,10 +70,14 @@ First, let us investigate only the case :math:`\delta=0` for varying :math:`\gam
 
 .. literalinclude:: kuramoto_sivanshinsky_arclength_eigen.py
    :language: python
-   :start-at: # slepc eigensolver is more reliable here
+   :start-at: if __name__ == "__main__":
 
-We use another eigensolver, provided by the PETSc/SLEPc package. These can be installed as explained in :numref:`petscslepc`.
-These packages might not be available on Windows. Just give it a try. If these packages cannot be installed, you can omit the import and the :py:meth:`~pyoomph.generic.problem.Problem.set_eigensolver` call to use the default ``scipy`` eigensolver. 
+No eigensolver is selected explicitly here. The default ``scipy`` eigensolver would struggle with this
+problem, but pyoomph does not fall back to it unless it has to: it picks the best backend available on
+your machine, which is SLEPc when PETSc/SLEPc is installed (see :numref:`petscslepc`, and the only
+option that also runs distributed under MPI) and the built-in ``spectra`` otherwise. The latter needs
+no PETSc at all and is therefore also available on Windows. You can still override the choice with
+:py:meth:`~pyoomph.generic.problem.Problem.set_eigensolver` if you want a particular one. 
 
 We then jump on the stationary solution by a stationary :py:meth:`~pyoomph.generic.problem.Problem.solve` command. However, before that, we step a bit in the direction with a transient solve command, since we might otherwise converge into the flat solution :math:`h=0`. We perform an :py:meth:`~pyoomph.generic.problem.Problem.arclength_continuation` along :math:`\gamma` and output the eigenvalue with the largest real part and the calculated rms to a text file. Based on the real part of the eigenvalue, we can determine whether the stationary solution is stable or not. The results are depicted in :numref:`figpdeksefold`, where we also include the flat solution, whose stability has been investigated analytically before.
 

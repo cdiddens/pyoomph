@@ -35,6 +35,7 @@ parser.add_argument("--tcc", help="Used TCC", action="store_true")
 parser.add_argument("--no-petsc", help="Do not select a PETSc build at all: skip the $PETSC_DIR/$PETSC_ARCH_REAL/$PETSC_ARCH_COMPLEX check and run every script with the inherited PYTHONPATH", action="store_true")
 parser.add_argument("--keep-logs", help="Keep log files also of successful tests", action="store_true")
 parser.add_argument("--keep-outdirs", help="Do not delete each script's output directory after it runs. Useful for comparing generated code across repeated runs (e.g. for determinism testing)", action="store_true")
+parser.add_argument("--timeout", type=float, default=0.0, metavar="SECONDS", help="Kill a script that has run this long and report it as a failure. Default 0, i.e. wait forever. Meant for unattended runs: one script that hangs otherwise takes the whole pass with it (a macOS-arm64 wheel spent 2 hours in Accelerate's sparse solver before segfaulting)")
 parser.add_argument("--report-json", metavar="PATH", default=None, help="Also write one JSON record per script (status, wall time, simulation time) to PATH. Meant for CI, which turns it into a table; the printed output is unchanged")
 parser.add_argument("--mpirun", type=int, default=0, metavar="N", help="Run each script under 'mpirun -n N' instead of directly. Default 0, i.e. no mpirun")
 parser.add_argument("--omp", type=int, default=0, metavar="N", help="Pass '--omp N' to each script, i.e. assemble the elements on N threads. Default 0, i.e. leave each script on the serial element loop. Composes with --mpirun, which is threads per rank then")
@@ -125,7 +126,16 @@ def simulation_seconds(started_at):
 _OPTIONAL_MODULES={"precice":"preCICE (pip install pyprecice, plus a libprecice built for this "
                              "distribution's release)",
                    "shapely":"shapely (pip install pyoomph[topology]), which plans the axisymmetric "
-                             "pinch-off and coalescence surgery"}
+                             "pinch-off and coalescence surgery",
+                   }
+# petsc4py/slepc4py used to be forgiven here as well, because the eigen scripts spelled out
+# set_eigensolver("slepc") and could not run without them. None of them does any more: they leave the
+# choice to pyoomph's autodetection, which takes SLEPc where PETSc is installed (and it is still the
+# only backend that solves an eigenproblem distributed) and the built-in "spectra" otherwise. So a
+# missing PETSc is no longer a reason to skip anything - on a --no-petsc run, i.e. the GitHub workflow
+# testing a plain wheel, these scripts have to RUN and produce the same answers, which is the point of
+# having a PETSc-free eigensolver in the first place. A ModuleNotFoundError for petsc4py is therefore a
+# real failure again.
 # Scripts that open a window and wait for the user. tkinter's mainloop never returns on its own, so
 # under this harness they would either hang forever or - on a headless nightly - die on "no display
 # name and no $DISPLAY environment variable", neither of which says anything about pyoomph. They are
@@ -135,6 +145,12 @@ _OPTIONAL_MODULES={"precice":"preCICE (pip install pyprecice, plus a libprecice 
 _MANUAL_GUI_SCRIPTS={"thin_film_bifurcation_gui.py":"opens the interactive bifurcation GUI"}
 
 _MISSING_MODULE=re.compile(rb"ModuleNotFoundError: No module named '([A-Za-z0-9_.]+)'")
+# pyoomph catches the ImportError of a solver backend and re-raises it as its own RuntimeError
+# (solvers/generic.py _unavailable_solver_message), so the missing package is named in the middle of
+# the last line rather than at the start of it. No tutorial script names a solver backend explicitly
+# any more, so this no longer fires for the eigen scripts; it stays for any script that does select a
+# backend whose package this machine happens not to have.
+_UNAVAILABLE_SOLVER=re.compile(rb"^RuntimeError: .* is not available \(ModuleNotFoundError: No module named '([A-Za-z0-9_.]+)'\)")
 _BROKEN_IMPORT=re.compile(rb"^ImportError: (.*)$")
 _TRACEBACK_FRAME=re.compile(rb'^  File "([^"]+)"')
 
@@ -163,6 +179,10 @@ def missing_optional_module(output):
   if not lines:
     return None
   last=lines[-1]
+  m=_UNAVAILABLE_SOLVER.match(last)
+  if m is not None:
+    name=m.group(1).decode().split(".")[0]
+    return (name,"is not installed here") if name in _OPTIONAL_MODULES else None
   m=_MISSING_MODULE.search(last)
   if m is not None:
     name=m.group(1).decode().split(".")[0]
@@ -311,8 +331,19 @@ untimed=[]  # ran, but left no "Elapsed time" footer anywhere
 records=[]  # one dict per script, for --report-json
 
 
+def folder_label(d):
+  """The bundle folder's plain name, from what glob returned.
+
+  glob("./*/") gives ".\\Advanced_Linear_Dynamics\\" on Windows, and the strip("/") that used to
+  do this left the backslashes in - so the GitHub summary listed every script as
+  "\\Advanced_Linear_Dynamics\\/rivulet.py" and no folder name a user typed matched the skip list.
+  The separator is normalised rather than left to Path: this then gives the same answer when the
+  report of a Windows run is read back on another machine.
+  """
+  return Path(d.replace("\\","/")).name
+
 for d in glob.glob("./*/"):
-  if d in skips or d.strip("/").strip("./") in skips:
+  if d in skips or folder_label(d) in skips:
     print("SKIPPING",d)
     continue
   
@@ -325,13 +356,13 @@ for d in glob.glob("./*/"):
       continue
     if f in _MANUAL_GUI_SCRIPTS:
       print("   SKIPPING",f,"--",_MANUAL_GUI_SCRIPTS[f],"and must be checked manually")
-      manual_gui.append((d.strip("/").strip("./"),f))
-      records.append({"folder":d.strip("/").strip("./"),"script":f,"status":"skipped","note":_MANUAL_GUI_SCRIPTS[f]+", must be checked manually"})
+      manual_gui.append((folder_label(d),f))
+      records.append({"folder":folder_label(d),"script":f,"status":"skipped","note":_MANUAL_GUI_SCRIPTS[f]+", must be checked manually"})
       continue
     if args.mpirun>0 and f=="parallel_running.py":
       # This one spawns its own mpirun, so launching it under one already gives nested MPI.
       print("   SKIPPING",f,"-- it is just as spawner of other scripts")
-      records.append({"folder":d.strip("/").strip("./"),"script":f,"status":"skipped","note":"only a spawner of other scripts, and this pass is already under mpirun"})
+      records.append({"folder":folder_label(d),"script":f,"status":"skipped","note":"only a spawner of other scripts, and this pass is already under mpirun"})
       continue
     env=None if args.no_petsc else (env_complex if needs_complex_petsc(f) else env_real)
     print("   Testing",f,"-- with the complex PETSc" if env is not None and env is env_complex else "")
@@ -349,26 +380,38 @@ for d in glob.glob("./*/"):
     started_at=time.time()
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
     #proc = subprocess.Popen([sys.executable, '-u', f], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    (stdout,_) = proc.communicate()
+    timed_out=False
+    try:
+      (stdout,_) = proc.communicate(timeout=args.timeout if args.timeout>0 else None)
+    except subprocess.TimeoutExpired:
+      # kill(), not terminate(): a script wedged inside a native solver does not necessarily get
+      # around to running a Python signal handler. The output written so far is still wanted - it
+      # is the only clue as to where it got stuck - so read it after the process is gone.
+      timed_out=True
+      proc.kill()
+      (stdout,_) = proc.communicate()
     # The whole subprocess, i.e. interpreter start-up and imports included. Not comparable to the
     # "simulation time" below, but it is the only number a script that never built a Problem has.
     wall=time.time()-started_at
     secs,numlogs=simulation_seconds(started_at)
     optional=None
-    if proc.returncode!=0:
+    if proc.returncode!=0 and not timed_out:
+      # A killed script's last line is wherever it happened to be, so the optional-package test
+      # would be reading tea leaves - and a timeout is never something to forgive anyway.
       optional=missing_optional_module(strip_mpirun_epilogue(stdout) if args.mpirun>0 else stdout)
     if optional is not None:
       mod,why=optional
       print("   SKIPPED",f,"--",_OPTIONAL_MODULES[mod],why)
-      skipped_for_missing.append((d.strip("/").strip("./"),f,mod,why))
+      skipped_for_missing.append((folder_label(d),f,mod,why))
       status,note="skipped","needs "+_OPTIONAL_MODULES[mod]+", which "+why
     elif proc.returncode!=0:
       logf=Path(f).stem+".log"
-      print(" ================= FAILED",f,"see log at ",logf)
+      print(" ================= %s"%("TIMED OUT after %.0f s"%args.timeout if timed_out else "FAILED"),f,"see log at ",logf)
       with open(logf,"wb") as lf:
         lf.write(stdout)
       folder_okay=False
-      status,note="failed","exited with %d, see %s"%(proc.returncode,logf)
+      status,note="failed",("timed out after %.0f s and was killed, see %s"%(args.timeout,logf)
+                            if timed_out else "exited with %d, see %s"%(proc.returncode,logf))
     elif args.keep_logs:
       logf=Path(f).stem+".log"
       with open(logf,"wb") as lf:
@@ -377,16 +420,16 @@ for d in glob.glob("./*/"):
     else:
       status,note="passed",""
 
-    records.append({"folder":d.strip("/").strip("./"),"script":f,"status":status,"note":note,
+    records.append({"folder":folder_label(d),"script":f,"status":status,"note":note,
                     "wall_seconds":wall,"sim_seconds":secs,"num_logs":numlogs})
 
     if secs is not None:
       print("      simulation time: %.2f s"%secs+(" (%d runs)"%numlogs if numlogs>1 else ""))
-      timings.append((d.strip("/").strip("./"),f,secs,numlogs,proc.returncode!=0))
+      timings.append((folder_label(d),f,secs,numlogs,proc.returncode!=0))
     elif optional is None:
       # A script that never got as far as building a Problem, or one that was killed hard enough
       # to skip the atexit footer. Named at the end so the total is not silently short.
-      untimed.append((d.strip("/").strip("./"),f))
+      untimed.append((folder_label(d),f))
 
     if not args.keep_outdirs:
       shutil.rmtree(Path(f).stem,ignore_errors=True)
@@ -447,6 +490,7 @@ if report_json is not None:
                "python":sys.version.split()[0],
                "options":{"quick_test":args.quick_test,"tcc":args.tcc,"no_petsc":args.no_petsc,
                           "mpirun":args.mpirun,"omp":args.omp,"distribute":args.distribute,
+                          "timeout":args.timeout,
                           "skips":skips},
                "scripts":records},jf,indent=1)
   print("Wrote the machine-readable report to",report_json)

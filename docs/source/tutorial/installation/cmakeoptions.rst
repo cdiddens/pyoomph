@@ -19,7 +19,10 @@ Feature switches
       Build with extra runtime sanity checks (defines ``PARANOID``).
 
 ``PYOOMPH_USE_OPENMP`` (default ``AUTO``)
-      OpenMP for the threaded element assembly (``--omp N``, see :numref:`installcmdlineoptions`). ``AUTO`` links OpenMP if the toolchain provides it and silently builds a serial-assembly pyoomph if it does not; ``ON`` makes a missing OpenMP a configure error, ``OFF`` never looks for it. Since the threaded loop is opt-in at runtime, ``AUTO`` costs nothing, but it also lets the build machine decide the capability unnoticed -- manylinux always has ``libgomp``, while AppleClang typically has no ``libomp``, so a release built with ``AUTO`` everywhere ships ``--omp`` on Linux and Windows but not on macOS. Use ``ON`` where threaded assembly is meant to be part of the deliverable.
+      OpenMP backend for the threaded element assembly (``--omp N``, see :numref:`installcmdlineoptions`). ``AUTO`` links OpenMP if the toolchain provides it (Linux/Windows always do); ``ON`` makes a missing OpenMP a configure error, ``OFF`` never looks for it. On macOS this is **off by default** -- macOS threads through GCD instead (next option), because an OpenMP runtime there would clash with the one MKL loads; pass ``ON`` to force the OpenMP path on macOS anyway (it then wins over GCD and needs a ``libomp``, e.g. via ``citools/build_static_libomp.sh``).
+
+``PYOOMPH_USE_GCD`` (macOS only, default ``AUTO``)
+      GCD/libdispatch backend for the threaded assembly -- the macOS default. It links no OpenMP runtime at all, so it cannot collide with MKL's. ``AUTO`` uses it unless ``PYOOMPH_USE_OPENMP=ON`` is given, ``ON`` forces it, ``OFF`` falls back to OpenMP. Ignored off macOS.
 
 ``PYOOMPH_ENABLE_JIT_CACHE`` (default ``ON``)
       Build-time kill switch for the JIT code cache (see :numref:`installenvvars`). If set to ``OFF``, the cache is permanently disabled for this build, regardless of any runtime flag or environment variable (``--no-cache``, ``PYOOMPH_JIT_CACHE``, ...) -- those can only ever narrow an ``ON`` down to ``OFF``, never override an ``OFF`` set here.

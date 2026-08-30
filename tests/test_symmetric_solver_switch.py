@@ -373,7 +373,7 @@ class _PendulumProblem(Problem):
         self.add_equations(_Eqs() @ "pendulum")
 
 
-@pytest.mark.parametrize("solver", ["scipy", "slepc"])
+@pytest.mark.parametrize("solver", ["scipy", "slepc", "spectra"])
 def test_indefinite_mass_matrix_falls_back_to_the_general_driver(solver):
     # The symmetric drivers use M as an inner product and need it positive semi-definite on top of
     # symmetric. Engaging them here made SLEPc abort outright ("The inner product is not well
@@ -381,6 +381,8 @@ def test_indefinite_mass_matrix_falls_back_to_the_general_driver(solver):
     # must come out as the exact +-i of the linearised pendulum.
     if solver == "slepc":
         pytest.importorskip("slepc4py", reason="slepc4py not available (PYTHONPATH must carry a PETSc build)")
+    if solver == "spectra":
+        pytest.importorskip("pyoomph.solvers.spectra", reason="this pyoomph build was compiled without Spectra")
     with _PendulumProblem() as p:
         p.quiet()
         p.set_eigensolver(solver)

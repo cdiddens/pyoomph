@@ -67,7 +67,7 @@ _TypeGenericLASolver=TypeVar("_TypeGenericLASolver",bound=type["GenericLinearSys
 _TypeGenericEigenSolver=TypeVar("_TypeGenericEigenSolver",bound=type["GenericEigenSolver"])
 
 CoreLinearSolverEnum:TypeAlias=Literal["superlu","umfpack","petsc","pardiso","accelerate","petsc_mumps"]
-CoreEigenSolverEnum:TypeAlias=Literal["scipy","pardiso","slepc","accelerate","slepc_mumps"]
+CoreEigenSolverEnum:TypeAlias=Literal["scipy","pardiso","spectra","slepc","accelerate","slepc_mumps"]
 EigenSolverWhich:TypeAlias=Literal["LM","SM","LR","SR","SI"]
 _default_la_solver:"GenericLinearSystemSolver | CoreLinearSolverEnum | None"=None
 _default_eigen_solver:"GenericEigenSolver | CoreEigenSolverEnum | None"=None
@@ -505,6 +505,66 @@ class GenericLinearSystemSolver:
 		# Allreduce, so rank 0 would unwind while the others sat in it. Agree here instead.
 		self._gather_layout=None
 		mpi_share_any_failure(error,context="solving the gathered linear system on rank 0")
+
+	#################### A system built in Python, solved across the ranks ####################
+
+	def solves_python_built_systems_distributed(self)->bool:
+		"""Can this backend factorise a row-distributed system that Python, not oomph-lib, assembled?
+
+		Separate from :py:attr:`solves_natively_distributed`, which is about the Newton solve reaching
+		:py:meth:`solve_distributed` from C++. Only a backend that overrides
+		:py:meth:`solve_python_built_distributed` answers yes; everything else gets the replicating
+		default below, which is correct but does the same factorisation on every rank.
+		"""
+		return False
+
+	def solve_python_built_distributed(self,ntot:int,nrow_local:int,first_row:int,mat_local:"Any",b_local:NPFloatArray)->NPFloatArray:
+		"""Solve ``A x = b`` for a system assembled in PYTHON and row-distributed across the ranks.
+
+		``mat_local`` is this rank's ``(nrow_local, ntot)`` CSR block with GLOBAL column indices -- the
+		layout oomph-lib's own distributed assembly produces and the one PETSc's MPIAIJ wants -- and
+		``b_local`` its matching row block. Returns this rank's block of the solution.
+
+		Collective: every rank must call it, with the same ``ntot``.
+
+		This default replicates rather than parallelising: it allgathers the whole square system onto
+		every rank and calls :py:meth:`solve_serial` there, which is what PeriodicDrivingResponse used
+		to do inline for a system it had built globally in the first place. It is the right fallback
+		because it asks nothing of a backend beyond a working serial solve, so pardiso/scipy/accelerate
+		keep working under ``--distribute``; it is a fallback because nproc identical factorisations is
+		not what ``mpirun -n 8`` was asking for. PETSc overrides it.
+		"""
+		from ..generic.mpi import get_mpi_nproc,mpi_allgather_square_csr,mpi_allgather_vector
+		mat_g=mpi_allgather_square_csr(ntot,first_row,nrow_local,mat_local,
+									   context="replicating a Python-built system on every rank").tocsr()
+		b_g=mpi_allgather_vector(ntot,first_row,nrow_local,b_local,
+								 context="replicating a Python-built right-hand side on every rank")
+		if get_mpi_nproc()>1:
+			self._report_replicated_python_solve_once(ntot)
+		# The factorisation slot is shared with the gathered Newton path, and this writes it with a
+		# system of a completely different size. Say so, so that a later gathered back-substitution
+		# fails loudly rather than silently against these factors -- see _note_external_serial_solve.
+		self._note_external_serial_solve()
+		sol=numpy.array(b_g,dtype=numpy.float64,copy=True)
+		self.solve_serial(1,ntot,mat_g.nnz,1,mat_g.data,mat_g.indices,mat_g.indptr,sol,0,1)
+		self.solve_serial(2,ntot,mat_g.nnz,1,mat_g.data,mat_g.indices,mat_g.indptr,sol,0,1)
+		return numpy.ascontiguousarray(sol[first_row:first_row+nrow_local])
+
+	_replicated_python_solve_reported:bool=False
+
+	def _report_replicated_python_solve_once(self,n:int)->None:
+		"""Say once, on rank 0, that a Python-built system is being solved redundantly on every rank."""
+		if self._replicated_python_solve_reported:
+			return
+		self._replicated_python_solve_reported=True
+		from ..generic.mpi import get_mpi_rank,get_mpi_nproc
+		if get_mpi_rank()!=0 or self.problem.is_quiet():
+			return
+		print("NOTE: the linear solver '"+str(getattr(self,"idname",type(self).__name__))+"' cannot "
+			  "factorise a distributed system that pyoomph assembled in Python, so this one ("+str(n)+
+			  " rows) is replicated onto every rank and solved "+str(get_mpi_nproc())+" times over. "
+			  "Assembly stays parallel; the solve does not. Use petsc_mumps for a genuinely distributed "
+			  "solve.",flush=True)
 
 	@classmethod
 	def register_solver(cls,*,override:bool=False)->Callable[[_TypeGenericLASolver],_TypeGenericLASolver]:
@@ -982,6 +1042,105 @@ class GenericEigenSolver:
 		eigenproblem assembled is the base state's -- see Problem::BaseDofDistributionScope.
 		"""
 		return self.problem._get_base_dof_distribution_info() #type:ignore
+
+	def _solve_gathered_on_root(self,neval:int,**kwargs:Any)->tuple[NPComplexArray,NPComplexArray,DefaultMatrixType,DefaultMatrixType]:
+		"""Solve a distributed eigenproblem by gathering J and M onto rank 0.
+
+		Under --distribute each rank assembles only its own (nrow_local x n) row block, which a serial
+		eigensolver cannot work with. Gathering them into one square matrix on rank 0 and solving there
+		is not parallel -- SLEPc is, and is preferred -- but it is correct, and it is the difference
+		between the serial backends (scipy, pardiso, spectra) being usable under --distribute and not
+		being usable at all.
+		"""
+		from ..generic.mpi import (get_mpi_rank,get_mpi_world_comm,mpi_row_layout,mpi_gather_csr_rows,
+								   mpi_share_root_failure)
+		from scipy.sparse import csr_matrix #type:ignore
+		# Collective, and it must run on every rank: it is what assembles the local blocks.
+		J,M,n,_is_complex=self.get_J_M_n_and_type()
+		_n,nrow_local,first_row,_distributed=self.get_eigen_row_layout()
+
+		def _gather(mat:DefaultMatrixType):
+			layout=mpi_row_layout(n,first_row,nrow_local,mat.nnz)
+			assert layout is not None
+			got=mpi_gather_csr_rows(layout,mat.data,mat.indices,mat.indptr,
+									context="gathering the eigenproblem onto rank 0")
+			if got is None:
+				return None
+			vals,cols,rs=got
+			return csr_matrix((vals,cols,rs),shape=(n,n))
+
+		Jg,Mg=_gather(J),_gather(M)
+		evals:Any=None
+		evects:Any=None
+		error:BaseException | None=None
+		# Everything inside this block runs on rank 0 ALONE, with the other ranks already waiting at
+		# mpi_share_root_failure below. Nothing called from here may be collective: the two sides then
+		# block in different collectives and the job hangs rather than failing, which is how the
+		# distributed scipy eigen tests turned into 900 s timeouts (see the PSD screen's `collective`).
+		if get_mpi_rank()==0:
+			assert Jg is not None and Mg is not None
+			try:
+				# get_J_M_n_and_type() skips the matrix manipulators when the problem is distributed --
+				# they rewrite whole rows of a square global matrix, which is not what a rank holds
+				# there. Here it is, so they apply.
+				for manip in self.matrix_manipulators:
+					Jg,Mg=manip.apply_on_J_and_M(self,Jg,Mg)
+				evals,evects,_,_=self.solve(neval,custom_J_and_M=(Jg,Mg),**kwargs)
+			except BaseException as e:
+				error=e
+		# Ends the job on every rank if rank 0 failed, rather than leaving them in the broadcast below.
+		mpi_share_root_failure(error,context="solving the gathered eigenproblem on rank 0")
+		comm=get_mpi_world_comm()
+		assert comm is not None
+		# Eigenvectors are contractually replicated at full global length on every rank (see
+		# Problem.rotate_eigenvectors), so a broadcast is exactly the right shape here.
+		evals,evects=comm.bcast((evals,evects) if get_mpi_rank()==0 else None,root=0) #type:ignore
+		# The LOCAL blocks are returned, not the gathered ones: the caller's accuracy report multiplies
+		# them by a globally replicated eigenvector and reduces over the ranks, which only works if each
+		# rank contributes its own rows.
+		return evals,evects,J,M
+
+	def get_parallel_row_split(self,n:int)->tuple[int,int,bool]:
+		"""``(nrow_local, first_row, parallel)`` for the PETSc/MPI matrices of an n-row eigenproblem.
+
+		Under ``mpirun -n>1`` such a system is ALWAYS solved in parallel, on COMM_WORLD, whether or not
+		the mesh was distributed. The two cases differ only in where the row split comes from:
+
+		- ``--distribute``: from oomph's dof distribution, because that is how the matrices were
+		  assembled and each rank genuinely holds only its own rows.
+		- plain ``mpirun``: oomph assembles in parallel and then redistributes the result back to a
+		  globally replicated form, so every rank holds the whole matrix. A contiguous split of ``n`` is
+		  imposed here and each rank contributes only its slice (see :py:meth:`local_row_block`).
+		  Nothing is recomputed; the slicing is a view onto a matrix the rank already has.
+
+		The replicated case is in one respect the safer of the two: each row is contributed by exactly
+		one rank, from matrices that are identical across ranks, so the blocks cannot disagree.
+
+		What this does NOT save is matrix memory -- every rank still stores the whole J and M. The win is
+		the factorisation, whose factors are typically far larger than the matrix and which is where both
+		the time and the real memory go.
+		"""
+		from ..generic.mpi import get_mpi_nproc,get_mpi_rank
+		nproc=get_mpi_nproc()
+		if nproc<=1:
+			return n,0,False
+		_,nrow_local,first_row,distributed=self.get_eigen_row_layout()
+		if not distributed:
+			rank=get_mpi_rank()
+			base,rem=divmod(n,nproc)
+			nrow_local=base+(1 if rank<rem else 0)
+			first_row=rank*base+min(rank,rem)
+		return nrow_local,first_row,True
+
+	@staticmethod
+	def local_row_block(mat:DefaultMatrixType,first_row:int,nrow_local:int)->DefaultMatrixType:
+		"""This rank's contiguous slice of rows of a GLOBALLY assembled matrix.
+
+		Column indices stay global, which is what MatMPIAIJSetPreallocationCSR wants; only the row
+		pointers are rebased, which scipy's slicing does.
+		"""
+		sub=mat[first_row:first_row+nrow_local,:]
+		return sub if isinstance(sub,DefaultMatrixType) else sub.tocsr() #type:ignore
 
 	def get_J_M_n_and_type(self)->tuple[DefaultMatrixType,DefaultMatrixType,int,bool]:
 		"""Assemble the eigenproblem's J and M and report the global size and whether they are complex.

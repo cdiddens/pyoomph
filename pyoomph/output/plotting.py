@@ -2419,7 +2419,15 @@ class MatplotLibTracers(MatplotLibPart):
     def add_to_plot(self):
         assert self.tracer_name is not None
         assert self.mesh is not None
-        col=self.mesh.get_tracers(self.tracer_name)
+        from ..meshes.meshdatamerge import needs_merging
+        if needs_merging(self.mesh):
+            # A particle belongs to the process holding the element it sits in, so this rank's
+            # collection is a fraction of the cloud. Gather it - collective, and served by the other
+            # ranks of the plot scope exactly like a merge request.
+            from ..meshes.meshdatamerge import gather_global_tracers
+            col=gather_global_tracers(self.mesh,self.tracer_name,with_history=self.trail)
+        else:
+            col=self.mesh.get_tracers(self.tracer_name)
         assert col is not None
         if self.invisible:
             return
@@ -2546,6 +2554,9 @@ class MatplotlibPlotter(BasePlotter):
         self._eigenfactor_right=None # Optional complex values to scale the eigenvector for the eigendynamics animation
         self._eigenfactor_left=None 
         self._eigenvector_for_animation=None
+        #: Which eigenvector _eigenvector_for_animation is. A distributed mesh needs the INDEX rather
+        #: than the array: the perturbation is applied on every rank, each from its own replicated copy.
+        self._eigenvector_index_for_animation:int | None=None
 
     
     def useLaTeXFont(self):
@@ -2643,17 +2654,38 @@ class MatplotlibPlotter(BasePlotter):
         else:
             # The dofs are perturbed and restored around the extraction, which only this rank does -
             # so on a distributed mesh the other ranks would contribute their unperturbed data to the
-            # merge and the animation would silently show a mixture of both.
+            # merge and the animation would silently show a mixture of both. There, the perturbation is
+            # therefore part of the merge REQUEST and every rank applies it (merge_perturbed_global_mesh_data).
             problem=self.get_problem(problem_name=problem_name)
             mesh_obj=problem.get_mesh(msh) if isinstance(msh,str) else msh
             from ..meshes.meshdatamerge import needs_merging
             if needs_merging(mesh_obj):
-                raise NotImplementedError("Eigendynamics animations are not supported on a mesh distributed with --distribute yet")
+                from ..meshes.meshdatamerge import merge_perturbed_global_mesh_data
+                from ..meshes.meshdatacache import MeshDataCacheKey
+                if self._eigenvector_index_for_animation is None:
+                    raise RuntimeError("An eigendynamics animation on a distributed (--distribute) mesh needs to know WHICH eigenvector is animated, so that every process can apply the same perturbation. Problem.create_eigendynamics_animation sets that; a plotter driven by hand must set _eigenvector_index_for_animation as well.")
+                key=MeshDataCacheKey.create(nondimensional=False,tesselate_tri=True,eigenvector=self.eigenvector,eigenmode=self.eigenmode,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions,global_mesh=True)
+                ef=self._eigenfactor_left if mirror_x else self._eigenfactor_right
+                # No invalidate_cached_mesh_data() here: it has to happen on every rank, so it is done
+                # inside the request, around the perturbation.
+                res=merge_perturbed_global_mesh_data(mesh_obj,key,self._eigenvector_index_for_animation,complex(ef))
+                assert res is not None # only rank 0 plots, and that is the rank the merged data ends up on
+                return res
             problem.invalidate_cached_mesh_data()
             olddofs,_=problem.get_current_dofs()
             ef=self._eigenfactor_left if mirror_x else self._eigenfactor_right
             problem.set_current_dofs(olddofs+numpy.real(ef*self._eigenvector_for_animation))
             res=problem.get_cached_mesh_data(msh,nondimensional=False,tesselate_tri=True,eigenvector=self.eigenvector,eigenmode=self.eigenmode,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions)
+            # Local expressions are evaluated lazily, i.e. after the restore below, so an animated
+            # frame used to draw them from the BASE state while every ordinary field showed the
+            # perturbed one. Materialise them here, while the perturbation still stands - the merged
+            # path does the same eagerly (meshdatamerge._local_payload).
+            for _lname in res.local_expr_indices.keys():
+                if _lname in res.nodal_field_inds.keys():
+                    continue # a nodal field of the same name wins in get_data(), as it does there
+                _lvals=res.get_data(_lname)
+                if _lvals is not None:
+                    res.nodal_local_exprs[_lname]=numpy.asarray(_lvals)
             problem.set_current_dofs(olddofs)
             return res
 

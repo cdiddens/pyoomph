@@ -87,6 +87,12 @@ if __name__ == "__main__":
         problem.go_to_param(gamma=0.28,startstep=0.01)
         problem.solve() # solve at gamma=0.28
 
+        # Solve for the critical eigenvector first: it is the guess the fold tracker starts from, and
+        # it must be passed explicitly when the problem is distributed with --distribute (see the
+        # comment in kuramoto_sivanshinsky_bifurcation.py).
+        # Eigensolver left to the autodetection (SLEPc where available, else Spectra)
+        problem.solve_eigenproblem(1,shift=0)
+
         # Activate bifurcation tracking
         problem.activate_bifurcation_tracking(problem.param_gamma,"fold")
         problem.solve()

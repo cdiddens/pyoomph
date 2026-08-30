@@ -109,21 +109,13 @@ def _as_real_eigenvector(v,what:str,tol:float=1e-8)->"numpy.ndarray":
 def _allgather_square(problem:Problem,mat:DefaultMatrixType,n:int)->DefaultMatrixType:
     """Turn a distributed row block into the whole square matrix, on every rank.
 
-    ``mpi_gather_csr_rows`` collects onto one rank; the callers here need the matrix everywhere, since
-    they all execute the same collective-laden routine together. Broadcasting the gathered triple is
-    the cheapest way to that and keeps the gather itself in one place.
+    Just ``mpi_allgather_square_csr`` on the BASE dof distribution, which is the layout the
+    eigenproblem matrices these callers pass in are assembled on.
     """
-    from .mpi import get_mpi_world_comm,get_mpi_rank,mpi_row_layout,mpi_gather_csr_rows
-    comm=get_mpi_world_comm()
-    assert comm is not None, "a distributed matrix without an MPI communicator"
+    from .mpi import mpi_allgather_square_csr
     _,nrow_local,first_row,_=problem._get_base_dof_distribution_info()
-    layout=mpi_row_layout(n,first_row,nrow_local,mat.nnz)
-    assert layout is not None
-    got=mpi_gather_csr_rows(layout,mat.data,mat.indices,mat.indptr,
-                            context="gathering the Hopf pencil for the Lyapunov coefficient")
-    got=comm.bcast(got if get_mpi_rank()==0 else None,root=0) #type:ignore
-    vals,cols,rs=got
-    return csr_matrix((vals,cols,rs),shape=(n,n))
+    return mpi_allgather_square_csr(n,first_row,nrow_local,mat,
+                                    context="gathering the Hopf pencil for the Lyapunov coefficient")
 
 
 def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD_delta:float=1e-5,FD_param_delta:float=1e-5,omega:float | None=None,q:NPComplexArray | None=None,omega_epsilon:float=1e-5,use_hopf_tracker_for_adjoint:bool=False,verbose:bool=True,residual_tolerance:float=1e-6,check_derivatives_by_fd:bool=False):
@@ -2954,7 +2946,37 @@ class NormalFormCalculator:
             # not move is the ANGLE between R01=-dR/dp and the left null vector: a=0 means dR/dp lies in
             # the range of J, i.e. the parameter cannot move the solution off the branch, and the cosine
             # says that scale-free. Measured: a genuine fold gives O(1) here, a branch point 1e-5 or less.
-            a_rel=abs(a)/max(numpy.linalg.norm(R01)*numpy.linalg.norm(zeta_star),1e-300)
+            a_rel_raw=abs(a)/max(numpy.linalg.norm(R01)*numpy.linalg.norm(zeta_star),1e-300)
+            a_rel=a_rel_raw
+            # ... but a cosine needs two directions, and R01 can have none. At the transcritical of
+            # R = p*x - x^2 the derivative IS the solution component, dR/dp = x, which is zero at the
+            # bifurcation - so R01 is zero up to whatever Newton left behind, and the "cosine" becomes
+            # round-off divided by round-off. Measured on the macOS wheel jobs of 29th August 2026:
+            # |a| = 1.4e-17 with |R01| of the same size gave a_rel = 1.0 exactly, the strongest
+            # possible FOLD signature for a textbook branch point, and branch switching then refused
+            # with "a fold has only one branch through it". Linux passed the same test only because
+            # its Newton landed on x = 0.0 exactly, making a exactly 0.0 - luck, not robustness.
+            #
+            # The guard compares a against the OTHER coefficients of the same normal form rather than
+            # against a matrix norm or an absolute floor: b1, b2 and b3 are projections onto the same
+            # zeta_star, so its arbitrary normalisation cancels here just as it does in the cosine,
+            # and they carry the scale that R01 alone cannot supply. A genuine fold has a of the same
+            # order as b1 (both are O(1) on the Bratu fold this was checked against), so ten decades
+            # below the largest of them is not a fold that happens to be weak - it is a zero that
+            # round-off failed to deliver exactly. tol_fold's own calibration is left untouched: this
+            # only ever turns a fold verdict into a branch point, never the other way round.
+            a_scale=max(abs(b1),abs(b2),abs(b3))
+            if numpy.linalg.norm(R01)==0.0:
+                # The exact case is a certificate rather than a threshold, as with norm_b2v below:
+                # dR/dp = 0 lies in the range of J trivially, which IS the branch-point condition.
+                a_rel=0.0
+                print("dR/dp is exactly zero, so the parameter cannot move the solution off the "
+                      "branch at all - a branch point, not a fold")
+            elif a_scale>0.0 and abs(a)<=1e-10*a_scale:
+                a_rel=0.0
+                print("a =",a,"is",abs(a)/a_scale,"of the largest normal-form coefficient, i.e. zero "
+                      "to round-off - a branch point. (The raw cosine against dR/dp was",a_rel_raw,
+                      ", which is meaningless when dR/dp itself is zero.)")
             # How well zeta and zeta_star actually annihilate THIS L, and how well the bordered
             # solves solved. Reported rather than merely trusted because everything below is a
             # projection onto zeta_star, and the one way this can go quietly wrong is a zeta from
@@ -2983,7 +3005,7 @@ class NormalFormCalculator:
             # denominator carry the same power of it).
             b2_rel=abs(b2)/max(numpy.linalg.norm(b2v)*numpy.linalg.norm(zeta_star),1e-300)
             diag["b2_rel"]=b2_rel
-            res={"a":a,"b1":b1,"b2":b2,"b3":b3,"a_rel":a_rel}
+            res={"a":a,"b1":b1,"b2":b2,"b3":b3,"a_rel":a_rel,"a_rel_raw":a_rel_raw}
             res.update(diag)
             print("a=",a," (relative to |dR/dp| and the left null vector:",a_rel,")")
             print("b1=",b1)

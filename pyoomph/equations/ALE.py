@@ -29,6 +29,7 @@ from __future__ import annotations
 from .._deprecation import deprecated_kwargs as _deprecated_kwargs, deprecated_attribute_alias as _deprecated_attribute_alias
 from ..meshes.mesh import InterfaceMesh, AnyMesh
 from ..meshes.ordering import SortAlongAxis, check_sorting_arguments, sort_line_segments
+from ..meshes.meshdatacache import MeshDataCacheEntry
 from .. import GlobalLagrangeMultiplier, WeakContribution, IntegralConstraint
 from ..generic import Equations,InterfaceEquations,ODEEquations
 from .generic import get_interface_field_connection_space
@@ -684,34 +685,113 @@ class EnforcedInterfacialLaplaceSmoothing(InterfaceEquations):
         # Fix the reference configuration
         self.set_Dirichlet_condition("_s_fixed_"+iname,True)
         
-    def before_assigning_equations_postorder(self, mesh:"AnyMesh"):
-        # Just make sure to initialize the arclengths of the interface nodes
-        assert isinstance(mesh,InterfaceMesh)
-        fn=self._master()._assert_codegen().get_full_name()
-        iname="__".join(fn.split("/")[1:])
-        data=mesh.get_problem().get_cached_mesh_data(mesh)
-        segs,_=data.get_interface_line_segments()
-        coords=data.get_coordinates()                
-        nodes=mesh.fill_node_index_to_node_map()
-        fixed_index=mesh.has_interface_dof_id("_s_fixed_"+iname)
-        dyn_index=mesh.has_interface_dof_id("_s_solved_"+iname)                
+    def _needs_merged_interface(self,mesh:"InterfaceMesh")->bool:
+        """Whether the reference arclength has to be measured on the globally merged interface.
+
+        Collective, and answered identically on every rank, so that it decides as a whole whether the
+        merge below is entered. The same gate as
+        :py:class:`~pyoomph.meshes.zeta.AssignZetaCoordinatesBase` uses, for the same reason: an
+        arclength is a property of the entire curve.
+        """
+        from ..generic.mpi import get_mpi_any, get_mpi_nproc
+        problem=mesh.get_problem()
+        if problem is None or not problem.is_distributed() or get_mpi_nproc()<=1:
+            return False
+        from ..meshes.meshdatamerge import needs_merging
+        return get_mpi_any(needs_merging(mesh))
+
+    def _walk_reference_arclengths(self,cache:"MeshDataCacheEntry")->list[tuple[int,float]]:
+        """(node index, arclength) along every segment of ``cache``, measured from the segment start."""
+        segs,_=cache.get_interface_line_segments()
+        coords=cache.get_coordinates()
         # Orient the segments before walking them, not while walking them: this reversal used to sit
         # inside the "for s in seg" loop below, where rebinding seg cannot change what the loop
         # iterates over, so the arclength was always assigned in the mesh's own node order and
         # sorting had no effect at all.
         segs=sort_line_segments(coords,segs,sort_along_axis=self.sorting,whom="EnforcedInterfacialLaplaceSmoothing")
+        res:list[tuple[int,float]]=[]
         for seg in segs:
             al=0.0
             lastx=coords[0,seg[0]]
             lasty=coords[1,seg[0]]
-
             for s in seg:
                 x,y=coords[0,s],coords[1,s]
                 delta=numpy.sqrt((x-lastx)**2+(y-lasty)**2)
                 al+=delta
-                nodes[s].set_value(nodes[s].additional_value_index(fixed_index),al)
-                nodes[s].set_value(nodes[s].additional_value_index(dyn_index),al)
+                res.append((int(s),float(al)))
                 lastx,lasty=x,y
+        return res
+
+    def _set_arclengths_by_index(self,mesh:"InterfaceMesh",values:list[tuple[int,float]],fixed_index:int,dyn_index:int)->None:
+        nodes=mesh.fill_node_index_to_node_map()
+        for ind,al in values:
+            nodes[ind].set_value(nodes[ind].additional_value_index(fixed_index),al)
+            nodes[ind].set_value(nodes[ind].additional_value_index(dyn_index),al)
+
+    def _set_arclengths_by_position(self,mesh:"InterfaceMesh",table:list[tuple[float,float,float]],fixed_index:int,dyn_index:int)->None:
+        """Write the arclengths of the merged interface onto this rank's nodes, addressed by position.
+
+        By position, because the table numbers the points of the WHOLE interface, which says nothing
+        about this rank's node order -- the same reason
+        :py:func:`~pyoomph.meshes.zeta.assign_zetas_from_position_table` does it. Every local node is
+        one of those points, so the match is exact up to the last bits. It deliberately covers the
+        HALO nodes as well: ``_s_fixed_`` is pinned, so oomph never synchronises it, and a halo node
+        left at its own local arclength would assemble a different equation from its owner.
+        """
+        from scipy.spatial import cKDTree #type:ignore
+        nodes=[n for n in mesh.nodes()]
+        if not len(table) or not nodes:
+            return
+        tab=numpy.array(table,dtype=float).reshape(-1,3)
+        dist,idx=cKDTree(tab[:,0:2]).query(numpy.array([[n.x(0),n.x(1)] for n in nodes])) #type:ignore
+        extent=max(float(numpy.amax(numpy.abs(tab[:,0:2]))),1.0)
+        if float(numpy.amax(dist))>1e-8*extent:
+            raise RuntimeError("EnforcedInterfacialLaplaceSmoothing on '"+mesh.get_name()+"': a node of this rank is "+str(float(numpy.amax(dist)))+" away from the nearest point of the merged interface, which should be zero. The merged data does not describe the same interface.")
+        for n,i in zip(nodes,idx):
+            al=float(tab[i,2])
+            n.set_value(n.additional_value_index(fixed_index),al)
+            n.set_value(n.additional_value_index(dyn_index),al)
+
+    def before_assigning_equations_postorder(self, mesh:"AnyMesh"):
+        # Just make sure to initialize the arclengths of the interface nodes
+        assert isinstance(mesh,InterfaceMesh)
+        fn=self._master()._assert_codegen().get_full_name()
+        iname="__".join(fn.split("/")[1:])
+        problem=mesh.get_problem()
+        fixed_index=mesh.has_interface_dof_id("_s_fixed_"+iname)
+        dyn_index=mesh.has_interface_dof_id("_s_solved_"+iname)
+        # Nondimensional throughout. _s_fixed_/_s_solved_ are defined without a scale, so their values
+        # ARE nondimensional, and Node.x() -- what the position match below compares against -- is too.
+        # The walk used to read the dimensional cache, which on a problem with set_scaling(spatial=R0)
+        # wrote a length in metres into a nondimensional field.
+        if not self._needs_merged_interface(mesh):
+            data=problem.get_cached_mesh_data(mesh,nondimensional=True)
+            self._set_arclengths_by_index(mesh,self._walk_reference_arclengths(data),fixed_index,dyn_index)
+            return
+        # Distributed: an arclength is a property of the whole curve, so measuring it on this rank's
+        # part alone gives every rank its own chart starting at zero. The reference configuration is
+        # then discontinuous across the partition boundary and the tangential shift pulls the nodes to
+        # the wrong places -- measured on the spreading-droplet tutorial: a first Newton step of 8e-2
+        # against 4e-6 serially, and inf on the second. So merge the interface (collective, result on
+        # rank 0), walk it there, and hand every rank a table of (x, y, arclength).
+        from ..generic.mpi import get_mpi_rank, get_mpi_world_comm, mpi_share_root_failure
+        comm=get_mpi_world_comm()
+        assert comm is not None
+        cache=problem.get_cached_mesh_data(mesh,nondimensional=True,global_mesh=True)
+        table:"list[tuple[float,float,float]] | None"=None
+        error:BaseException | None=None
+        if get_mpi_rank()==0:
+            try:
+                assert cache is not None
+                coords=cache.get_coordinates()
+                table=[(float(coords[0,ind]),float(coords[1,ind]),al)
+                       for ind,al in self._walk_reference_arclengths(cache)]
+            except BaseException as e:
+                error=e
+        table=comm.bcast(table,root=0) #type:ignore
+        mpi_share_root_failure(error,context="measuring the reference arclength of the merged interface '"+mesh.get_name()+"'")
+        assert table is not None
+        self._set_arclengths_by_position(mesh,table,fixed_index,dyn_index)
 
 
     def with_corners(self, *corners):

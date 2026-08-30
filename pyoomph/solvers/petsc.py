@@ -182,6 +182,14 @@ class PETSCSolver(GenericLinearSystemSolver):
         # rebuilds the KSP even when the sparsity pattern itself is reusable.
         self._symmetric_engaged:bool=False
 
+        # Auxiliary slots for solve_python_built_distributed(): a system pyoomph assembled in Python
+        # rather than one oomph-lib handed down. Deliberately NOT petsc_mat/ksp -- see that method.
+        self._aux_mat:Any=None
+        self._aux_ksp:Any=None
+        self._aux_x:Any=None
+        self._aux_b:Any=None
+        self._aux_digest:bytes | None=None
+
     #		opts=PETSc.Options().getAll()
     #		if "add_zero_diagonal" in opts.keys():
     #			problem.set_diagonal_zero_entries(True)
@@ -889,6 +897,130 @@ class PETSCSolver(GenericLinearSystemSolver):
         return res
 
 
+    #################### A system built in Python, solved across the ranks ####################
+
+    def solves_python_built_systems_distributed(self)->bool:
+        return True
+
+    def _aux_signature(self,ntot:int,nrow_local:int,indptr:Any,indices:Any)->bytes:
+        """Fingerprint of the auxiliary system's shape and sparsity pattern.
+
+        Compared rather than trusted, exactly as _structure_matches does for the Jacobian: setValuesCSR
+        writes only the entries it is handed, and pyoomph disables NEW_NONZERO_ALLOCATION_ERR, so
+        refreshing a Mat with a pattern that has moved leaves the old values in place instead of
+        failing. There is no structure id to lean on here -- the caller assembled this matrix itself.
+        """
+        h=hashlib.blake2b(digest_size=16)
+        h.update(numpy.array([ntot,nrow_local],dtype=numpy.int64).view(numpy.uint8))
+        h.update(numpy.ascontiguousarray(indptr).view(numpy.uint8))
+        h.update(numpy.ascontiguousarray(indices).view(numpy.uint8))
+        return h.digest()
+
+    def _destroy_aux(self)->None:
+        for name in ("_aux_ksp","_aux_x","_aux_b","_aux_mat"):
+            obj=getattr(self,name,None)
+            if obj is not None:
+                obj.destroy() #type:ignore
+            setattr(self,name,None)
+        self._aux_digest=None
+
+    def solve_python_built_distributed(self,ntot:int,nrow_local:int,first_row:int,mat_local:Any,b_local:NPFloatArray)->NPFloatArray:
+        """Factorise a Python-assembled, row-distributed system on COMM_WORLD. See the base class.
+
+        The Mat, KSP and vectors live in slots of their OWN (``_aux_*``), never in self.petsc_mat /
+        self.ksp. Those hold the Newton solve's factorisation, and a caller that interleaves the two --
+        PeriodicDrivingResponse scanning frequencies between solves -- would otherwise back-substitute
+        against whichever factors were written last. Keeping them apart is what makes
+        _note_external_serial_solve() unnecessary on this path rather than merely survivable.
+
+        The pattern is reused across calls when it has not moved, which is the normal case for a
+        frequency scan (only the values depend on omega), so MUMPS keeps its symbolic analysis.
+        """
+        self._require_aux_parallel_capable(ntot)
+        mat_local=mat_local.tocsr()
+        indptr=mat_local.indptr.astype(PETSc.IntType, copy=False) #type:ignore
+        indices=mat_local.indices.astype(PETSc.IntType, copy=False) #type:ignore
+        values=mat_local.data.astype(PETSc.ScalarType, copy=False) #type:ignore
+        digest=self._aux_signature(ntot,nrow_local,indptr,indices)
+        # Collective, for the same reason as _agree_on_reuse_structure_distributed: both branches below
+        # are collective, so a rank that decides differently deadlocks rather than losing the reuse.
+        reuse=(getattr(self,"_aux_mat",None) is not None and getattr(self,"_aux_digest",None)==digest)
+        if get_mpi_nproc()>1 and get_mpi_any(not reuse):
+            reuse=False
+        if reuse:
+            self._aux_mat.setValuesCSR(indptr,indices,values) #type:ignore
+            self._aux_mat.assemble() #type:ignore
+        else:
+            self._destroy_aux()
+            self._aux_mat=PETSc.Mat().createAIJ(size=((nrow_local,ntot),(nrow_local,ntot),), #type:ignore
+                                                csr=(indptr,indices,values),
+                                                comm=PETSc.COMM_WORLD) #type:ignore
+            self._aux_mat.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False) #type:ignore
+            self._aux_mat.assemble() #type:ignore
+            self._aux_x=self._aux_mat.createVecRight() #type:ignore
+            self._aux_b=self._aux_mat.createVecRight() #type:ignore
+            self._aux_ksp=PETSc.KSP().create(comm=self._aux_mat.getComm()) #type:ignore
+            self._aux_ksp.setOperators(self._aux_mat) #type:ignore
+            # No setFromOptions(): the options database is the Newton solve's, and a -ksp_type/-pc_type
+            # chosen for the Jacobian says nothing about this bordered system. A direct solve is the
+            # only thing that is right for it unconditionally, and the factor package is taken from
+            # whatever the backend was configured with (MUMPS for petsc_mumps, and required under MPI
+            # anyway -- see _require_aux_parallel_capable).
+            self._aux_ksp.setType("preonly") #type:ignore
+            pc=self._aux_ksp.getPC() #type:ignore
+            pc.setType("lu") #type:ignore
+            pkg=self._aux_factor_package()
+            if pkg is not None:
+                if hasattr(pc,"setFactorSolverType"):
+                    pc.setFactorSolverType(pkg) #type:ignore
+                elif hasattr(pc,"setFactorSolverPackage"):
+                    pc.setFactorSolverPackage(pkg) #type:ignore
+            self._aux_digest=digest
+        self._aux_b.getArray()[:]=numpy.asarray(b_local,dtype=numpy.float64) #type:ignore
+        self._aux_ksp.solve(self._aux_b,self._aux_x) #type:ignore
+        reason=int(self._aux_ksp.getConvergedReason()) #type:ignore
+        if reason<0:
+            self._destroy_aux()
+            raise PETScSolverError("The PETSc solve of a pyoomph-assembled distributed system failed "
+                                   "with KSPConvergedReason "+str(reason)+". The solution vector is "
+                                   "meaningless, so the solve is aborted here.")
+        arr=self._aux_x.getArray() #type:ignore
+        # Real system; on a complex PETSc build the imaginary part is pure round-off. Dropped
+        # explicitly rather than by a numpy ComplexWarning, as in solve_serial.
+        return numpy.ascontiguousarray(arr.real if arr.dtype.kind=="c" else arr,dtype=numpy.float64)
+
+    def _aux_factor_package(self)->str | None:
+        """The direct-solver package to factorise an auxiliary system with, or None for PETSc's own.
+
+        Under MPI there is no choice worth offering: PETSc's built-in LU is sequential, so it must be
+        MUMPS or SuperLU_DIST. Serially, follow whatever the backend was configured with.
+        """
+        opts=PETSc.Options() #type:ignore
+        configured=str(opts.getString("pc_factor_mat_solver_type","")) if opts.hasName("pc_factor_mat_solver_type") else "" #type:ignore
+        if get_mpi_nproc()<=1:
+            return configured or None
+        if configured in ("mumps","superlu_dist"):
+            return configured
+        return "mumps" if PETSc.Sys.hasExternalPackage("mumps") else "superlu_dist" #type:ignore
+
+    def _require_aux_parallel_capable(self,n:int)->None:
+        """Refuse, by name, a parallel direct solve this PETSc cannot do -- rather than solve it wrongly."""
+        if get_mpi_nproc()<=1:
+            return
+        petsc_nproc=PETSc.COMM_WORLD.getSize() #type:ignore
+        if petsc_nproc!=get_mpi_nproc():
+            raise RuntimeError(
+                "This petsc4py is not MPI-aware: pyoomph is running on "+str(get_mpi_nproc())+
+                " processes but PETSc's COMM_WORLD has "+str(petsc_nproc)+". Either it was built with "
+                "--with-mpi=0, or it is linked against a different MPI than mpi4py.")
+        if not (PETSc.Sys.hasExternalPackage("mumps") or PETSc.Sys.hasExternalPackage("superlu_dist")): #type:ignore
+            raise RuntimeError(
+                "Factorising a distributed "+str(n)+"-row system on "+str(get_mpi_nproc())+" processes "
+                "needs a PARALLEL direct solver, and this PETSc has neither MUMPS nor SuperLU_DIST "
+                "(PETSc's own LU is sequential only). Rebuild PETSc with --download-mumps=yes, or run "
+                "on a single process.")
+
+
 @GenericLinearSystemSolver.register_solver()
 class PETSCMUMPSSolver(PETSCSolver):
     # Pre-configured with MUMPS, unlike PETSCSolver: set_linear_solver("petsc").use_mumps() needs a live Problem to
@@ -1004,41 +1136,15 @@ class SlepcEigenSolver(GenericEigenSolver):
         return bool(numpy.issubdtype(numpy.dtype(PETSc.ScalarType),numpy.complexfloating)) #type:ignore
 
     def _eigen_parallel_layout(self,n:int)->tuple[int,int,bool]:
-        """``(nrow_local, first_row, parallel)`` for the PETSc matrices of an n-row eigenproblem.
+        """``(nrow_local, first_row, parallel)``, and remember it. See GenericEigenSolver.get_parallel_row_split.
 
-        Under ``mpirun -n>1`` the eigenproblem is ALWAYS solved in parallel, on COMM_WORLD, whether or
-        not the mesh was distributed. The two cases differ only in where the row split comes from:
-
-        - ``--distribute``: from oomph's dof distribution, because that is how the matrices were
-          assembled and each rank genuinely holds only its own rows.
-        - plain ``mpirun``: oomph assembles in parallel and then redistributes the result back to a
-          globally replicated form, so every rank holds the whole matrix. A contiguous split of ``n``
-          is imposed here and each rank contributes only its slice. Nothing is recomputed; the slicing
-          is a view onto a matrix the rank already has.
-
-        The replicated case is in one respect the safer of the two: each row is contributed by exactly
-        one rank, from matrices that are identical across ranks, so the blocks cannot disagree.
-
-        What this does NOT save is matrix memory -- every rank still stores the whole J and M. The win
-        is the shift-and-invert factorisation, whose factors are typically far larger than the matrix
-        and which is where both the time and the real memory go.
+        The split itself lives on the base class, because the periodic driving response builds its own
+        distributed system on exactly the same layout and must not have to reach into this subclass for
+        it. Recorded here so a caller can verify the eigensolve was genuinely split rather than infer it
+        from an answer that comes out the same either way (tests/mpi_eigen_worker.py).
         """
-        nproc=get_mpi_nproc()
-        if nproc<=1:
-            self.last_parallel_layout=(n,0,False)
-            return n,0,False
-        _,nrow_local,first_row,distributed=self.get_eigen_row_layout()
-        if not distributed:
-            # Replicated: impose a contiguous split here, so that the matrix, the initial space and the
-            # row slicing all agree on it.
-            rank=get_mpi_rank()
-            base,rem=divmod(n,nproc)
-            nrow_local=base+(1 if rank<rem else 0)
-            first_row=rank*base+min(rank,rem)
-        # Recorded so a caller can verify the eigensolve was genuinely split rather than infer it from
-        # an answer that comes out the same either way (tests/mpi_eigen_worker.py).
-        self.last_parallel_layout=(nrow_local,first_row,True)
-        return nrow_local,first_row,True
+        self.last_parallel_layout=self.get_parallel_row_split(n)
+        return self.last_parallel_layout
 
     def _require_parallel_capable(self)->None:
         """Stop, with the reason, if this PETSc/SLEPc cannot solve an eigenproblem in parallel.
@@ -1072,13 +1178,7 @@ class SlepcEigenSolver(GenericEigenSolver):
                 "on a single process.")
 
     def _local_row_block(self,mat:"DefaultMatrixType",first_row:int,nrow_local:int)->"DefaultMatrixType":
-        """This rank's contiguous slice of rows of a GLOBALLY assembled matrix.
-
-        Column indices stay global, which is what MatMPIAIJSetPreallocationCSR wants; only the row
-        pointers are rebased, which scipy's slicing does.
-        """
-        sub=mat[first_row:first_row+nrow_local,:]
-        return sub if isinstance(sub,DefaultMatrixType) else sub.tocsr() #type:ignore
+        return self.local_row_block(mat,first_row,nrow_local)
 
     def _create_petsc_matrix(self,mat:"DefaultMatrixType",n:int,nrow_local:int,first_row:int,parallel:bool,rows_are_local:bool)->Any:
         """Build a PETSc Mat from the eigenproblem's J or M.

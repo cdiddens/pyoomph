@@ -141,10 +141,20 @@ def main():
 
         nbranches = len(c.branches)
         try:
-            res["switched"] = bool(c.branch_switch())
+            switched = c.branch_switch()
+            res["switched"] = bool(switched)
+            # What branch_switch actually handed back, and the state it decided from. A refusal
+            # returns falsy WITHOUT raising, so "error" then stays absent and the test could only
+            # report "assert False" against a None - which is what the macOS arm64 wheel job of 29th
+            # August 2026 did for [transcritical-real] and [transcritical-stable], saying nothing
+            # about why the switch was declined.
+            res["switch_return"] = repr(switched)
+            res["bifurcation_info_at_switch"] = {k: str(v) for k, v in (cp.bifurcation_info or {}).items()}
         except Exception as e:
             res["switched"] = False
             res["error"] = str(e)
+            import traceback
+            res["traceback"] = traceback.format_exc()
         res["type_after"] = str((cp.bifurcation_info or {}).get("type"))
         res["new_branches"] = len(c.branches) - nbranches
         res["landed_mu"] = float(problem.mu.value)

@@ -117,7 +117,10 @@ test-sources = ["tests"]
 # instead of the old citools/download_and_build_static_ginac.sh script, so
 # wheel builds just need to turn that on. This is the default for all OSes
 # except Windows, which overrides it below (see [tool.cibuildwheel.windows]).
-config-settings = { "cmake.define.PYOOMPH_DOWNLOAD_CLN" = "ON", "cmake.define.PYOOMPH_DOWNLOAD_GINAC" = "ON", "cmake.define.PYOOMPH_USE_MPI" = "OFF", "cmake.define.PYOOMPH_PARANOID" = "OFF" }
+# PYOOMPH_HAS_SPECTRA=ON is asserted rather than left to the option() default, so that a wheel whose
+# Spectra/Eigen download failed at configure time fails the build instead of silently shipping without
+# the "spectra" eigensolver (tests/test_spectra_present.py + PYOOMPH_EXPECT_SPECTRA catch the rest).
+config-settings = { "cmake.define.PYOOMPH_DOWNLOAD_CLN" = "ON", "cmake.define.PYOOMPH_DOWNLOAD_GINAC" = "ON", "cmake.define.PYOOMPH_USE_MPI" = "OFF", "cmake.define.PYOOMPH_PARANOID" = "OFF", "cmake.define.PYOOMPH_HAS_SPECTRA" = "ON" }
 
 # Tag the cp312 build's wheel as cp312-abi3 instead of cp312-cp312: paired
 # with CMakeLists.txt's nanobind_add_module(_pyoomph_core STABLE_ABI ...),
@@ -212,7 +215,12 @@ before-all = [
 # PYOOMPH_*_INCLUDE_DIR/PYOOMPH_*_LIB_DIR at a prebuilt CLN/GiNaC you
 # supply yourself, or skip Windows wheels for now and document a
 # from-source / WSL install path instead.
-config-settings = { "cmake.define.PYOOMPH_DOWNLOAD_CLN" = "OFF", "cmake.define.PYOOMPH_DOWNLOAD_GINAC" = "OFF", "cmake.define.PYOOMPH_USE_MPI" = "OFF", "cmake.define.PYOOMPH_PARANOID" = "OFF" }
+# PYOOMPH_HAS_SPECTRA is spelled out here as it is in every other build entry point (and in
+# build_for_develop.sh): it is ON by default, but a default is inherited rather than asserted, and a
+# CMake cache that was ever configured with it OFF keeps it OFF on every later build of that
+# directory. It matters most in this Windows block, where MPI is off and there is therefore no
+# PETSc/SLEPc at all, leaving Spectra the only eigensolver in the wheel that can target an eigenvalue.
+config-settings = { "cmake.define.PYOOMPH_DOWNLOAD_CLN" = "OFF", "cmake.define.PYOOMPH_DOWNLOAD_GINAC" = "OFF", "cmake.define.PYOOMPH_USE_MPI" = "OFF", "cmake.define.PYOOMPH_PARANOID" = "OFF", "cmake.define.PYOOMPH_HAS_SPECTRA" = "ON" }
 
 # Baseline config only (no strict/disallow_untyped_defs): the codebase
 # currently has a sizeable pre-existing type-error backlog, so this isn't

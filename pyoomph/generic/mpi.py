@@ -538,6 +538,46 @@ def mpi_scatter_vector(layout:MPIRowLayout,x,out,root:int=0,comm=None,context:st
 	return out
 
 
+def mpi_allgather_square_csr(n:int,first_row:int,nrow_local:int,mat,context:str=""):
+	"""Turn a distributed ``(nrow_local, n)`` CSR row block into the whole ``(n, n)`` matrix, on EVERY rank.
+
+	:py:func:`mpi_gather_csr_rows` collects onto one rank; the callers of this one all execute the same
+	collective-laden routine together and need the matrix everywhere. Broadcasting the gathered triple
+	is the cheapest way to that and keeps the gather itself in one place.
+
+	Returns ``mat`` unchanged on a single process, so a caller need not branch on the rank count.
+	"""
+	from scipy.sparse import csr_matrix #type:ignore
+	if get_mpi_nproc()<=1:
+		return mat
+	comm=get_mpi_world_comm()
+	assert comm is not None, "a distributed matrix without an MPI communicator"
+	layout=mpi_row_layout(n,first_row,nrow_local,mat.nnz)
+	assert layout is not None
+	got=mpi_gather_csr_rows(layout,mat.data,mat.indices,mat.indptr,
+							context=context or "gathering a distributed matrix onto rank 0")
+	got=comm.bcast(got if get_mpi_rank()==0 else None,root=0) #type:ignore
+	vals,cols,rs=got
+	return csr_matrix((vals,cols,rs),shape=(n,n))
+
+
+def mpi_allgather_vector(n:int,first_row:int,nrow_local:int,b,context:str=""):
+	"""The full-length vector on EVERY rank, from each rank's own row block. ``b`` unchanged serially."""
+	import numpy
+	from mpi4py import MPI #type:ignore
+	if get_mpi_nproc()<=1:
+		return numpy.asarray(b,dtype=numpy.float64)
+	comm=get_mpi_world_comm()
+	assert comm is not None
+	layout=mpi_row_layout(n,first_row,nrow_local,0)
+	assert layout is not None
+	out=numpy.empty(n,dtype=numpy.float64)
+	send=numpy.ascontiguousarray(b,dtype=numpy.float64)
+	req=comm.Iallgatherv(send,[out,layout.vec_counts,layout.vec_displs,MPI.DOUBLE]) #type:ignore
+	mpi_wait_idle(req,context or "replicating a distributed vector on every rank")
+	return out
+
+
 PYMETIS_MISSING_MESSAGE="PyMetis is not installed, cannot perform graph partitioning for distributed meshes. Please install PyMetis via e.g. 'pip install pymetis'"
 
 

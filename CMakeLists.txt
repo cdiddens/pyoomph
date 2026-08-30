@@ -84,6 +84,15 @@ option(PYOOMPH_ENABLE_JIT_CACHE "Enable the JIT code cache at build time" ON)
 # has_tqmesh == False and none of the TQMesh* classes exist.
 option(PYOOMPH_HAS_TQMESH "Build with the TQMesh two-dimensional mesh generator" ON)
 
+# Spectra (https://spectralib.org) is a header-only Arnoldi eigensolver on top of Eigen, both
+# downloaded by cmake/ThirdPartySpectra.cmake and exposed to python by src/nanobind/spectra/*.cpp as
+# the eigensolver named "spectra". It exists for the platforms that have no PETSc/SLEPc at all -
+# Windows above all - where it is the only backend that can target an eigenvalue. Switching this OFF
+# skips the download and drops those sources; the extension module then reports has_spectra == False,
+# pyoomph.solvers.spectra refuses to import, and the eigensolver autodetection falls back to the
+# ARPACK-based "pardiso"/"scipy" backends, which cannot handle a target at all.
+option(PYOOMPH_HAS_SPECTRA "Build with the Spectra/Eigen serial eigensolver backend" ON)
+
 # Left empty by default: ginac.de only ever hosts the *current* release
 # tarball, so a version pinned here goes dead as soon as a new release is
 # published. When empty, cmake/ThirdPartyGiNaC.cmake auto-detects the
@@ -127,6 +136,9 @@ endif()
 include(cmake/ThirdPartyGiNaC.cmake)
 if(PYOOMPH_HAS_TQMESH)
   include(cmake/ThirdPartyTQMesh.cmake)
+endif()
+if(PYOOMPH_HAS_SPECTRA)
+  include(cmake/ThirdPartySpectra.cmake)
 endif()
 
 # ----------------------------------------------------------------------------
@@ -248,21 +260,47 @@ endif()
 # generated code is called from INSIDE the parallel region and only has to be
 # reentrant, which it is since commit 25b24ea retired its file-scope globals.
 # ----------------------------------------------------------------------------
-if(PYOOMPH_USE_OPENMP)
-  if(PYOOMPH_USE_OPENMP STREQUAL "AUTO")
-    find_package(OpenMP COMPONENTS CXX)
-  else()
-    find_package(OpenMP REQUIRED COMPONENTS CXX)
+# Two backends provide the identical, bit-identical threaded loop; exactly one is compiled in.
+#
+#   * macOS defaults to GCD/libdispatch. It ships NO OpenMP runtime, so nothing collides with the
+#     Intel libiomp5 that MKL's Pardiso pulls in - that collision is "OMP: Error #15" and crashed an
+#     Intel-mac test run (see dev_docs/openmp_assembly.md). libdispatch is in libSystem, so nothing
+#     extra is linked. OpenMP is still selectable on macOS with -DPYOOMPH_USE_OPENMP=ON, in which
+#     case it wins and GCD steps aside (the old static-libomp wheel path).
+#   * Linux and Windows always use OpenMP (libgomp comes with GCC/MinGW); GCD is macOS-only.
+#
+# So the AUTO default is: GCD on macOS, OpenMP everywhere else - and never both, because the code in
+# parallel_assembly.cpp would pick OpenMP when both are defined and the second runtime is exactly
+# what we are avoiding here.
+set(_pyoomph_use_gcd FALSE)
+if(APPLE)
+  set(PYOOMPH_USE_GCD "AUTO" CACHE STRING "GCD/libdispatch backend for --omp N on macOS: AUTO=the macOS default unless PYOOMPH_USE_OPENMP=ON, ON=require, OFF=never (fall back to OpenMP)")
+  set_property(CACHE PYOOMPH_USE_GCD PROPERTY STRINGS AUTO ON OFF)
+  if(PYOOMPH_USE_GCD STREQUAL "ON" OR (PYOOMPH_USE_GCD STREQUAL "AUTO" AND NOT PYOOMPH_USE_OPENMP STREQUAL "ON"))
+    set(_pyoomph_use_gcd TRUE)
   endif()
 endif()
-if(OpenMP_CXX_FOUND AND PYOOMPH_USE_OPENMP)
-  target_link_libraries(pyoomph_core PUBLIC OpenMP::OpenMP_CXX)
-  target_compile_definitions(pyoomph_core PUBLIC PYOOMPH_HAS_OPENMP)
-  message(STATUS "OpenMP found - parallel element assembly (--omp N) is available")
-elseif(PYOOMPH_USE_OPENMP)
-  message(STATUS "OpenMP NOT found - building without parallel element assembly (pass -DPYOOMPH_USE_OPENMP=ON to make this an error instead)")
+
+if(_pyoomph_use_gcd)
+  target_compile_definitions(pyoomph_core PUBLIC PYOOMPH_HAS_GCD)
+  message(STATUS "Threaded element assembly (--omp N): GCD/libdispatch backend (no OpenMP runtime linked)")
 else()
-  message(STATUS "OpenMP disabled by PYOOMPH_USE_OPENMP=OFF - building without parallel element assembly")
+  if(PYOOMPH_USE_OPENMP)
+    if(PYOOMPH_USE_OPENMP STREQUAL "AUTO")
+      find_package(OpenMP COMPONENTS CXX)
+    else()
+      find_package(OpenMP REQUIRED COMPONENTS CXX)
+    endif()
+  endif()
+  if(OpenMP_CXX_FOUND AND PYOOMPH_USE_OPENMP)
+    target_link_libraries(pyoomph_core PUBLIC OpenMP::OpenMP_CXX)
+    target_compile_definitions(pyoomph_core PUBLIC PYOOMPH_HAS_OPENMP)
+    message(STATUS "Threaded element assembly (--omp N): OpenMP")
+  elseif(PYOOMPH_USE_OPENMP)
+    message(STATUS "OpenMP NOT found - building without parallel element assembly (pass -DPYOOMPH_USE_OPENMP=ON to make this an error instead)")
+  else()
+    message(STATUS "OpenMP disabled by PYOOMPH_USE_OPENMP=OFF - building without parallel element assembly")
+  endif()
 endif()
 
 # ----------------------------------------------------------------------------
@@ -288,6 +326,19 @@ if(PYOOMPH_HAS_TQMESH)
                         "src/nanobind/tqmesh - pass -DPYOOMPH_HAS_TQMESH=OFF to build without TQMesh.")
   endif()
   list(APPEND PYOOMPH_NANOBIND_SOURCES ${PYOOMPH_TQMESH_SOURCES})
+endif()
+
+# Same arrangement for the Spectra bindings: their own subdirectory, because they are the only
+# translation units that may include Eigen's and Spectra's headers (see the include scoping further
+# down for why that matters here in particular), and the only ones that must not be compiled when
+# PYOOMPH_HAS_SPECTRA is off.
+if(PYOOMPH_HAS_SPECTRA)
+  file(GLOB PYOOMPH_SPECTRA_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/nanobind/spectra/*.cpp")
+  if(NOT PYOOMPH_SPECTRA_SOURCES)
+    message(FATAL_ERROR "PYOOMPH_HAS_SPECTRA is ON, but no .cpp sources were found under "
+                        "src/nanobind/spectra - pass -DPYOOMPH_HAS_SPECTRA=OFF to build without Spectra.")
+  endif()
+  list(APPEND PYOOMPH_NANOBIND_SOURCES ${PYOOMPH_SPECTRA_SOURCES})
 endif()
 
 if(NOT PYOOMPH_NANOBIND_SOURCES)
@@ -342,13 +393,33 @@ target_compile_definitions(_pyoomph_core PRIVATE
   $<$<BOOL:${PYOOMPH_USE_MPI}>:OOMPH_HAS_MPI>
   $<$<BOOL:${PYOOMPH_PARANOID}>:PARANOID>
   $<$<BOOL:${PYOOMPH_HAS_TQMESH}>:PYOOMPH_HAS_TQMESH>
+  $<$<BOOL:${PYOOMPH_HAS_SPECTRA}>:PYOOMPH_HAS_SPECTRA>
 )
 
 if(PYOOMPH_HAS_TQMESH)
-  # Kept PRIVATE and off pyoomph_core: nothing outside src/nanobind/tqmesh sees TQMesh. The sources
-  # are only there once tqmesh_external has run, hence the dependency.
-  target_include_directories(_pyoomph_core PRIVATE ${PYOOMPH_TQMESH_INCLUDE_DIRS})
+  # Kept off pyoomph_core AND off the rest of _pyoomph_core's TUs: nothing outside
+  # src/nanobind/tqmesh sees TQMesh. Scoping the include dir to just the TQMesh sources (rather than
+  # the whole target) matters because TQMesh's src/algorithm/ carries a Mesh.h that collides
+  # case-insensitively with oomph-lib's mesh.h - on macOS a target-wide include dir made every other
+  # TU's #include "mesh.h" (via oomph_lib.hpp) resolve to TQMesh's Mesh.h instead
+  # (-Wnonportable-include-path, and the wrong header). The sources are only there once
+  # tqmesh_external has run, hence the dependency.
+  set_source_files_properties(${PYOOMPH_TQMESH_SOURCES}
+    PROPERTIES INCLUDE_DIRECTORIES "${PYOOMPH_TQMESH_INCLUDE_DIRS}")
   add_dependencies(_pyoomph_core tqmesh_external)
+endif()
+
+if(PYOOMPH_HAS_SPECTRA)
+  # Scoped to the Spectra sources for the same reason as TQMesh above, and here it is not a
+  # hypothetical: Eigen's include root contains extensionless headers named Core, Dense,
+  # Eigenvalues, LU, SVD and Householder. A target-wide include directory would put those in front
+  # of every other TU in _pyoomph_core, and on a case-insensitive filesystem they collide with
+  # pyoomph's own core.h. PYOOMPH_SPECTRA_DEPENDS is empty when the user supplied both source trees.
+  set_source_files_properties(${PYOOMPH_SPECTRA_SOURCES}
+    PROPERTIES INCLUDE_DIRECTORIES "${PYOOMPH_SPECTRA_INCLUDE_DIRS}")
+  if(PYOOMPH_SPECTRA_DEPENDS)
+    add_dependencies(_pyoomph_core ${PYOOMPH_SPECTRA_DEPENDS})
+  endif()
 endif()
 
 if(PYOOMPH_USE_MPI)

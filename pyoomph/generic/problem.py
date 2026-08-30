@@ -267,8 +267,18 @@ class PeriodicOrbit:
         
         self.problem.initialise_dt(dt)
         
+        # The dt loop stops at ndt(): the history has THREE entries (u(0), u(-dt), u(-2dt)) while a
+        # BDF2 Time stores two step sizes, so set_dt(2) wrote eight bytes past the end of that
+        # vector - oomph::Time::dt(i) hands out Dt[i] unchecked, and the binding used to pass the
+        # index straight through. Nothing showed on Linux; on macOS the corrupted heap surfaced later
+        # as a crash in an unrelated destructor at interpreter shutdown, on a different test each run.
+        # Found with valgrind on tests/floquet_worker.py: "Invalid write of size 8, 0 bytes after a
+        # block of size 16". Nothing is lost by stopping: initialise_dt(dt) above has already set
+        # every stored step size to dt, so these assignments were redundant to begin with.
+        ndt=self.problem.time_pt().ndt()
         for i,h in enumerate(history):
-            self.problem.time_pt().set_dt(i,dt)            
+            if i<ndt:
+                self.problem.time_pt().set_dt(i,dt)
             self.problem.set_history_dofs(i,h)
         self.problem.time_stepper_pt().set_weights()
         # No shift_time_values() here. The history above is already in shift-before-solve form
@@ -2126,7 +2136,13 @@ class Problem(_pyoomph.Problem):
 
     def set_eigensolver(self,solv:str | GenericEigenSolver):
         """
-        Set the eigensolver backend. "scipy", "pardiso", "slepc" are available (the latter two only if the packages MKL and/or petsc4py/slepc4py are installed)
+        Set the eigensolver backend. "scipy", "pardiso", "spectra", "slepc" and "slepc_mumps" are available
+        ("pardiso" only with MKL installed, the "slepc" ones only with petsc4py/slepc4py, and "spectra" only
+        if the build was configured with PYOOMPH_HAS_SPECTRA=ON, which is the default).
+
+        "scipy" and "pardiso" are both scipy's ARPACK and cannot target an eigenvalue at all. "spectra" and
+        the "slepc" ones can; only "slepc" with a complex PETSc build, and the "slepc" ones alone run in
+        parallel. Use ``python -m pyoomph check eigen all`` to see what this installation actually has.
 
         Returns:
             The eigenproblem solver instance after setting
@@ -2215,9 +2231,8 @@ class Problem(_pyoomph.Problem):
         These callers assemble the eigenproblem matrices themselves and read the result as a square
         global matrix, which it stops being once the rows are partitioned across ranks -- scipy then
         raises about an indptr length, several frames away from the feature the user asked for. The
-        remaining ones (the Lyapunov exponents, the periodic driving response, the multi-assembly
-        tensor cache, and the Python custom assembler behind get_hopf_lyapunov_coefficient's
-        HopfTracker route) additionally sit on top of
+        remaining ones (the Lyapunov exponents, the multi-assembly tensor cache, and the Python custom
+        assembler behind get_hopf_lyapunov_coefficient's HopfTracker route) additionally sit on top of
         sparse_assemble_row_or_column_compressed_base_problem, which throws "This likely does not work
         in distributed parallel" from C++. Failing here names the feature instead.
 
@@ -2225,9 +2240,11 @@ class Problem(_pyoomph.Problem):
         multipliers, and -- since the normal form left the custom multi-assembly the way deflation
         did -- left eigenvectors and branch switching, used to be on that list and are not any more.
         See dev_docs/mpi_augmented_systems.md, dev_docs/floquet_multipliers.md section 10 and
-        dev_docs/branch_switching.md.
-        refine_eigenfunction() is here for the history-dof reason instead of an assembly one:
-        Problem::set_history_dofs refuses when distributed.
+        dev_docs/branch_switching.md. refine_eigenfunction() has left this list too: it was here for
+        the history-dof reason rather than an assembly one, and the history dof accessors work
+        distributed since commit 2531e00. So has the periodic driving response, which now assembles on
+        its own row block and solves the bordered system on COMM_WORLD -- dev_docs/mpi_eigenproblems.md
+        section 8.
         """
         if self.is_distributed():
             raise RuntimeError(what+" is not supported on a distributed (--distribute) problem yet. Run it without --distribute (plain eigenvalue solving via SLEPc does work distributed).")
@@ -2399,6 +2416,12 @@ class Problem(_pyoomph.Problem):
             numouts: Number of output steps. Defaults to 25.
             phi0: Initial phase. Defaults to 0.
         
+        
+        Works on a mesh distributed with ``--distribute`` as well: the perturbation that makes a frame
+        is applied by every process, not by the drawing one alone (see
+        ``pyoomph.meshes.meshdatamerge.merge_perturbed_global_mesh_data``), and plotted tracers are gathered
+        from all processes as well.
+
         """
         if len(self.get_last_eigenvalues())<eigenvector+1:
             raise RuntimeError("Eigenvalue/vector at index "+str(eigenvector)+" not calculated")
@@ -2446,6 +2469,9 @@ class Problem(_pyoomph.Problem):
             plotter._eigenanimation_m=eigenmodes_m[eigenvector]
             
         plotter._eigenvector_for_animation=eigenfunction
+        # The index as well: on a distributed mesh the perturbation is applied by every rank from its
+        # own replicated copy of the eigenvector, so the request only carries the index and the factor.
+        plotter._eigenvector_index_for_animation=eigenvector
         from pathlib import Path
         Path(os.path.join(self.get_output_directory(),outdir)).mkdir(parents=True, exist_ok=True)
         for i in range(numouts):
@@ -2463,6 +2489,7 @@ class Problem(_pyoomph.Problem):
         plotter._eigenfactor_right=None
         plotter._eigenfactor_left=None
         plotter._eigenvector_for_animation=None
+        plotter._eigenvector_index_for_animation=None
         plotter._eigenanimation_m=None
         plotter._eigenanimation_lambda=None
 
@@ -3479,6 +3506,7 @@ class Problem(_pyoomph.Problem):
         eigen_solver_group = self.cmdlineparser.add_mutually_exclusive_group()
         eigen_solver_group.add_argument('--slepc',help="use SLEPc as eigensolver. Specify your own backend for the matrix inversion during eigensolve here",action="store_true")
         eigen_solver_group.add_argument('--slepc_mumps',help="use SLEPc as eigensolver with MUMPS as backend",action="store_true")
+        eigen_solver_group.add_argument('--spectra',help="use the built-in Spectra eigensolver (needs no PETSc, but is serial)",action="store_true")
         eigen_solver_group.add_argument('--arpack',action="store_true")
         # Mutually exclusive for the same reason as linear_solver_group above.
         ccompiler_group = self.cmdlineparser.add_mutually_exclusive_group()
@@ -3557,6 +3585,8 @@ class Problem(_pyoomph.Problem):
             self.set_eigensolver("slepc_mumps")
         elif self.cmdlineargs.slepc:
             self.set_eigensolver("slepc")
+        elif self.cmdlineargs.spectra:
+            self.set_eigensolver("spectra")
 
 
 
@@ -6353,12 +6383,11 @@ class Problem(_pyoomph.Problem):
             Tuple[float, NPFloatArray]: The eigenvalue and eigenvector of the adapted eigenproblem.
             
         """
-        # Unlike plain eigenvalue solving, this one is NOT available distributed: adapt() carries the
-        # eigenfunction across the adaption in history levels 3 and 4, and the history dof accessors
-        # refuse on a distributed problem (an equation number there is global while the vector holds
-        # only this rank's rows -- see Problem::get_dofs(t,...) in src/problem.cpp). Raising here names
-        # the feature instead of failing several frames into adapt().
-        self._require_non_distributed("Mesh adaptation to an eigenfunction (refine_eigenfunction)")
+        # This used to be refused on a distributed problem, because adapt() carries the eigenfunction
+        # across the adaption in history levels 3 and 4 and the history dof accessors were unsupported
+        # there. They are not any more (Problem::get_dofs(t,...)/set_dofs(t,...) walk this rank's owned
+        # rows and let synchronise_all_dofs() carry the values, src/problem.cpp), and the whole path is
+        # now held against a serial reference in tests/test_mpi_eigen_adapt.py.
         # adapt() renumbers, which pulls the augmented dof vector out from under the tracker.
         self._require_no_bifurcation_tracking("Mesh adaptation to an eigenfunction (refine_eigenfunction)")
         if eigenindex<0:

@@ -144,14 +144,12 @@ by global equation number and reach the dofs through `get_current_dofs()`/`set_c
 already gather and scatter. Nothing on that path had to change. The cost is `neval` vectors, not a
 matrix.
 
-`refine_eigenfunction()` is the exception, and it is worth being precise about why, because it looks
-like it should work: it too only ever handles a global eigenvector. But `adapt()` carries the
-eigenfunction across the adaption in **history levels 3 and 4**, and the history dof accessors refuse
-on a distributed problem — an equation number there is global while the vector holds only this rank's
-rows, so oomph-lib declares them unsupported and pyoomph throws rather than corrupt the heap
-(`Problem::get_dofs(t,...)`, `src/problem.cpp`). The same is true of `adapt()` during arclength
-continuation, which uses levels 5 and 6; that is pre-existing and unrelated to eigenproblems.
-Distributed history dofs are the prerequisite for both.
+`refine_eigenfunction()` used to be the exception. It handles a global eigenvector like everything
+else here, but `adapt()` carries the eigenfunction across the adaption in **history levels 3 and 4**,
+and the history dof accessors were unsupported on a distributed problem — an equation number there is
+global while the vector holds only this rank's rows. That is fixed (`Problem::get_dofs(t,...)` /
+`set_dofs(t,...)` walk this rank's owned rows and let `synchronise_all_dofs()` carry the values,
+commit `2531e00`), and the guard came off once the adaptation itself had been validated — see §9.
 
 **Manipulators move to the backend.** `EigenMatrixManipulatorBase.apply_on_distributed_J_and_M`
 takes the eigensolver's own matrices; `EigenMatrixSetDofsToZero` implements it as
@@ -228,10 +226,11 @@ through `Problem._require_non_distributed`:
 
 - the multi-assembly tensor cache
 - Lyapunov exponents
-- the periodic driving response
-  (both of these build a replicated system and call `solve_serial` on every rank — see
-  [linear_solvers.md](linear_solvers.md) §9.2 for why they now have to say so first)
-- `refine_eigenfunction()` — for the history-dof reason in §3, not for an assembly reason
+  (this builds a replicated system and calls `solve_serial` on every rank — see
+  [linear_solvers.md](linear_solvers.md) §9.2 for why it now has to say so first)
+The **periodic driving response** has left this list; see §8, and so has
+**`refine_eigenfunction()`**, which was on it for the history-dof reason of §3 rather than an
+assembly one; see §9.
 Branch switching, left eigenvectors and the normal forms are no longer on this list either: they left
 the Python custom multi-assembly the way deflation and the Lyapunov coefficient did, and work under a
 plain `mpirun` and under `--distribute` — see [branch_switching.md](branch_switching.md)
@@ -360,3 +359,194 @@ Two bugs in oomph-lib's `CRDoubleMatrix::redistribute`, on the path
 `get_eigenproblem_matrices` takes when the problem is *not* distributed, made every eigenproblem with
 fewer equations than ranks abort; see
 [dev_docs/replicated_mpi_correctness.md](replicated_mpi_correctness.md) §2.
+
+---
+
+## 8. The periodic driving response
+
+`pyoomph/utils/periodic_driving_response.py`. Works under `mpirun`, with and without `--distribute`,
+and is solved genuinely in parallel in both cases. `tests/test_linear_response.py` covers the algebra
+against a closed form serially; the distributed agreement was measured on the drum tutorial (§8.3).
+
+### 8.1 What it solves
+
+At driving frequency `omega` the response is the bordered real system
+
+```
+[ s*J        omega*M    e_d  e_dt ] [xr ]   [0]
+[ s*omega*M   -J          .    .  ] [xi ] = [0]
+[ e_d^T        .          .    .  ] [l_1]   [1]
+[ e_dt^T       .          .    .  ] [l_2]   [0]
+```
+
+with `J` the **negated** assembled Jacobian (the `(A,M) = (-J,M)` convention of §0), `s` the sign
+orientation, and the two border rows pinning the driving ODE's own two dofs so that the driving is
+exactly `cos(omega t)`. Nothing about that changed; what changed is the **ordering of its unknowns**.
+
+### 8.2 Interleave the unknowns, do not permute the blocks
+
+The unknowns used to be ordered by block, `[xr(0..n), xi(0..n), l_1, l_2]`. Once the dofs are
+partitioned, rank *r* owning dof rows `[first_row, first_row+nrow_local)` then owns two **disjoint**
+row ranges of that system, which `MatCreateAIJ` cannot express — a row-distributed PETSc matrix owns
+one contiguous block per rank and nothing else. Interleaving by dof fixes it outright:
+
+```
+xr_k -> 2k        xi_k -> 2k+1        l_1 -> 2n        l_2 -> 2n+1
+```
+
+Rank *r* then owns `[2*first_row, 2*(first_row+nrow_local))`, contiguous, and the two border rows go
+on the last rank. A global column index `j` maps to `2j` / `2j+1` — no owner lookup, no prefix sum, no
+communication, and the column indices stay global exactly as `MatMPIAIJSetPreallocationCSR` wants.
+
+Serially the ordering is a permutation of the old one, so the answer is the same up to pivoting.
+Measured on the drum tutorial, 1000 frequencies × 10 Bessel modes: **max relative difference 2.8e-12**
+against the block-ordered result.
+
+### 8.3 The omega-dependent entry, and why the pattern must not move
+
+The driving ODE contributes `d(EQ_yp)/d(dp) = omega**2`, i.e. `-omega**2` in `matJ`. The old code
+overwrote that single entry in the assembled CSR on every iteration — a `SparseEfficiencyWarning` when
+the diagonal is structurally absent, and a **global** index write that no rank can perform once the
+rows are partitioned. It is now zeroed once at assembly and re-supplied per frequency as two explicit
+triplets, on its owning rank only.
+
+That is not just tidiness: it makes the **sparsity pattern of the bordered system independent of
+omega**, which is what lets `PETSCSolver.solve_python_built_distributed` keep one Mat and one KSP alive
+across the whole scan and MUMPS keep its symbolic analysis. Everything else about a frequency step is
+a values-only refresh.
+
+### 8.4 Where the row split comes from
+
+`GenericEigenSolver.get_parallel_row_split()` and `.local_row_block()` — lifted out of
+`SlepcEigenSolver` so this module does not have to reach into the PETSc subclass for them, and so a
+non-PETSc eigensolver does not break the import. Same policy as §3: under `--distribute` the split is
+oomph's own dof distribution and the matrices already hold only this rank's rows; under a plain
+`mpirun` the matrices are replicated and a contiguous split of `n` is imposed here, each rank slicing
+out its share. Both give one parallel solve rather than `nproc` identical ones.
+
+Verified on the drum (403 dofs → 808 bordered rows) at `np=3`, blocks tiling `[0, 808)` exactly:
+
+| | rank 0 | rank 1 | rank 2 |
+|---|---|---|---|
+| plain `mpirun` | `[0, 270)` | `[270, 538)` | `[538, 808)` |
+| `--distribute` | `[0, 212)` | `[212, 452)` | `[452, 808)` |
+
+### 8.5 The solve itself
+
+`GenericLinearSystemSolver.solve_python_built_distributed(ntot, nrow_local, first_row, mat_local,
+b_local)` — a system **pyoomph assembled in Python**, row-distributed, as opposed to one oomph-lib
+handed down through `solve_distributed`. Two implementations:
+
+- **PETSc**: an MPIAIJ on `COMM_WORLD` and a `preonly`+`lu` KSP, in slots of their own
+  (`_aux_mat`, `_aux_ksp`) — never `petsc_mat`/`ksp`, which hold the Newton solve's factorisation. A
+  caller that interleaves the two, which a frequency scan between solves does, would otherwise
+  back-substitute against whichever factors were written last. Keeping them apart is what makes
+  `_note_external_serial_solve()` *unnecessary* on this path rather than merely survivable. The factor
+  package is MUMPS or SuperLU_DIST under MPI and refused by name if neither is present, for the same
+  reason as `_require_parallel_capable`: PETSc's own LU is sequential, and quietly solving redundantly
+  would look like success while being slower than serial.
+- **The base class**: allgather the whole square system onto every rank (`mpi_allgather_square_csr`,
+  moved to `generic/mpi.py` from `bifurcation_tools._allgather_square`) and call `solve_serial`. This
+  is what the module used to do inline for a system it had built globally in the first place, and it
+  keeps pardiso / scipy / accelerate / superlu working under `--distribute` — redundantly, which it
+  says once, on rank 0.
+
+The response is replicated to full global length afterwards (`mpi_allgather_vector`), because
+`set_eigenfunction_as_dofs()`, the mesh data cache and the VTK output all index an eigenvector by
+global equation number. Same trade as §3.
+
+`solve_driving_response()` — the older route, through `solve_eigenproblem` or a Hopf tracker — was
+refused as well and needed no change at all: both of those work distributed already. Measured on the
+drum at 200 Hz with `use_target=True`, serial and `np=3 --distribute` agree to all 15 digits.
+
+### 8.6 The tutorial script had a second bug behind the guard
+
+`docs/source/tutorial/advstab/response/linear_response_drum.py` projects the response onto Bessel
+modes by splining it along the radius. `get_cached_mesh_data("drum", ...)` returns **this rank's
+partition** of that radius under `--distribute`, so lifting the guard alone would have produced a run
+that finished and wrote plausible-looking nonsense, differently on every rank. It now asks for
+`global_mesh=True` inside a `run_with_global_mesh_data(...)` block. Worth remembering for any other
+script that post-processes an eigenvector pointwise: making the *solve* distributed does not make the
+*analysis* distributed.
+
+### 8.7 Measured agreement
+
+Drum tutorial, 1000 frequencies, 10 Bessel amplitudes each, max relative difference against the serial
+run of the same build:
+
+| config | max rel. difference |
+|---|---|
+| serial, old block ordering | 2.8e-12 |
+| `mpirun -n 3` | 3.1e-11 |
+| `mpirun -n 3 --distribute` | 1.9e-11 |
+| `mpirun -n 3 --distribute --pardiso` (allgather fallback) | 4.3e-12 |
+| `mpirun -n 3 --distribute --superlu` (allgather fallback) | 3.1e-11 |
+
+The oscillator tutorial (an ODE, so nothing to partition) agrees to 2.6e-15 at `np=2 --distribute`.
+
+The response amplitudes are the right thing to compare: `distribute()` renumbers the dofs, so nothing
+that indexes a dof vector is comparable between a serial and a distributed run.
+
+---
+
+## 9. Adapting the mesh to an eigenfunction
+
+`Problem.refine_eigenfunction()` works under `mpirun`, replicated and `--distribute`. Nothing had to
+be changed to make it: the guard was the last user of a blocker that commit `2531e00` had already
+removed (§3), and it was kept only because the adaptation itself had never been run distributed. It
+now has been, and the suite is `tests/test_mpi_eigen_adapt.py` + `tests/mpi_eigen_adapt_worker.py` —
+which is also the *only* coverage this feature has ever had, serial included.
+
+Two cases, both on an adaptive `RectangularQuadMesh` with a diffusivity bump and a source placed
+asymmetrically so that the base-state and eigenfunction error fields peak in different places: a
+plane real eigenproblem, and an axisymmetric one at `azimuthal_m=1` — the complex path, the second
+estimator pass over `Im(v)`, and the forced-zero-dof manipulator (a scalar field is unconstrained at
+`r=0` for the base state but must vanish at `|m|=1`).
+
+### 9.1 The oracle that matters is the carry-across, not the mesh
+
+The eigenfunction crosses the adaptation in history levels 3 and 4. **Refining an element leaves the
+FE function it interpolates exactly unchanged**, so with one adaptation and no unrefinement the
+eigenfunction's integrals must come back out of those levels unchanged — whichever elements were
+refined, and on whatever partition. That is the assertion the lifted guard rests on, and it is
+partition-independent by construction. Measured:
+
+| | serial | `-n 2 --distribute` | `-n 4 --distribute` |
+|---|---|---|---|
+| Cartesian | 7.9e-16 | 2.2e-16 | 0 |
+| azimuthal `m=1` | 2.1e-7 | 2.1e-7 | 2.1e-7 |
+
+The azimuthal residue is the same in serial, so it belongs to the `m != 0` machinery (axis dofs
+forced to zero by a matrix manipulator rather than pinned) and not to MPI. It is not chased here, but
+it is the thing to look at if that path ever misbehaves.
+
+### 9.2 The refined mesh is partition-dependent, and that is the estimator
+
+A **replicated** `mpirun` reproduces the serial mesh to the last element (fingerprint, `ndof` and
+element count all identical at `-n 2` and `-n 4`, both cases): every rank computes every Z2 patch.
+
+Under `--distribute` it need not. At `-n 2` it happened to match exactly; at `-n 4` the Cartesian case
+came out at 1093 dofs against 1129 serially (−3%), with the eigenvalue moving by 2e-6 relative. The
+cause is upstream and documented in place: oomph-lib's distributed Z2 recovery **neglects the flux
+contributions of patches that can only be assembled from vertex nodes owned by another process** (the
+long "NOTE FOR FUTURE REFERENCE" comment in `LagrZ2ErrorEstimator::setup_patches`,
+`src/lagr_error_estimator.cpp`). Elements sitting near the refinement threshold are then decided
+differently.
+
+This was worth establishing rather than assuming, because a partition-dependent mesh is exactly the
+failure class of `adaptive_refinement.md` §8.2. The control that settles it is in the worker as
+`--driver base`: the *same* estimator and the *same* number of adaptations, driven by the base state
+alone, diverge from serial in the same way (885 → 857 dofs at `-n 4`). So the eigenfunction adds no
+partition dependence of its own, and `test_mesh_difference_is_the_estimator_not_the_eigenfunction`
+asserts precisely that — a mesh difference that appears *only* when adapting to an eigenfunction
+fails the suite.
+
+Everything else is held exactly: all ranks of one run report bit-identical results (the gathered
+eigenvector, `ndof`, the mesh fingerprint and every integral), and `PYOOMPH_CHECK_HALO_CONSISTENCY=throw`
+passes on the distributed arms of both cases.
+
+### 9.3 Still refused
+
+`refine_eigenfunction()` while a **bifurcation tracker** is installed, distributed or not: adapting
+renumbers, which pulls the augmented dof vector out from under the handler. The bifurcation GUI's
+`_adapt_to_eigenfunction()` keeps that refusal and has dropped its distributed one.

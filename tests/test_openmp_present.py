@@ -72,7 +72,19 @@ def test_openmp_is_compiled_in_when_the_build_promised_it():
         "this build was configured with PYOOMPH_USE_OPENMP=ON but the extension reports no OpenMP"
 
 
-@pytest.mark.skipif(not _pyoomph_core.has_openmp, reason="this build has no OpenMP")
+def test_a_threaded_backend_is_compiled_in_when_the_build_promised_it():
+    # The backend-agnostic promise, for platforms that thread through something other than OpenMP:
+    # macOS uses GCD/libdispatch (has_openmp is false there, has_gcd true), so the wheel jobs set
+    # PYOOMPH_EXPECT_THREADED rather than PYOOMPH_EXPECT_OPENMP on macOS. Either way a wheel that lost
+    # its threaded loop must fail rather than silently make --omp N a no-op.
+    if not os.environ.get("PYOOMPH_EXPECT_THREADED", ""):
+        pytest.skip("PYOOMPH_EXPECT_THREADED is not set; this build may legitimately have no threaded loop")
+    assert getattr(_pyoomph_core, "has_threaded_assembly", _pyoomph_core.has_openmp), \
+        "this build was configured for a threaded element loop (OpenMP or GCD) but the extension reports none"
+
+
+@pytest.mark.skipif(not getattr(_pyoomph_core, "has_threaded_assembly", _pyoomph_core.has_openmp),
+                    reason="this build has no threaded element loop (neither OpenMP nor GCD)")
 def test_the_threaded_element_loop_actually_runs(tmp_path):
     with _TinyPoisson() as p:
         p.set_output_directory(str(tmp_path))

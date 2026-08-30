@@ -181,6 +181,20 @@ def test_rejects_nonsensical_parameters():
 # ---------------------------------------------------------------- end to end
 
 
+def _solver_name(problem):
+    """Which linear solver actually got installed, for an assertion message.
+
+    These problems are ONE dof, so no assertion here can plausibly be about a solver's numerical
+    quality - but the macOS wheel jobs of 29th August 2026 failed all three deflation tests while
+    printing "falling back to the 'accelerate' solver", and nothing in the failure said which backend
+    had been used. Naming it is what makes the next run's message decidable either way.
+    """
+    try:
+        return type(problem.get_la_solver()).__name__
+    except Exception as e:
+        return "unknown (%s)" % (e,)
+
+
 def test_pitchfork_ode_finds_all_three_solutions(tmp_path):
     """The tutorial's own claim: x = 0, +1, -1 at r = 1.
 
@@ -198,7 +212,8 @@ def test_pitchfork_ode_finds_all_three_solutions(tmp_path):
     # margin, not machine epsilon: the solve stops when the residual does, so the position of a root
     # is only good to about 5e-9, and which backend factorised it - and how strongly the deflation
     # pushed on the way in - moves the last couple of digits.
-    assert sorted(sols) == pytest.approx([-1.0, 0.0, 1.0], abs=1e-7)
+    assert sorted(sols) == pytest.approx([-1.0, 0.0, 1.0], abs=1e-7), \
+        "got %r with the %s solver" % (sorted(sols), _solver_name(p))
     for s in sols:
         assert abs(abs(s) - round(abs(s))) < 1e-7
 
@@ -265,8 +280,8 @@ def test_deflated_continuation_traces_the_pitchfork(tmp_path):
                 r=numpy.linspace(-1.0, 1.0, 21), perturbation_amplitude=0.5,
                 num_random_tries=2, random_seed=0):
             branches.setdefault(branch_index, []).append((float(rvalue), float(sol[0])))
-    assert len(branches) == 3, "expected the trivial branch and the symmetric pair, got %r" % (
-        {k: len(v) for k, v in branches.items()},)
+    assert len(branches) == 3, "expected the trivial branch and the symmetric pair, got %r (%s solver)" % (
+        {k: len(v) for k, v in branches.items()}, _solver_name(p))
     finals = sorted(round(v[-1][1], 6) for v in branches.values())
     assert finals == pytest.approx([-1.0, 0.0, 1.0], abs=1e-6)
     # The trivial branch exists for every r; the other two only above the bifurcation.
@@ -291,10 +306,102 @@ def test_assembly_handler_shell_still_works(tmp_path):
         h.add_known_solution(p.get_current_dofs()[0])
         assert (h.alpha, h.p, h.shift_mode, len(h.Ws)) == (0.1, 2, "each", 1)
         p.perturb_dofs(numpy.array([0.3]))
-        p.solve()
+        try:
+            p.solve()
+        except RuntimeError as e:
+            # The deflated Newton solve diverged rather than landing on the other root. Bare, that
+            # arrives as "RuntimeError: OomphException" with no indication of where it stood or what
+            # factorised it - which is all the macOS arm64 wheel job of 29th August 2026 reported.
+            raise AssertionError(
+                "the deflated solve failed from x=%r with the %s solver: %s"
+                % (float(p.get_current_dofs()[0][0]), _solver_name(p), e)) from e
         found = float(p.get_current_dofs()[0][0])
         p.set_custom_assembler(None)
     assert abs(abs(found) - 1.0) < 1e-7, "deflating x=0 must lead to x=+-1, got %r" % found
+
+
+class _TracingPitchFork(PitchForkProblem):
+    """PitchForkProblem that records where every Newton step lands.
+
+    The macOS deflation failures say the deflated Newton left a 0.3 perturbation and ended at
+    x = -27 on a ONE-dof problem, and nothing said whether it got there in one wild step - which
+    points at the linear solve, and is what tests/test_linear_solver_selfcheck.py interrogates - or
+    wandered there over many, which points at the deflation factor instead. The trajectory separates
+    those two without needing either to be reproducible off a Mac.
+    """
+
+    def __init__(self, r=1.0):
+        super().__init__(r=r)
+        self.trajectory = []
+
+    def actions_after_newton_step(self):
+        super().actions_after_newton_step()
+        self.trajectory.append(float(self.get_current_dofs()[0][0]))
+
+
+def _deflated_step_ingredients(p, h, W, U):
+    """Everything the FIRST deflated Newton step is made of, as a readable string.
+
+    x solves J x = M R, eta = 1/M, the ordinary increment is eta*x and the deflated one is that
+    divided by 1 + G.(eta x) - see DeflationOperator.rescale_newton_step. That denominator is the
+    interesting number: it passes through ZERO, and the size of the first step is entirely its doing.
+    Measured here on Linux it is 0.339; the macOS first step of -41.6 from U = 0.3 implies about
+    0.0024 there, i.e. 140 times closer to the singularity. Which of the ingredients moved is what
+    this prints, since every one of them is either pure numpy on the dofs (M, G, and the distance
+    they come from) or JIT-compiled code (R and J), and those are two very different faults.
+    """
+    import numpy as _n
+    try:
+        p.set_custom_assembler(None)
+        R, J = p.assemble_jacobian(with_residual=True)
+        R = _n.array(R, dtype=float)
+        J = _n.asarray(J.todense(), dtype=float)
+        p.set_custom_assembler(h)
+        log_M, G = h.operator.evaluate(need_gradient=True, U=U)
+        M = float(_n.exp(log_M))
+        x = _n.linalg.solve(J, M*R)
+        ey = float(_n.exp(-log_M))*x
+        denom = 1.0 + float(_n.dot(G, ey))
+        return ("W=%r U=%r R=%r J=%r M=%.8g G=%r ordinary_increment=%r denominator=%.8g"
+                % (W, U, R, J, M, G, ey, denom))
+    except Exception as e:
+        return "could not be gathered: %r" % (e,)
+
+
+def test_the_deflated_newton_trajectory_is_reported(tmp_path):
+    """Not a numeric assertion beyond the landing: what it adds on a failure is the path taken."""
+    from pyoomph.generic.bifurcation_tools import DeflationAssemblyHandler
+    with _TracingPitchFork(r=1.0) as p:
+        p.set_output_directory(str(tmp_path / "trace"))
+        p.quiet()
+        p.initialise()
+        p.solve()
+        h = DeflationAssemblyHandler(alpha=0.1, p=2)
+        p.set_custom_assembler(h)
+        W = numpy.array(p.get_current_dofs()[0], dtype=float)
+        h.add_known_solution(W)
+        p.perturb_dofs(numpy.array([0.3]))
+        U = numpy.array(p.get_current_dofs()[0], dtype=float)
+        ingredients = _deflated_step_ingredients(p, h, W, U)
+        p.trajectory.clear()
+        try:
+            p.solve()
+        except RuntimeError as e:
+            raise AssertionError(
+                "the deflated solve failed with the %s solver; Newton went %r\n%s"
+                % (_solver_name(p), [round(v, 6) for v in p.trajectory], ingredients)) from e
+        found = float(p.get_current_dofs()[0][0])
+        p.set_custom_assembler(None)
+        steps = list(p.trajectory)
+    assert abs(abs(found) - 1.0) < 1e-7, (
+        "deflating x=0 must lead to x=+-1, got %r with the %s solver; Newton went %r\n%s"
+        % (found, _solver_name(p), [round(v, 6) for v in steps], ingredients))
+    # The first step is the one the linear solve alone decides, so it is worth stating separately:
+    # a solve that returns nonsense puts x somewhere absurd immediately, while a wrong deflation
+    # factor lets Newton wander. Generous on purpose - this is a diagnostic, not a tuning knob.
+    assert steps and abs(steps[0]) < 10.0, (
+        "the FIRST deflated Newton step already went to %r (whole path %r, %s solver)\n%s"
+        % (steps[0], [round(v, 6) for v in steps], _solver_name(p), ingredients))
 
 
 def test_refuses_adaptation_while_solutions_are_known(tmp_path):

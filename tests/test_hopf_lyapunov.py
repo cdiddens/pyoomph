@@ -74,21 +74,19 @@ import sys
 import numpy
 import pytest
 
+from conftest import has_complex_target_eigensolver
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _WORKER = os.path.join(_HERE, "hopf_lyapunov_worker.py")
 
 
 def _skip_reason():
-    try:
-        from petsc4py import PETSc  # type:ignore
-        if not PETSc.Sys.hasExternalPackage("mumps"):
-            return "PETSc has no MUMPS support"
-    except Exception:
-        return "petsc4py not available (PYTHONPATH must carry a complex PETSc build)"
-    try:
-        import slepc4py  # type:ignore  # noqa: F401
-    except Exception:
-        return "slepc4py not available"
+    # What this actually needs is an eigensolver that can target the complex Hopf pair, which used to
+    # mean SLEPc (with MUMPS, for the zero diagonals of the augmented systems). The built-in spectra
+    # backend does it without PETSc, and the worker no longer names a backend at all, so the question
+    # is the capability rather than the package.
+    if not has_complex_target_eigensolver():
+        return "no eigensolver that can target a complex eigenvalue (spectra or slepc4py)"
     return None
 
 

@@ -75,18 +75,148 @@ def _dump_imports(dll):
     return False
 
 
+def _rerun_the_compile(source):
+    """Run the same tccbox command pyoomph runs, with its output shown and the result inspected."""
+    try:
+        import pyoomph
+    except Exception as e:
+        _say("cannot import pyoomph to locate the jit headers: %r" % (e,))
+        return
+    include = os.path.join(os.path.dirname(os.path.abspath(pyoomph.__file__)), "jitbridge")
+    target = os.path.splitext(source)[0] + ".dll"
+    cmd = [sys.executable, "-m", "tccbox", "-I", include, "-shared", "-rdynamic",
+           "-DPYOOMPH_TCC_TO_MEMORY", "-Dsize_t=unsigned long long", source, "-o", target]
+    _say("re-running: " + " ".join(cmd))
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except (OSError, subprocess.SubprocessError) as e:
+        _say("could not run tccbox: %r" % (e,))
+        return
+    _say("tccbox exited %d" % out.returncode)
+    for stream, name in ((out.stdout, "stdout"), (out.stderr, "stderr")):
+        text = (stream or "").strip()
+        _say("tccbox %s: %s" % (name, text if text else "(empty)"))
+    _say("target exists afterwards: %s" % os.path.exists(target))
+    if os.path.exists(target):
+        _dump_imports(target)
+
+
+_LIBM_PROBES = ("erf", "erfc", "asinh", "acosh", "atanh", "exp", "log", "sqrt", "pow",
+                "sinh", "cosh", "tanh", "atan2", "fabs", "fmax", "fmin", "strcpy", "strlen")
+
+
+def _which_libm_symbols_link(outdir):
+    """Which of the functions the generated code may call can tcc actually LINK on this platform.
+
+    tcc stops at the first undefined symbol, so one failing compile names one function and hides the
+    rest. Each is tried on its own here, because the answer decides the fix: asinh, acosh and atanh
+    have exact closed forms that could be supplied in the header, while erf and erfc to the 1e-14 the
+    tests demand do not, and would need the symbols themselves - from the UCRT rather than the legacy
+    msvcrt tcc links by default.
+    """
+    workdir = os.path.join(os.path.abspath(outdir), "symcheck")
+    os.makedirs(workdir, exist_ok=True)
+    ok, missing, skipped = [], [], []
+    for name in _LIBM_PROBES:
+        src = os.path.join(workdir, name + ".c")
+        dst = os.path.splitext(src)[0] + (".dll" if os.name == "nt" else ".so")
+        argument = '"x"' if name in ("strcpy", "strlen") else "0.5"
+        if name == "strcpy":
+            body = "char buf[8]; double f(void){ strcpy(buf, \"ab\"); return 0.0; }\n"
+            decl = "char *strcpy(char *, const char *);\n"
+        elif name == "strlen":
+            body = "double f(void){ return (double)strlen(\"ab\"); }\n"
+            decl = "unsigned long long strlen(const char *);\n"
+        elif name in ("pow", "atan2", "fmax", "fmin"):
+            body = "double f(double x){ return %s(x, 0.5); }\n" % name
+            decl = "double %s(double, double);\n" % name
+        else:
+            body = "double f(double x){ return %s(x); }\n" % name
+            decl = "double %s(double);\n" % name
+        with open(src, "w") as f:
+            f.write(decl + body)
+        cmd = [sys.executable, "-m", "tccbox", "-shared", src, "-o", dst]
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        except (OSError, subprocess.SubprocessError) as e:
+            skipped.append("%s (%s)" % (name, e))
+            continue
+        if os.path.exists(dst):
+            ok.append(name)
+        else:
+            first = (out.stderr or out.stdout or "").strip().splitlines()
+            missing.append("%s [%s]" % (name, first[0] if first else "no diagnostic"))
+    _say("libm symbols tcc CAN link: " + (", ".join(ok) or "none"))
+    _say("libm symbols tcc CANNOT link: " + (", ".join(missing) or "none"))
+    if skipped:
+        _say("not probed: " + ", ".join(skipped))
+
+
+def _try_alternative_c_runtimes(outdir):
+    """Can tcc be pointed at a C runtime that HAS the C99 functions?
+
+    tcc links msvcrt by default, and msvcrt predates C99: erf, erfc, asinh, acosh, atanh, fmax and
+    fmin are all absent from it, which is why the JIT compile fails. The host CPython is UCRT-based
+    and ucrtbase.dll exports every one of them, so if tcc can be given that instead - it resolves
+    imports through .def files in its own lib directory - the whole class of failure goes away with
+    one flag and no numerics of our own. This reports which .def files exist and which -l name links.
+    """
+    try:
+        import tccbox
+    except Exception as e:
+        _say("tccbox is not importable here (%r)" % (e,))
+        return
+    root = os.path.dirname(os.path.abspath(tccbox.__file__))
+    defs = sorted(glob.glob(os.path.join(root, "**", "*.def"), recursive=True))
+    _say("tccbox ships %d .def files: %s" % (len(defs), ", ".join(os.path.basename(d) for d in defs[:20]) or "none"))
+
+    workdir = os.path.join(os.path.abspath(outdir), "runtimecheck")
+    os.makedirs(workdir, exist_ok=True)
+    src = os.path.join(workdir, "probe.c")
+    with open(src, "w") as f:
+        # One function from each missing family, so a partial answer is still informative.
+        f.write("double acosh(double);\ndouble erf(double);\ndouble fmax(double,double);\n"
+                "double f(double x){ return acosh(x) + erf(x) + fmax(x, 0.5); }\n")
+    for lib in ("ucrtbase", "ucrt", "api-ms-win-crt-math-l1-1-0", "msvcr120", "m"):
+        dst = os.path.join(workdir, "with_%s%s" % (lib, ".dll" if os.name == "nt" else ".so"))
+        cmd = [sys.executable, "-m", "tccbox", "-shared", src, "-l" + lib, "-o", dst]
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        except (OSError, subprocess.SubprocessError) as e:
+            _say("-l%-28s could not run (%s)" % (lib, e))
+            continue
+        if os.path.exists(dst):
+            _say("-l%-28s LINKS - this runtime has the C99 functions" % (lib,))
+        else:
+            first = (out.stderr or out.stdout or "").strip().splitlines()
+            _say("-l%-28s no (%s)" % (lib, first[0] if first else "no diagnostic"))
+
+
 def main():
     outdir = sys.argv[1] if len(sys.argv) > 1 else "tccdiag_out"
 
+    # The functions are applied to an UNKNOWN, not to a number. erf(0.7) is folded to a literal at
+    # code-generation time, so the first two versions of this probe produced a DLL with no libm call
+    # in it at all - it loaded fine and imported nothing but msvcrt, which proved nothing about a
+    # test whose DLL does call erf, erfc, asinh, acosh and atanh. This mirrors _Values in
+    # tests/test_math_functions.py: one unknown per function, each written through a solved variable
+    # so the calls and their derivatives both reach the generated code.
     code = (
         "from pyoomph import Problem, ODEEquations\n"
-        "from pyoomph.expressions import var_and_test, erf\n"
+        "from pyoomph.expressions import var_and_test, erf, erfc, asinh, acosh, atanh\n"
+        "FUNCS = {'erf': (erf, 0.0), 'erfc': (erfc, 0.0), 'asinh': (asinh, 0.0),\n"
+        "         'acosh': (acosh, 2.0), 'atanh': (atanh, 0.0)}\n"
         "class E(ODEEquations):\n"
         "    def define_fields(self):\n"
-        "        self.define_ode_variable('u')\n"
+        "        self.define_ode_variable('s')\n"
+        "        for n in FUNCS:\n"
+        "            self.define_ode_variable('u_' + n)\n"
         "    def define_residuals(self):\n"
-        "        u, v = var_and_test('u')\n"
-        "        self.add_residual((u - erf(0.7)) * v)\n"
+        "        s, vs = var_and_test('s')\n"
+        "        self.add_residual((s - 0.7) * vs)\n"
+        "        for n, (f, shift) in FUNCS.items():\n"
+        "            u, v = var_and_test('u_' + n)\n"
+        "            self.add_residual((u - f(s + shift)) * v)\n"
         "class P(Problem):\n"
         "    def define_problem(self):\n"
         "        self.add_equations(E() @ 'ode')\n"
@@ -99,8 +229,7 @@ def main():
         "    except Exception as e:\n"
         "        print('DIAG: reproduced the failure:', e)\n" % (outdir,)
     )
-    # A separate process on purpose: the failure under investigation is a DLL load, and a load that
-    # goes wrong can take the interpreter with it.
+
     # cwd=outdir's parent, never the checkout: a repository copy of pyoomph/ on sys.path has no
     # compiled extension, so the child would fail with "No module named pyoomph._pyoomph_core"
     # before reaching the JIT at all - which is exactly how this probe first came back empty.
@@ -124,8 +253,16 @@ def main():
     _say("produced %d shared librar(y/ies) and %d C file(s) under %s" % (len(produced), len(sources), outdir))
     if not produced:
         # Worth knowing on its own: if tcc never wrote a DLL, the failure is at COMPILE time and the
-        # import-table theory is wrong from the start.
-        _say("nothing was produced at all, so this is not a load-time dependency problem")
+        # import-table theory is wrong from the start. That is what happens here - and pyoomph does
+        # not notice, because call_cmd only raises on a NONZERO exit and tcc exits 0 having written
+        # nothing, so the failure surfaces much later as "DLL could not be loaded. Error code: 126",
+        # which is Windows saying the file does not exist. So run the same compile again, by hand,
+        # and show what tcc says when its output is not thrown away.
+        _say("nothing was produced at all, so this is a COMPILE failure, not a load-time dependency")
+        if sources:
+            _rerun_the_compile(sources[0])
+        _which_libm_symbols_link(outdir)
+        _try_alternative_c_runtimes(outdir)
         return 0
     for dll in produced:
         _dump_imports(dll)

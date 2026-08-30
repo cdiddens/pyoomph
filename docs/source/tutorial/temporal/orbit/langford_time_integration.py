@@ -30,9 +30,7 @@ from langford_floquet import *
 if __name__=="__main__":
      with LangfordProblem() as problem:
         # Use again an analytic Hessian for the determination of the first Lyapunov coefficient
-        problem.setup_for_stability_analysis(analytic_hessian=True)        
-        # We also need the SLEPc eigensolver here
-        problem.set_eigensolver("slepc").use_mumps() 
+        problem.setup_for_stability_analysis(analytic_hessian=True)                
         
         problem+=InitialCondition(x=0.01,z=1.1)@"langford"  # Some non-trivial initial position        
         

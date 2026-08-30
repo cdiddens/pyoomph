@@ -102,6 +102,81 @@ class MacAccelerateLinearSolver(GenericLinearSystemSolver):
         """Re-solve against a new right-hand side, reusing the cached factorization."""
         return self.solver.resolve(b)
 
+    #: Backward error above which a symmetric factorisation is discarded and redone with QR. Far
+    #: above any honest round-off (a good solve gives 1e-16 to 1e-12 here) and far below what a
+    #: failed one produces (7.9e14 measured), so it does not need tuning.
+    symmetric_fallback_tolerance:float=1e-6
+
+    def _check_solves(self)->bool:
+        """Whether to verify each solve against the matrix it was given.
+
+        Off by default - it costs a sparse matrix-vector product and a copy of the matrix per
+        factorisation - and switched on with PYOOMPH_ACCELERATE_CHECK_SOLVE=1. It exists because this
+        backend has twice now returned an answer that does not solve the system while reporting
+        success: Newton went from a residual of 0.118 to inf on a linear Poisson problem, and from
+        1.016 to 9.0e15 on a constrained-adaptivity one. A backward error is the one measurement that
+        distinguishes "the solver is wrong" from "the matrix it was handed is wrong", and neither
+        Apple's status nor the Newton residual says it.
+        """
+        import os
+        return os.environ.get("PYOOMPH_ACCELERATE_CHECK_SOLVE","") not in ("","0","false","False")
+
+    def _solve_and_maybe_check(self,rhs:NPFloatArray)->NPFloatArray:
+        """Solve, and - once per symmetric factorisation - check that the answer solves the system.
+
+        Apple's symmetric factorisations return a vector that does not satisfy Ax=b, with status
+        SparseStatusOK, on matrices pyoomph assembles routinely. Measured on macOS arm64: an
+        unpivoted LDL^T on a 1600-dof saddle point took Newton from a residual of 0.118 to inf, and
+        the PIVOTED ldlt_sbk on the 357-dof constrained-adaptivity system returned a backward error
+        of 7.9e14 - both silently. So the answer is verified rather than trusted, and a bad one is
+        recomputed with QR, which is general and has never done this.
+
+        The cost is one matrix-vector product per factorisation. Using QR throughout would cost far
+        more, on every symmetric problem that factorises perfectly well.
+        """
+        import numpy
+        x=self.solver.solve(rhs)
+        A=getattr(self,"_checked_matrix",None)
+        if A is None or not getattr(self,"_verify_next_solve",False):
+            return x
+        self._verify_next_solve=False
+        scale=float(numpy.linalg.norm(rhs)) or 1.0
+        backward_error=float(numpy.linalg.norm(A@x-rhs))/scale
+        if self._check_solves():
+            # The inputs as well as the error: a backward error of 1e38 on a 357-dof system is not
+            # something a factorisation can produce out of finite data, so "is what we were handed
+            # finite, and how big is it" has to be part of the same line, or the next question is
+            # another round trip.
+            finite_A=bool(numpy.isfinite(A.data).all()) if A.nnz else True
+            finite_b=bool(numpy.isfinite(rhs).all())
+            print("PYOOMPH_ACCELERATE_CHECK n=%d method=%s backward_error=%.3e "
+                  "|A|max=%.3e finite_A=%s |b|max=%.3e finite_b=%s"
+                  %(A.shape[0],self._last_factorize_method,backward_error,
+                    float(numpy.abs(A.data).max()) if A.nnz else 0.0,finite_A,
+                    float(numpy.abs(rhs).max()),finite_b),flush=True)
+        if backward_error>self.symmetric_fallback_tolerance:
+            if not getattr(self,"_warned_about_fallback",False):
+                self._warned_about_fallback=True
+                print("NOTE: the Accelerate '"+str(self._last_factorize_method)+"' factorisation "
+                      "returned a solution with a backward error of "+("%.3e"%backward_error)+
+                      " and reported success; refactorising this system with QR. Symmetric "
+                      "factorisations do this on indefinite and near-singular systems, which is why "
+                      "the answer is checked. Pass exploit_proven_symmetry=False to skip them "
+                      "entirely.",flush=True)
+            indptr,indices,data=self._last_csr
+            self.solver.factorize(A.shape[0],A.shape[0],indptr,indices,data,"qr")
+            self._last_factorize_method="qr"
+            self._structure_id=0   # the next factorisation must not refresh a QR as if symmetric
+            x=self.solver.solve(rhs)
+            # Checked too, and reported: if QR is no better, the fault is not the factorisation but
+            # what it was given, and that is a different investigation.
+            after=float(numpy.linalg.norm(A@x-rhs))/scale
+            if after>self.symmetric_fallback_tolerance:
+                print("NOTE: QR did not do better (backward error %.3e); the system itself is the "
+                      "problem, not the factorisation."%after,flush=True)
+        self._checked_matrix=None
+        return x
+
     def solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPIntArray,colptr:NPIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
         if op_flag==1:
             A=csr_matrix((values,rowind,colptr),shape=(n,n))
@@ -116,11 +191,21 @@ class MacAccelerateLinearSolver(GenericLinearSystemSolver):
             # recomputes only the numbers. problem.jacobian_structure_id promises the pattern is the
             # same; refactorize_values_only() verifies it against the stored indices before acting, so a
             # stale id costs a full factorization rather than a wrong answer.
-            # "ldlt" (not "cholesky": that needs SPD, which the symbolic proof cannot give) when the
-            # matrix is proven symmetric; the C++ side then reads only the upper triangle of the full
-            # CSR, so no triangle extraction is needed here. Users keeping their own method choice do
-            # so via exploit_proven_symmetry=False or by picking a symmetric method themselves.
-            method:MacAccelerateMethod="ldlt" if self._use_symmetric_factorisation_now() else self.method
+            # "ldlt_sbk", not "ldlt": Apple's SparseFactorizationLDLT is the UNPIVOTED factorization,
+            # which is only valid for a definite matrix, while the symbolic proof behind
+            # _use_symmetric_factorisation_now() establishes symmetry and nothing more. Every saddle
+            # point pyoomph assembles - an interface Lagrange multiplier, a constraint, an augmented
+            # tracker - is symmetric INDEFINITE, and unpivoted LDL^T meets a zero pivot there and
+            # returns nonsense without reporting failure. Measured on the coupled curved-interface
+            # Poisson problem of tests/test_curved_boundaries.py: 1600 dofs, symmetric to 2.2e-16,
+            # 1472 positive and 128 negative eigenvalues (one per interface multiplier); Accelerate
+            # reported a successful factorisation and Newton went from a residual of 0.118 to inf in
+            # one step, on a LINEAR problem. SBK is Bunch-Kaufman with supernodes, i.e. the pivoted
+            # variant the symmetry proof actually justifies; "ldlt_tpp" (threshold partial pivoting)
+            # is the more conservative alternative, and plain "ldlt" remains available for anyone who
+            # knows their system is definite. Cholesky is still not an option - that needs SPD, which
+            # the proof cannot give either.
+            method:MacAccelerateMethod="ldlt_sbk" if self._use_symmetric_factorisation_now() else self.method
             structure_id=self.problem.jacobian_structure_id
             if (self.reuse_symbolic_factorization and structure_id!=0 and structure_id==self._structure_id
                     and method==self._last_factorize_method
@@ -132,11 +217,33 @@ class MacAccelerateLinearSolver(GenericLinearSystemSolver):
             self._structure_id=structure_id
             self.solver.factorize(n,n,indptr,indices,data,method)
             self._last_factorize_method=method
+            # Kept only for the check below, and only when it is switched on: holding the matrix
+            # otherwise would double the memory a factorisation costs.
+            # Verified on the FIRST solve after every symmetric factorisation - one matrix-vector
+            # product per factorisation, not per solve, and the matrix is dropped again as soon as it
+            # has been used. A bad factorisation poisons every solve that follows it, so checking the
+            # first is enough to catch it.
+            symmetric_now=method in ("ldlt","ldlt_unpivoted","ldlt_sbk","ldlt_tpp","cholesky")
+            self._checked_matrix=A if (self._check_solves() or symmetric_now) else None
+            self._verify_next_solve=bool(symmetric_now or self._check_solves())
+            self._last_csr=(indptr,indices,data)
         elif op_flag==2:
             if nrhs != 1:
                 raise NotImplementedError("Only single right-hand side is supported")
-            x=self.solver.solve(b)
-            b[:] = x[:]
+            # _solve_newton_step, not solve()-and-return: it is the one entry point that applies BOTH
+            # of the things installed on top of a plain solve, and every other backend goes through it
+            # (pardiso.py, scipy.py, petsc.py). This one applied neither, so on a Mac falling back to
+            # Accelerate - Apple silicon without PETSc/MUMPS - a deflated Newton took the UNDEFLATED
+            # step and an augmented handler never got the solve at all.
+            #
+            #   * a deflation OPERATOR rescales the increment (_postprocess_newton_step). Adding only
+            #     that fixed the two tests that install one, on arm64, in the run of 29th August 2026.
+            #   * a custom assembler with has_custom_solve_routine() - the augmented trackers, and the
+            #     DeflationAssemblyHandler shell - is handed the solve as a CALLABLE and does its own
+            #     algebra with it. That is the half this backend was still missing, which is why the
+            #     two handler-based tests went on failing with a trajectory identical to before the
+            #     first fix: -41.6 at the first step, the undeflated increment exactly.
+            b[:] = self._solve_newton_step(lambda rhs: self._solve_and_maybe_check(rhs), b)
         else:
             raise NotImplementedError("Only transpose operation is supported")
 

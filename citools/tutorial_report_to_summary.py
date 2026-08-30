@@ -87,6 +87,8 @@ def main():
         flags.append("--mpirun %d" % opts["mpirun"])
     if opts.get("omp"):
         flags.append("--omp %d" % opts["omp"])
+    if opts.get("timeout"):
+        flags.append("--timeout %g" % opts["timeout"])
 
     out = []
     out.append("## %s - %d passed, %d failed, %d skipped" % (args.title, len(passed), len(failed), len(skipped)))

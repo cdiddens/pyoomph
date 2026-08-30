@@ -53,6 +53,12 @@ Its stages, in order:
 Stage 2 storing the raw error in the *override* slot is the reason stages 4 and 5 can use `max()`
 throughout: overrides only ever raise an error, never lower it.
 
+Stage 3 runs under `--distribute` too since the `refine_eigenfunction()` guard came off; what a
+distributed run does to the *outcome* of stages 2 and 3 alike — oomph-lib's Z2 recovery neglects the
+patches it cannot assemble from locally owned vertex nodes, so elements near the threshold can be
+decided differently from serial — is measured in
+[mpi_eigenproblems.md](mpi_eigenproblems.md) §9.2.
+
 ### The two sentinel values
 
 Stages 4 and 5 do not carry flags. They encode their verdict as a magic error value, chosen relative

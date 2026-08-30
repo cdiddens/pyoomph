@@ -57,8 +57,11 @@ Likewise, the eigensolver flags are mutually exclusive:
 ``--slepc_mumps``
       Use SLEPc as eigensolver with MUMPS as backend. This is the default whenever PETSc/SLEPc with MUMPS support is installed, so the flag is only required to override an eigensolver selected in the driver code itself.
 
+``--spectra``
+      Use the built-in `Spectra <https://spectralib.org>`__ eigensolver. It needs no PETSc/SLEPc at all -- it is compiled into pyoomph -- and can target a given, also complex, eigenvalue, but it is serial: under ``--distribute`` the matrices are gathered onto one process first. This is the default whenever PETSc/SLEPc with MUMPS is not available, so the flag is mainly useful to override a different choice, e.g. to compare against SLEPc.
+
 ``--arpack``
-      Use scipy's ARPACK-based eigensolver. Note that this is scipy's own backend, not the ARPACK-with-Pardiso combination which pyoomph selects by default when SLEPc/MUMPS is missing but MKL Pardiso is present.
+      Use scipy's ARPACK-based eigensolver. Note that this is scipy's own backend, not the ARPACK-with-Pardiso combination which pyoomph falls back to when neither SLEPc/MUMPS nor Spectra is available but MKL Pardiso is present. Neither ARPACK variant can target an eigenvalue.
 
 And the C compiler backend used to build the just-in-time generated code is likewise mutually exclusive between:
 

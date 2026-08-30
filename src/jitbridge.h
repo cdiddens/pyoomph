@@ -68,6 +68,13 @@ void *malloc(size_t);
 void *free(void *);
 void *calloc(size_t, size_t);
 char *strncpy(char *, const char *, size_t);
+// strcpy is used by the generated JIT_ELEMENT_init to fill in the space names (codegen.cpp), and its
+// omission here cost a Windows wheel failure that read as something else entirely: tcc warned
+// "implicit declaration of function 'strcpy'", EXITED 0, and wrote no DLL at all, so pyoomph only
+// noticed when LoadLibrary reported error 126 - which is Windows saying the file does not exist, not
+// that a dependency is missing. On ELF the same implicit declaration is harmless, the symbol being
+// resolved at dlopen; that asymmetry is why this went unnoticed for so long.
+char *strcpy(char *, const char *);
 
 #define bool _Bool
 #define true 1

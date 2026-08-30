@@ -41,9 +41,21 @@
 # attribute (RemesherBase.problem is a live lookup now, meshes/remesher.py). The class of bug is
 # easy to reintroduce with any new back-reference, hence this test.
 #
+# Why this compares two runs rather than asserting "leaked" is simply absent: the absolute count is
+# not portable. "from pyoomph import *" (which the ordinary user script uses) binds pyoomph's
+# nanobind singletons into __main__, and on some interpreter builds - macOS in particular - nanobind's
+# leak check runs during _pyoomph_core finalization BEFORE __main__ is cleared, so those singletons
+# are always reported leaked, remesh or not (a constant baseline, independent of problem size). On
+# Linux the finalization order clears them first and the baseline is zero. Either way the question that
+# matters is the same: does remeshing leave anything alive that an explicit release() would have freed?
+# So the baseline is the identical script with p.release() (which tears the Problem's C++ side down
+# regardless of any Python cycle); the plain run must not leak MORE than that. A reintroduced cycle
+# keeps the whole Problem graph alive in the plain run only, pushing its count above the baseline.
+#
 # Run in a subprocess: the symptom is a message nanobind prints during interpreter finalization,
 # long after any assertion inside the test could observe it.
 
+import re
 import subprocess
 import sys
 import textwrap
@@ -80,7 +92,27 @@ _SCRIPT = textwrap.dedent("""
     p.initialise()
     p.force_remesh()
     print("REMESHED", flush=True)
+    %s
 """)
+
+# Substituted for the second %s. The plain run leaves the Problem for __del__/gc to reach at shutdown
+# (the case under test); the baseline run tears it down by hand, so whatever it still reports is the
+# platform's unavoidable "from pyoomph import *" shutdown noise, not a live Problem.
+_PLAIN = ""
+_RELEASED = "import gc as _gc; p.release(); _gc.collect()"
+
+
+def _run(tmp_path, remesher, teardown, tag):
+    script = tmp_path / ("remesh_%s.py" % tag)
+    script.write_text(_SCRIPT % (remesher, teardown))
+    return subprocess.run([sys.executable, str(script)], cwd=str(tmp_path),
+                          capture_output=True, text=True, timeout=600)
+
+
+def _leaked_instances(output):
+    """The count from 'nanobind: leaked N instances!', or 0 if the line is absent."""
+    matches = re.findall(r"nanobind: leaked (\d+) instances", output)
+    return max((int(m) for m in matches), default=0)
 
 
 @pytest.mark.parametrize("remesher", [
@@ -90,20 +122,28 @@ _SCRIPT = textwrap.dedent("""
 def test_remeshed_problem_is_not_leaked(tmp_path, remesher):
     """A script that remeshes and then just ends must not leak its Problem.
 
-    Deliberately no "with" block and no release() call: those tear the Problem down by hand and
-    would hide the very cycle this checks for."""
+    The plain run deliberately uses no "with" block and no release() call: those tear the Problem down
+    by hand and would hide the very cycle this checks for. The released run is the baseline it is
+    measured against (see the module comment)."""
     pytest.importorskip("gmsh", reason="remeshing needs gmsh")
-    script = tmp_path / "remesh_case.py"
-    script.write_text(_SCRIPT % remesher)
-    proc = subprocess.run([sys.executable, str(script)], cwd=str(tmp_path),
-                          capture_output=True, text=True, timeout=600)
-    assert proc.returncode == 0, (
-        "exited %d\n--- stdout ---\n%s\n--- stderr tail ---\n%s"
-        % (proc.returncode, proc.stdout[-2000:], proc.stderr[-3000:]))
-    assert "REMESHED" in proc.stdout, "the script never got as far as remeshing"
-    output = proc.stdout + proc.stderr
-    assert "nanobind: leaked" not in output, (
-        "the remeshed Problem was still alive at interpreter shutdown -- some back-reference from "
-        "a mesh (or its template/remesher/code generator) to the Problem closes a cycle through "
-        "the invisible nb::keep_alive edge again:\n%s"
-        % "\n".join(l for l in output.splitlines() if "leaked" in l or "nanobind" in l))
+
+    plain = _run(tmp_path, remesher, _PLAIN, "plain")
+    released = _run(tmp_path, remesher, _RELEASED, "released")
+
+    for proc, name in ((plain, "plain"), (released, "released")):
+        assert proc.returncode == 0, (
+            "%s run exited %d\n--- stdout ---\n%s\n--- stderr tail ---\n%s"
+            % (name, proc.returncode, proc.stdout[-2000:], proc.stderr[-3000:]))
+        assert "REMESHED" in proc.stdout, "the %s run never got as far as remeshing" % name
+
+    plain_leaked = _leaked_instances(plain.stdout + plain.stderr)
+    base_leaked = _leaked_instances(released.stdout + released.stderr)
+
+    assert plain_leaked <= base_leaked, (
+        "the remeshed Problem was still alive at interpreter shutdown: the plain run leaked %d nanobind "
+        "instances, %d more than the %d that survive even when the Problem is released by hand -- some "
+        "back-reference from a mesh (or its template/remesher/code generator) to the Problem closes a "
+        "cycle through the invisible nb::keep_alive edge again:\n%s"
+        % (plain_leaked, plain_leaked - base_leaked, base_leaked,
+           "\n".join(l for l in (plain.stdout + plain.stderr).splitlines()
+                     if "leaked" in l or "nanobind" in l)))

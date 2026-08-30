@@ -239,7 +239,14 @@ def _assert_matches_serial(what, serial, per_rank, distributed):
 #              eigenvector block in the naive numbering, which the translation table has to place.
 # azimuthal -- AzimuthalSymmetryBreakingHandler, [u | Re | Im | param | Omega] plus the axis dofs
 #              it forces to zero by global equation number.
-_CASES = ["fold", "hopf", "pitchfork", "azimuthal"]
+# fold_interface -- the fold case on a problem that ALSO has an interface mesh, so a handler sets up
+#              its dof halo scheme over more than one mesh. Same fold, so it must give the same
+#              numbers. It is NOT a regression test for the tree-less halo element of INFO_oomph-lib,
+#              29th August 2026 (three tutorials died with SIGSEGV in
+#              Tree::stick_leaves_into_vector(this=0) on activation): that one is a BULK element in
+#              the halo layer, and this interface mesh has no root halo elements at all. Covering it
+#              is open -- dev_docs/mpi_augmented_systems.md section 6b.
+_CASES = ["fold", "hopf", "pitchfork", "azimuthal", "fold_interface"]
 
 
 @pytest.mark.parametrize("case", _CASES)

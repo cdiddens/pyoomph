@@ -345,6 +345,39 @@ other transfer paths) and on `docs/source/tutorial/ale/beads_on_string.py`, whic
 distributed with the same three remeshing events as serially, the ranks in step, and a minimum radius
 tracking the serial one to ~5e-5 over the whole transient.
 
+### 3.4b The reference arclength of `EnforcedInterfacialLaplaceSmoothing`
+
+Same shape of problem as 3.4a, found later and in a place that did not refuse a distributed mesh at
+all - it just produced a wrong one. The equation keeps interface nodes at their original relative
+spacing by solving for the arclength along the interface and shifting the nodes tangentially, and
+`before_assigning_equations_postorder` measures the *reference* arclength once at setup by walking the
+line segments from zero. Distributed, that walk sees this rank's piece of the curve, so every rank
+started counting at zero on its own piece and the ranks disagreed about the nodes they share. On
+`docs/source/tutorial/ale/spread/droplet_spread_hyperelastic_tangential_shift.py` at two ranks the
+reference configuration was then discontinuous at the partition boundary and the first stationary
+solve went 1.62 -> 8.3e-2 -> `inf`, where serially and replicated it goes 1.62 -> 4.4e-6 -> 2.8e-10.
+
+The fix is 3.4a's: `_walk_reference_arclengths` is split out of the assignment, run on the merged
+interface on rank 0, broadcast as `(x, y, arclength)` and assigned by k-d tree position match. Two
+differences from the zeta case are worth knowing:
+
+* **It must reach the halo nodes**, so it walks `mesh.nodes()` rather than the local mesh data cache.
+  `_s_fixed_` is a *pinned* value, and oomph synchronises dofs, not pinned values: a halo copy left
+  with its own local arclength makes the halo element assemble a different equation from the element
+  it stands in for.
+* **Both paths now read the NONDIMENSIONAL cache.** `_s_fixed_`/`_s_solved_` are declared without a
+  scale, so their values are nondimensional, and `Node::x()` - what the position match compares
+  against - is too. The walk used to read the dimensional cache, which on a problem with
+  `set_scaling(spatial=R0)` wrote a length in metres into a nondimensional field. Harmless in the end,
+  because the equation only ever compares `s` with `s0` and both carried the same unit (the serial
+  Newton history is unchanged to all printed digits), but it made the two conventions meet in the
+  position match.
+
+`tests/test_mpi_arclength_smoothing.py` pins it at 2 and 3 ranks against a serial reference, comparing
+the arclength at each node by position rather than the profile of a rank's own stretch. The tutorial
+runs to completion at 2 and 3 ranks with the same final bounding box and the same pressure and
+velocity extrema as serially (8 digits).
+
 ### 3.5 `Remesher2d` from the merged boundaries
 
 The automatic remesher reconstructs the geometry from the boundaries of the mesh it replaces, walking

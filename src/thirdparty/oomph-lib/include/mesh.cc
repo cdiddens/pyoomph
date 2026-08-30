@@ -4871,6 +4871,21 @@ namespace oomph
         RefineableElement* ref_el_pt = dynamic_cast<RefineableElement*>(el_pt);
         if (ref_el_pt != 0)
         {
+          // FOR PYOOMPH
+          // Upstream takes "casts to RefineableElement" to imply "has a tree" and dereferences
+          // tree_pt() unconditionally. In pyoomph the cast says nothing: EVERY element derives from
+          // RefineableSolidElement (pyoomph::FiniteElementBase), and a halo element can still have
+          // no tree -- measured on docs/source/tutorial/advstab/eigenbranch_continuation.py, where
+          // the null one is a bulk pyoomph::BulkElementQuad2dC2 in the halo layer of the bulk mesh.
+          // A tree-less element is its own only leaf, so it belongs in the non-refineable branch
+          // below. Reached from every bifurcation-tracking handler, which builds the dof halo
+          // scheme in its constructor: without this, activating tracking on such a distributed
+          // problem segfaults here.
+          if (!ref_el_pt->tree_pt())
+          {
+            el_pt->add_internal_value_pt_to_map(map_of_halo_data);
+            continue;
+          }
           // Vector of pointers to leaves in tree emanating from
           // current root halo element
           Vector<Tree*> leaf_pt;

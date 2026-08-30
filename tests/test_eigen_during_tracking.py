@@ -66,6 +66,8 @@ import sys
 import numpy
 import pytest
 
+from conftest import has_complex_target_eigensolver
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _WORKER = os.path.join(_HERE, "mpi_bifurcation_worker.py")
 # Kept in step with PitchforkProblem.ASPECT in the worker by hand: the worker is run as a
@@ -75,16 +77,15 @@ _PITCHFORK_ASPECT = 1.05
 
 
 def _skip_reason():
-    try:
-        from petsc4py import PETSc  # type:ignore
-        if not PETSc.Sys.hasExternalPackage("mumps"):
-            return "PETSc has no MUMPS support"
-    except Exception:
-        return "petsc4py not available (PYTHONPATH must carry a complex PETSc build)"
-    try:
-        import slepc4py  # type:ignore  # noqa: F401
-    except Exception:
-        return "slepc4py not available"
+    """What these cases need is an eigensolver that can TARGET an eigenvalue, not PETSc.
+
+    They used to demand petsc4py with MUMPS, because the worker named that pair itself; it now names
+    it only where it exists (mpi_bifurcation_worker._select_solvers) and falls back to the built-in
+    spectra backend, which shift-and-inverts just as SLEPc's ST does. So the guard asks for the
+    capability, and a plain wheel runs these instead of skipping them.
+    """
+    if not has_complex_target_eigensolver():
+        return "no eigensolver that can target an eigenvalue (spectra or slepc4py)"
     return None
 
 

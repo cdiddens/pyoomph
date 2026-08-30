@@ -224,6 +224,71 @@ The operator is dropped from the broadcast key (it is refused for global data an
 survive pickling); requests for meshes of a problem the scope does not know about raise rather than
 being sent into the void.
 
+### 3.4c Perturbed requests: the eigendynamics animation
+
+`Problem.create_eigendynamics_animation` draws the base state plus `Re(f*v)` for a complex factor
+`f = A*exp(i*m*phi)*exp(lambda*t)` — one frame per phase, and a *mirrored* half of the same frame with
+`exp(i*m*(phi+pi))` instead. Serially, `MatplotlibPlotter._get_mesh_data` just perturbs the dofs around
+the extraction and restores them.
+
+Under §3.4b that is impossible: the perturbation would be applied by rank 0, inside `func`, and merged
+with everybody else's **base** state. Nor can rank 0 do it and tell the others afterwards —
+`set_current_dofs` is collective, so one rank calling it alone deadlocks. The animation was therefore
+refused on a distributed mesh, and `docs/source/tutorial/plotting/eigendynamics.py` was the last
+tutorial that could not run under `--distribute`.
+
+`merge_perturbed_global_mesh_data(msh, key, eigenvector_index, factor)` makes the perturbation part of
+the request instead. The request tuple grows one optional element,
+
+    plain:     (problem name, mesh full name, key fields)
+    perturbed: (problem name, mesh full name, key fields, (eigenvector index, complex factor))
+
+so a plain request is unchanged on the wire, and the serve loop unpacks by length. Only two scalars
+travel: an eigenvector is replicated full length on every rank
+(`SlepcEigenSolver._vector_to_global_array`), and `get_current_dofs`/`set_current_dofs` are global and
+collective, so every rank reconstructs the identical perturbed state from the index and the factor.
+
+Three properties are load-bearing:
+
+* **Atomic.** Perturb, extract, gather, restore is one request. The restore is in a `finally`, and
+  `_merge_on_root` — the only part that fails on rank 0 alone — runs *after* it. No rank can be left
+  holding a perturbed state, whatever fails. This is also why the function cannot simply wrap
+  `merge_global_mesh_data`.
+* **Two invalidations, both inside the request.** `_local_payload` reads the ordinary
+  (`global_mesh=False`) slot, which the plotter's field probes have already filled with base-state
+  data, so the cache is invalidated *before* the perturbation; and the perturbed values would
+  otherwise sit in slots keyed as if they were the base state, so it is invalidated *after* the
+  restore too. Both happen on every rank, so the hit/miss symmetry of §3.4 survives.
+* **The result is never cached.** The key has no room for the factor: the two mirror halves of one
+  frame, and successive frames, would collide. The entry is returned directly. That matches the
+  serial cost, which re-extracts per plotted part anyway.
+
+Validation before the first collective is not a style choice here: anything that raises between the
+broadcast and the gather leaves rank 0 unwinding while the others wait. `needs_merging`, `with_halos`,
+the operator refusal (this path bypasses `MeshDataCacheStorage.get_data`, so §3.3/§3.5 no longer guard
+it) and the eigenvector index are all checked up front.
+
+**A serial bug fell out of this.** Local expressions are evaluated lazily, i.e. after the dofs are
+restored, so an animated frame drew every ordinary field from the perturbed state and every
+`add_local_function` field from the base state. The merged path evaluates them eagerly inside the
+perturbed window (§4.1), so the two would have disagreed; `_get_mesh_data` now materialises them before
+restoring, and both are right.
+
+The same request scope carries the **tracers** of a plot, for the same reason: a particle belongs to
+the process holding its element, so `MatplotLibTracers` -- which reads `mesh.get_tracers()` -- drew
+whatever happened to be on the drawing rank, silently, since a scatter plot of a subset looks
+perfectly reasonable. `gather_global_tracers` returns a `GatheredTracers` with the same
+`get_positions`/`get_tags`/`get_ids`/`get_history` API a collection has, so the drawing code did not
+change; the underlying gathers are `MPI_Allgatherv` sorted by particle identity. Trails need the
+position history, and the only gather that carries it is the checkpoint one (`_save_state(True)`),
+whose packing is decoded there.
+
+`tests/test_mpi_eigendynamics.py` covers it at 2 and 3 ranks: the collective called symmetrically, the
+same thing through the request scope (including a plain request afterwards that must return exactly
+what the plain request before it did), the whole animation through
+`create_eigendynamics_animation`, that no rank keeps a perturbed state, and that a perturbation which
+reaches only one rank's dofs is *detectably* different — otherwise the comparison would prove nothing.
+
 ### 3.5 Operators
 
 Operators (`MeshDataCombineWithEigenfunction`, `MeshDataRotationalExtrusion`,
@@ -558,9 +623,11 @@ Left open:
 
 1. **Operators** (`MeshDataCombineWithEigenfunction`, the extrusions) still raise `NotImplementedError`
    together with `global_mesh=True`; see §3.5 for the `required_cache_keys` design that resolves it.
-2. **Eigendynamics animations** (`create_eigendynamics_animation`) raise on a distributed mesh: they
-   perturb and restore the dofs around the extraction, which only rank 0 would do inside the request
-   scope, so the other ranks would contribute unperturbed data to the same merge.
+2. ~~**Eigendynamics animations**~~ and ~~**tracer plots**~~ DONE (29th August 2026): both are
+   requests now, so every rank takes part -- §3.4c. The one thing a distributed tracer plot still
+   cannot show is the fading trail of a DEAD particle: those are deliberately not gathered
+   (`dev_docs/tracers.md`), so a particle that has left the domain loses its trail at once instead of
+   over the history window.
 3. **Remeshing** still works on per-rank data; switching `RemeshWhen` and the boundary identification
    to the merged mesh is the next consumer.
 4. **Coordinate fallback** (§5.3) is not implemented: every distributed mesh met so far has the shared

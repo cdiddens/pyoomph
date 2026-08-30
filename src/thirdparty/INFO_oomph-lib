@@ -778,3 +778,31 @@ a moving mesh a copy carries position dofs of its own and (a) leaves nothing to 
 See dev_docs/distributed_periodic_bc.md and tests/test_mpi_periodic.py.
 Upstream equivalent: none, this is a pyoomph fix (upstream oomph-lib does not support periodic
 boundary conditions on a distributed mesh either).
+
+mesh.cc (Changed on 29th August 2026, tree-less halo elements):
+Mesh::get_all_halo_data walks the tree of every root halo element it finds to be a RefineableElement,
+dereferencing tree_pt() without checking it. In pyoomph that cast carries no information: EVERY element
+derives from RefineableSolidElement (pyoomph::FiniteElementBase), and a halo element can still have no
+tree, so the cast succeeds on a null tree pointer and the walk segfaults. Measured with a breakpoint on
+docs/source/tutorial/advstab/eigenbranch_continuation.py under mpirun -n 2 --distribute: the element
+that takes the new branch is a BULK pyoomph::BulkElementQuad2dC2 (Ndof=35, one external data,
+Non_halo_proc_ID=1) in the halo layer of the 222-element bulk mesh -- not a face element, as the first
+version of this entry said. Why that mesh's halo elements carry no tree while e.g. the fixed-mesh Bratu
+problem of tests/mpi_bifurcation_worker.py does is not established. A tree-less element is its own only
+leaf, so the guard added here treats it like the non-refineable branch does and adds the element's own
+internal data to the map.
+Reached from every bifurcation-tracking handler: MyFoldHandler/MyPitchForkHandler etc. call
+Problem::setup_dof_halo_scheme() while constructing the augmented dof distribution
+(AugmentedDofDistributionHelper::initialise, src/bifurcation.cpp), so activate_bifurcation_tracking on
+such a distributed problem crashed there - three tutorials in the --distribute sweep of 29th August 2026
+(advstab/movmesh/hanging_droplet.py fold, advstab/azimuthal/rayleigh_benard_azimuthal_stability.py
+pitchfork, advstab/eigenbranch_continuation.py eigenbranch), each with a backtrace ending in
+Tree::stick_leaves_into_vector (this=0x0). With the guard, all three run to completion under mpirun -n 2 --distribute
+(rayleigh_benard_azimuthal_stability.py needs the COMPLEX PETSc build for its m=1 leg, as it does
+serially - with the real one it stops at "cannot handle a complex eigenvalue problem", which is an
+environment matter and not this bug).
+The identical guard already exists, also marked FOR PYOOMPH, at the two sibling sites in mesh.h
+(halo_element_pt and haloed_element_pt); this call site was simply missed. The two remaining copies of
+the pattern in problem.cc (load_balance) are untouched, pyoomph does not reach them.
+See dev_docs/mpi_augmented_systems.md section 6b.
+Upstream equivalent: none; upstream never has a refineable element without a tree.

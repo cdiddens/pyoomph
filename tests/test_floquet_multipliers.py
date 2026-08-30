@@ -75,12 +75,54 @@ import sys
 import numpy
 import pytest
 
+from conftest import has_complex_target_eigensolver
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _WORKER = os.path.join(_HERE, "floquet_worker.py")
 
 # The radial multiplier of the Stuart-Landau limit cycle: r'=r(1-r^2) linearizes to -2 at r=1, over
 # a period of 2*pi.
 _EXACT_RADIAL = float(numpy.exp(-4 * numpy.pi))
+
+
+def _no_eigensolver_reason():
+    """Why the legacy method="eigenproblem" path cannot run here, or None.
+
+    That path is the only one in this module that solves a generalised eigenproblem
+    (Problem.get_floquet_multipliers -> get_eigen_solver().solve); the default condensation method
+    needs no eigensolver at all, which is why the rest of the module is unaffected. What it cannot
+    run on is scipy's ARPACK, which cannot build an Arnoldi factorization for this pencil - "ARPACK
+    error -9999", raised out of the solve rather than returning a poor answer (seen on the wheel of
+    29th August 2026, which had neither PETSc nor spectra). SLEPc and the built-in spectra backend
+    both shift-and-invert instead, so either will do.
+    """
+    if not has_complex_target_eigensolver():
+        return "neither spectra nor slepc4py: the eigenproblem method falls back to scipy, whose ARPACK cannot factor this pencil"
+    return None
+
+
+_NO_EIGENSOLVER = _no_eigensolver_reason()
+
+
+def _describe_exit(out):
+    """How the worker ended, in words, for an assertion message.
+
+    Without this a worker that DIED produces exactly the same message as one that ran and printed
+    nothing - "no result line" - which is what the macOS wheel jobs of 29th August 2026 reported for
+    four cases each. A negative returncode is a signal on POSIX, and that single number is the
+    difference between "the solver gave up" and "the process was killed".
+    """
+    import signal
+    rc = out.returncode
+    if rc is None:
+        return "worker still running?"
+    if rc < 0:
+        try:
+            name = signal.Signals(-rc).name
+        except ValueError:
+            name = "signal %d" % (-rc,)
+        return "worker was KILLED BY %s (returncode %d)" % (name, rc)
+    return "worker exited with returncode %d" % rc
 
 
 def _run(tmp_path, timeout=900, **kw):
@@ -95,10 +137,11 @@ def _run(tmp_path, timeout=900, **kw):
             cmd += [flag, str(v)]
     out = subprocess.run(cmd, cwd=str(tmp_path), capture_output=True, text=True, timeout=timeout)
     lines = [l for l in out.stdout.splitlines() if l.startswith("PYOOMPH_FLOQUET_RESULT ")]
-    assert len(lines) == 1, out.stdout[-4000:] + out.stderr[-4000:]
+    assert len(lines) == 1, (_describe_exit(out) + " and produced " + str(len(lines))
+                             + " result lines\n" + out.stdout[-4000:] + out.stderr[-4000:])
     res = json.loads(lines[0][len("PYOOMPH_FLOQUET_RESULT "):])
     assert "error" not in res, res.get("traceback", res.get("error"))
-    assert out.returncode == 0, out.stdout[-4000:] + out.stderr[-4000:]
+    assert out.returncode == 0, _describe_exit(out) + "\n" + out.stdout[-4000:] + out.stderr[-4000:]
     return res
 
 
@@ -119,7 +162,8 @@ def _run_capturing_output(tmp_path, timeout=900, **kw):
             cmd += [flag, str(v)]
     out = subprocess.run(cmd, cwd=str(tmp_path), capture_output=True, text=True, timeout=timeout)
     lines = [l for l in out.stdout.splitlines() if l.startswith("PYOOMPH_FLOQUET_RESULT ")]
-    assert len(lines) == 1, out.stdout[-4000:] + out.stderr[-4000:]
+    assert len(lines) == 1, (_describe_exit(out) + " and produced " + str(len(lines))
+                             + " result lines\n" + out.stdout[-4000:] + out.stderr[-4000:])
     res = json.loads(lines[0][len("PYOOMPH_FLOQUET_RESULT "):])
     assert "error" not in res, res.get("traceback", res.get("error"))
     return res, out.stdout
@@ -182,6 +226,7 @@ def test_count_is_nbase_in_every_mode(tmp_path, mode, order):
     assert _trivial_error(F) < 1e-7, F
 
 
+@pytest.mark.skipif(_NO_EIGENSOLVER is not None, reason=str(_NO_EIGENSOLVER))
 def test_agrees_with_eigenproblem_method(tmp_path):
     cond = _multipliers(_run(tmp_path / "cond", case="dae", NT=48))
     old = _multipliers(_run(tmp_path / "old", case="dae", NT=48, method="eigenproblem", n=3))
@@ -191,6 +236,7 @@ def test_agrees_with_eigenproblem_method(tmp_path):
         assert numpy.min(numpy.abs(cond - z)) < 1e-6, (z, cond)
 
 
+@pytest.mark.skipif(_NO_EIGENSOLVER is not None, reason=str(_NO_EIGENSOLVER))
 def test_eigenproblem_method_loses_the_small_multiplier(tmp_path):
     """Why the default changed: the old filtering cannot tell exp(-4*pi) from an infinite eigenvalue."""
     cond = _multipliers(_run(tmp_path / "cond", NT=48))

@@ -123,6 +123,173 @@ class PeriodicDrivingResponse():
         """
         self.set_driving_omega(2*pi*freq)
 
+    #################### Assembling and solving the bordered response system ####################
+    #
+    # The response at a driving frequency omega solves the bordered real system
+    #
+    #     [ s*J      omega*M   e_d  e_dt ] [xr ]   [0]
+    #     [ s*omega*M   -J      .    .   ] [xi ] = [0]
+    #     [ e_d^T       .       .    .   ] [l_1]   [1]
+    #     [ e_dt^T      .       .    .   ] [l_2]   [0]
+    #
+    # with J the NEGATED assembled Jacobian (the (A,M)=(-J,M) convention of
+    # dev_docs/mpi_eigenproblems.md section 0), s the sign orientation, and the two border rows pinning
+    # the driving ODE's own dofs so that the driving is exactly cos(omega*t).
+    #
+    # The unknowns are ordered INTERLEAVED, xr_k -> 2k and xi_k -> 2k+1, with the two multipliers last.
+    # Block ordering would give each rank two disjoint row ranges once the dofs are partitioned, which
+    # MatCreateAIJ cannot express; interleaving makes rank r's rows the contiguous block
+    # [2*first_row, 2*(first_row+nrow_local)) and turns the column map into j -> 2j / 2j+1, with the
+    # column indices still global. No communication, and no owner lookup.
+
+    def _find_driving_dofs(self)->tuple[int,int]:
+        """Global equation numbers of the driving ODE's two dofs.
+
+        get_dof_description() is collective and full-length on a distributed problem, so these are the
+        same on every rank -- which they must be, since they index a globally replicated response.
+        """
+        doftypes,dofnames=self.problem.get_dof_description()
+        driveind=dofnames.index(self.driving_domain_name+"/_driving")
+        drivedofind=numpy.argwhere(doftypes==driveind)
+        if len(drivedofind)!=1:
+            raise RuntimeError("Cannot find the driving degree of freedom for some some strange reason")
+        dtdriveind=dofnames.index(self.driving_domain_name+"/_dt__driving")
+        dtdrivedofind=numpy.argwhere(doftypes==dtdriveind)
+        if len(dtdrivedofind)!=1:
+            raise RuntimeError("Cannot find the driving degree of freedom for some some strange reason")
+        return int(drivedofind[0,0]),int(dtdrivedofind[0,0])
+
+    def _assemble_response_pencil(self):
+        """Assemble (J, M) once, on this rank's row block, ready for any driving frequency.
+
+        Everything that does not depend on omega happens here: the matrices are assembled with the time
+        steppers made steady and the frequency parameter at 1, and the one entry that DOES depend on it
+        -- the driving ODE's (dt_driving, dt_driving) Jacobian entry, analytically -omega**2 -- is zeroed
+        out to be re-supplied per frequency by _solve_at_omega(). That keeps the sparsity pattern of the
+        bordered system independent of omega, which is what lets the solver keep its symbolic
+        factorisation across a whole frequency scan.
+
+        Returns ``(n, nrow_local, first_row, parallel, matJ, matM, drivedofind, dtdrivedofind)`` with the
+        matrices shaped ``(nrow_local, n)`` and carrying GLOBAL column indices.
+        """
+        drivedofind,dtdrivedofind=self._find_driving_dofs()
+        eigensolver=self.problem.get_eigen_solver()
+        ntstep=self.problem.ntime_stepper()
+        was_steady=[False]*ntstep
+        self.hopf_param.value=0.0
+        oldomega=self.omega_param.value
+        self.omega_param.value=1.0
+        for i in range(ntstep):
+            ts=self.problem.time_stepper_pt(i)
+            was_steady[i]=ts.is_steady()
+            ts.make_steady()
+        try:
+            n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = self.problem.assemble_eigenproblem_matrices(0) #type:ignore
+        finally:
+            for i in range(ntstep):
+                if not was_steady[i]:
+                    self.problem.time_stepper_pt(i).undo_make_steady()
+            self.omega_param.value=oldomega
+        # shape=(M_nr, n), not (n, n): M_nr is the LOCAL row count, and under --distribute it is smaller
+        # than n. Passing (n,n) with a short indptr is what used to make this die inside scipy with
+        # "index pointer size (3) should be (5)", three frames from the feature the user asked for.
+        matM=scipy.sparse.csr_matrix((M_val, M_ci, M_rs), shape=(M_nr, n)).copy()
+        matJ=scipy.sparse.csr_matrix((-J_val, J_ci, J_rs), shape=(J_nr, n)).copy()
+
+        nrow_local,first_row,parallel=eigensolver.get_parallel_row_split(n)
+        if parallel and not self.problem.is_distributed():
+            # Plain mpirun: oomph replicated the assembled matrices, so every rank holds all of them and
+            # contributes only the slice the split above assigned it. Without this the solve would be
+            # done nproc times over instead of once in parallel.
+            matM=eigensolver.local_row_block(matM,first_row,nrow_local)
+            matJ=eigensolver.local_row_block(matJ,first_row,nrow_local)
+        if not parallel:
+            nrow_local,first_row=n,0
+
+        # Drop the omega-dependent entry. The driving ODE contributes d(EQ_yp)/d(dp) = omega**2 there,
+        # i.e. -omega**2 in matJ; _solve_at_omega() re-adds it explicitly. The old code overwrote it in
+        # the assembled CSR every iteration, which is both a SparseEfficiencyWarning when that diagonal
+        # is structurally absent and a GLOBAL index write no rank can do once the rows are partitioned.
+        if first_row<=dtdrivedofind<first_row+nrow_local:
+            p=dtdrivedofind-first_row
+            lo,hi=int(matJ.indptr[p]),int(matJ.indptr[p+1])
+            matJ.data[lo+numpy.flatnonzero(matJ.indices[lo:hi]==dtdrivedofind)]=0.0
+        return n,nrow_local,first_row,parallel,matJ,matM,drivedofind,dtdrivedofind
+
+    def _solve_at_omega(self,pencil,signum:int):
+        """Build the bordered system at the current omega, solve it, and return the complex response.
+
+        The response comes back REPLICATED at full global length on every rank, which is what
+        set_eigenfunction_as_dofs(), the mesh data cache and the VTK output all expect -- they index an
+        eigenvector by global equation number. See dev_docs/mpi_eigenproblems.md section 3.
+        """
+        from ..generic.mpi import get_mpi_nproc,get_mpi_rank,mpi_allgather_vector
+        n,nrow_local,first_row,parallel,matJ,matM,drivedofind,dtdrivedofind=pencil
+        omega=self.omega_param.value
+        ntot=2*n+2
+        last_rank=parallel and (get_mpi_rank()==get_mpi_nproc()-1)
+
+        rows:list[Any]=[]
+        cols:list[Any]=[]
+        vals:list[Any]=[]
+        def block(mat,row_off:int,col_off:int,factor:float):
+            coo=mat.tocoo()
+            rows.append(2*coo.row+row_off)
+            cols.append(2*coo.col+col_off)
+            vals.append(factor*coo.data)
+        block(matJ,0,0,signum)          # row 2p, cols 2j:      s*J
+        block(matM,0,1,omega)           # row 2p, cols 2j+1:    omega*M
+        block(matM,1,0,signum*omega)    # row 2p+1, cols 2j:    s*omega*M
+        block(matJ,1,1,-1.0)            # row 2p+1, cols 2j+1: -J
+        # The omega-dependent driving entry, dropped in _assemble_response_pencil(), on its owner only.
+        if first_row<=dtdrivedofind<first_row+nrow_local:
+            p=dtdrivedofind-first_row
+            rows.append(numpy.array([2*p,2*p+1],dtype=numpy.int64))
+            cols.append(numpy.array([2*dtdrivedofind,2*dtdrivedofind+1],dtype=numpy.int64))
+            vals.append(numpy.array([signum*(-omega**2),omega**2],dtype=numpy.float64))
+        # The two border COLUMNS: the multipliers act on the driving dofs' first-block rows.
+        for dof,col in ((drivedofind,2*n),(dtdrivedofind,2*n+1)):
+            if first_row<=dof<first_row+nrow_local:
+                rows.append(numpy.array([2*(dof-first_row)],dtype=numpy.int64))
+                cols.append(numpy.array([col],dtype=numpy.int64))
+                vals.append(numpy.array([1.0],dtype=numpy.float64))
+        nrow_block=2*nrow_local+(2 if last_rank or not parallel else 0)
+        b_local=numpy.zeros(nrow_block)
+        if last_rank or not parallel:
+            # The two border ROWS, pinning Re(v_drive)=1 and Re(v_dt_drive)=0. They go on the LAST rank
+            # (serially, at the end of the only block), which is what makes every rank's row range
+            # contiguous.
+            base=2*nrow_local
+            rows.append(numpy.array([base,base+1],dtype=numpy.int64))
+            cols.append(numpy.array([2*drivedofind,2*dtdrivedofind],dtype=numpy.int64))
+            vals.append(numpy.array([1.0,1.0],dtype=numpy.float64))
+            b_local[base]=1.0
+        fullmat=scipy.sparse.coo_matrix((numpy.concatenate(vals),
+                                         (numpy.concatenate(rows),numpy.concatenate(cols))),
+                                        shape=(nrow_block,ntot)).tocsr()
+        fullmat.sum_duplicates()
+
+        la=self.problem.get_la_solver()
+        if not parallel:
+            # Single process: the whole system is here, so go straight through the ordinary serial entry
+            # point and keep every backend, MPI-capable or not, on the path it always had. Under mpirun
+            # this branch is never taken -- get_parallel_row_split() reports parallel for any nproc>1 --
+            # so unlike the old code there is no replicated solve_serial() to warn the gather path about.
+            sol=b_local.copy()
+            la.solve_serial(1,ntot,fullmat.nnz,1,fullmat.data,fullmat.indices,fullmat.indptr,sol,0,1)
+            la.solve_serial(2,ntot,fullmat.nnz,1,fullmat.data,fullmat.indices,fullmat.indptr,sol,0,1)
+        else:
+            first_block_row=2*first_row
+            local=la.solve_python_built_distributed(ntot,nrow_block,first_block_row,fullmat,b_local)
+            sol=mpi_allgather_vector(ntot,first_block_row,nrow_block,local,
+                                     context="replicating the driving response on every rank")
+        result=sol[0:2*n:2]+1j*sol[1:2*n:2]
+        result/=result[drivedofind]
+        self.problem.invalidate_cached_mesh_data(only_eigens=True)
+        self.problem._last_eigenvectors=numpy.array([result])
+        self.problem._last_eigenvalues=numpy.array([0+1j*omega])
+        return result
+
     def iterate_over_driving_frequencies(self,*,omegas:list[ExpressionOrNum] | None=None,freqs:list[ExpressionOrNum] | None=None,unit:ExpressionOrNum=1,signum:int=1):
         """
         Iterator to iterate over the response of the system to different driving frequencies.
@@ -135,6 +302,9 @@ class PeriodicDrivingResponse():
 
         Yields:
             For each frequency, you get the current response as complex vector, with entries belonging to the degrees of freedom of the system.
+
+        Works under ``mpirun``, with and without ``--distribute``: the bordered system is assembled on
+        each rank's own row block and solved on COMM_WORLD, and the response is replicated afterwards.
         """
         if omegas is not None and freqs is not None:
             raise RuntimeError("Cannot set both omega and frequency")
@@ -156,67 +326,13 @@ class PeriodicDrivingResponse():
             self.set_driving_omega(self._omega_val_before_init)
             self._omega_val_before_init=None
 
-        doftypes,dofnames=self.problem.get_dof_description()
-        driveind=dofnames.index(self.driving_domain_name+"/_driving")
-        drivedofind=numpy.argwhere(doftypes==driveind)
-        if len(drivedofind)!=1:
-            raise RuntimeError("Cannot find the driving degree of freedom for some some strange reason")
-        drivedofind=drivedofind[0,0]      
-        dtdriveind=dofnames.index(self.driving_domain_name+"/_dt__driving")
-        dtdrivedofind=numpy.argwhere(doftypes==dtdriveind)
-        dtdrivedofind=dtdrivedofind[0,0]              
-        ntstep=self.problem.ntime_stepper()
-        was_steady=[False]*ntstep
-        self.hopf_param.value=0.0
-        oldomega=self.omega_param.value
-        self.omega_param.value=1.0
-        for i in range(ntstep):
-            ts=self.problem.time_stepper_pt(i)
-            was_steady[i]=ts.is_steady()
-            ts.make_steady()
-        n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = self.problem.assemble_eigenproblem_matrices(0) #type:ignore
-        for i in range(ntstep):
-            if not was_steady[i]:
-                self.problem.time_stepper_pt(i).undo_make_steady()
-        matM=scipy.sparse.csr_matrix((M_val, M_ci, M_rs), shape=(n, n)).copy()	#TODO: Is csr or csc?
-        matJ=scipy.sparse.csr_matrix((-J_val, J_ci, J_rs), shape=(n, n)).copy() 
-        self.omega_param.value=oldomega
-
-        lambda_in_vr=numpy.zeros((n,2))            
-        lambda_in_vr[drivedofind,0]=1
-        lambda_in_vr[dtdrivedofind,1]=1
-        vr_in_lambda=numpy.zeros((2,n))
-        vr_in_lambda[0,drivedofind]=1
-        vr_in_lambda[1,dtdrivedofind]=1
-        rhs=numpy.zeros((2*n+2))                        
-        rhs[-2]=1
-        rhs[-1]=0
-        
-
+        pencil=self._assemble_response_pencil()
         for omega in omegas:
             self.set_driving_omega(omega*unit)
-            matJ[dtdrivedofind,dtdrivedofind]=-self.omega_param.value**2
-            fullmat=scipy.sparse.bmat([[signum*matJ,self.omega_param.value*matM,lambda_in_vr],[signum*self.omega_param.value*matM,-matJ,None],[vr_in_lambda,None,None]]).copy()        
-            fullmat=fullmat.tocsr()                        
-            sol=rhs.copy()
-
-            # Tell the solver its factorisation slot is being reused for a system pyoomph built here, not
-            # for the one solve_distributed() gathered. Under mpirun the gathered Newton solve keeps
-            # rank 0's factors in that same slot, and a back-substitution landing on these ones instead
-            # would be silently wrong on every rank at once.
-            self.problem.get_la_solver()._note_external_serial_solve()
-            self.problem.get_la_solver().solve_serial(1,fullmat.shape[0],fullmat.nnz,1,fullmat.data,fullmat.indices,fullmat.indptr,sol,0,1)        
-            self.problem.get_la_solver().solve_serial(2,fullmat.shape[0],fullmat.nnz,1,fullmat.data,fullmat.indptr,fullmat.indptr,sol,0,1)            
-            result=sol[:n]+sol[n:-2]*1j        
-            result/=result[drivedofind]
-            self.problem.invalidate_cached_mesh_data(only_eigens=True)
-            self.problem._last_eigenvectors=numpy.array([result])
-            self.problem._last_eigenvalues=numpy.array([0+1j*self.omega_param.value])            
-            yield result        
+            yield self._solve_at_omega(pencil,signum)
         return
 
-    def new_solve_driving_response(self,*,omega:ExpressionNumOrNone=None,freq:ExpressionNumOrNone=None):
-        self.problem._require_non_distributed("The periodic driving response")
+    def new_solve_driving_response(self,*,omega:ExpressionNumOrNone=None,freq:ExpressionNumOrNone=None,signum:int=1):
         if omega is not None and freq is not None:
             raise RuntimeError("Cannot set both omega and frequency")
         elif omega is not None:
@@ -230,57 +346,11 @@ class PeriodicDrivingResponse():
             self.set_driving_omega(self._omega_val_before_init)
             self._omega_val_before_init=None
 
-        doftypes,dofnames=self.problem.get_dof_description()
-        driveind=dofnames.index(self.driving_domain_name+"/_driving")
-        drivedofind=numpy.argwhere(doftypes==driveind)
-        if len(drivedofind)!=1:
-            raise RuntimeError("Cannot find the driving degree of freedom for some some strange reason")
-        drivedofind=drivedofind[0,0]      
-        dtdriveind=dofnames.index(self.driving_domain_name+"/_dt__driving")
-        dtdrivedofind=numpy.argwhere(doftypes==dtdriveind)
-        dtdrivedofind=dtdrivedofind[0,0]              
-        ntstep=self.problem.ntime_stepper()
-        was_steady=[False]*ntstep
-        for i in range(ntstep):
-            ts=self.problem.time_stepper_pt(i)
-            was_steady[i]=ts.is_steady()
-            ts.make_steady()
-        n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = self.problem.assemble_eigenproblem_matrices(0) #type:ignore
-        for i in range(ntstep):
-            if not was_steady[i]:
-                self.problem.time_stepper_pt(i).undo_make_steady()
-        matM=scipy.sparse.csr_matrix((M_val, M_ci, M_rs), shape=(n, n)).copy()	#TODO: Is csr or csc?
-        matJ=scipy.sparse.csr_matrix((-J_val, J_ci, J_rs), shape=(n, n)).copy() 
-
-        lambda_in_vr=numpy.zeros((n,2))            
-        lambda_in_vr[drivedofind,0]=1
-        lambda_in_vr[dtdrivedofind,1]=1
-        vr_in_lambda=numpy.zeros((2,n))
-        vr_in_lambda[0,drivedofind]=1
-        vr_in_lambda[1,dtdrivedofind]=1
-        rhs=numpy.zeros((2*n+2))                        
-        rhs[-2]=1
-        rhs[-1]=0
-        fullmat=scipy.sparse.bmat([[matJ,self.omega_param.value*matM,lambda_in_vr],[self.omega_param.value*matM,-matJ,None],[vr_in_lambda,None,None]]).copy()        
-        fullmat=fullmat.tocsr()
-        # Same reason as above: this is pyoomph's own replicated system, not the one the gathered
-        # solve_distributed() left in the solver's factorisation slot.
-        self.problem.get_la_solver()._note_external_serial_solve()
-        self.problem.get_la_solver().solve_serial(1,fullmat.shape[0],fullmat.nnz,1,fullmat.data,fullmat.indices,fullmat.indptr,rhs,0,0)
-        self.problem.get_la_solver().solve_serial(2,fullmat.shape[0],fullmat.nnz,1,fullmat.data,fullmat.indptr,fullmat.indptr,rhs,0,0)
-        sol=rhs
-        result=sol[:n]+sol[n:-2]*1j        
-        result/=result[drivedofind]
-        self.problem.invalidate_cached_mesh_data(only_eigens=True)
-        self.problem._last_eigenvectors=numpy.array([result])
-        self.problem._last_eigenvalues=numpy.array([0+1j*self.omega_param.value])
-        
-        return result
-        
-
+        # _assemble_response_pencil() forces omega to 1 while it assembles and puts it back afterwards,
+        # so the frequency set above survives it.
+        return self._solve_at_omega(self._assemble_response_pencil(),signum)
 
     def solve_driving_response(self,*,omega:ExpressionNumOrNone=None,freq:ExpressionNumOrNone=None,with_eigenvector_guess:bool=False,numeigen=4,eigen_thresh=1e-7,by_hopf_tracking:bool=False,use_target:bool=False):
-        self.problem._require_non_distributed("The periodic driving response")
         if omega is not None and freq is not None:
             raise RuntimeError("Cannot set both omega and frequency")
         elif omega is not None:
