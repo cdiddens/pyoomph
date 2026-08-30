@@ -106,9 +106,13 @@ jobs:
         with:
           python-version: ${{ inputs.python_version }}
 
-      # OpenBLAS is the one thing NOT inside the tarball: --download-openblas would add ten minutes
-      # to every build for a library whose soname (libopenblas.so.0) is stable across runner
-      # images. The consumer installs the same package - see the snippet at the bottom of this file.
+      # OpenBLAS is not inside the tarball: --download-openblas would add ten minutes to every build
+      # for a library whose soname (libopenblas.so.0) is stable across runner images. The consumer
+      # installs the same package. It is not the only such dependency - on macOS the Fortran halves
+      # of MUMPS and ScaLAPACK leave petsc4py dlopening Homebrew's libgfortran at
+      # /opt/homebrew/opt/gcc/lib/gcc/current, so the consumers `brew install gcc` too. Neither is
+      # a design decision worth defending; making the tarball self-contained would mean copying
+      # those libraries in and rewriting the install_names.
       - name: Install build dependencies (Linux)
         if: steps.want.outputs.run == '1' && matrix.platform == 'linux'
         run: |

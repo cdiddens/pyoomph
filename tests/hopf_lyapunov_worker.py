@@ -254,7 +254,10 @@ def run(args):
                             "T": float(orbit.get_T(dimensional=False)),
                             "T_exact": 2 * numpy.pi * args.m1 / _W,
                             "radius_mean": float(radii.mean()),
-                            "radius_rel_spread": float(radii.ptp() / radii.mean()),
+                            # numpy.ptp(), not radii.ptp(): the ndarray METHOD was removed in numpy 2.0, and the
+                            # wheel jobs install a numpy 2.x. Unnoticed until now because this worker
+                            # ran only where SLEPc was, i.e. never on a wheel.
+                            "radius_rel_spread": float(numpy.ptp(radii) / radii.mean()),
                             "radius_exact": (float(numpy.sqrt(-mu / args.sigma))
                                              if args.case != "brusselator" else float("nan")),
                             "guess_vs_solved": float(abs(res["radius_guess"] - radii.mean())

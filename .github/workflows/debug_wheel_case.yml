@@ -221,6 +221,14 @@ jobs:
                       --status success --limit 1 --json databaseId --jq '.[0].databaseId')"
           [[ -n "${RUN_ID}" && "${RUN_ID}" != "null" ]] || {
             echo "No successful 'Prebuild PETSc/SLEPc' run to take the artifact from" >&2; exit 1; }
+          # petsc4py's extension dlopens Homebrew's libgfortran - MUMPS and ScaLAPACK are Fortran, and
+          # the prebuild runner had it only because it installed gcc to compile them. The image this
+          # job runs on provides no unversioned `gcc` prefix, so the import died with "Library not
+          # loaded: /opt/homebrew/opt/gcc/lib/gcc/current/libgfortran.5.dylib" - and, since every
+          # SLEPc test only asks whether petsc4py imports, as a wall of failures half an hour into
+          # the suite rather than here. Checked, not assumed, for the same reason.
+          brew install gcc || brew link --overwrite gcc
+          test -e "$(brew --prefix gcc)/lib/gcc/current/libgfortran.5.dylib"
           rm -rf petsc-prebuilt && mkdir -p petsc-prebuilt
           gh run download "${RUN_ID}" --repo "${GITHUB_REPOSITORY}" \
             --name "petsc-slepc-macos-arm64-cp${PYVER//./}" --dir petsc-prebuilt
