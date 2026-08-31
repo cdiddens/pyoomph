@@ -232,7 +232,21 @@ jobs:
             exit 1
           fi
 
-          echo "Using prebuild run id ${RUN_ID}"
+          # WHICH COMMIT the artifact was built from, not just which run - "latest successful run"
+          # says nothing about that, and on 31st August 2026 the newest artifact (30th August) had
+          # been built from a commit predating citools/patches/ginac-deterministic-*.patch, so the
+          # wheels linked an unpatched GiNaC whose term ordering moves between processes. The build
+          # now catches that itself (cmake/ThirdPartyGiNaC.cmake runs a probe and fails), but that
+          # failure is far easier to read with the artifact's provenance already in the log.
+          PRE_SHA="$(gh run view "${RUN_ID}" --repo "${GITHUB_REPOSITORY}" \
+                       --json headSha --jq '.headSha' 2>/dev/null || echo unknown)"
+          PRE_AT="$(gh run view "${RUN_ID}" --repo "${GITHUB_REPOSITORY}" \
+                      --json createdAt --jq '.createdAt' 2>/dev/null || echo unknown)"
+          echo "Using prebuild run id ${RUN_ID} (built from ${PRE_SHA} at ${PRE_AT})"
+          {
+            echo "### Static CLN/GiNaC artifact"
+            echo "- run \`${RUN_ID}\`, built from commit \`${PRE_SHA}\` at ${PRE_AT}"
+          } >> "${GITHUB_STEP_SUMMARY}"
           echo "run_id=${RUN_ID}" >> "${GITHUB_OUTPUT}"
 
       - name: Download the static CLN/GiNaC artifact
