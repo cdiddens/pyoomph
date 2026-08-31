@@ -16,21 +16,9 @@ At the planar surfaces at :math:`x=0`, :math:`y=0` and :math:`z=0` of the mesh, 
 
 .. math:: \vec{N}=\cos(\theta)\vec{t}_\text{s} -\sin(\theta)\vec{n}_\text{s}
 
-Note the two ``DTSF_`` settings before the run. By default, pyoomph multiplies the time step by up to
-4 whenever a step is accepted and by 0.25 whenever one is rejected. That is a good default, but this
-case is unusually unforgiving of a step that lands too far ahead: with ``keep_structural_zeros``, the
-diagonals of the pressure degrees of freedom and of the kinematic boundary condition's Lagrange
-multipliers are *stored* as exact zeros -- 586 rows in this mesh -- and a direct solver that plans its
-elimination from the sparsity pattern alone can meet one of them as a pivot. MUMPS, which is the
-default linear solver wherever Intel's MKL is unavailable, then replaces that pivot and returns a
-vector which does not solve the system, and the Newton iteration sits on an unchanging residual until
-it gives up. Approaching the same states in smaller increments avoids the overshoot that provokes it.
-The Jacobian itself is perfectly well behaved -- its condition number here is about
-:math:`10^{6}` -- so this is a property of the elimination, not of the problem.
-
 The equilibrium contact angle :math:`\theta` is a function of the local coordinates. :math:`\vec{t}_\text{s}` depends on the local free surface. So in total, the contact line dynamics is really complicated and highly non-linear. Luckily, pyoomph does all the required internals, in particular the assembly of the analytical Jacobian, automatically.
 
-In terms of implementation, one has to pay attention: It is important to use ``n_free=var("normal",domain="domain/interface")``, whereas ``n_free=var("normal")`` would *not* work. ``n_free`` will be further evaluated at the contact line, not at the free surface. Hence, without ``domain`` specification, it would expand to the normal :math:`\vec{N}` of the contact line, which is the tangential continuation of the free surface.
+In terms of implementation, one has to pay attention: It is important to use ``n_free=var("normal",domain="domain/interface")``, whereas ``n_free=var("normal")`` would not work. ``n_free`` will be further evaluated at the contact line, not at the free surface. Hence, without ``domain`` specification, it would expand to the normal :math:`\vec{N}` of the contact line, which is the tangential continuation of the free surface.
 
 
 Since we are mostly interested in the final state of the droplet, we have not considered a slip length here, so that the droplet attains the equilibrium shape (cf. :numref:`figalethreedimspread`) as quickly as possible. Also the dynamic time stepping is beneficial for that. However, it is required to delimit the maximum time step with ``maxstep`` since too large steps lead to unacceptable errors in the volume conservation. The reason is due to the kinematic boundary condition, which is discrete in time.
