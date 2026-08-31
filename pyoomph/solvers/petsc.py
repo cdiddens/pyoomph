@@ -197,9 +197,16 @@ class PETSCSolver(GenericLinearSystemSolver):
         self.raise_on_failed_solve=True
 
         # Whether a solve in which MUMPS substituted a null pivot and whose answer does not satisfy
-        # J x = b is rejected, rather than handed to Newton as an update that cannot move the
-        # residual. See _reject_null_pivot_pseudo_solution.
-        self.raise_on_null_pivot_pseudo_solution=True
+        # J x = b is rejected, rather than handed on. See _reject_null_pivot_pseudo_solution.
+        #
+        # OFF, because rejecting these turned out to be worse than tolerating them. Newton plus the
+        # adaptive timestep already absorb a badly inexact update -- lubrication_coalescence.py
+        # substitutes 150 to 351 null pivots per solve on macOS arm64, reaches ||Jx-b||/||b|| = 4061,
+        # and has passed on every platform for as long as it has existed. Turning the same solves
+        # into rejections drove its timestep below the minimum and failed the script, at every
+        # tolerance tried. Rejecting also never rescued the case this was built for: droplet_spread_3d
+        # merely swapped 103 rejections and 93 max-iteration hits for 425 rejections and no progress.
+        self.raise_on_null_pivot_pseudo_solution=False
         #: How far ||J x - b|| / ||b|| may rise before such a solve counts as a pseudo-solution
         #: rather than an inexact solution.
         #:
@@ -208,14 +215,14 @@ class PETSCSolver(GenericLinearSystemSolver):
         #: a Newton update built from it cannot be trusted to point anywhere. Below it the update is
         #: inexact but still a descent direction, which Newton absorbs.
         #:
-        #: Measured, across the three regimes the tutorials produced:
-        #:   5e-8, 7e-8      droplet_spread_3d's structurally zero diagonals -- the case ICNTL(24)=1
-        #:                   exists for, where the substitution is exactly right;
-        #:   9e-3 .. 1.7e-2  lubrication_coalescence on arm64, 76 solves -- inexact, and the script
-        #:                   converges through every one of them. A tolerance of 1e-4 rejected these
-        #:                   and drove its timestep below the minimum, turning a passing script into
-        #:                   a failing one;
-        #:   0.0015 .. 537   droplet_spread_3d on arm64, 522 solves, median 27 -- 80% above 1.0.
+        #: Measured, and the reason no threshold works as a pass/fail line:
+        #:   5e-8, 7e-8      droplet_spread_3d's structurally zero diagonals on Linux, where the
+        #:                   substitution is exactly right;
+        #:   9e-3 .. 4061    lubrication_coalescence on arm64, 38 solves -- and the script CONVERGES
+        #:                   through all of them, including the 4061 one;
+        #:   0.0015 .. 537   droplet_spread_3d on arm64, 522 solves, median 27 -- and it does not.
+        #: The two overlap across four decades, so the ratio does not separate a solve Newton can use
+        #: from one it cannot. Only consulted when raise_on_null_pivot_pseudo_solution is turned on.
         self.null_pivot_residual_tolerance=1.0
 
         # Whether the CURRENT KSP/PC were configured for a proven-symmetric matrix (see
@@ -658,13 +665,15 @@ class PETSCSolver(GenericLinearSystemSolver):
                   + repr(relative))
         if relative <= self.null_pivot_residual_tolerance:
             return   # substituted, but the answer solves the system - the structurally-zero case
+        # Deliberately no claim about the Jacobian: it is measurably NOT singular in the case this
+        # was written for -- droplet_spread_3d's Jacobian has condition number 1.1e6 and scipy's
+        # SuperLU factorises it at every state where MUMPS returns one of these. What is singular is
+        # MUMPS' view of it, through 586 structurally zero diagonals it planned an elimination around.
         msg = ("MUMPS replaced " + str(null_pivots) + " null pivot(s) (INFOG(28)) and the vector it "
-               "returned does not solve the system: ||Jx-b||/||b|| = " + repr(relative) + ". That is "
-               "a pseudo-solution, and applying it as a Newton update leaves the residual where it "
-               "was, so the solve is rejected here rather than costing the whole Newton iteration. "
-               "The Jacobian is numerically singular at this state; a smaller step usually clears it. "
-               "Set problem.get_la_solver().raise_on_null_pivot_pseudo_solution=False to accept these "
-               "solves as before.")
+               "returned does not solve the system: ||Jx-b||/||b|| = " + repr(relative) + ", so it is "
+               "a pseudo-solution rather than a solution. Set "
+               "problem.get_la_solver().raise_on_null_pivot_pseudo_solution=False to hand these on "
+               "regardless, which is the default.")
         if self.raise_on_null_pivot_pseudo_solution:
             raise PETScSolverError(msg)
         print("WARNING: " + msg)
