@@ -558,7 +558,7 @@ namespace pyoomph
 					if (code->coordinates_as_dofs && !pyoomph::ignore_nodal_position_derivatives_for_pitchfork_symmetry())
 					{
 						// Now this is a bit harder: We need to remove this spaces here!
-						for (auto d : std::vector<std::string>{"x", "y", "z"})
+						for (const auto& d : std::vector<std::string>{"x", "y", "z"})
 						{
 							FiniteElementField *cf = code->get_field_by_name("coordinate_" + d);
 							if (cf)
@@ -567,7 +567,7 @@ namespace pyoomph
 								std::vector<BasisFunction *> bases = {cf->get_space()->get_basis()};
 								for (unsigned ib = 0; ib < 3; ib++)
 									bases.push_back(bases[0]->get_diff_x(ib));
-								for (auto ts : time_schemes)
+								for (const auto& ts : time_schemes)
 								{
 									for (auto bas : bases)
 									{
@@ -585,7 +585,7 @@ namespace pyoomph
 									bases = {cf->get_space()->get_basis()};
 									for (unsigned ib = 0; ib < 3; ib++)
 										bases.push_back(bases[0]->get_diff_x(ib));
-									for (auto ts : time_schemes)
+									for (const auto& ts : time_schemes)
 									{
 										for (auto bas : bases)
 										{
@@ -602,7 +602,7 @@ namespace pyoomph
 										bases = {cf->get_space()->get_basis()};
 										for (unsigned ib = 0; ib < 3; ib++)
 											bases.push_back(bases[0]->get_diff_x(ib));
-										for (auto ts : time_schemes)
+										for (const auto& ts : time_schemes)
 										{
 											for (auto bas : bases)
 											{
@@ -1278,6 +1278,7 @@ namespace pyoomph
 				}
 			}
 			std::vector<GiNaC::ex> ret;
+			ret.reserve(numret);
 			for (int i = 0; i < numret; i++)
 			{
 				ret.push_back(GiNaC::GiNaCMultiRetCallback(MultiRetCallback(code, invok, i)));
@@ -2261,7 +2262,6 @@ namespace pyoomph
 		{
 			if (s.dt_order == 0 || s.basis->get_space() != this)
 				continue;
-			std::string nds = for_code->get_nodal_data_string(s.basis->get_space());
 			if (s.basis->get_space() == this) // Only expand if it is my task
 			{
 				std::string varname = s.get_dt_values_name(for_code);
@@ -3022,7 +3022,7 @@ namespace pyoomph
 		// TODO: This is only necessary if a dx portion or dxdpsi is present
 		if (for_code->coordinates_as_dofs)
 		{
-			for (auto d : std::vector<std::string>{"x", "y", "z"})
+			for (const auto& d : std::vector<std::string>{"x", "y", "z"})
 			{
 				if (for_code->get_field_by_name("coordinate_" + d))
 				{
@@ -3040,7 +3040,7 @@ namespace pyoomph
 		}
 		if (for_code->get_opposite_interface_code() && for_code->get_opposite_interface_code()->coordinates_as_dofs)
 		{
-			for (auto d : std::vector<std::string>{"x", "y", "z"})
+			for (const auto& d : std::vector<std::string>{"x", "y", "z"})
 			{
 				if (for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d))
 				{
@@ -3137,7 +3137,7 @@ namespace pyoomph
 			// TODO: This is only necessary if a dx portion or dxdpsi is present
 			if (for_code->coordinates_as_dofs)
 			{
-				for (auto d : std::vector<std::string>{"x", "y", "z"})
+				for (const auto& d : std::vector<std::string>{"x", "y", "z"})
 				{
 					if (for_code->get_field_by_name("coordinate_" + d))
 					{
@@ -3155,7 +3155,7 @@ namespace pyoomph
 			}
 			if (for_code->get_opposite_interface_code() && for_code->get_opposite_interface_code()->coordinates_as_dofs)
 			{
-				for (auto d : std::vector<std::string>{"x", "y", "z"})
+				for (const auto& d : std::vector<std::string>{"x", "y", "z"})
 				{
 					if (for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d))
 					{
@@ -3273,7 +3273,7 @@ namespace pyoomph
 					auto shapeexps = for_code->get_all_shape_expansions_in(diffpart2);
 					auto shapeexpsM = for_code->get_all_shape_expansions_in(masspart2);
 					
-					for (auto sexpa : shapeexps)
+					for (const auto& sexpa : shapeexps)
 					{
 						// The derived ones are excluded HERE only (they would collide as interpolation
 						// variables), but they are still read by the emitted code - see
@@ -3283,7 +3283,7 @@ namespace pyoomph
 						for_code->all_Hessian_shapeexps_for_shapeflags.insert(sexpa);
 						for_code->all_Hessian_indices_required.insert(sexpa.field);
 					}
-					for (auto sexpa : shapeexpsM)
+					for (const auto& sexpa : shapeexpsM)
 					{
 						if ((!sexpa.is_derived && !sexpa.is_derived_other_index) || sexpa.nodal_coord_dir != -1 || sexpa.nodal_coord_dir2 != -1)
 							for_code->all_Hessian_shapeexps.insert(sexpa);
@@ -3474,7 +3474,7 @@ namespace pyoomph
 		// TODO: This is only necessary if a dx portion or dxdpsi is present
 		if (for_code->coordinates_as_dofs)
 		{
-			for (auto d : std::vector<std::string>{"x", "y", "z"})
+			for (const auto& d : std::vector<std::string>{"x", "y", "z"})
 			{
 				if (for_code->get_field_by_name("coordinate_" + d))
 				{
@@ -3492,7 +3492,7 @@ namespace pyoomph
 		}
 		if (for_code->get_opposite_interface_code() && for_code->get_opposite_interface_code()->coordinates_as_dofs)
 		{
-			for (auto d : std::vector<std::string>{"x", "y", "z"})
+			for (const auto& d : std::vector<std::string>{"x", "y", "z"})
 			{
 				if (for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d))
 				{
@@ -3711,7 +3711,6 @@ namespace pyoomph
 		std::ostringstream oss;
 		std::string numnodes_str = this->get_num_nodes_str(for_code);
 		oss << indent << "{" << std::endl;
-		std::string shapeinfo = for_code->get_shape_info_str(this);
 
 		std::string l_test;
 		if (numnodes_str != "1")
@@ -3797,7 +3796,7 @@ namespace pyoomph
 			// Make sure to include all coordinates if we have coordinates as dofs (TODO: This should be only necessary if dx or dpsidx is present)
 			if (for_code->coordinates_as_dofs)
 			{
-				for (auto d : std::vector<std::string>{"x", "y", "z"})
+				for (const auto& d : std::vector<std::string>{"x", "y", "z"})
 				{
 					if (for_code->get_field_by_name("coordinate_" + d))
 					{
@@ -3815,7 +3814,7 @@ namespace pyoomph
 			}
 			if (for_code->get_opposite_interface_code() && for_code->get_opposite_interface_code()->coordinates_as_dofs)
 			{
-				for (auto d : std::vector<std::string>{"x", "y", "z"})
+				for (const auto& d : std::vector<std::string>{"x", "y", "z"})
 				{					
 					if (for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d))
 					{
@@ -4045,7 +4044,7 @@ namespace pyoomph
 		for (unsigned int i = 0; i < spaces.size(); i++)
 		{
 			if (spaces[i]->get_name() != "ED0")
-				avail = avail + "\n" + spaces[i]->get_name();
+				avail += "\n" + spaces[i]->get_name();
 		}
 		throw_runtime_error(avail);
 		return NULL;
@@ -4299,7 +4298,7 @@ namespace pyoomph
 			if (GiNaC::is_a<GiNaC::GiNaCShapeExpansion>(inp))
 			{
 				auto &shapeexp = (GiNaC::ex_to<GiNaC::GiNaCShapeExpansion>(inp)).get_struct();
-				for (auto d : dirs)
+				for (const auto& d : dirs)
 				{
 					if (shapeexp.field->get_name() == "mesh_" + d)
 					{
@@ -4312,7 +4311,7 @@ namespace pyoomph
 			else if (GiNaC::is_a<GiNaC::GiNaCTestFunction>(inp))
 			{
 				auto &testf = (GiNaC::ex_to<GiNaC::GiNaCTestFunction>(inp)).get_struct();
-				for (auto d : dirs)
+				for (const auto& d : dirs)
 				{
 					if (testf.field->get_name() == "mesh_" + d)
 					{
@@ -6098,7 +6097,7 @@ namespace pyoomph
 		{
 			//			throw_runtime_error("You cannot use analyical Hessian yet if a mesh has moving nodes");
 
-			for (auto d : std::vector<std::string>{"x", "y", "z"})
+			for (const auto& d : std::vector<std::string>{"x", "y", "z"})
 			{
 				if (this->get_field_by_name("coordinate_" + d))
 				{
@@ -6116,7 +6115,7 @@ namespace pyoomph
 		}
 		if (this->opposite_interface_code && this->opposite_interface_code->coordinates_as_dofs)
 		{
-			for (auto d : std::vector<std::string>{"x", "y", "z"})
+			for (const auto& d : std::vector<std::string>{"x", "y", "z"})
 			{
 				if (this->opposite_interface_code->get_field_by_name("coordinate_" + d))
 				{
@@ -6130,6 +6129,7 @@ namespace pyoomph
 		}
 
 		std::vector<std::string> indices_lines;
+		indices_lines.reserve(indices_required.size());
 		for (auto *f : indices_required)
 		{
 			//osh << "  const unsigned " << f->get_nodal_index_str(this) << " = " << f->index << ";" << std::endl;
@@ -6365,7 +6365,7 @@ namespace pyoomph
 
 		if (this->coordinates_as_dofs)
 		{
-			for (auto d : std::vector<std::string>{"x", "y", "z"})
+			for (const auto& d : std::vector<std::string>{"x", "y", "z"})
 			{
 				if (this->get_field_by_name("coordinate_" + d))
 				{
@@ -6383,7 +6383,7 @@ namespace pyoomph
 		}
 		if (this->opposite_interface_code && this->opposite_interface_code->coordinates_as_dofs)
 		{
-			for (auto d : std::vector<std::string>{"x", "y", "z"})
+			for (const auto& d : std::vector<std::string>{"x", "y", "z"})
 			{
 				if (this->opposite_interface_code->get_field_by_name("coordinate_" + d))
 				{
@@ -6397,6 +6397,7 @@ namespace pyoomph
 		}
 
 		std::vector<std::string> indices_lines;
+		indices_lines.reserve(indices_required.size());
 		for (auto *f : indices_required)
 		{
 			//os << "  const unsigned " << f->get_nodal_index_str(this) << " = " << f->index << ";" << std::endl;
@@ -7149,6 +7150,7 @@ namespace pyoomph
 		}
 
 		std::vector<ShapeExpansion> ordered_shapeexps;
+		ordered_shapeexps.reserve(shapeexps.size());
 		for (auto &sp : shapeexps)
 		{
 			ordered_shapeexps.push_back(sp);
@@ -7192,6 +7194,7 @@ namespace pyoomph
 		}
 
 		std::vector<TestFunction> ordered_testfuncs;
+		ordered_testfuncs.reserve(testfuncs.size());
 		for (auto &sp : testfuncs)
 			ordered_testfuncs.push_back(sp);
 		auto test_order = [](TestFunction &a, TestFunction &b)
@@ -9111,7 +9114,7 @@ namespace pyoomph
 		{
 			throw_runtime_error("Can only nullify bulk residuals on continuous spaces, but the DoF is discontinuous " + dofname);
 		}
-		for (auto a : nullified_bulk_residuals)
+		for (const auto& a : nullified_bulk_residuals)
 			if (dofname == a)
 				return;
 		nullified_bulk_residuals.push_back(dofname);
@@ -9383,6 +9386,7 @@ namespace pyoomph
 	std::vector<std::string> FiniteElementCode::get_integral_expressions()
 	{
 		std::vector<std::string> res;
+		res.reserve(this->integral_expressions.size());
 		for (auto &e : this->integral_expressions)
 			res.push_back(e.first);
 		return res;
@@ -9391,6 +9395,7 @@ namespace pyoomph
 	std::vector<std::string> FiniteElementCode::get_local_expressions()
 	{
 		std::vector<std::string> res;
+		res.reserve(this->local_expressions.size());
 		for (auto &e : this->local_expressions)
 			res.push_back(e.first);
 		return res;
@@ -9399,6 +9404,7 @@ namespace pyoomph
 	std::vector<std::string> FiniteElementCode::get_extremum_expressions()
 	{
 		std::vector<std::string> res;
+		res.reserve(this->extremum_expressions.size());
 		for (auto &e : this->extremum_expressions)
 			res.push_back(e.first);
 		return res;		
@@ -9830,15 +9836,15 @@ namespace pyoomph
 		init << " functable->stop_on_jacobian_difference = " << (stop_on_jacobian_difference ? "true" : "false") << ";" << std::endl;
 
 		
-		for (std::string my_sp : std::vector<std::string>{"Pos","DL","D0"})
+		for (const std::string& my_sp : std::vector<std::string>{"Pos","DL","D0"})
 		{
 			init << " strcpy(functable->info_" << my_sp << ".space_name, \"" << my_sp << "\");" << std::endl;
 		}
-		for (std::string my_sp : std::vector<std::string>{"C2TB","C2","C1TB","C1"})
+		for (const std::string& my_sp : std::vector<std::string>{"C2TB","C2","C1TB","C1"})
 		{
 			init << " strcpy(functable->continuous_spaces[SPACE_INDEX_" << my_sp << "].space_name, \"" << my_sp << "\");" << std::endl;
 		}		
-		for (std::string my_sp : std::vector<std::string>{"D2TB","D2","D1TB","D1"})
+		for (const std::string& my_sp : std::vector<std::string>{"D2TB","D2","D1TB","D1"})
 		{
 			init << " strcpy(functable->dg_spaces[SPACE_INDEX_" << my_sp << "].space_name, \"" << my_sp << "\");" << std::endl;
 		}
@@ -10312,7 +10318,6 @@ namespace pyoomph
 		// TODO: discontinuous_refinement_exponents
 		init << " functable->discontinuous_refinement_exponents=calloc(" << std::to_string(myfields.size()) << ",sizeof(double));" << std::endl;
       cleanup << " pyoomph_tested_free(functable->discontinuous_refinement_exponents); functable->discontinuous_refinement_exponents=PYOOMPH_NULL; " << std::endl;
-		index_offset = 0;
 		bool has_temporal_estimators = false;
 		for (auto &f : myfields)
 		{
@@ -11140,7 +11145,7 @@ namespace GiNaC
 		if (get_struct().code->coordinates_as_dofs && !pyoomph::ignore_nodal_position_derivatives_for_pitchfork_symmetry())
 		{
 			bool is_coordinate = false;
-			for (auto d : std::vector<std::string>{"x", "y", "z"})
+			for (const auto& d : std::vector<std::string>{"x", "y", "z"})
 			{
 				auto *f = get_struct().code->get_field_by_name("coordinate_" + d);
 				if (f)

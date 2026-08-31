@@ -283,8 +283,22 @@ void PyReg_Spectra(nb::module_ &m)
 	doc_real.replace(doc_real.find("%s"), 2, "float64");
 	doc_complex.replace(doc_complex.find("%s"), 2, "complex128");
 
+	// The functions return nb::object, which the stub generator can only render as "-> object". That
+	// made the tuple unpack in pyoomph/solvers/spectra.py an "object is not iterable" error and left
+	// nconv/niter/info with no type at all, so the signature is spelled out for the stub here. Keep
+	// it in step with the make_tuple above.
+	// static: nanobind keeps the signature pointer, so it must outlive this function.
+	static const char *ret_sig = ") -> tuple[NDArray[numpy.complex128], NDArray[numpy.complex128], int, int, str, int]";
+	static const std::string arg_sig =
+		"(op: collections.abc.Callable, n: int, nev: int, ncv: int, maxit: int, tol: float, "
+		"v0: object | None, sortrule: str";
+	static const std::string sig_real = "def spectra_eigensolve_real" + arg_sig + ret_sig;
+	static const std::string sig_complex = "def spectra_eigensolve_complex" + arg_sig + ret_sig;
+
 	m.def("spectra_eigensolve_real", &spectra_eigensolve_real,
-		  "op"_a, "n"_a, "nev"_a, "ncv"_a, "maxit"_a, "tol"_a, "v0"_a.none(), "sortrule"_a, doc_real.c_str());
+		  "op"_a, "n"_a, "nev"_a, "ncv"_a, "maxit"_a, "tol"_a, "v0"_a.none(), "sortrule"_a, doc_real.c_str(),
+		  nb::sig(sig_real.c_str()));
 	m.def("spectra_eigensolve_complex", &spectra_eigensolve_complex,
-		  "op"_a, "n"_a, "nev"_a, "ncv"_a, "maxit"_a, "tol"_a, "v0"_a.none(), "sortrule"_a, doc_complex.c_str());
+		  "op"_a, "n"_a, "nev"_a, "ncv"_a, "maxit"_a, "tol"_a, "v0"_a.none(), "sortrule"_a, doc_complex.c_str(),
+		  nb::sig(sig_complex.c_str()));
 }

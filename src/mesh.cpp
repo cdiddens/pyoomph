@@ -3363,7 +3363,7 @@ namespace pyoomph
           from_interface_dofs[name2find] = space_info->interface_dof_indices[i];
         }
       }
-      for (auto my : my_interface_dofs)
+      for (const auto& my : my_interface_dofs)
       {
         if (from_interface_dofs.count(my.second))
         {
@@ -4107,7 +4107,7 @@ namespace pyoomph
         }
       }
 
-      for (auto my : my_interface_dofs)
+      for (const auto& my : my_interface_dofs)
       {
         if (from_interface_dofs.count(my.second))
         {
@@ -5289,6 +5289,11 @@ namespace pyoomph
         }
         catch (const std::runtime_error &error)
         {
+          // The 2x2 determinant was checked above, so a throw here means the solve itself failed.
+          // The Newmark slopes are then left at their previous values (which is what this used to do
+          // silently) - but say so, because a wrong slope shows up much later as a bad acceleration.
+          std::cout << "Warning: could not solve for the Newmark slopes of value index " << valindex
+                    << ": " << error.what() << ". Keeping the previous slopes." << std::endl;
         }
       }
     }
@@ -7927,7 +7932,7 @@ namespace pyoomph
       imesh = dynamic_cast<InterfaceMesh *>(imesh->bulkmesh);
     }
     std::set<unsigned> to_rem_inds;
-    for (auto n : to_rem_names)
+    for (const auto& n : to_rem_names)
     {
       for (unsigned int j = 0; j < boundary_names.size(); j++)
       {

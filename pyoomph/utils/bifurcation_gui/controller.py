@@ -2771,7 +2771,11 @@ class BifurcationController:
         cp._departure_tangs=[]
         cp._departure_kind=None
         bi=cp.bifurcation_info
-        btype=bi.get("type") if bi is not None else None
+        if bi is None:
+            # Not a classified point at all: every branch below is keyed on bi["type"] and would fall
+            # through to the same empty result.
+            return
+        btype=bi.get("type")
         if btype is not None and bi.get("zeta") is None:
             # A classification restored from a diagram: it knows its type but not its null vector, and
             # every arrow below is built from that vector. The dofs are put back first because the

@@ -104,7 +104,7 @@ class RayleighPlateauPinchOffProblem(Problem):
         self.L = 2 * numpy.pi / self.k       # one FULL wavelength, so the neck is in the interior
         self.a = 0.5                         # amplitude of the perturbation
         self.min_elements_per_radius = 2.5   # elements across the local radius
-        self.hmin = 0.04                     # finest allowed element
+        self.hmin = 0.03                     # finest allowed element
         self.hmax = 0.35                     # coarsest allowed element
         # The neck radius at which we declare the column broken
         self.rmin = 2 * self.hmin
@@ -184,6 +184,12 @@ if __name__ == "__main__":
         problem.DTSF_max_increase_factor = 1.25
         problem.DTSF_min_decrease_factor = 0.75
         problem.initialise()
+        
+        # Make it reproducible. A threaded direct solver is not bit-reproducible, and a pinch-off
+        # turns a last-bit difference into a different remesh sequence. After initialise(), so that
+        # it also wins over a --omp N on the command line. (Gmsh is pinned separately, with
+        # General.NumThreads in define_geometry above.)
+        problem.set_num_threads(1)
 
         history = problem.create_text_file_output("pinchoff.txt",
                                                   header=["t", "r_min", "fragments", "volume"])

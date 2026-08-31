@@ -41,6 +41,15 @@ name: Build one wheel per OS and run the test suite
 # DEFAULT branch, which is why this file lives on main even though development happens on
 # develop. Pick the branch to test via the `ref` input.
 
+# The title of the run carries the parameters that decide whether it COUNTS as a release
+# prerequisite. wheels.yml's gate looks for a successful run of this workflow on the exact commit
+# being released whose title contains "[full_suite=true]"; the run's inputs themselves are not
+# exposed by the Actions API, so they are put here instead. Keep the markers verbatim if you touch
+# this line - the gate matches them as plain substrings.
+run-name: >-
+  Suite [full_suite=${{ inputs.full_suite || false }}] on ${{ inputs.ref || github.ref_name }}
+  (py${{ inputs.python_version }})
+
 on:
   workflow_dispatch:
     inputs:
@@ -62,6 +71,47 @@ on:
         description: Optional "Prebuild PETSc/SLEPc" run id to take the macOS arm64 PETSc artifact from (defaults to the latest successful run)
         required: false
         type: string
+      full_suite:
+        description: Run the WHOLE suite (--full plus the campaign tests) instead of the per-wheel selection - hours, not minutes
+        required: false
+        type: boolean
+        default: false
+      platforms:
+        description: Which platforms to build and test
+        required: false
+        type: choice
+        default: all
+        options: [all, linux, macos, windows, linux-and-macos]
+      test_command_override:
+        description: Run this instead of the test suite (a probe, e.g. 'python -P {package}/tests/jit_compiler_probe.py') - overrides full_suite
+        required: false
+        type: string
+        default: ""
+
+  # Called by wheels.yml when the release gate finds no qualifying run of this workflow for the
+  # commit being released; see the "prereqs" job there. Same inputs as above, minus the
+  # descriptions and with `platforms`-style choices spelled as plain strings, which is all
+  # workflow_call supports.
+  workflow_call:
+    inputs:
+      ref:
+        required: false
+        type: string
+        default: ""
+      python_version:
+        required: false
+        type: string
+        default: "3.12"
+      prebuild_run_id:
+        required: false
+        type: string
+      petsc_prebuild_run_id:
+        required: false
+        type: string
+      full_suite:
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -72,9 +122,12 @@ jobs:
   wheel_and_tests:
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.runner }}
-    # The suite itself is ~25 minutes; the rest is the wheel build. Generous, because a
-    # cold macOS runner is much slower than a Linux one.
-    timeout-minutes: 180
+    # The default selection is 40-75 minutes depending on the runner, and the rest is the wheel
+    # build. 360 (GitHub's ceiling for a hosted job) because full_suite adds the slow tests and the
+    # adaptivity campaign: ~1300 more tests, and the heavy ones are the azimuthal-stability codegen
+    # cases, several minutes each. Measured locally with --full: 3041 passed in 1h19 on an 8-core
+    # box, so a macOS runner has a real chance of needing most of this.
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -100,7 +153,23 @@ jobs:
             prebuild_artifact: static-ginac-cln-windows-msys2-ucrt64
 
     steps:
+      - name: Decide whether this platform was asked for
+        id: want
+        shell: bash
+        env:
+          WANTED: ${{ inputs.platforms }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          case "${WANTED}" in
+            all) yes=1 ;;
+            linux-and-macos) [[ "${PLATFORM}" == "linux" || "${PLATFORM}" == "macos" ]] && yes=1 || yes=0 ;;
+            *) [[ "${WANTED}" == "${PLATFORM}" ]] && yes=1 || yes=0 ;;
+          esac
+          echo "run=${yes}" >> "${GITHUB_OUTPUT}"
+          [[ "${yes}" == "1" ]] || echo "Skipping ${PLATFORM}: only '${WANTED}' was requested"
+
       - uses: actions/checkout@v4
+        if: steps.want.outputs.run == '1'
         with:
           ref: ${{ inputs.ref || github.ref }}
 
@@ -111,13 +180,14 @@ jobs:
       # on purpose - _tkinter.pyd is version-specific. First, so that the driver interpreter set up
       # below is the one $pythonLocation ends up pointing at.
       - name: Set up a Tk donor interpreter (Windows)
-        if: matrix.platform == 'windows'
+        if: steps.want.outputs.run == '1' && matrix.platform == 'windows'
         id: tkdonor
         uses: actions/setup-python@v5
         with:
           python-version: ${{ inputs.python_version }}
 
       - name: Set up Python
+        if: steps.want.outputs.run == '1'
         # Only the interpreter that *drives* cibuildwheel; the wheel itself is built for
         # inputs.python_version by cibuildwheel's own managed interpreters.
         uses: actions/setup-python@v5
@@ -125,6 +195,7 @@ jobs:
           python-version: '3.14'
 
       - name: Compute the cibuildwheel build selector
+        if: steps.want.outputs.run == '1'
         id: cibw
         shell: bash
         env:
@@ -137,6 +208,7 @@ jobs:
       # [tool.cibuildwheel.windows] turns PYOOMPH_DOWNLOAD_CLN/GINAC off - there is no MSVC
       # port of CLN), and using them everywhere keeps this wheel comparable to a shipped one.
       - name: Resolve prebuild run id
+        if: steps.want.outputs.run == '1'
         id: prebuild
         env:
           GH_TOKEN: ${{ github.token }}
@@ -164,6 +236,7 @@ jobs:
           echo "run_id=${RUN_ID}" >> "${GITHUB_OUTPUT}"
 
       - name: Download the static CLN/GiNaC artifact
+        if: steps.want.outputs.run == '1'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -177,7 +250,7 @@ jobs:
           find prebuilt -maxdepth 4 -type d | sort
 
       - name: Install build dependencies (Linux)
-        if: matrix.platform == 'linux'
+        if: steps.want.outputs.run == '1' && matrix.platform == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libglu1-mesa-dev libxcursor-dev libopengl0
@@ -188,7 +261,7 @@ jobs:
       # PYOOMPH_USE_OPENMP=ON).
 
       - name: Resolve the PETSc/SLEPc prebuild run id
-        if: matrix.petsc_artifact
+        if: steps.want.outputs.run == '1' && matrix.petsc_artifact
         id: petsc_prebuild
         env:
           GH_TOKEN: ${{ github.token }}
@@ -213,7 +286,7 @@ jobs:
           echo "run_id=${RUN_ID}" >> "${GITHUB_OUTPUT}"
 
       - name: Install the PETSc/SLEPc prebuild
-        if: matrix.petsc_artifact
+        if: steps.want.outputs.run == '1' && matrix.petsc_artifact
         env:
           GH_TOKEN: ${{ github.token }}
           PYVER: ${{ inputs.python_version }}
@@ -251,7 +324,7 @@ jobs:
           echo "PYOOMPH_PETSC_TEST_ENV=PYOOMPH_EXPECT_COMPLEX_SLEPC=1 PETSC_DIR=${PETSC_DIR} PETSC_ARCH_REAL=${PETSC_ARCH_REAL} PETSC_ARCH_COMPLEX=${PETSC_ARCH_COMPLEX} PYTHONPATH=${COMPLEX_LIB} DYLD_LIBRARY_PATH=${PETSC_DIR}/mpi/lib:${COMPLEX_LIB}" >> "${GITHUB_ENV}"
 
       - name: Build and test the wheel (Linux/macOS)
-        if: matrix.platform != 'windows'
+        if: steps.want.outputs.run == '1' && matrix.platform != 'windows'
         env:
           CIBW_BUILD: ${{ steps.cibw.outputs.selector }}
           CIBW_SKIP: "*-musllinux_*"
@@ -302,13 +375,20 @@ jobs:
           # asserts OpenMP specifically (Linux); EXPECT_THREADED asserts either backend (macOS/GCD).
           # PYOOMPH_PETSC_TEST_ENV is empty on every platform but macOS arm64, where the step
           # above filled it in with the prebuilt complex PETSc/SLEPc.
-          CIBW_TEST_ENVIRONMENT: ${{ matrix.platform == 'macos' && 'PYOOMPH_EXPECT_THREADED=1 PYOOMPH_EXPECT_SPECTRA=1' || 'PYOOMPH_EXPECT_OPENMP=1 PYOOMPH_EXPECT_SPECTRA=1' }} ${{ env.PYOOMPH_PETSC_TEST_ENV }}
+          CIBW_TEST_ENVIRONMENT: ${{ matrix.platform == 'macos' && 'PYOOMPH_EXPECT_THREADED=1 PYOOMPH_EXPECT_SPECTRA=1 PYOOMPH_EXPECT_STUBS=1' || 'PYOOMPH_EXPECT_OPENMP=1 PYOOMPH_EXPECT_SPECTRA=1 PYOOMPH_EXPECT_STUBS=1' }} ${{ env.PYOOMPH_PETSC_TEST_ENV }}
+          # The default is pyproject.toml's test-command; full_suite replaces it with the whole
+          # suite - --full turns the "slow" marker (the mpirun-based and large-sweep tests) from a
+          # skip into a run, and dropping -m "not campaign" adds the mixed-adaptive-mesh validation
+          # campaign. The mpirun ones still skip on a wheel, which is built PYOOMPH_USE_MPI=OFF, and
+          # say so by name. -rf and --durations make the log answer "what failed" and "what cost the
+          # time" without a second run.
+          CIBW_TEST_COMMAND: ${{ inputs.test_command_override || (inputs.full_suite && 'pytest {package}/tests --full -rf --durations=60' || 'pytest {package}/tests -m "not campaign"') }}
         uses: pypa/cibuildwheel@v4.1.0
         with:
           output-dir: wheelhouse
 
       - name: Set up MSYS2
-        if: matrix.platform == 'windows'
+        if: steps.want.outputs.run == '1' && matrix.platform == 'windows'
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
@@ -324,7 +404,7 @@ jobs:
       - name: Build and test the wheel (Windows/MSYS2)
         # Windows builds through MSYS2/MinGW rather than MSVC - CLN has no MSVC port, and its
         # MinGW-built libstdc++ could not be mixed into an MSVC extension anyway.
-        if: matrix.platform == 'windows'
+        if: steps.want.outputs.run == '1' && matrix.platform == 'windows'
         shell: msys2 {0}
         env:
           CC: gcc
@@ -352,7 +432,9 @@ jobs:
           TK_DONOR="$(dirname "$(cygpath -m '${{ steps.tkdonor.outputs.python-path }}')")"
           export CIBW_BEFORE_TEST_WINDOWS="python {project}/citools/windows_add_tkinter.py ${TK_DONOR} ${{ inputs.python_version }}"
           # See the Linux/macOS step above.
-          export CIBW_TEST_ENVIRONMENT="PYOOMPH_EXPECT_OPENMP=1 PYOOMPH_EXPECT_SPECTRA=1"
+          export CIBW_TEST_ENVIRONMENT="PYOOMPH_EXPECT_OPENMP=1 PYOOMPH_EXPECT_SPECTRA=1 PYOOMPH_EXPECT_STUBS=1"
+          # See the Linux/macOS step. Double quotes around the marker because cmd.exe runs this.
+          export CIBW_TEST_COMMAND='${{ inputs.test_command_override || (inputs.full_suite && 'pytest {package}/tests --full -rf --durations=60' || 'pytest {package}/tests -m "not campaign"') }}'
           export CIBW_CONFIG_SETTINGS="cmake.args=-GUnix\ Makefiles cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON cmake.define.PYOOMPH_USE_MPI=OFF cmake.define.PYOOMPH_PARANOID=OFF cmake.define.PYOOMPH_USE_OPENMP=ON cmake.define.PYOOMPH_HAS_SPECTRA=ON"
 
           python -m cibuildwheel --output-dir wheelhouse
@@ -367,7 +449,7 @@ jobs:
       # that fails its tests uploads nothing - precisely the run whose binary someone wants to poke at.
       # The repaired wheel is sitting in cibuildwheel's own temp directory either way; this fetches it.
       - name: Collect the built wheel even if the tests failed
-        if: always()
+        if: always() && steps.want.outputs.run == '1'
         shell: bash
         run: |
           # Through python, not find: on Windows this step runs under Git bash, where RUNNER_TEMP is
@@ -403,7 +485,7 @@ jobs:
         # -eo pipefail, so `ls wheelhouse/*.whl` finding no match returns 2 and kills the step before
         # its own "nothing to diagnose" guard can say anything. That, not the heredoc it first
         # blamed, is why this step twice produced no output at all.
-        if: always() && matrix.platform == 'windows'
+        if: always() && steps.want.outputs.run == '1' && matrix.platform == 'windows'
         continue-on-error: true
         shell: msys2 {0}
         run: |
@@ -428,7 +510,7 @@ jobs:
 
       # Kept so a failing suite can be reproduced locally against the exact same binary.
       - name: Upload the wheel
-        if: always()
+        if: always() && steps.want.outputs.run == '1'
         uses: actions/upload-artifact@v4
         with:
           name: test-wheel-${{ matrix.label }}

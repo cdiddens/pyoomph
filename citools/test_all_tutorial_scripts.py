@@ -40,6 +40,11 @@ parser.add_argument("--report-json", metavar="PATH", default=None, help="Also wr
 parser.add_argument("--mpirun", type=int, default=0, metavar="N", help="Run each script under 'mpirun -n N' instead of directly. Default 0, i.e. no mpirun")
 parser.add_argument("--omp", type=int, default=0, metavar="N", help="Pass '--omp N' to each script, i.e. assemble the elements on N threads. Default 0, i.e. leave each script on the serial element loop. Composes with --mpirun, which is threads per rank then")
 parser.add_argument("--distribute", help="Pass --distribute to each script, i.e. distribute the mesh over the ranks. Only meaningful together with --mpirun", action="store_true")
+# For chasing one flaky script across the platforms: a full pass is hours per OS, and a script that
+# only fails once in a while has to be run as the CI runs it - same wheel, same runner - not once in
+# a scratch directory. Substring rather than glob, on "Folder/script.py", so that a bare script name
+# is the common case and a folder name still selects the folder.
+parser.add_argument("--only", action="append", default=[], metavar="SUBSTRING", help="Run only the scripts whose 'Folder/script.py' path contains one of these substrings. Repeatable. Folders with no match are skipped entirely")
 # Folders to skip used to be read from sys.argv directly, which stopped working when argparse was
 # added - argparse rejects any positional argument it does not know about.
 parser.add_argument("skips", nargs="*", help="Bundle folders to skip, e.g. Temporal_ODEs")
@@ -235,11 +240,24 @@ import tutorial_bundle
 # reported the bare verdict for a petsc4py whose DIRECTORY the harness had already located, which
 # left the actual ImportError - the only part that says which of the three it is - unsaid.
 _PETSC_PROBE="""
+import sys
 try:
   from petsc4py import PETSc
 except ImportError as e:
   print("NO_PETSC4PY")
-  import sys
+  print("REASON:", e, file=sys.stderr)
+  raise SystemExit
+# slepc4py, and not only petsc4py, because PETSc.ScalarType below is a compile-time constant of the
+# petsc4py extension and says nothing about the libpetsc that was actually mapped. A complex
+# petsc4py that loaded the real libpetsc - which is what a DYLD_LIBRARY_PATH pointing at the other
+# arch produces - answers COMPLEX here and is nonetheless wrong. Loading SLEPc is what catches it:
+# the two builds do not export the same symbols, so the arch mismatch becomes an ImportError instead
+# of a silently wrong sizeof(PetscScalar). It is also what pyoomph's own autodetection imports, so a
+# tree that fails here is a tree that would have fallen back to a slower solver without saying so.
+try:
+  from slepc4py import SLEPc
+except ImportError as e:
+  print("NO_SLEPC4PY")
   print("REASON:", e, file=sys.stderr)
   raise SystemExit
 import numpy
@@ -282,6 +300,21 @@ def env_with_petsc(petscdir):
   env=dict(os.environ)
   # Prepended, not replaced: PYTHONPATH is where the tutorial bundle's own helper modules can live.
   env["PYTHONPATH"]=os.pathsep.join([str(petscdir)]+([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+  # The dynamic loader has to follow PYTHONPATH to the same arch, and this is not housekeeping: the
+  # two builds ship the SAME leaf names (libpetsc.dylib, libslepc.dylib), and DYLD_LIBRARY_PATH is
+  # searched by leaf name before an install_name or an RPATH. With only PYTHONPATH moved, the macOS
+  # arm64 job's DYLD_LIBRARY_PATH stayed at env.sh's real/lib and the COMPLEX petsc4py mapped
+  # real/lib/libpetsc - while still reporting ScalarType complex128, because that is a compile-time
+  # constant of the extension module rather than a property of the library it loaded. slepc4py then
+  # died on a symbol its real-scalar twin does not export ("Symbol not found: _NEPCISSGetExtraction"),
+  # pyoomph's _have_petsc_mumps() swallowed the ImportError and fell back to accelerate, and
+  # rayleigh_benard_azimuthal_stability.py spent 55 s per LU factorisation until the 1800 s timeout.
+  # The scripts that do NOT reach SLEPc were the worse half of that: they ran on a libpetsc with the
+  # wrong sizeof(PetscScalar) and said nothing at all.
+  # Prepended rather than replaced for the same reason as PYTHONPATH - the inherited value carries
+  # the MPI runtime's lib directory, which both arches need.
+  for var in ("DYLD_LIBRARY_PATH","LD_LIBRARY_PATH"):
+    env[var]=os.pathsep.join([str(petscdir)]+([env[var]] if env.get(var) else []))
   return env
 
 def check_petsc(env,arch,varname,want_complex):
@@ -291,6 +324,12 @@ def check_petsc(env,arch,varname,want_complex):
   if "NO_PETSC4PY" in verdict:
     raise ImportError("petsc4py is not importable from %s by %s:\n%s"
                       %(where,sys.executable,(probe.stderr or "").strip() or "(the probe said nothing)"))
+  if "NO_SLEPC4PY" in verdict:
+    raise ImportError("petsc4py imports from %s but slepc4py does not, so pyoomph would silently fall "
+                      "back to a slower solver.\nA 'Symbol not found' here means the loader took the "
+                      "OTHER arch's libslepc: check that $DYLD_LIBRARY_PATH/$LD_LIBRARY_PATH point at "
+                      "this arch and not at the one env.sh happens to set.\n%s"
+                      %(where,(probe.stderr or "").strip() or "(the probe said nothing)"))
   wanted="COMPLEX" if want_complex else "NOT_COMPLEX"
   if wanted in verdict:
     return
@@ -350,15 +389,28 @@ def folder_label(d):
   """
   return Path(d.replace("\\","/")).name
 
+def wanted(folder,script):
+  """Whether --only selects this script. No --only means everything, as before."""
+  if not args.only:
+    return True
+  return any(o in folder+"/"+script for o in args.only)
+
+
 for d in glob.glob("./*/"):
   if d in skips or folder_label(d) in skips:
     print("SKIPPING",d)
+    continue
+  if args.only and not any(wanted(folder_label(d),f.name)
+                           for f in (basedir/d).glob("*.py")):
+    # Silent: with --only naming one script, saying so for the other ten folders is noise.
     continue
   
   folder_okay=True
   os.chdir(basedir/d)
   print("TESTING FOLDER",d )
   for f in glob.glob("*.py"):
+    if not wanted(folder_label(d),f):
+      continue
     if f=="bifurcation_fold_param_change.py":
       # This is meant to crash when the parameter is changed, so it is not a regression test.
       continue
@@ -499,7 +551,7 @@ if report_json is not None:
                "options":{"quick_test":args.quick_test,"tcc":args.tcc,"no_petsc":args.no_petsc,
                           "mpirun":args.mpirun,"omp":args.omp,"distribute":args.distribute,
                           "timeout":args.timeout,
-                          "skips":skips},
+                          "skips":skips,"only":args.only},
                "scripts":records},jf,indent=1)
   print("Wrote the machine-readable report to",report_json)
   

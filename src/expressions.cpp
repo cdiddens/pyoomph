@@ -1032,11 +1032,9 @@ namespace pyoomph
 		// un-evaluated (.hold()) if that information is not yet available (e.g. outside of code generation).
 		static ex unitvect_eval(const ex &dir, const ex &basedim, const ex &coordsys, const ex &flags)
 		{
-			std::cout << "ENTERING UNITVECT EVAL A" << std::endl;
 			GiNaCCustomCoordinateSystemWrapper w = ex_to<GiNaCCustomCoordinateSystemWrapper>(coordsys);
 			const pyoomph::CustomCoordinateSystemWrapper &sp = w.get_struct();
 			CustomCoordinateSystem *sys = &__no_coordinate_system;
-			std::cout << "ENTERING UNITVECT EVAL B" << std::endl;
 			if (sp.cme == &__no_coordinate_system)
 			{
 				// No explicit coordinate system was given: fall back to the one associated with the code currently being generated
@@ -1056,9 +1054,8 @@ namespace pyoomph
 			}
 			else
 			{
-				sys = sp.cme;
+				sys = sp.cme; // Kept only so the guard above reads the same as in grad_eval; unitvect() itself does not need the system
 			}
-			std::cout << "ENTERING UNITVECT EVAL C" << std::endl;
 			int _flags = GiNaC::ex_to<GiNaC::numeric>(flags.evalf()).to_double();
 			int ndim = GiNaC::ex_to<GiNaC::numeric>(basedim.evalf()).to_double();
 			if (ndim < 0)
@@ -1083,7 +1080,6 @@ namespace pyoomph
 					return unitvect(dir, basedim, coordsys, flags).hold();
 			}
 
-			std::cout << "ENTERING UNITVECT EVAL D" << std::endl;
 			int direction = GiNaC::ex_to<GiNaC::numeric>(dir.evalf()).to_double();
 			std::vector<GiNaC::ex> v(pyoomph::the_vector_dim, 0);
 			v[direction] = 1;
@@ -4083,7 +4079,7 @@ namespace pyoomph
 			//std::cout << "Minimizing " << F << " wrt " << wrto << std::endl;
 			GiNaC::ex res = 0;
 			GiNaC::symbol derive_dummy("__dummy__for_minimization");
-			for (GiNaC::ex wrt_ex : wrto)
+			for (const GiNaC::ex& wrt_ex : wrto)
 			{
 				if (is_a<GiNaCShapeExpansion>(wrt_ex))
 				{

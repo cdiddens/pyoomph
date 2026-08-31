@@ -23,6 +23,7 @@ The main author may be contacted at c.diddens@utwente.nl
 #include "kdtree.hpp"
 #include "thirdparty/nanoflann.hpp"
 #include <iostream>
+#include <limits>
 #include "exception.hpp"
 
 namespace pyoomph
@@ -167,8 +168,10 @@ namespace pyoomph
 			if (cloud.pts.empty())
 				return -1;
 			const size_t num_results = 1;
-			size_t ret_index;
-			num_t out_dist_sqr;
+			size_t ret_index = 0;
+			// Seeded with infinity, not 0: findNeighbors leaves these untouched if the tree yields no
+			// neighbour, and a 0 distance would then report a bogus "point 0 is present".
+			num_t out_dist_sqr = std::numeric_limits<num_t>::max();
 			nanoflann::KNNResultSet<num_t> resultSet(num_results);
 			resultSet.init(&ret_index, &out_dist_sqr);
 			num_t query_pt[3] = {x, y, z};
@@ -233,8 +236,10 @@ namespace pyoomph
 			if (cloud.pts.empty())
 				return -1;
 			const size_t num_results = 1;
-			size_t ret_index;
-			num_t out_dist_sqr;
+			size_t ret_index = 0;
+			// Seeded with infinity, not 0: findNeighbors leaves these untouched if the tree yields no
+			// neighbour, and a 0 distance would then report a bogus "point 0 is present".
+			num_t out_dist_sqr = std::numeric_limits<num_t>::max();
 			nanoflann::KNNResultSet<num_t> resultSet(num_results);
 			resultSet.init(&ret_index, &out_dist_sqr);
 			num_t query_pt[3] = {x, y, z};
