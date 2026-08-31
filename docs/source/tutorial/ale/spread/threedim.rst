@@ -8,13 +8,25 @@ Finally, we also want to use the droplet spreading case in three dimensions. Sin
 .. literalinclude:: droplet_spread_3d.py
    :language: python
    :start-at: from droplet_spread_sliplength import * # Import the previous example
-   :end-at: problem.run(50, outstep=True, startstep=0.05,temporal_error=1,maxstep=2)
+   :end-at: problem.run(15, outstep=True, startstep=0.05,temporal_error=1,maxstep=2)
 
 The equilibrium contact angle may be an arbitrary function of the coordinates. Here, we chose some expression that describes some wetting gradients along the substrate. As mesh, we use the :py:class:`~pyoomph.meshes.simplemeshes.SphericalOctantMesh`, which is one eighth of a sphere. With only four elements, it has to be refined with a :py:class:`~pyoomph.equations.generic.RefineToLevel` to resolve the flow at all. Its shell is attached to a curved entity, so the nodes introduced by that refinement are placed exactly on the sphere instead of on the polyhedron spanned by the coarse mesh's corners -- otherwise the initial droplet would start out with 23% less volume than the sphere it is meant to be, no matter how far it is refined. However, three-dimensional ALE problems become easily very expensive in terms of computational costs. We get a high number of degrees of freedom for the velocity and also for the mesh position. Also, the motion of the mesh will couple with all equations and the Jacobian of the coupled system has quite a bunch of non-zero entries. Hence, one should not exaggerate the refinement level here. Instead of the :py:class:`~pyoomph.equations.ALE.LaplaceSmoothedMesh`, now the predefined class :py:class:`~pyoomph.equations.ALE.PseudoElasticMesh` is used. While both lead to a relaxation of a mesh that is subject to deformations due to the ``KinematicBC``, the :py:class:`~pyoomph.equations.ALE.PseudoElasticMesh` behaves as a deformable solid. This is often more stable, i.e. preventing strong deformations in a better way. It is, however, slightly more expensive to calculate than the :py:class:`~pyoomph.equations.ALE.LaplaceSmoothedMesh`.
 
 At the planar surfaces at :math:`x=0`, :math:`y=0` and :math:`z=0` of the mesh, we deactivate the mesh motion and the velocity in this direction to prevent any outflow through these domains. The tangential continuation of the free interface at the contact line :math:`\vec{N}` is now more complicated than in two dimensions. We calculate it by first projecting the free surface normal :math:`\vec{n}` on the normal :math:`\vec{n}_\text{s}=(0,0,1)` of the substrate. This leads to a vector with zero :math:`z`-component, i.e. oriented along the substrate plane and pointing outward from the contact line. When normalizing this vector :math:`\vec{t}_\text{s}`, we can assemble our vector by
 
 .. math:: \vec{N}=\cos(\theta)\vec{t}_\text{s} -\sin(\theta)\vec{n}_\text{s}
+
+Note the two ``DTSF_`` settings before the run. By default, pyoomph multiplies the time step by up to
+4 whenever a step is accepted and by 0.25 whenever one is rejected. That is a good default, but this
+case is unusually unforgiving of a step that lands too far ahead: with ``keep_structural_zeros``, the
+diagonals of the pressure degrees of freedom and of the kinematic boundary condition's Lagrange
+multipliers are *stored* as exact zeros -- 586 rows in this mesh -- and a direct solver that plans its
+elimination from the sparsity pattern alone can meet one of them as a pivot. MUMPS, which is the
+default linear solver wherever Intel's MKL is unavailable, then replaces that pivot and returns a
+vector which does not solve the system, and the Newton iteration sits on an unchanging residual until
+it gives up. Approaching the same states in smaller increments avoids the overshoot that provokes it.
+The Jacobian itself is perfectly well behaved -- its condition number here is about
+:math:`10^{6}` -- so this is a property of the elimination, not of the problem.
 
 The equilibrium contact angle :math:`\theta` is a function of the local coordinates. :math:`\vec{t}_\text{s}` depends on the local free surface. So in total, the contact line dynamics is really complicated and highly non-linear. Luckily, pyoomph does all the required internals, in particular the assembly of the analytical Jacobian, automatically.
 

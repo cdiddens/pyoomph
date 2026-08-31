@@ -30,7 +30,6 @@ from .generic import GenericLinearSystemSolver, GenericEigenSolver, EigenSolverW
 from ..meshes.mesh import AnyMesh
 import atexit
 import hashlib
-import os
 from collections import OrderedDict
 import petsc4py #type:ignore
 import sys
@@ -87,24 +86,6 @@ _MUMPS_ICNTL14_ERRORS = (-8, -9, -11, -12, -14, -15, -17, -20)
 # a cap only asks for more of something already forbidden. The lever there is ICNTL(23) itself, which
 # is the user's to set (pyoomph never does), so this is reported rather than escalated.
 _MUMPS_ICNTL23_ERROR = -19
-
-
-# INFOG(28) is the number of null pivots MUMPS detected and REPLACED under ICNTL(24)=1, which
-# use_mumps() turns on. A nonzero count means the vector that came back MAY be a pseudo-solution:
-# the component along the null space is set rather than solved for, and the KSP still reports
-# success.
-#
-# A nonzero count is NOT by itself an error, which is why this does not simply fail on it. The case
-# ICNTL(24)=1 was introduced for (dev_docs/linear_solvers.md section 7c) has 158 structurally zero
-# diagonals -- interface Lagrange multipliers and pressure dofs, whose self-coupling is zero by
-# construction -- and there the substitution turns a garbage answer into a correct one. What
-# separates that from the macOS arm64 droplet_spread_3d run, where 383 solves in 700 s came back as
-# pseudo-solutions and Newton sat on a residual frozen to every digit for seven or eight steps until
-# the iteration limit rejected the timestep, is not the count: it is whether the vector actually
-# solves the system. So when MUMPS reports a substitution, ask.
-#
-# Set PYOOMPH_DEBUG_MUMPS_NULL_PIVOTS=1 to print every substitution, including the ones that verify.
-_MUMPS_NULL_PIVOT_DEBUG = bool(os.environ.get("PYOOMPH_DEBUG_MUMPS_NULL_PIVOTS"))
 
 
 def _mumps_infog_from_pc(pc:Any,which:int)->int | None:
@@ -195,35 +176,6 @@ class PETSCSolver(GenericLinearSystemSolver):
         # for a genuine factorisation failure -- an iterative KSP that merely stops on its iteration
         # limit is never affected by this, whichever way it is set.
         self.raise_on_failed_solve=True
-
-        # Whether a solve in which MUMPS substituted a null pivot and whose answer does not satisfy
-        # J x = b is rejected, rather than handed on. See _reject_null_pivot_pseudo_solution.
-        #
-        # OFF, because rejecting these turned out to be worse than tolerating them. Newton plus the
-        # adaptive timestep already absorb a badly inexact update -- lubrication_coalescence.py
-        # substitutes 150 to 351 null pivots per solve on macOS arm64, reaches ||Jx-b||/||b|| = 4061,
-        # and has passed on every platform for as long as it has existed. Turning the same solves
-        # into rejections drove its timestep below the minimum and failed the script, at every
-        # tolerance tried. Rejecting also never rescued the case this was built for: droplet_spread_3d
-        # merely swapped 103 rejections and 93 max-iteration hits for 425 rejections and no progress.
-        self.raise_on_null_pivot_pseudo_solution=False
-        #: How far ||J x - b|| / ||b|| may rise before such a solve counts as a pseudo-solution
-        #: rather than an inexact solution.
-        #:
-        #: 1.0 is a statement, not a tuned constant: at that ratio the "solution" leaves the linear
-        #: residual as large as the right-hand side, i.e. it is no better than returning x = 0, and
-        #: a Newton update built from it cannot be trusted to point anywhere. Below it the update is
-        #: inexact but still a descent direction, which Newton absorbs.
-        #:
-        #: Measured, and the reason no threshold works as a pass/fail line:
-        #:   5e-8, 7e-8      droplet_spread_3d's structurally zero diagonals on Linux, where the
-        #:                   substitution is exactly right;
-        #:   9e-3 .. 4061    lubrication_coalescence on arm64, 38 solves -- and the script CONVERGES
-        #:                   through all of them, including the 4061 one;
-        #:   0.0015 .. 537   droplet_spread_3d on arm64, 522 solves, median 27 -- and it does not.
-        #: The two overlap across four decades, so the ratio does not separate a solve Newton can use
-        #: from one it cannot. Only consulted when raise_on_null_pivot_pseudo_solution is turned on.
-        self.null_pivot_residual_tolerance=1.0
 
         # Whether the CURRENT KSP/PC were configured for a proven-symmetric matrix (see
         # _use_symmetric_factorisation_now). Tracked so a flip - a bifurcation tracker toggled -
@@ -626,58 +578,6 @@ class PETSCSolver(GenericLinearSystemSolver):
             self.petsc_rhs=previous_rhs
             v.destroy() #type:ignore
 
-    def _reject_null_pivot_pseudo_solution(self,bv:Any)->None:
-        """Raise if MUMPS substituted a null pivot and the vector it returned is not a solution.
-
-        MUMPS is asked to detect null pivots rather than divide by them (ICNTL(24)=1, see use_mumps),
-        and reports how many it replaced in INFOG(28). It then returns successfully either way, so
-        without this the Newton solver cannot tell a solution from a pseudo-solution.
-
-        The count alone does not decide it -- see the comment on _MUMPS_NULL_PIVOT_DEBUG -- so the
-        answer is verified directly: ||J x - b|| / ||b||. One MatMult on the solves where MUMPS
-        actually substituted something, and nothing at all on the ones where it did not.
-
-        Raising is what makes this recoverable. PETScSolverError is a SolverError, so an adaptive
-        timestep or an arclength step rejects and retries with a smaller one -- which is exactly what
-        the same case does on Pardiso, where a perturbed pivot yields a wrong but nonzero update and
-        the step is rejected within one or two Newton iterations instead of eight.
-
-        Collective-safe: INFOG is global, so every rank sees the same count and takes the same branch,
-        and the norms are on the matrix's own communicator.
-        """
-        if not self.raise_on_null_pivot_pseudo_solution and not _MUMPS_NULL_PIVOT_DEBUG:
-            return
-        null_pivots = self._mumps_infog(28)
-        if not null_pivots:
-            return
-        r = self.petsc_mat.createVecLeft() #type:ignore
-        try:
-            self.petsc_mat.mult(self.x, r) #type:ignore
-            r.axpy(-1.0, bv) #type:ignore
-            rhs_norm = bv.norm() #type:ignore
-            # An all-zero right-hand side is already solved by x = 0; relative is meaningless there.
-            relative = r.norm() / rhs_norm if rhs_norm > 0.0 else r.norm() #type:ignore
-        finally:
-            r.destroy() #type:ignore
-        if _MUMPS_NULL_PIVOT_DEBUG:
-            print("MUMPS INFOG(28)=" + str(null_pivots) + " null pivot(s) replaced, INFOG(12)="
-                  + str(self._mumps_infog(12)) + " off-diagonal pivots; ||Jx-b||/||b|| = "
-                  + repr(relative))
-        if relative <= self.null_pivot_residual_tolerance:
-            return   # substituted, but the answer solves the system - the structurally-zero case
-        # Deliberately no claim about the Jacobian: it is measurably NOT singular in the case this
-        # was written for -- droplet_spread_3d's Jacobian has condition number 1.1e6 and scipy's
-        # SuperLU factorises it at every state where MUMPS returns one of these. What is singular is
-        # MUMPS' view of it, through 586 structurally zero diagonals it planned an elimination around.
-        msg = ("MUMPS replaced " + str(null_pivots) + " null pivot(s) (INFOG(28)) and the vector it "
-               "returned does not solve the system: ||Jx-b||/||b|| = " + repr(relative) + ", so it is "
-               "a pseudo-solution rather than a solution. Set "
-               "problem.get_la_solver().raise_on_null_pivot_pseudo_solution=False to hand these on "
-               "regardless, which is the default.")
-        if self.raise_on_null_pivot_pseudo_solution:
-            raise PETScSolverError(msg)
-        print("WARNING: " + msg)
-
     def _ksp_solve_checked(self,bv:Any)->None:
         """Solve, and turn a failed *factorisation* into a retry, and then into an error.
 
@@ -714,7 +614,6 @@ class PETSCSolver(GenericLinearSystemSolver):
         self.ksp.solve(bv, self.x) #type:ignore
         reason:int = self.ksp.getConvergedReason() #type:ignore
         if reason >= 0:
-            self._reject_null_pivot_pseudo_solution(bv)
             return
 
         def described(r:int)->str:
@@ -746,7 +645,6 @@ class PETSCSolver(GenericLinearSystemSolver):
         self.ksp.solve(bv, self.x) #type:ignore
         reason = self.ksp.getConvergedReason() #type:ignore
         if reason >= 0:
-            self._reject_null_pivot_pseudo_solution(bv)
             return
 
         msg = ("The PETSc linear solver failed: " + described(reason)
@@ -809,11 +707,6 @@ class PETSCSolver(GenericLinearSystemSolver):
 
     def solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPAnyIntArray,colptr:NPAnyIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
         if op_flag == 1:
-            # oomph-lib calls this "factorise" and times it as such, but nothing here factorises:
-            # the CSR is copied into a Mat and that is all. PETSc builds the factors lazily, inside
-            # the KSPSolve of op_flag==2, so on this backend the cost lands in what the log calls
-            # the backsub() call and this line is the matrix upload alone. See the FOR PYOOMPH note
-            # on the timing print in thirdparty/oomph-lib/include/linear_solver.cc.
             self._update_symmetry_engagement()
             if self._can_reuse_structure(n,nnz,colptr,rowind):
                 # Same nonzero pattern, new values. Overwriting them in place (rather than destroying
@@ -873,10 +766,6 @@ class PETSCSolver(GenericLinearSystemSolver):
 
             self.x = PETSc.Vec().createSeq(n) #type:ignore
         elif op_flag == 2:
-            # oomph-lib times this as the back-substitution, and for a direct PC it is usually the
-            # FACTORISATION that dominates it: KSPSetUp/PCSetUp run on the first solve after the
-            # matrix changed (see _setup_solver_if_needed and _one_ksp_solve). A second solve on an
-            # unchanged Mat really is only a back substitution, which is what makes re-solves cheap.
             #print("Solving linear system with PETSc", op_flag, n, nnz, nrhs, transpose, "SPLIT INFO",self._dofs_to_field_info)
             # _dofs_to_field_info is reset to None whenever the equations are reassigned
             # (_before_assigning_equation_numbers), so this only recomputes the field split after a

@@ -70,4 +70,7 @@ class DropletSpreading3d(Problem):
 
 if __name__ == "__main__":
     with DropletSpreading3d() as problem:
-        problem.run(50, outstep=True, startstep=0.05,temporal_error=1,maxstep=2)
+        # Gentler than the default 4x up / 0.25x down: an overshoot is expensive here (see the text)
+        problem.DTSF_max_increase_factor = 1.25
+        problem.DTSF_min_decrease_factor = 0.75
+        problem.run(15, outstep=True, startstep=0.05,temporal_error=1,maxstep=2)
