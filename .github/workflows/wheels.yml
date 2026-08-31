@@ -19,6 +19,15 @@ on:
         type: choice
         default: auto
         options: [auto, force, skip]
+      upload_from_run_id:
+        description: >-
+          Publish the wheels and sdist that an EARLIER run of this workflow already built, instead of
+          building anything: give that run's id. Nothing is compiled, no prerequisite is checked, and
+          the artifacts are taken as they are. For the case where the build was green and only the
+          upload did not happen - artifacts live 90 days, so the run has to be recent enough.
+        required: false
+        type: string
+        default: ""
   workflow_run:
     workflows:
       - Prebuild static CLN/GiNaC
@@ -85,8 +94,12 @@ jobs:
   prereqs:
     name: Check release prerequisites
     # Nothing here needs to run for the prebuild-completed trigger; the wheel jobs keep their own
-    # copy of that condition.
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    # copy of that condition. Nor for an upload-only dispatch, which certifies nothing and builds
+    # nothing - the run it takes its artifacts from is what was gated.
+    if: >-
+      ${{ inputs.upload_from_run_id == ''
+          && (github.event_name != 'workflow_run'
+              || github.event.workflow_run.conclusion == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -243,6 +256,7 @@ jobs:
     if: >-
       ${{ !cancelled()
           && !contains(needs.*.result, 'failure')
+          && inputs.upload_from_run_id == ''
           && (github.event_name != 'workflow_run'
               || github.event.workflow_run.conclusion == 'success') }}
     name: ${{ matrix.label }}
@@ -654,6 +668,7 @@ jobs:
     if: >-
       ${{ !cancelled()
           && !contains(needs.*.result, 'failure')
+          && inputs.upload_from_run_id == ''
           && (github.event_name != 'workflow_run'
               || github.event.workflow_run.conclusion == 'success') }}
     name: sdist
@@ -698,23 +713,49 @@ jobs:
   upload_pypi:
     name: Upload to PyPI
     needs: [build_wheels, build_sdist]
-    if: github.event_name == 'release' && github.event.action == 'published'
+    # Two ways in, and !cancelled() rather than success() because the second one SKIPS both build
+    # jobs deliberately:
+    #
+    #   * a published release, which is the normal path;
+    #   * a manual dispatch naming an earlier run of this workflow in upload_from_run_id, for the
+    #     case where that run built and tested everything and only the upload did not happen. This
+    #     stays in wheels.yml rather than becoming a workflow of its own on purpose: PyPI's trusted
+    #     publisher is bound to a workflow FILENAME, so a second file would be rejected until it was
+    #     registered on PyPI as well.
+    if: >-
+      ${{ !cancelled()
+          && !contains(needs.*.result, 'failure')
+          && ((github.event_name == 'release' && github.event.action == 'published')
+              || (github.event_name == 'workflow_dispatch'
+                  && inputs.upload_from_run_id != '')) }}
     runs-on: ubuntu-latest
     environment: release
 
     permissions:
       id-token: write  # mandatory for trusted publishing
+      # Reading another run's artifacts, for the upload_from_run_id path.
+      actions: read
 
     steps:
+      # run-id defaults to this run, so the release path is unchanged; with upload_from_run_id set
+      # the artifacts come from that run instead. github-token is required whenever run-id is given,
+      # even for a run in the same repository.
       - uses: actions/download-artifact@v4
         with:
           pattern: wheels-*
           path: dist
           merge-multiple: true
+          run-id: ${{ inputs.upload_from_run_id || github.run_id }}
+          github-token: ${{ github.token }}
 
       - uses: actions/download-artifact@v4
         with:
           name: sdist
           path: dist
+          run-id: ${{ inputs.upload_from_run_id || github.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Show what is about to be uploaded
+        run: ls -la dist
 
       - uses: pypa/gh-action-pypi-publish@release/v1
