@@ -469,7 +469,7 @@ jobs:
           # asserts OpenMP specifically (Linux), EXPECT_THREADED asserts either backend (macOS/GCD,
           # where has_openmp is false). Without it tests/test_openmp_present.py skips - a from-source
           # build defaults to AUTO and is entitled to whatever backend the platform provides.
-          CIBW_TEST_ENVIRONMENT: ${{ matrix.platform == 'macos' && 'PYOOMPH_EXPECT_THREADED=1 PYOOMPH_EXPECT_SPECTRA=1' || 'PYOOMPH_EXPECT_OPENMP=1 PYOOMPH_EXPECT_SPECTRA=1' }}
+          CIBW_TEST_ENVIRONMENT: ${{ matrix.platform == 'macos' && 'PYOOMPH_EXPECT_THREADED=1 PYOOMPH_EXPECT_SPECTRA=1 PYOOMPH_EXPECT_STUBS=1' || 'PYOOMPH_EXPECT_OPENMP=1 PYOOMPH_EXPECT_SPECTRA=1 PYOOMPH_EXPECT_STUBS=1' }}
         uses: pypa/cibuildwheel@v4.1.0
         with:
           output-dir: wheelhouse
@@ -518,7 +518,7 @@ jobs:
           # See the same variables in the legacy step above. PYOOMPH_PETSC_TEST_ENV is empty
           # everywhere but macOS arm64, where the step above filled it in with the prebuilt complex
           # PETSc/SLEPc - this is the one tier whose interpreter matches that artifact's cpXY.
-          CIBW_TEST_ENVIRONMENT: ${{ matrix.platform == 'macos' && 'PYOOMPH_EXPECT_THREADED=1 PYOOMPH_EXPECT_SPECTRA=1' || 'PYOOMPH_EXPECT_OPENMP=1 PYOOMPH_EXPECT_SPECTRA=1' }} ${{ env.PYOOMPH_PETSC_TEST_ENV }}
+          CIBW_TEST_ENVIRONMENT: ${{ matrix.platform == 'macos' && 'PYOOMPH_EXPECT_THREADED=1 PYOOMPH_EXPECT_SPECTRA=1 PYOOMPH_EXPECT_STUBS=1' || 'PYOOMPH_EXPECT_OPENMP=1 PYOOMPH_EXPECT_SPECTRA=1 PYOOMPH_EXPECT_STUBS=1' }} ${{ env.PYOOMPH_PETSC_TEST_ENV }}
         uses: pypa/cibuildwheel@v4.1.0
         with:
           output-dir: wheelhouse
@@ -555,7 +555,7 @@ jobs:
           export CIBW_ENVIRONMENT_WINDOWS="CC=gcc CXX=g++ CXXFLAGS='-static-libgcc -static-libstdc++' LDFLAGS='-static-libgcc -static-libstdc++' PYOOMPH_GINAC_INCLUDE_DIR=${PREBUILT_WIN}/include PYOOMPH_GINAC_LIB_DIR=${PREBUILT_WIN}/lib PYOOMPH_CLN_INCLUDE_DIR=${PREBUILT_WIN}/include PYOOMPH_CLN_LIB_DIR=${PREBUILT_WIN}/lib"
           export CIBW_REPAIR_WHEEL_COMMAND_WINDOWS="delvewheel repair --add-path C:/msys64/ucrt64/bin -w {dest_dir} {wheel}"
           # See the Linux/macOS steps above: makes tests/test_openmp_present.py assert instead of skip.
-          export CIBW_TEST_ENVIRONMENT="PYOOMPH_EXPECT_OPENMP=1 PYOOMPH_EXPECT_SPECTRA=1"
+          export CIBW_TEST_ENVIRONMENT="PYOOMPH_EXPECT_OPENMP=1 PYOOMPH_EXPECT_SPECTRA=1 PYOOMPH_EXPECT_STUBS=1"
 
           mkdir -p wheelhouse
 

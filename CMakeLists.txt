@@ -61,7 +61,14 @@ option(PYOOMPH_DOWNLOAD_GINAC "Download and build GiNaC from source via its own 
 # that means to ship threaded assembly says ON and finds out at configure time.
 set(PYOOMPH_USE_OPENMP "AUTO" CACHE STRING "OpenMP for the parallel element assembly (--omp N): AUTO=use if found, ON=require, OFF=never")
 set_property(CACHE PYOOMPH_USE_OPENMP PROPERTY STRINGS AUTO ON OFF)
-option(PYOOMPH_GENERATE_STUBS "Generate .pyi stubs for the _core extension via nanobind.stubgen (best effort, non-fatal)"  ON)
+option(PYOOMPH_GENERATE_STUBS "Generate .pyi stubs for the _core extension via nanobind.stubgen"  ON)
+# The stub is part of the package, not a nicety: the wheel ships py.typed alongside it, so a wheel
+# without the stub tells type checkers the API is described and then hands them an unintrospectable
+# binary. Generation used to be best-effort and silently swallowed its failures, which is how the
+# Windows wheel shipped without a .pyi indefinitely (see cmake/stubgen_launcher.py for what was
+# actually failing). OFF restores the old warn-and-continue behaviour for a build that cannot
+# produce one and does not care.
+option(PYOOMPH_REQUIRE_STUBS "Fail the build when the .pyi stub cannot be generated, rather than warning" ON)
 option(PYOOMPH_COPY_STUBS_TO_SOURCE_TREE "Also mirror the generated .pyi stub into the source-tree pyoomph/ directory, so Pylance/Pyright/mypy can resolve pyoomph._core while editing without a full pip install" ON)
 # Only meaningful together with -DPYOOMPH_DOWNLOAD_GINAC=OFF (a system-supplied
 # GiNaC, never touched by citools/patches/apply_ginac_patch.sh): asserts that
@@ -436,6 +443,9 @@ if(PYOOMPH_GENERATE_STUBS)
     list(APPEND PYOOMPH_STUB_EXTRA_COPY_ARGS
          --extra-copy-dir "${CMAKE_SOURCE_DIR}/pyoomph")
   endif()
+  if(PYOOMPH_REQUIRE_STUBS)
+    list(APPEND PYOOMPH_STUB_EXTRA_COPY_ARGS --required)
+  endif()
 
   add_custom_command(TARGET _pyoomph_core POST_BUILD
     COMMAND "${Python_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/cmake/generate_stubs.py"
@@ -452,9 +462,15 @@ if(PYOOMPH_GENERATE_STUBS)
  
   # Whatever generate_stubs.py normalizes into PYOOMPH_STUB_STAGE_DIR (either
   # "_core.pyi" or a "_core/" package directory) is copied straight next to
-  # the built extension. OPTIONAL means a missing stage dir (stub generation
-  # skipped/failed) is silently ignored rather than breaking `make install`.
-  install(DIRECTORY "${PYOOMPH_STUB_STAGE_DIR}/" DESTINATION pyoomph OPTIONAL)
+  # the built extension. With PYOOMPH_REQUIRE_STUBS the install is NOT optional:
+  # the POST_BUILD step above has already failed the build if it could not write
+  # the stage dir, and dropping OPTIONAL means an empty one is caught here too
+  # rather than producing a wheel that quietly lacks the stub.
+  if(PYOOMPH_REQUIRE_STUBS)
+    install(DIRECTORY "${PYOOMPH_STUB_STAGE_DIR}/" DESTINATION pyoomph)
+  else()
+    install(DIRECTORY "${PYOOMPH_STUB_STAGE_DIR}/" DESTINATION pyoomph OPTIONAL)
+  endif()
 endif()
 
 

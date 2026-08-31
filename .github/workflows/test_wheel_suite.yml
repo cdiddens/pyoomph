@@ -375,7 +375,7 @@ jobs:
           # asserts OpenMP specifically (Linux); EXPECT_THREADED asserts either backend (macOS/GCD).
           # PYOOMPH_PETSC_TEST_ENV is empty on every platform but macOS arm64, where the step
           # above filled it in with the prebuilt complex PETSc/SLEPc.
-          CIBW_TEST_ENVIRONMENT: ${{ matrix.platform == 'macos' && 'PYOOMPH_EXPECT_THREADED=1 PYOOMPH_EXPECT_SPECTRA=1' || 'PYOOMPH_EXPECT_OPENMP=1 PYOOMPH_EXPECT_SPECTRA=1' }} ${{ env.PYOOMPH_PETSC_TEST_ENV }}
+          CIBW_TEST_ENVIRONMENT: ${{ matrix.platform == 'macos' && 'PYOOMPH_EXPECT_THREADED=1 PYOOMPH_EXPECT_SPECTRA=1 PYOOMPH_EXPECT_STUBS=1' || 'PYOOMPH_EXPECT_OPENMP=1 PYOOMPH_EXPECT_SPECTRA=1 PYOOMPH_EXPECT_STUBS=1' }} ${{ env.PYOOMPH_PETSC_TEST_ENV }}
           # The default is pyproject.toml's test-command; full_suite replaces it with the whole
           # suite - --full turns the "slow" marker (the mpirun-based and large-sweep tests) from a
           # skip into a run, and dropping -m "not campaign" adds the mixed-adaptive-mesh validation
@@ -432,7 +432,7 @@ jobs:
           TK_DONOR="$(dirname "$(cygpath -m '${{ steps.tkdonor.outputs.python-path }}')")"
           export CIBW_BEFORE_TEST_WINDOWS="python {project}/citools/windows_add_tkinter.py ${TK_DONOR} ${{ inputs.python_version }}"
           # See the Linux/macOS step above.
-          export CIBW_TEST_ENVIRONMENT="PYOOMPH_EXPECT_OPENMP=1 PYOOMPH_EXPECT_SPECTRA=1"
+          export CIBW_TEST_ENVIRONMENT="PYOOMPH_EXPECT_OPENMP=1 PYOOMPH_EXPECT_SPECTRA=1 PYOOMPH_EXPECT_STUBS=1"
           # See the Linux/macOS step. Double quotes around the marker because cmd.exe runs this.
           export CIBW_TEST_COMMAND='${{ inputs.test_command_override || (inputs.full_suite && 'pytest {package}/tests --full -rf --durations=60' || 'pytest {package}/tests -m "not campaign"') }}'
           export CIBW_CONFIG_SETTINGS="cmake.args=-GUnix\ Makefiles cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON cmake.define.PYOOMPH_USE_MPI=OFF cmake.define.PYOOMPH_PARANOID=OFF cmake.define.PYOOMPH_USE_OPENMP=ON cmake.define.PYOOMPH_HAS_SPECTRA=ON"
