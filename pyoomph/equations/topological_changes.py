@@ -84,7 +84,8 @@ from ..generic.codegen import InterfaceEquations, Equations, FiniteElementCodeGe
 from ..generic.mpi import (get_mpi_any, get_mpi_max, get_mpi_nproc, get_mpi_rank, get_mpi_sum,
                            get_mpi_world_comm, mpi_share_root_failure)
 from ..meshes.axisymm_topology import (InterfaceChain, ReconnectionEvent, SurgeryPlan,
-                                       WaistNotYetSeparable, detect_and_plan, revolved_volume)
+                                       WaistNotYetSeparable, InterfaceStateNotPlannable,
+                                       detect_and_plan, revolved_volume)
 from ..meshes.gmsh import GmshTemplate
 from ..meshes.tqmesh import TQMeshPoint, TQMeshTemplate
 from ..meshes.mesh import AnySpatialMesh, InterfaceMesh, MeshFromTemplate2d, MeshFromTemplateBase, MeshedMeshTemplate, Node, Element, AnyMesh
@@ -605,7 +606,8 @@ class AxisymmetricReconnection(InterfaceEquations):
                  coalescence_arm_factor: float = 3.0, axis_tolerance: float = 1e-7,
                  reservoir_depth: ExpressionNumOrNone = None,
                  allow_fragment_removal: bool = True, segment_jump_offset: float = 1.0,
-                 handle_zeta: bool = True, max_deferred_events: int = 25) -> None:
+                 handle_zeta: bool = True, max_deferred_events: int = 25,
+                 max_unplannable_states: int = 25) -> None:
         super().__init__()
         #: Minimal interface radius below which a neck pinches off. ``None`` disables pinch-off.
         self.rmin = rmin
@@ -642,6 +644,12 @@ class AxisymmetricReconnection(InterfaceEquations):
         #: a wrong ``rmin`` and raised. A collapsing neck needs one, occasionally two; a neck that is
         #: not collapsing at all would otherwise defer for ever while the mesh degenerates.
         self.max_deferred_events = max_deferred_events
+        #: How many consecutive solves may end in an
+        #: :py:class:`~pyoomph.meshes.axisymm_topology.InterfaceStateNotPlannable` before it is
+        #: treated as a real geometry this module cannot handle and raised. The transients it exists
+        #: for are gone by the retry at a smaller ``dt``; a cross section that stays self-intersecting
+        #: is not something waiting will fix.
+        self.max_unplannable_states = max_unplannable_states
         #: Carry the interface fields across the event by writing the plan's zeta chart onto both the
         #: old and the new interface (see :py:meth:`_before_mesh_to_mesh_interpolation`). Switch off
         #: to leave the transfer to whatever the geometry alone can match.
@@ -659,6 +667,8 @@ class AxisymmetricReconnection(InterfaceEquations):
         self._last_plan: SurgeryPlan | None = None
         # Consecutive solves whose detection was postponed by WaistNotYetSeparable.
         self._deferred_events: int = 0
+        # Consecutive solves whose interface was refused by InterfaceStateNotPlannable.
+        self._unplannable_states: int = 0
         # (template, interface name) of the plan that is waiting to be built, so that
         # after_remeshing can clear it without having to resolve the tree again.
         self._pending_on: tuple["TopologicalChangesTemplate", str] | None = None
@@ -976,7 +986,23 @@ class AxisymmetricReconnection(InterfaceEquations):
                       "for the morphological opening (attempt " + str(self._deferred_events) + " of "
                       + str(self.max_deferred_events) + ").")
             return nothing
+        except InterfaceStateNotPlannable:
+            # An intermediate interface, not a verdict on the physics: this hook runs after EVERY
+            # Newton solve, and the solve of a step that is then rejected leaves a state nobody
+            # keeps. Declining costs nothing, since nothing has been changed yet and the retry
+            # re-detects. Ending the run instead is what the pinch-off tutorial did in about one run
+            # in thirty, on the recoil of a fresh satellite, a couple of steps after the event.
+            self._unplannable_states += 1
+            if self._unplannable_states > self.max_unplannable_states:
+                raise
+            if get_mpi_rank() == 0:
+                print("Declining to plan a topological change: the interface does not currently "
+                      "form a cross section this can reason about (attempt "
+                      + str(self._unplannable_states) + " of " + str(self.max_unplannable_states)
+                      + ").")
+            return nothing
         self._deferred_events = 0
+        self._unplannable_states = 0
         if plan is None:
             return nothing
 
