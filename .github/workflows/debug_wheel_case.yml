@@ -64,6 +64,11 @@ on:
         required: false
         type: string
         default: "1"
+      wheel_extras:
+        description: Extras to install the wheel with, e.g. "topology" for the scripts that need shapely. tutorial_scripts.yml installs pyoomph[topology], so a tutorial script needs the same here
+        required: false
+        type: string
+        default: ""
       keep_going:
         description: Run all the repetitions even when one fails, and report how many of them did. Off = stop at the first failure, which is what a crash hunt wants; on = what a flakiness rate needs
         required: false
@@ -160,7 +165,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install pytest
-          python -m pip install wheelhouse/*.whl
+          # Extras need the filename, not the glob: pip reads "name.whl[extra]" but not "*.whl[extra]".
+          WHEEL="$(ls wheelhouse/*.whl | head -n1)"
+          if [ -n "${{ inputs.wheel_extras }}" ]; then
+            python -m pip install "${WHEEL}[${{ inputs.wheel_extras }}]"
+          else
+            python -m pip install "${WHEEL}"
+          fi
           # From outside the checkout, since the repo's own pyoomph/ would shadow the installed one.
           cd "${RUNNER_TEMP}" && python -c "import pyoomph; print('pyoomph', pyoomph.__file__)"
 
@@ -299,8 +310,10 @@ jobs:
           failed=0
           for i in $(seq 1 ${{ inputs.repeat }}); do
             echo "=============== attempt $i of ${{ inputs.repeat }} ==============="
-            eval "$CMD" 2>&1 | tee -a run.log
-            this=$?   # the command's own status: pipefail is set above, so tee cannot mask it
+            # In the condition of an `if`, so that `bash -e` - which is how GitHub invokes
+            # `shell: bash` - does not kill the step on the first failing attempt, which is the
+            # very thing keep_going exists to survive.
+            if eval "$CMD" 2>&1 | tee -a run.log; then this=0; else this=$?; fi
             if [ "$this" != "0" ]; then
               failed=$((failed+1))
               rc=$this
