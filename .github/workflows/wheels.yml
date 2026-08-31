@@ -716,16 +716,27 @@ jobs:
     # Two ways in, and !cancelled() rather than success() because the second one SKIPS both build
     # jobs deliberately:
     #
-    #   * a published release, which is the normal path;
+    #   * a release, which is the normal path;
     #   * a manual dispatch naming an earlier run of this workflow in upload_from_run_id, for the
     #     case where that run built and tested everything and only the upload did not happen. This
     #     stays in wheels.yml rather than becoming a workflow of its own on purpose: PyPI's trusted
     #     publisher is bound to a workflow FILENAME, so a second file would be rejected until it was
     #     registered on PyPI as well.
+    #
+    # The release half deliberately does NOT also test github.event.action == 'published'. That term
+    # was here, it was redundant - `on.release.types` below is [published], so a release-triggered
+    # run IS a publish and nothing else can reach this job - and on the 0.2.0 release it evaluated
+    # false anyway. Every wheel and the sdist built and passed, and the upload was then skipped;
+    # re-running the job alone against the same payload skipped it again, so the payload did not
+    # carry the action the term asked for. Why is unexplained: a probe workflow confirms that both a
+    # fresh non-draft create and the publishing of a draft emit `published` (alongside `released`
+    # and, for a create, `created`), and no GitHub changelog entry describes a payload whose action
+    # differs from the type that matched it. Rather than keep a redundant check that is capable of
+    # withholding a release, the types filter is left to do the one job it already does.
     if: >-
       ${{ !cancelled()
           && !contains(needs.*.result, 'failure')
-          && ((github.event_name == 'release' && github.event.action == 'published')
+          && (github.event_name == 'release'
               || (github.event_name == 'workflow_dispatch'
                   && inputs.upload_from_run_id != '')) }}
     runs-on: ubuntu-latest
