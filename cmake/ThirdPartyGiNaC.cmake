@@ -346,13 +346,103 @@ endif()
 # by CMakeLists.txt to define PYOOMPH_GINAC_HASH_PATCHED for pyoomph_core,
 # which pyoomph/generic/jit_cache.py uses to disable the JIT code cache
 # entirely whenever it can't be sure generated code is reproducible.
-if(PYOOMPH_DOWNLOAD_GINAC OR PYOOMPH_ASSUME_GINAC_HASH_PATCHED)
+# It is now MEASURED rather than assumed. Both of the inputs above are claims about a library
+# rather than observations of it - PYOOMPH_DOWNLOAD_GINAC says "we patched it during this build",
+# PYOOMPH_ASSUME_GINAC_HASH_PATCHED says "trust me, someone patched it" - and on 31st August 2026
+# the second one was wrong: the wheel jobs pass it because they link a PREBUILT static GiNaC, the
+# artifact in use had been built from a commit predating the patches, and nothing anywhere
+# compared the claim against the library. The generated C came out reordered, the JIT cache stayed
+# enabled over it, and the only symptom was four tests failing on one of four platforms.
+#
+# ginac_determinism_probe.cpp exercises exactly what the patches change, and is run in SEVERAL
+# processes because that is the axis the bug lives on: an unpatched GiNaC is perfectly consistent
+# within one process and different in the next. Measured on this machine, an unpatched system
+# GiNaC gave five different term orderings in five runs (including "b*a" against "a*b" - a
+# same-length reorder, which is why the CI symptom was a file of identical length and different
+# shape); the patched build gave five identical ones.
+set(PYOOMPH_GINAC_HASH_PATCHED FALSE)
+set(_pyoomph_ginac_probe_verdict "unavailable")
+
+if(NOT CMAKE_CROSSCOMPILING)
+  set(_pyoomph_ginac_probe_exe "${CMAKE_BINARY_DIR}/ginac_determinism_probe${CMAKE_EXECUTABLE_SUFFIX}")
+  try_compile(_pyoomph_ginac_probe_built
+    "${CMAKE_BINARY_DIR}/ginac_determinism_probe_build"
+    "${CMAKE_CURRENT_LIST_DIR}/ginac_determinism_probe.cpp"
+    CMAKE_FLAGS
+      "-DINCLUDE_DIRECTORIES=${PYOOMPH_GINAC_INCLUDE_DIR_RESOLVED};${PYOOMPH_CLN_INCLUDE_DIR_RESOLVED}"
+      "-DCMAKE_CXX_STANDARD=17"
+    LINK_LIBRARIES "${PYOOMPH_GINAC_LIBRARY}" "${PYOOMPH_CLN_LIBRARY}" ${CMAKE_DL_LIBS}
+    COPY_FILE "${_pyoomph_ginac_probe_exe}"
+    OUTPUT_VARIABLE _pyoomph_ginac_probe_log)
+
+  if(_pyoomph_ginac_probe_built AND EXISTS "${_pyoomph_ginac_probe_exe}")
+    # Three, not two: one repetition could agree by chance, three agreeing by chance on a 32-bit
+    # hash is not worth guarding against.
+    set(_pyoomph_ginac_probe_first "")
+    set(_pyoomph_ginac_probe_verdict "deterministic")
+    foreach(_i RANGE 1 3)
+      execute_process(COMMAND "${_pyoomph_ginac_probe_exe}"
+                      OUTPUT_VARIABLE _pyoomph_ginac_probe_out
+                      ERROR_VARIABLE _pyoomph_ginac_probe_err
+                      RESULT_VARIABLE _pyoomph_ginac_probe_rc)
+      if(NOT _pyoomph_ginac_probe_rc EQUAL 0)
+        set(_pyoomph_ginac_probe_verdict "unavailable")
+        break()
+      endif()
+      if(_i EQUAL 1)
+        set(_pyoomph_ginac_probe_first "${_pyoomph_ginac_probe_out}")
+      elseif(NOT _pyoomph_ginac_probe_out STREQUAL _pyoomph_ginac_probe_first)
+        set(_pyoomph_ginac_probe_verdict "nondeterministic")
+        break()
+      endif()
+    endforeach()
+  endif()
+endif()
+
+if(_pyoomph_ginac_probe_verdict STREQUAL "deterministic")
   set(PYOOMPH_GINAC_HASH_PATCHED TRUE)
+  message(STATUS "GiNaC term/hash ordering: verified deterministic across processes")
+elseif(_pyoomph_ginac_probe_verdict STREQUAL "nondeterministic")
+  # The claim and the library disagree, so one of them has to give, and it must not be silence.
+  # Both branches are build errors rather than a quiet fallback to a disabled cache: if the build
+  # was told the GiNaC is patched, something is wrong with what it was handed (a stale prebuilt
+  # artifact is the way this actually happened), and if we patched it ourselves the patch did not
+  # take. Either way the wheel that would come out is not the one anybody intended to ship.
+  if(PYOOMPH_DOWNLOAD_GINAC)
+    message(FATAL_ERROR
+      "The GiNaC built by this project orders terms differently from one process to the next, so "
+      "citools/patches/ginac-deterministic-*.patch did not take effect. Generated code would not "
+      "be reproducible and the JIT code cache would be unsafe. Check the patch step in "
+      "cmake/ThirdPartyGiNaC.cmake / citools/patches/apply_ginac_patch.sh.")
+  elseif(PYOOMPH_ASSUME_GINAC_HASH_PATCHED)
+    message(FATAL_ERROR
+      "PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON, but the GiNaC at "
+      "${PYOOMPH_GINAC_LIBRARY} orders terms differently from one process to the next - it does "
+      "NOT carry citools/patches/ginac-deterministic-*.patch. If this is a prebuilt artifact, it "
+      "predates those patches and must be rebuilt; do not silence this by turning the option off, "
+      "because the wheel would then ship a JIT code cache over non-reproducible generated code.")
+  else()
+    set(PYOOMPH_GINAC_HASH_PATCHED FALSE)
+    message(WARNING
+      "The system-supplied GiNaC orders terms differently from one process to the next, so "
+      "pyoomph's JIT code cache will disable itself at runtime (see pyoomph/generic/jit_cache.py). "
+      "Build with -DPYOOMPH_DOWNLOAD_GINAC=ON to get a patched one.")
+  endif()
 else()
-  set(PYOOMPH_GINAC_HASH_PATCHED FALSE)
-  message(WARNING
-    "Using a system-supplied GiNaC (PYOOMPH_DOWNLOAD_GINAC=OFF) without "
-    "PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON: its term/hash ordering cannot be "
-    "assumed deterministic across process runs, so pyoomph's JIT code cache "
-    "will disable itself entirely at runtime (see pyoomph/generic/jit_cache.py).")
+  # Could not build or run the probe - a cross-compile, or a link line this snippet cannot
+  # reproduce. Fall back to the old behaviour, but say so, because "unverified" is exactly the
+  # state that produced the bug and should never again pass unremarked.
+  if(PYOOMPH_DOWNLOAD_GINAC OR PYOOMPH_ASSUME_GINAC_HASH_PATCHED)
+    set(PYOOMPH_GINAC_HASH_PATCHED TRUE)
+    message(WARNING
+      "Could not run the GiNaC determinism probe (cross-compiling, or it failed to link), so "
+      "deterministic term/hash ordering is being ASSUMED, not verified. The JIT code cache will "
+      "be enabled on that assumption.")
+  else()
+    message(WARNING
+      "Using a system-supplied GiNaC (PYOOMPH_DOWNLOAD_GINAC=OFF) without "
+      "PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON: its term/hash ordering cannot be "
+      "assumed deterministic across process runs, so pyoomph's JIT code cache "
+      "will disable itself entirely at runtime (see pyoomph/generic/jit_cache.py).")
+  endif()
 endif()

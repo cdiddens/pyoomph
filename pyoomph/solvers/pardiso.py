@@ -394,6 +394,21 @@ class pardisoSolver(object):
 
         self.last_mem_used_in_kb:int | None=None
 
+        # Whether MKL currently holds no internal memory for this handle, i.e. whether nothing has been
+        # factorised since the last phase -1. Releasing a handle that holds nothing is what MKL answers
+        # with error -2 (not enough memory), which is a confusing way of saying "there is nothing here
+        # to free" -- and it does so ONLY for the symmetric and Hermitian mtypes: measured on MKL
+        # 2025.0, an empty release returns 0 for the general mtypes 11 and 13 and -2 for every one of
+        # 2, -2, 4, -4 and 6, which is why this surfaced only once exploit_proven_symmetry started
+        # picking -2. The double release itself is not new. PardisoSolver hits it on every mesh
+        # adaptation: it calls clear() explicitly before dropping the old solver, and __del__ then
+        # calls it a second time when the last reference goes away.
+        #
+        # True from the start: pardisoinit only fills iparm, it allocates nothing, so a handle that is
+        # constructed and thrown away without ever being factorised has nothing to release either
+        # (and mtype -2 reports -2 for that release too).
+        self._released=True
+
     def update_matrix_values(self, matA:Any,mtype:int=11):
         if self.n != matA.shape[0]:
             return False
@@ -419,7 +434,11 @@ class pardisoSolver(object):
         self._MKL_ja = self.ja.ctypes.data_as(POINTER(c_int))
         return True
 
-    def clear(self):        
+    def clear(self):
+        # Idempotent on purpose: see _released. A second release is not an error worth reporting, and
+        # there is nothing left to free either way.
+        if self._released:
+            return
         self.run_pardiso(phase=-1)
 
     def __del__(self, _is_finalizing:Any=sys.is_finalizing):
@@ -766,6 +785,13 @@ class pardisoSolver(object):
                 MKL_rhs,  # b
                 MKL_x,  # x
                 byref(error))  # error
+
+        # Track whether MKL still holds workspace for this handle, so that clear() can stay idempotent.
+        # Every phase other than -1 (re)allocates it, which is what makes the release/refactorise pairs
+        # in _escalate_pivoting and _deescalate_pivoting reusable afterwards. Updated BEFORE the error
+        # check: a factorisation that failed may well have allocated before it failed, so that handle
+        # still has to be released.
+        self._released = (phase == -1)
 
         self._check_pardiso_error(phase, error.value)
 

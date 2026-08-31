@@ -322,6 +322,19 @@ jobs:
             exit 1
           fi
 
+          # See the same step in test_wheel_suite.yml: "latest successful run" says nothing about
+          # which COMMIT built the artifact, and an artifact predating the GiNaC determinism
+          # patches is the one failure mode that used to reach a shipped wheel. Record it here so
+          # the release has the provenance of what it linked against.
+          PRE_SHA="$(gh run view "${RUN_ID}" --repo "${GITHUB_REPOSITORY}" \
+                       --json headSha --jq '.headSha' 2>/dev/null || echo unknown)"
+          PRE_AT="$(gh run view "${RUN_ID}" --repo "${GITHUB_REPOSITORY}" \
+                      --json createdAt --jq '.createdAt' 2>/dev/null || echo unknown)"
+          echo "Using prebuild run id ${RUN_ID} (built from ${PRE_SHA} at ${PRE_AT})"
+          {
+            echo "### Static CLN/GiNaC artifact"
+            echo "- run \`${RUN_ID}\`, built from commit \`${PRE_SHA}\` at ${PRE_AT}"
+          } >> "${GITHUB_STEP_SUMMARY}"
           echo "run_id=${RUN_ID}" >> "${GITHUB_OUTPUT}"
 
       - name: Download matching static prebuild artifact
