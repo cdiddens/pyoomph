@@ -104,7 +104,7 @@ class RayleighPlateauPinchOffProblem(Problem):
         self.L = 2 * numpy.pi / self.k       # one FULL wavelength, so the neck is in the interior
         self.a = 0.5                         # amplitude of the perturbation
         self.min_elements_per_radius = 2.5   # elements across the local radius
-        self.hmin = 0.04                     # finest allowed element
+        self.hmin = 0.03                     # finest allowed element
         self.hmax = 0.35                     # coarsest allowed element
         # The neck radius at which we declare the column broken
         self.rmin = 2 * self.hmin
