@@ -37,6 +37,18 @@ on:
         description: Run id of "Build one wheel per OS and run the test suite" to take the wheel from (defaults to its latest run, failed or not)
         required: false
         type: string
+      wheels_workflow:
+        description: Which workflow the run id above belongs to, used only when it is left empty
+        required: false
+        type: choice
+        default: test_wheel_suite.yml
+        options: [test_wheel_suite.yml, tutorial_scripts.yml]
+      wheel_artifact_prefix:
+        description: Artifact name prefix the wheel was uploaded under - "test-wheel" for test_wheel_suite.yml, "tutorial-wheel" for tutorial_scripts.yml
+        required: false
+        type: choice
+        default: test-wheel
+        options: [test-wheel, tutorial-wheel]
       ref:
         description: Branch, tag or SHA whose tests/ to run (the WHEEL comes from the run above, not from here)
         required: false
@@ -48,10 +60,15 @@ on:
         type: string
         default: tests/test_floquet_multipliers.py -q
       repeat:
-        description: How many times to run it (for intermittent failures; stops at the first failure)
+        description: How many times to run it (for intermittent failures)
         required: false
         type: string
         default: "1"
+      keep_going:
+        description: Run all the repetitions even when one fails, and report how many of them did. Off = stop at the first failure, which is what a crash hunt wants; on = what a flakiness rate needs
+        required: false
+        type: boolean
+        default: false
       python_version:
         description: Interpreter to install the wheel on (must match the wheel's tag)
         required: false
@@ -113,7 +130,7 @@ jobs:
             RUN_ID="${MANUAL}"
           else
             # Deliberately NOT --status success: the interesting wheels come from red runs.
-            RUN_ID="$(gh run list --workflow test_wheel_suite.yml --repo "${GITHUB_REPOSITORY}" \
+            RUN_ID="$(gh run list --workflow "${{ inputs.wheels_workflow }}" --repo "${GITHUB_REPOSITORY}" \
                         --limit 1 --json databaseId --jq '.[0].databaseId')"
           fi
           if [ -z "${RUN_ID}" ] || [ "${RUN_ID}" = "null" ]; then
@@ -129,7 +146,7 @@ jobs:
         run: |
           rm -rf wheelhouse && mkdir -p wheelhouse
           gh run download "${{ steps.resolve.outputs.run_id }}" --repo "${GITHUB_REPOSITORY}" \
-            --name "test-wheel-${{ inputs.platform }}" --dir wheelhouse
+            --name "${{ inputs.wheel_artifact_prefix }}-${{ inputs.platform }}" --dir wheelhouse
           ls -la wheelhouse
 
       - name: Install runtime dependencies (Linux)
@@ -279,11 +296,23 @@ jobs:
           fi
           echo "command: $CMD"
           rc=0
+          failed=0
           for i in $(seq 1 ${{ inputs.repeat }}); do
             echo "=============== attempt $i of ${{ inputs.repeat }} ==============="
-            eval "$CMD" 2>&1 | tee -a run.log || { rc=$?; break; }
+            eval "$CMD" 2>&1 | tee -a run.log
+            this=$?   # the command's own status: pipefail is set above, so tee cannot mask it
+            if [ "$this" != "0" ]; then
+              failed=$((failed+1))
+              rc=$this
+              # A crash hunt wants the machine left at the first failure; a flakiness rate needs
+              # every repetition, because 1 of 10 and 9 of 10 are different answers and stopping
+              # at the first cannot tell them apart.
+              if [ "${{ inputs.keep_going }}" != "true" ]; then break; fi
+            fi
           done
+          echo "$failed of ${{ inputs.repeat }} attempt(s) failed"
           echo "exit_code=$rc" >> "${GITHUB_OUTPUT}"
+          echo "failed=$failed" >> "${GITHUB_OUTPUT}"
           exit 0
 
       - name: Collect macOS crash reports
@@ -326,6 +355,6 @@ jobs:
       - name: Report the outcome
         shell: bash
         run: |
-          echo "pytest exit code: ${{ steps.run.outputs.exit_code }}"
+          echo "pytest exit code: ${{ steps.run.outputs.exit_code }} (${{ steps.run.outputs.failed }} of ${{ inputs.repeat }} attempts failed)"
           # Fails the job when the case failed, so the run's own status says what happened.
           test "${{ steps.run.outputs.exit_code }}" = "0"
