@@ -137,6 +137,16 @@ jobs:
         run: |
           python -c "from pyoomph import _pyoomph_core as c; assert c.has_openmp, 'this wheel has no OpenMP - --omp N would silently do nothing'; print('OpenMP present')"
 
+      - name: Verify the installed wheel has its type stub
+        # Same reasoning as the OpenMP check above, and the same blind spot it closes: the stub is
+        # what editors and type checkers read for the compiled extension, the wheel ships py.typed
+        # promising it is there, and nothing a user runs would ever notice its absence. Every
+        # Windows wheel lacked it until the loader fix in cmake/stubgen_launcher.py, through a
+        # release and a full green suite. This is the check on the file people actually install.
+        shell: bash
+        run: |
+          python -c "import pathlib, pyoomph; d = pathlib.Path(pyoomph.__file__).parent; s = d / '_pyoomph_core.pyi'; assert s.is_file(), f'no _pyoomph_core.pyi in {d} - this wheel ships py.typed and no stub'; t = s.read_text(encoding='utf-8', errors='replace'); assert 'class Problem' in t, f'{s} is {len(t)} characters and does not declare class Problem - a truncated stub'; print(f'stub present ({len(t)} characters)')"
+
       - name: Run pyoomph check all
         shell: bash
         run: |

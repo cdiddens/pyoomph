@@ -155,11 +155,14 @@ config-settings = { "wheel.py-api" = "cp312" }
 # generation; test_stokes builds, assembles and solves. Anything version-specific about the wheel
 # shows up in the first import either way.
 #
-# test_openmp_present.py is the one addition to that list: it is the only test that FAILS rather
-# than skips when a wheel has no OpenMP (see its docstring), and it costs about a second.
+# test_openmp_present.py and test_stubs_present.py are the two additions to that list. Both assert
+# something about the WHEEL that no physics test would notice - a lost OpenMP, a missing .pyi - and
+# both cost about a second. The legacy tier needs them as much as the abi3 one does: cp310 and
+# cp311 are released wheels, and the stub is generated per wheel, so "the cp312 build had one" says
+# nothing about them.
 [[tool.cibuildwheel.overrides]]
 select = "cp310-* cp311-*"
-test-command = "pytest {package}/tests/test_compilers.py {package}/tests/test_math_functions.py {package}/tests/test_stokes.py {package}/tests/test_openmp_present.py"
+test-command = "pytest {package}/tests/test_compilers.py {package}/tests/test_math_functions.py {package}/tests/test_stokes.py {package}/tests/test_openmp_present.py {package}/tests/test_stubs_present.py"
 
 [tool.cibuildwheel.linux]
 before-all = [
