@@ -1150,6 +1150,7 @@ Index : Local coordinates (s0,s1,s2)
 			}
 		}
 		std::vector<std::string> res;
+		res.reserve(binds.size());
 		for (auto b : binds)
 		{
 			res.push_back(mesh_template->get_boundary_names()[b]);
@@ -1540,6 +1541,7 @@ Index : Local coordinates (s0,s1,s2)
 					{
 						// Locate the corresponding pair indiced by the periodic master corners
 						std::vector<nodeindex_t> masters;
+						masters.reserve(pm.parent_node_ids.size());
 						for (auto ncorn : pm.parent_node_ids)
 						{
 							masters.push_back(mesh_template->nodes[ncorn]->periodic_master);

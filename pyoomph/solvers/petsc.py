@@ -254,8 +254,8 @@ class PETSCSolver(GenericLinearSystemSolver):
         factorisation takes -- and a 128-bit digest makes an undetected change not a practical concern.
         """
         h = hashlib.blake2b(digest_size=16)
-        h.update(numpy.ascontiguousarray(indptr).view(numpy.uint8))
-        h.update(numpy.ascontiguousarray(indices).view(numpy.uint8))
+        h.update(numpy.ascontiguousarray(indptr).view(numpy.uint8)) #type:ignore[arg-type] # ndarray is a buffer at runtime, but typeshed only knows that once numpy declares __buffer__
+        h.update(numpy.ascontiguousarray(indices).view(numpy.uint8)) #type:ignore[arg-type]
         self._structure_digest = h.digest()
 
     def _structure_matches(self,indptr:Any,indices:Any)->bool:
@@ -274,8 +274,8 @@ class PETSCSolver(GenericLinearSystemSolver):
         if self._structure_digest is None:
             return False
         h = hashlib.blake2b(digest_size=16)
-        h.update(numpy.ascontiguousarray(indptr).view(numpy.uint8))
-        h.update(numpy.ascontiguousarray(indices).view(numpy.uint8))
+        h.update(numpy.ascontiguousarray(indptr).view(numpy.uint8)) #type:ignore[arg-type] # ndarray is a buffer at runtime, but typeshed only knows that once numpy declares __buffer__
+        h.update(numpy.ascontiguousarray(indices).view(numpy.uint8)) #type:ignore[arg-type]
         if h.digest() == self._structure_digest:
             return True
         self._report_structure_id_mismatch("the PETSc matrix")
@@ -705,7 +705,7 @@ class PETSCSolver(GenericLinearSystemSolver):
         self.ksp.setFromOptions() #type:ignore
         #print('Solving with:', self.ksp.getType())  # ,dir(pc)
 
-    def solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPIntArray,colptr:NPIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
+    def solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPAnyIntArray,colptr:NPAnyIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
         if op_flag == 1:
             self._update_symmetry_engagement()
             if self._can_reuse_structure(n,nnz,colptr,rowind):
@@ -920,9 +920,9 @@ class PETSCSolver(GenericLinearSystemSolver):
         failing. There is no structure id to lean on here -- the caller assembled this matrix itself.
         """
         h=hashlib.blake2b(digest_size=16)
-        h.update(numpy.array([ntot,nrow_local],dtype=numpy.int64).view(numpy.uint8))
-        h.update(numpy.ascontiguousarray(indptr).view(numpy.uint8))
-        h.update(numpy.ascontiguousarray(indices).view(numpy.uint8))
+        h.update(numpy.array([ntot,nrow_local],dtype=numpy.int64).view(numpy.uint8)) #type:ignore[arg-type]
+        h.update(numpy.ascontiguousarray(indptr).view(numpy.uint8)) #type:ignore[arg-type] # ndarray is a buffer at runtime, but typeshed only knows that once numpy declares __buffer__
+        h.update(numpy.ascontiguousarray(indices).view(numpy.uint8)) #type:ignore[arg-type]
         return h.digest()
 
     def _destroy_aux(self)->None:

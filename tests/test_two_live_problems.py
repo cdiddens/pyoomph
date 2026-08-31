@@ -53,6 +53,8 @@ import textwrap
 import pytest
 
 _PREAMBLE = textwrap.dedent("""
+    from pyoomph.generic.ccompiler import BaseCCompiler
+    print("CHILD COMPILERS", BaseCCompiler.available_compilers(), flush=True)
     from pyoomph import Problem, DirichletBC
     from pyoomph.equations.poisson import PoissonEquation
     from pyoomph.meshes.simplemeshes import RectangularQuadMesh
@@ -81,6 +83,22 @@ _PREAMBLE = textwrap.dedent("""
 """)
 
 
+def _compilers_here():
+    """What this process would JIT with, for the failure message.
+
+    The child gets its own answer, and the two need not agree: on the Windows wheel job of 30th
+    August 2026 these cases died in the CHILD with "Cannot open include file: math.h", i.e. it had
+    picked the MSVC toolchain (SystemCCompiler, quality 5, which outranks tccbox's 4) while the
+    pytest process compiling the rest of the suite had not - and nothing in the log said what either
+    of them chose. Reported rather than asserted on: a machine is entitled to any of them.
+    """
+    try:
+        from pyoomph.generic.ccompiler import BaseCCompiler
+        return repr(BaseCCompiler.available_compilers())
+    except Exception as e:
+        return "unavailable (%s)" % e
+
+
 def _run(tmp_path, body, timeout=900):
     script = tmp_path / "case.py"
     script.write_text(_PREAMBLE + textwrap.dedent(body))
@@ -88,8 +106,9 @@ def _run(tmp_path, body, timeout=900):
                           capture_output=True, text=True, timeout=timeout)
     assert proc.returncode == 0, (
         "exited %d (a negative value is the killing signal -- -11 is SIGSEGV)\n"
+        "compilers available to pytest: %s\n"
         "--- stdout ---\n%s\n--- stderr tail ---\n%s"
-        % (proc.returncode, proc.stdout[-3000:], proc.stderr[-4000:]))
+        % (proc.returncode, _compilers_here(), proc.stdout[-3000:], proc.stderr[-4000:]))
     return proc.stdout
 
 
@@ -175,3 +194,36 @@ def test_pinned_colliding_code_dir_is_refused(tmp_path):
     assert "DONE" in out, out
     assert "RAISED True True" in out, \
         "the pinned collision was not refused with an actionable message: %r" % out
+
+
+def test_the_default_compiler_falls_back_when_the_system_one_cannot_compile(monkeypatch):
+    """A broken system toolchain must cost speed, not the run.
+
+    get_default_c_compiler() used to return a hardcoded "system", which on Windows means MSVC
+    whatever else is installed. The Windows job of the full-suite run of 30th August 2026 got an
+    MSVC whose vcvars returned an INCLUDE without the Windows SDK - every JIT compile died on
+    "Cannot open include file: 'math.h'" while a working tccbox sat there unconsulted. Not
+    reproducible on the next runner, which is exactly why the fallback is worth having rather than
+    the image being blamed.
+
+    Faked here rather than waited for: check_avail() is what a missing SDK makes false.
+    """
+    import warnings
+
+    import pyoomph
+    from pyoomph.generic.ccompiler import BaseCCompiler, SystemCCompiler
+
+    monkeypatch.setattr(SystemCCompiler, "check_avail", staticmethod(lambda: False))
+    monkeypatch.setattr(pyoomph, "_resolved_default_c_compiler", None)
+    assert "tccbox" in BaseCCompiler.available_compilers(), \
+        "the fallback this test is about needs tccbox installed (pyoomph depends on it)"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        got = pyoomph.get_default_c_compiler()
+    assert got == "tccbox", got
+    assert any("cannot compile on this machine" in str(w.message) for w in caught), \
+        [str(w.message) for w in caught]
+
+    # ... and the answer is memoised, since check_avail() compiles and links a program.
+    monkeypatch.setattr(SystemCCompiler, "check_avail", staticmethod(lambda: True))
+    assert pyoomph.get_default_c_compiler() == "tccbox"

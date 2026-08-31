@@ -40,7 +40,7 @@ import distutils.errors
 
 
 from ..typings import *
-from .jit_cache import get_jit_cache
+from .jit_cache import get_jit_cache, replace_possibly_loaded_library
 
 _TypeVarCompiler=TypeVar("_TypeVarCompiler",bound=type["BaseCCompiler"])
 
@@ -409,14 +409,15 @@ int main (int argc, char **argv) {
         obj=self.comp.compile([src],extra_preargs=preargs,extra_postargs=preargs,debug=os.environ.get('PYOOMPH_DEBUG') == "1")
         # Link to a sibling temp name and rename it into place, rather than letting the linker write
         # the final name directly. A direct write truncates and rewrites the same inode, which may be
-        # mmapped right now by a library another Problem in this process still has loaded; os.replace
-        # is atomic and installs a new inode, so an existing mapping keeps the bytes it was opened
-        # with. Same reasoning as JITCache.try_restore in jit_cache.py.
+        # mmapped right now by a library another Problem in this process still has loaded; the rename
+        # installs a new inode, so an existing mapping keeps the bytes it was opened with. Same
+        # reasoning as JITCache.try_restore in jit_cache.py, and the same helper: a plain os.replace
+        # is refused on Windows exactly when the destination is loaded, which is the case this is for.
         final=self.get_lib_filename()
         tmp=final+".tmp"+str(os.getpid())
         self.comp.link(self.comp.SHARED_LIBRARY, obj,tmp,extra_postargs=link_extra_postargs) #type:ignore
         try:
-            os.replace(tmp,final)
+            replace_possibly_loaded_library(tmp,final)
         except BaseException:
             try:
                 os.remove(tmp)

@@ -177,7 +177,7 @@ class MacAccelerateLinearSolver(GenericLinearSystemSolver):
         self._checked_matrix=None
         return x
 
-    def solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPIntArray,colptr:NPIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
+    def solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPAnyIntArray,colptr:NPAnyIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
         if op_flag==1:
             A=csr_matrix((values,rowind,colptr),shape=(n,n))
             A.sort_indices()

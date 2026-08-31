@@ -77,14 +77,12 @@ The second is the one obligation this feature places on the user: A node that th
 
 We therefore call ``problem.timestepper.set_num_unsteady_steps_done(0)``, to that the time stepper assumes we are at the first step of a new transient, and the BDF2 becomes a BDF1 for that step.
 
-Results
-^^^^^^^
 
 .. literalinclude:: rayleigh_plateau_pinchoff.py
    :language: python
    :start-at: if __name__ == "__main__":
 
-The break-up happens at :math:`t\approx2.54`, and the result is shown in figure :numref:`figalepinchoffsatellite`.
+The break-up happens at :math:`t\approx2.57`, and the result is shown in figure :numref:`figalepinchoffsatellite`.
 
 ..  figure:: pinchoff_satellite.*
 	:name: figalepinchoffsatellite
@@ -96,7 +94,7 @@ The break-up happens at :math:`t\approx2.54`, and the result is shown in figure 
 	(left) The interface over one wavelength, mirrored about the axis, before and after the break-up. The column does not pinch at one point but at both ends of the thin filament between the two growing drops, so a single event carries two simultaneous pinches and leaves three fragments: two drops and a satellite. (right) The relative change of the liquid volume in each accepted time step, on a logarithmic scale. The pinch-off step is no larger an error than the ordinary steps and quality remeshes around it.
 
 
-The **volume** is the quantitative payoff. The surgery is volume-conserving by construction: the plan splits the parent volume at the waist plane and moves only the freshly created points, along their normals, until each child fragment carries its share exactly. What is left is the :math:`\mathcal{O}(h^2)` deviation between the plan's polyline and the Catmull-Rom spline that ``define_geometry`` draws through it -- which is precisely the error an ordinary quality remesh makes as well. Measured on this run (relative change of the liquid volume in one accepted time step):
+The volume is the quantitative payoff. The surgery is volume-conserving by construction: the plan splits the parent volume at the waist plane and moves only the freshly created points, along their normals, until each child fragment carries its share exactly. What is left is the :math:`\mathcal{O}(h^2)` deviation between the plan's polyline and the Catmull-Rom spline that ``define_geometry`` draws through it -- which is precisely the error an ordinary quality remesh makes as well. Measured on this run (relative change of the liquid volume in one accepted time step):
 
 .. list-table::
    :widths: 60 40
@@ -104,15 +102,15 @@ The **volume** is the quantitative payoff. The surgery is volume-conserving by c
    * - worst ordinary step or quality remesh
      - :math:`9.3\times10^{-6}`
    * - the pinch-off step
-     - :math:`1.3\times10^{-5}`
-   * - the whole run (67 steps)
-     - :math:`-1.4\times10^{-4}`
+     - :math:`-2.8\times10^{-6}`
+   * - the whole run (71 steps)
+     - :math:`-1.3\times10^{-4}`
 
 i.e. the break-up costs about what remeshing the same mesh costs anyway, and both are far below the drift the free-surface kinematic condition accumulates over the run. :py:attr:`~pyoomph.equations.topological_changes.ReconnectedBoundaries.fragment_volumes` exposes the target volume of each fragment for exactly that purpose.
 
 .. note::
 
-   The reverse event, **coalescence**, is available from the same equation: pass ``distmin`` instead of (or in addition to) ``rmin`` and two fragments whose axial tip-to-tip gap falls below it will merge, with the same one-branch ``define_geometry`` handling the merged geometry. For a two-phase setting, :py:meth:`~pyoomph.equations.topological_changes.TopologicalChangesGmshTemplate.get_reconnected_boundaries` additionally takes an ``opposite_axis_name``, and fills :py:attr:`~pyoomph.equations.topological_changes.ReconnectedBoundaries.opposite_axis_segments` with the complementary axis pieces the surrounding phase has to cover.
+   The reverse event, *coalescence*, is available from the same equation: pass ``distmin`` instead of (or in addition to) ``rmin`` and two fragments whose axial tip-to-tip gap falls below it will merge, with the same one-branch ``define_geometry`` handling the merged geometry. For a two-phase setting, :py:meth:`~pyoomph.equations.topological_changes.TopologicalChangesGmshTemplate.get_reconnected_boundaries` additionally takes an ``opposite_axis_name``, and fills :py:attr:`~pyoomph.equations.topological_changes.ReconnectedBoundaries.opposite_axis_segments` with the complementary axis pieces the surrounding phase has to cover.
 
 
 .. only:: html

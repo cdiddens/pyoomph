@@ -731,7 +731,7 @@ namespace pyoomph
     p->s.assign(elem_dim, 0.0);
     p->id = id;
     p->tag = tag;
-    const unsigned nh = (unsigned)(in[k++] + 0.5);
+    const unsigned nh = (unsigned)std::lround(in[k++]);
     const unsigned stride = 1 + nodal_dim;
     if (nh)
     {

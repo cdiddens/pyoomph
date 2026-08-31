@@ -61,6 +61,7 @@ __all__ = [
     "detect_and_plan",
     "revolved_volume",
     "WaistNotYetSeparable",
+    "InterfaceStateNotPlannable",
 ]
 
 
@@ -74,6 +75,24 @@ class WaistNotYetSeparable(RuntimeError):
     exactly one step too early, at every ``rmin_nd`` tried). Its own type is what lets
     :py:class:`~pyoomph.equations.topological_changes.AxisymmetricReconnection` retry on the next
     solve instead of ending the run - see its ``max_deferred_events``.
+    """
+
+
+class InterfaceStateNotPlannable(RuntimeError):
+    """The interface handed in cannot be turned into a cross section this module can reason about.
+
+    Two shapes reach it: a chain whose ring self-intersects, and a union that already encloses a
+    hole. Both used to end the run, and both are states a *transient* can pass through, because
+    :py:class:`~pyoomph.equations.topological_changes.AxisymmetricReconnection` detects after every
+    Newton solve - including the solves of steps that are about to be rejected on temporal error or
+    on a Newton failure, whose interface is an intermediate that no one ever asked to keep. Measured
+    on the Rayleigh-Plateau pinch-off tutorial: the retracting caps of a fresh satellite produce one
+    of these in roughly one run in thirty, a couple of steps after the event, and the run died on it
+    although the very next attempt at a smaller ``dt`` was fine.
+
+    So it has its own type, like :py:class:`WaistNotYetSeparable`: the caller declines to plan on
+    that solve and tries again on the next one. A state that is genuinely - not transiently - beyond
+    this module still ends the run, once ``max_unplannable_states`` consecutive solves have seen it.
     """
 
 
@@ -503,16 +522,17 @@ def detect_and_plan(chains: List[InterfaceChain],
     rings = [sh.Polygon(_ring_coords(ch)) for ch in chains]
     for r in rings:
         if not r.is_valid:
-            raise RuntimeError("axisymmetric topology: an input chain produces a "
-                               "self-intersecting cross section")
+            raise InterfaceStateNotPlannable("axisymmetric topology: an input chain produces a "
+                                             "self-intersecting cross section")
     P_geom = sh.unary_union(rings)
     P = _polygons(P_geom)
     if not P:
         return None
     for p in P:
         if len(p.interiors) > 0:
-            raise RuntimeError("axisymmetric topology: the input cross section already "
-                               "encloses a hole (entrapped opposite phase); unsupported")
+            raise InterfaceStateNotPlannable("axisymmetric topology: the input cross section "
+                                             "already encloses a hole (entrapped opposite phase); "
+                                             "unsupported")
 
     eps_p = float(rmin_nd) if rmin_nd is not None else 0.0
     eps_c = 0.5 * float(distmin_nd) if distmin_nd is not None else 0.0

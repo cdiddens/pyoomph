@@ -5207,6 +5207,7 @@ namespace pyoomph
 			else { if (sel[i] < it->second.first) it->second.first = sel[i]; if (sel[i] > it->second.second) it->second.second = sel[i]; }
 		}
 		std::vector<std::pair<int, int>> spans;
+		spans.reserve(span_of_root.size());
 		for (const auto &kv : span_of_root) spans.push_back(kv.second);
 		if (spans.empty()) return cuts;
 		std::sort(spans.begin(), spans.end());

@@ -358,7 +358,7 @@ namespace pyoomph
 			// carries far more work per barrier than the sweep's worst case did.
 			const size_t min_chunk = 8;
 			const size_t in_chunk = i - (size_t)plan.chunk_start.back();
-			if (in_chunk && in_chunk >= min_chunk && acc_block + need > budget_doubles)
+			if (in_chunk >= min_chunk && acc_block + need > budget_doubles)
 			{
 				plan.chunk_block_size.push_back(acc_block);
 				plan.chunk_res_size.push_back(acc_res);

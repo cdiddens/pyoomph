@@ -26,7 +26,16 @@ from __future__ import annotations
 #
 # ========================================================================
  
-from typing import Union,Any,Optional,TYPE_CHECKING,Type,Set,Literal,List,Dict,overload,Tuple,cast,TypeVar,SupportsFloat,TypeAlias,TypedDict,Self
+import sys
+from typing import Union,Any,Optional,TYPE_CHECKING,Type,Set,Literal,List,Dict,overload,Tuple,cast,TypeVar,SupportsFloat,TypeAlias,TypedDict
+
+if sys.version_info>=(3,11):
+    from typing import Self
+else:
+    # typing.Self was only added in 3.11, but pyoomph still claims 3.10, and typing_extensions is
+    # not a dependency - importing Self unconditionally made `import pyoomph` an ImportError there.
+    # Every use of it (codegen.py) is a string annotation, so an alias is enough at runtime.
+    Self=Any
 from collections import OrderedDict
 from collections.abc import Sequence, Iterable, Callable, Iterator, Generator, Mapping
 

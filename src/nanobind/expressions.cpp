@@ -405,6 +405,7 @@ namespace pyoomph
 	static GiNaC::ex GiNaCFromDoubleArray(std::vector<double> v)
 	{
 		std::vector<GiNaC::ex> vex;
+		vex.reserve(v.size());
 		for (auto e : v)
 			vex.push_back(e);
 		return GiNaCFromExArray(vex);

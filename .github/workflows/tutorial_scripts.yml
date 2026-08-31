@@ -40,6 +40,15 @@ name: Run the tutorial scripts on a fresh wheel
 # branch, which is why this file lives on main even though development happens on develop. Pick the
 # branch to test via the `ref` input.
 
+# The title of the run carries the parameters that decide whether it COUNTS as a release
+# prerequisite. wheels.yml's gate looks for a successful run of this workflow on the exact commit
+# being released whose title contains "[omp=3]" and "[platforms=all]"; the run's inputs themselves
+# are not exposed by the Actions API, so they are put here instead. Keep the markers verbatim if
+# you touch this line - the gate matches them as plain substrings.
+run-name: >-
+  Tutorials [omp=${{ inputs.omp }}] [platforms=${{ inputs.platforms }}]
+  on ${{ inputs.ref || github.ref_name }}
+
 on:
   workflow_dispatch:
     inputs:
@@ -86,12 +95,62 @@ on:
         required: false
         type: string
         default: ""
+      only:
+        description: Run ONLY the scripts whose "Folder/script.py" path contains one of these substrings, space separated (e.g. "rayleigh_plateau_pinchoff"). Empty runs everything. For chasing one flaky script across the platforms without paying for a full pass
+        required: false
+        type: string
+        default: ""
       prebuild_run_id:
         description: Optional "Prebuild static CLN/GiNaC" run id to take the CLN/GiNaC artifacts from (defaults to the latest successful run)
         required: false
         type: string
       petsc_prebuild_run_id:
         description: Optional "Prebuild PETSc/SLEPc" run id to take the macOS arm64 PETSc artifact from (defaults to the latest successful run)
+        required: false
+        type: string
+
+  # Called by wheels.yml when the release gate finds no qualifying run of this workflow for the
+  # commit being released; see the "prereqs" job there. Same inputs as above, minus the
+  # descriptions and with the `platforms` choice spelled as a plain string, which is all
+  # workflow_call supports.
+  workflow_call:
+    inputs:
+      ref:
+        required: false
+        type: string
+        default: ""
+      python_version:
+        required: false
+        type: string
+        default: "3.12"
+      quick_test:
+        required: false
+        type: boolean
+        default: true
+      omp:
+        required: false
+        type: string
+        default: "0"
+      platforms:
+        required: false
+        type: string
+        default: all
+      script_timeout:
+        required: false
+        type: string
+        default: "3600"
+      skip_folders:
+        required: false
+        type: string
+        default: ""
+      only:
+        required: false
+        type: string
+        default: ""
+      prebuild_run_id:
+        required: false
+        type: string
+      petsc_prebuild_run_id:
         required: false
         type: string
 
@@ -416,8 +475,11 @@ jobs:
           cat /opt/pyoomph-petsc/env.sh
           set -a; source /opt/pyoomph-petsc/env.sh; set +a
           # The harness reads PETSC_DIR/PETSC_ARCH_REAL/PETSC_ARCH_COMPLEX and puts the matching
-          # arch on each script's PYTHONPATH itself, so what is exported here only has to make a
-          # plain `python -c "import petsc4py"` work.
+          # arch on each script's PYTHONPATH *and* loader path itself, so what is exported here only
+          # has to make a plain `python -c "import petsc4py"` work. env.sh names the REAL arch, and
+          # until env_with_petsc() also moved DYLD_LIBRARY_PATH the complex scripts inherited it:
+          # petsc4py reported complex scalars (a compile-time constant) while having mapped
+          # real/lib/libpetsc, and slepc4py died on a symbol only the complex build exports.
           for v in PETSC_DIR PETSC_ARCH_REAL PETSC_ARCH_COMPLEX PATH PYTHONPATH \
                    LD_LIBRARY_PATH DYLD_LIBRARY_PATH; do
             echo "${v}=${!v}" >> "${GITHUB_ENV}"
@@ -433,6 +495,7 @@ jobs:
           # pyoomph, and running it with the venv's python keeps the two consistent anyway.
           QUICK: ${{ inputs.quick_test && '--quick-test' || '' }}
           SKIPS: ${{ inputs.skip_folders }}
+          ONLY: ${{ inputs.only }}
           TIMEOUT: ${{ inputs.script_timeout }}
           OMP: ${{ inputs.omp }}
         run: |
@@ -449,11 +512,14 @@ jobs:
           # which is not the serial element loop every previous run of this workflow measured.
           OMP_FLAG=""
           if [[ "${OMP:-0}" != "0" ]]; then OMP_FLAG="--omp ${OMP}"; fi
+          # Word splitting is the point: each substring becomes its own repeatable --only.
+          ONLY_FLAGS=""
+          for o in ${ONLY:-}; do ONLY_FLAGS="${ONLY_FLAGS} --only ${o}"; done
           # The harness exits 0 whatever happens - the verdict comes from the report in the next
           # step - so nothing here can hide a failing script.
           "${TUTORIAL_PYTHON}" -u citools/test_all_tutorial_scripts.py \
             ${NO_PETSC} ${QUICK} --timeout "${TIMEOUT:-0}" ${OMP_FLAG} \
-            --report-json tutorial_report.json \
+            ${ONLY_FLAGS} --report-json tutorial_report.json \
             ${SKIPS} 2>&1 | tail -n 4000
 
       - name: Run the tutorial scripts (Windows)
@@ -463,6 +529,7 @@ jobs:
           MPLBACKEND: Agg
           QUICK: ${{ inputs.quick_test && '--quick-test' || '' }}
           SKIPS: ${{ inputs.skip_folders }}
+          ONLY: ${{ inputs.only }}
           TIMEOUT: ${{ inputs.script_timeout }}
           OMP: ${{ inputs.omp }}
         run: |
@@ -474,9 +541,12 @@ jobs:
           export PATH="/ucrt64/bin:$PATH"
           OMP_FLAG=""
           if [[ "${OMP:-0}" != "0" ]]; then OMP_FLAG="--omp ${OMP}"; fi
+          # Word splitting is the point: each substring becomes its own repeatable --only.
+          ONLY_FLAGS=""
+          for o in ${ONLY:-}; do ONLY_FLAGS="${ONLY_FLAGS} --only ${o}"; done
           "$(cygpath -u "${TUTORIAL_PYTHON}")" -u citools/test_all_tutorial_scripts.py \
             --no-petsc ${QUICK} --timeout "${TIMEOUT:-0}" ${OMP_FLAG} \
-            --report-json tutorial_report.json \
+            ${ONLY_FLAGS} --report-json tutorial_report.json \
             ${SKIPS} 2>&1 | tail -n 4000
 
       # The point of the whole workflow: the per-script verdict and timing, on the run's summary

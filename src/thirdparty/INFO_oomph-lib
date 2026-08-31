@@ -806,3 +806,23 @@ The identical guard already exists, also marked FOR PYOOMPH, at the two sibling 
 the pattern in problem.cc (load_balance) are untouched, pyoomph does not reach them.
 See dev_docs/mpi_augmented_systems.md section 6b.
 Upstream equivalent: none; upstream never has a refineable element without a tree.
+
+##########################################################################
+linear_solver.cc (Changed on 30th August 2026, the two phase timings in SuperLUSolver::solve and
+SuperLUSolver::solve_transpose are named after the CALLS they bracket, not after an algorithm):
+The two lines used to read "Time for LU factorisation" and "Time for back-substitution", which is
+true for SuperLU and for every backend that factorises eagerly, and false for one that does not.
+pyoomph routes its Python solvers through this class (see the older FOR PYOOMPH note on the third
+line of the same print), and its PETSc wrapper does nothing in factorise() but copy the CSR into a
+Mat: PETSc factorises lazily inside KSPSolve, so the numerical factorisation is charged to backsub().
+Measured on docs/source/tutorial/advstab/azimuthal/rayleigh_benard_azimuthal_stability.py, ndof=16565,
+515 solves: PETSc/MUMPS reports 0.035 s "factorisation" and 0.583 s "back-substitution", Pardiso
+0.272 s and 0.017 s for the same system - the ratio inverted, and the same total within a factor of
+two. Read literally, the PETSc numbers say the triangular solve costs seventeen times the
+factorisation that produced it, which sent an investigation of a CI timeout after a back-substitution
+that was never slow.
+The lines now read "Time for factorise() call" and "Time for backsub() call". Only the third line,
+the total, is comparable across backends; the split says how the work divides between the two calls,
+which is a property of the backend rather than of the linear algebra.
+Nothing in pyoomph parses these strings (checked); they are diagnostics printed under Doc_time.
+Upstream equivalent: none; upstream SuperLUSolver always is SuperLU, so upstream's labels are right.

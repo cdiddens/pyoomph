@@ -509,7 +509,10 @@ class _BlobProb(Problem):
         self.extra_on = extra_on
 
     def define_problem(self):
-        m = _Blob(self.res)
+        # Kept on the problem: a test that wants to steer the REMESH (see
+        # test_projection_conserves_the_integral_better_than_interpolation) needs the template, and
+        # the mesh object does not hand it back.
+        self.blob = m = _Blob(self.res)
         m.remesher = Remesher2d(m)
         self.add_mesh(m)
         eqs = PoissonEquation(source=1)
@@ -538,6 +541,17 @@ def test_projection_conserves_the_integral_better_than_interpolation():
     # The reason to prefer the projection at all. An exact L2 projection conserves exactly (constants
     # are in the space); nodal interpolation does not. Measured on a field the space CANNOT represent,
     # since on a representable one both are exact and the question does not arise.
+    #
+    # The remesh is forced onto a COARSER mesh (575 nodes -> ~220), and that is the whole point of
+    # set_boundary_point_size here. A plain force_remesh rebuilds the geometry from the old mesh's own
+    # boundary points AND its element sizes (GmshRemesher2d / RemeshBoundaryPoint.element_size), so it
+    # asks gmsh for the mesh it already has - and how nearly gmsh delivers exactly that is a property
+    # of the gmsh version. When it does, nodal interpolation is EXACT, because the new nodes sit on
+    # the old ones, and it beats any projection, which still pays its own quadrature error. That is
+    # not hypothetical: the first CI run of this test (gmsh 4.15.2 in the wheel's venv) measured
+    # 3.5e-7 for interpolation against 3.5e-6 for the projection and failed, while gmsh 4.13.1 here
+    # gave 3.9e-5 against 2.6e-5 and passed. Comparing on a mesh that genuinely differs is what the
+    # claim is about; it holds by 4.7x coarsening and 2.5x refining.
     def bump(x, y):
         return math.exp(-30.0 * ((x - 0.45) ** 2 + (y - 0.3) ** 2))
 
@@ -549,6 +563,9 @@ def test_projection_conserves_the_integral_better_than_interpolation():
             m = p.get_mesh("domain")
             _stamp_bulk(m, bump)
             before = float(m.evaluate_all_observables()["u_int"])
+            coarse = 0.15
+            p.blob.remesher.set_boundary_point_size(
+                bottom=lambda x, y: coarse, interface=lambda x, y: coarse, axis=lambda x, y: coarse)
             p.force_remesh(interpolator=interp)
             after = float(p.get_mesh("domain").evaluate_all_observables()["u_int"])
         drift[interp] = abs(after - before) / abs(before)

@@ -318,7 +318,7 @@ class GenericLinearSystemSolver:
 			return self._solve_distributed_on_root(op_flag,allow_permutations,n,nnz_local,nrow_local,first_row,values,col_index,row_start,b,nprow,npcol,doc,data,info)
 		raise RuntimeError("This solver cannot be used with multiple MPI processes.")
 
-	def solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPIntArray,colptr:NPIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
+	def solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPAnyIntArray,colptr:NPAnyIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
 		raise NotImplementedError("You need to specialise the function 'solve_serial'")
 
 

@@ -98,9 +98,8 @@ identical numbers and looks like a perfect result.
 
 - **Vendored oomph-lib.** Changes inside `src/thirdparty/oomph-lib/` are marked with a `//FOR PYOOMPH`
   comment *and* described in `src/thirdparty/INFO_oomph-lib`. Both, every time.
-- **Comments explain why.** The codebase documents reasoning and rejected alternatives, not
-  restatements of the code. Match that: when a piece of code exists because of a specific failure,
-  say what the failure was. However, keep it brief.
 - **Correct the record.** Several long-standing comments in this codebase turned out to describe
   behaviour that had since changed (a default flipped, a bug fixed, a code path `#define`d out). If
   you find one, fix it in the same commit rather than working around it.
+- **Do not edit CHANGELOG.md unless asked.** We will do it before releasing the next version
+- **Do not add bug-fix specific comments to the tutorial rst files.** The users are not interested in the history, but they just want to have a running script

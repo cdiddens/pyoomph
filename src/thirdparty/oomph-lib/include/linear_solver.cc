@@ -1333,10 +1333,20 @@ namespace oomph
     Solution_time = t_end - t_start;
     if (Doc_time)
     {
+      //FOR PYOOMPH: these two lines used to read "Time for LU factorisation" and
+      // "Time for back-substitution", which names an algorithmic phase rather than
+      // what is actually being timed - the factorise() and backsub() calls. The
+      // distinction is not pedantic once the backend is not SuperLU: pyoomph's PETSc
+      // wrapper does nothing in factorise() but upload the CSR, and PETSc factorises
+      // lazily inside KSPSolve, so the numerical factorisation is charged to backsub().
+      // On rayleigh_benard_azimuthal_stability that reads 0.035 s "factorisation" and
+      // 0.583 s "back-substitution", the exact opposite of Pardiso's 0.272 s / 0.017 s
+      // on the same system, and it cost an afternoon of chasing a back-substitution
+      // that was never slow. Only the third line, the total, compares across backends.
       oomph_info
-        << "Time for LU factorisation : "
+        << "Time for factorise() call : "
         << TimingHelpers::convert_secs_to_formatted_string(factorise_time)
-        << "\nTime for back-substitution: "
+        << "\nTime for backsub() call   : "
         << TimingHelpers::convert_secs_to_formatted_string(backsub_time)
         << "\nTime for LinearSolver solve (ndof=" << n_row_before_factorise << "): " //FOR PYOOMPH: Replaced SuperLUSolver by LinearSolver, since it is not always superlu doing the job
         << TimingHelpers::convert_secs_to_formatted_string(Solution_time)
@@ -1818,10 +1828,20 @@ namespace oomph
     Solution_time = t_end - t_start;
     if (Doc_time)
     {
+      //FOR PYOOMPH: these two lines used to read "Time for LU factorisation" and
+      // "Time for back-substitution", which names an algorithmic phase rather than
+      // what is actually being timed - the factorise() and backsub() calls. The
+      // distinction is not pedantic once the backend is not SuperLU: pyoomph's PETSc
+      // wrapper does nothing in factorise() but upload the CSR, and PETSc factorises
+      // lazily inside KSPSolve, so the numerical factorisation is charged to backsub().
+      // On rayleigh_benard_azimuthal_stability that reads 0.035 s "factorisation" and
+      // 0.583 s "back-substitution", the exact opposite of Pardiso's 0.272 s / 0.017 s
+      // on the same system, and it cost an afternoon of chasing a back-substitution
+      // that was never slow. Only the third line, the total, compares across backends.
       oomph_info
-        << "Time for LU factorisation : "
+        << "Time for factorise() call : "
         << TimingHelpers::convert_secs_to_formatted_string(factorise_time)
-        << "\nTime for back-substitution: "
+        << "\nTime for backsub() call   : "
         << TimingHelpers::convert_secs_to_formatted_string(backsub_time)
         << "\nTime for LinearSolver solve (ndof=" << n_row_before_factorise << "): " //FOR PYOOMPH: Replaced SuperLUSolver by LinearSolver, since it is not always superlu doing the job
         << TimingHelpers::convert_secs_to_formatted_string(Solution_time)

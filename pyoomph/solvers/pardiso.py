@@ -862,7 +862,7 @@ class PardisoSolver(GenericLinearSystemSolver):
 
             
 
-    def get_jacobian_matrix(self,n:int,values:NPFloatArray, rowind:NPIntArray, colptr:NPIntArray)->Any:
+    def get_jacobian_matrix(self,n:int,values:NPFloatArray, rowind:NPAnyIntArray, colptr:NPAnyIntArray)->Any:
         # The .copy() is load-bearing, not redundant: csr_matrix((values,rowind,colptr)) only *wraps*
         # the incoming arrays, which are zero-copy numpy views onto oomph-lib's CRDoubleMatrix buffers
         # (see src/nanobind/solver.cpp). pardisoSolver keeps ctypes pointers into a/ia/ja and MKL
@@ -957,14 +957,14 @@ class PardisoSolver(GenericLinearSystemSolver):
         ps.a[:] = A.data[:]
         return True
 
-    def solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPIntArray,colptr:NPIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
+    def solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPAnyIntArray,colptr:NPAnyIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
         try:
             return self._solve_serial(op_flag,n,nnz,nrhs,values,rowind,colptr,b,ldb,transpose)
         except Exception:
             self._invalidate_factorisation()
             raise
 
-    def _solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPIntArray,colptr:NPIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
+    def _solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPAnyIntArray,colptr:NPAnyIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
         #print("CALL WITH OP FLAG ",op_flag,ldb,transpose)
         #print("PARDISO ", op_flag)
         if op_flag == 1:

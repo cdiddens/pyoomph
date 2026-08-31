@@ -91,10 +91,46 @@ from . import _pyoomph_core as _pyoomph
 _pyoomph.set_jit_include_dir(os.path.join(os.path.dirname(os.path.abspath(__file__)), "jitbridge"))
 
 _default_c_compiler:Literal["tcc","system"]="system"
+_resolved_default_c_compiler:str | None=None
 
 
 def get_default_c_compiler():
-	return _default_c_compiler
+	"""The compiler a fresh Problem starts with: "system", unless that one cannot compile here.
+
+	The preference is unchanged - the system toolchain is faster than the bundled tcc and is what
+	every working installation ends up with - but it is now VERIFIED once per process instead of
+	being asserted. On Windows "system" means MSVC whatever else is installed (distutils has no
+	other default there), and an MSVC that cannot compile is not hypothetical: the Windows job of
+	the full-suite run of 30th August 2026 got one whose vcvars returned an INCLUDE without the
+	Windows SDK, so every JIT compile died on "Cannot open include file: 'math.h'" - on an image
+	carrying a Visual Studio 18 preview, and not reproducible on the next runner. tccbox was
+	installed and working the whole time, and nothing consulted it, because this function returned
+	a hardcoded name that Problem.__init__ passes straight to set_c_compiler.
+
+	check_avail() compiles and links a small program, so it is memoised: it would otherwise be paid
+	per Problem, and tests/test_multiple_problems.py builds plenty.
+	"""
+	global _resolved_default_c_compiler
+	if _resolved_default_c_compiler is not None:
+		return _resolved_default_c_compiler
+	from .generic.ccompiler import BaseCCompiler
+	resolved=_default_c_compiler
+	try:
+		avail=BaseCCompiler.available_compilers()
+	except Exception:
+		avail={}   # a probe that raises must not stop a run before it starts
+	if avail and resolved not in avail:
+		best=max(avail,key=lambda k:avail[k])
+		import warnings
+		warnings.warn(
+			"The '"+resolved+"' C compiler cannot compile on this machine, so pyoomph will JIT with "
+			"'"+best+"' instead. On Windows this usually means the Visual Studio installation has no "
+			"Windows SDK on its include path (the symptom is \"Cannot open include file: 'math.h'\"); "
+			"the fallback works, but it is slower.",
+			RuntimeWarning,stacklevel=2)
+		resolved=best
+	_resolved_default_c_compiler=resolved
+	return resolved
 
 
 ###DEVELOPMENT FLAGS, REMOVE AFTER SUCCESSFUL IMPLEMENTATION
@@ -275,12 +311,29 @@ def _have_spectra() -> bool:
 		return False
 
 
+# Why PETSc/MUMPS was not taken, for _warn_suboptimal_solver() to quote. The bare `except` below
+# used to discard it, and the three reasons it hides are three different things to go and fix: no
+# petsc4py on the path at all, a PETSc built without MUMPS, and - the one that cost two hours of CI
+# on 30th August 2026 - a petsc4py that imports but whose slepc4py cannot, because the loader had
+# been pointed at the other scalar arch ("Symbol not found: _NEPCISSGetExtraction"). All three read
+# as "no better solver was found" and only the last one is a misconfiguration the user can undo.
+_petsc_mumps_unavailable_reason:Optional[str]=None
+
 def _have_petsc_mumps() -> bool:
+	global _petsc_mumps_unavailable_reason
 	try:
 		from .solvers.petsc import PETSc,PETSCMUMPSSolver,SlepcMUMPSEigenSolver #type:ignore
-		return bool(PETSc.Sys.hasExternalPackage("mumps")) #type:ignore
-	except:
+	except BaseException as e:
+		_petsc_mumps_unavailable_reason="importing petsc4py/slepc4py failed: %s: %s"%(type(e).__name__,e)
 		return False
+	try:
+		if bool(PETSc.Sys.hasExternalPackage("mumps")): #type:ignore
+			_petsc_mumps_unavailable_reason=None
+			return True
+		_petsc_mumps_unavailable_reason="this PETSc was built without MUMPS (--download-mumps=yes)"
+	except BaseException as e:
+		_petsc_mumps_unavailable_reason="PETSc.Sys.hasExternalPackage('mumps') failed: %s: %s"%(type(e).__name__,e)
+	return False
 
 
 def _set_accelerate_linear_solver() -> bool:
@@ -317,10 +370,14 @@ _is_arm64 = _machine in ("arm64", "aarch64")
 def _warn_suboptimal_solver(name:str) -> None:
 	import warnings
 	suggestion="PETSc/SLEPc compiled with MUMPS support" if (_is_macos and _is_arm64) else "pardiso (via Intel MKL)"
+	# Appended when there is one: a PETSc that is installed and merely unreachable produces exactly the
+	# same sentence as one that was never there, and the difference decides whether the reader should
+	# go and install something or go and fix an environment variable.
+	why=("\nPETSc/MUMPS was not used because "+_petsc_mumps_unavailable_reason) if _petsc_mumps_unavailable_reason else ""
 	warnings.warn(
 		"pyoomph is falling back to the '"+name+"' solver, since no better solver was found. For better performance, consider "
 		"installing "+suggestion+" -- see https://pyoomph.readthedocs.io/en/latest/tutorial/installation/ for "
-		"instructions.",
+		"instructions."+why,
 		RuntimeWarning,
 		stacklevel=2,
 	)
