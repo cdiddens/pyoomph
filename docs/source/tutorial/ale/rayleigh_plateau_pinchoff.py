@@ -184,17 +184,12 @@ if __name__ == "__main__":
         problem.DTSF_max_increase_factor = 1.25
         problem.DTSF_min_decrease_factor = 0.75
         problem.initialise()
-        # After initialise(), so that it also wins over a --omp N on the command line: that flag is
-        # applied by parse_cmd_line() during initialise() and drives the SOLVER's thread count as
-        # well as the assembly's. MKL Pardiso's threaded factorisation is not bit-reproducible even
-        # at a fixed thread count, and a pinch-off amplifies a last-bit difference into a different
-        # remesh sequence - between 13 and 29 remeshes were observed for the same script. One such
-        # trajectory hit a remesh whose interpolated state Newton could not recover from (residuals
-        # 15862 -> 32086 -> 222298, dt collapsing to oomph-lib's 1e-12 floor), which is how this
-        # turned up: as a CI failure on one platform only, not reproducible by re-running.
-        # Only the solver is pinned; the threaded element loop is bit-identical to the serial one
-        # and keeps its threads. On every backend other than Pardiso this call does nothing.
-        problem.get_la_solver().set_num_threads(1)
+        
+        # Make it reproducible. A threaded direct solver is not bit-reproducible, and a pinch-off
+        # turns a last-bit difference into a different remesh sequence. After initialise(), so that
+        # it also wins over a --omp N on the command line. (Gmsh is pinned separately, with
+        # General.NumThreads in define_geometry above.)
+        problem.set_num_threads(1)
 
         history = problem.create_text_file_output("pinchoff.txt",
                                                   header=["t", "r_min", "fragments", "volume"])
