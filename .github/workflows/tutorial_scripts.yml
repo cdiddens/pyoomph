@@ -95,6 +95,11 @@ on:
         required: false
         type: string
         default: ""
+      only:
+        description: Run ONLY the scripts whose "Folder/script.py" path contains one of these substrings, space separated (e.g. "rayleigh_plateau_pinchoff"). Empty runs everything. For chasing one flaky script across the platforms without paying for a full pass
+        required: false
+        type: string
+        default: ""
       prebuild_run_id:
         description: Optional "Prebuild static CLN/GiNaC" run id to take the CLN/GiNaC artifacts from (defaults to the latest successful run)
         required: false
@@ -135,6 +140,10 @@ on:
         type: string
         default: "3600"
       skip_folders:
+        required: false
+        type: string
+        default: ""
+      only:
         required: false
         type: string
         default: ""
@@ -486,6 +495,7 @@ jobs:
           # pyoomph, and running it with the venv's python keeps the two consistent anyway.
           QUICK: ${{ inputs.quick_test && '--quick-test' || '' }}
           SKIPS: ${{ inputs.skip_folders }}
+          ONLY: ${{ inputs.only }}
           TIMEOUT: ${{ inputs.script_timeout }}
           OMP: ${{ inputs.omp }}
         run: |
@@ -502,11 +512,14 @@ jobs:
           # which is not the serial element loop every previous run of this workflow measured.
           OMP_FLAG=""
           if [[ "${OMP:-0}" != "0" ]]; then OMP_FLAG="--omp ${OMP}"; fi
+          # Word splitting is the point: each substring becomes its own repeatable --only.
+          ONLY_FLAGS=""
+          for o in ${ONLY:-}; do ONLY_FLAGS="${ONLY_FLAGS} --only ${o}"; done
           # The harness exits 0 whatever happens - the verdict comes from the report in the next
           # step - so nothing here can hide a failing script.
           "${TUTORIAL_PYTHON}" -u citools/test_all_tutorial_scripts.py \
             ${NO_PETSC} ${QUICK} --timeout "${TIMEOUT:-0}" ${OMP_FLAG} \
-            --report-json tutorial_report.json \
+            ${ONLY_FLAGS} --report-json tutorial_report.json \
             ${SKIPS} 2>&1 | tail -n 4000
 
       - name: Run the tutorial scripts (Windows)
@@ -516,6 +529,7 @@ jobs:
           MPLBACKEND: Agg
           QUICK: ${{ inputs.quick_test && '--quick-test' || '' }}
           SKIPS: ${{ inputs.skip_folders }}
+          ONLY: ${{ inputs.only }}
           TIMEOUT: ${{ inputs.script_timeout }}
           OMP: ${{ inputs.omp }}
         run: |
@@ -527,9 +541,12 @@ jobs:
           export PATH="/ucrt64/bin:$PATH"
           OMP_FLAG=""
           if [[ "${OMP:-0}" != "0" ]]; then OMP_FLAG="--omp ${OMP}"; fi
+          # Word splitting is the point: each substring becomes its own repeatable --only.
+          ONLY_FLAGS=""
+          for o in ${ONLY:-}; do ONLY_FLAGS="${ONLY_FLAGS} --only ${o}"; done
           "$(cygpath -u "${TUTORIAL_PYTHON}")" -u citools/test_all_tutorial_scripts.py \
             --no-petsc ${QUICK} --timeout "${TIMEOUT:-0}" ${OMP_FLAG} \
-            --report-json tutorial_report.json \
+            ${ONLY_FLAGS} --report-json tutorial_report.json \
             ${SKIPS} 2>&1 | tail -n 4000
 
       # The point of the whole workflow: the per-script verdict and timing, on the run's summary

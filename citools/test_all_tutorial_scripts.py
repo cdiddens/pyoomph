@@ -40,6 +40,11 @@ parser.add_argument("--report-json", metavar="PATH", default=None, help="Also wr
 parser.add_argument("--mpirun", type=int, default=0, metavar="N", help="Run each script under 'mpirun -n N' instead of directly. Default 0, i.e. no mpirun")
 parser.add_argument("--omp", type=int, default=0, metavar="N", help="Pass '--omp N' to each script, i.e. assemble the elements on N threads. Default 0, i.e. leave each script on the serial element loop. Composes with --mpirun, which is threads per rank then")
 parser.add_argument("--distribute", help="Pass --distribute to each script, i.e. distribute the mesh over the ranks. Only meaningful together with --mpirun", action="store_true")
+# For chasing one flaky script across the platforms: a full pass is hours per OS, and a script that
+# only fails once in a while has to be run as the CI runs it - same wheel, same runner - not once in
+# a scratch directory. Substring rather than glob, on "Folder/script.py", so that a bare script name
+# is the common case and a folder name still selects the folder.
+parser.add_argument("--only", action="append", default=[], metavar="SUBSTRING", help="Run only the scripts whose 'Folder/script.py' path contains one of these substrings. Repeatable. Folders with no match are skipped entirely")
 # Folders to skip used to be read from sys.argv directly, which stopped working when argparse was
 # added - argparse rejects any positional argument it does not know about.
 parser.add_argument("skips", nargs="*", help="Bundle folders to skip, e.g. Temporal_ODEs")
@@ -384,15 +389,28 @@ def folder_label(d):
   """
   return Path(d.replace("\\","/")).name
 
+def wanted(folder,script):
+  """Whether --only selects this script. No --only means everything, as before."""
+  if not args.only:
+    return True
+  return any(o in folder+"/"+script for o in args.only)
+
+
 for d in glob.glob("./*/"):
   if d in skips or folder_label(d) in skips:
     print("SKIPPING",d)
+    continue
+  if args.only and not any(wanted(folder_label(d),f.name)
+                           for f in (basedir/d).glob("*.py")):
+    # Silent: with --only naming one script, saying so for the other ten folders is noise.
     continue
   
   folder_okay=True
   os.chdir(basedir/d)
   print("TESTING FOLDER",d )
   for f in glob.glob("*.py"):
+    if not wanted(folder_label(d),f):
+      continue
     if f=="bifurcation_fold_param_change.py":
       # This is meant to crash when the parameter is changed, so it is not a regression test.
       continue
@@ -533,7 +551,7 @@ if report_json is not None:
                "options":{"quick_test":args.quick_test,"tcc":args.tcc,"no_petsc":args.no_petsc,
                           "mpirun":args.mpirun,"omp":args.omp,"distribute":args.distribute,
                           "timeout":args.timeout,
-                          "skips":skips},
+                          "skips":skips,"only":args.only},
                "scripts":records},jf,indent=1)
   print("Wrote the machine-readable report to",report_json)
   
