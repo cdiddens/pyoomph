@@ -200,13 +200,23 @@ class PETSCSolver(GenericLinearSystemSolver):
         # J x = b is rejected, rather than handed to Newton as an update that cannot move the
         # residual. See _reject_null_pivot_pseudo_solution.
         self.raise_on_null_pivot_pseudo_solution=True
-        #: How far ||J x - b|| / ||b|| may sit above zero before such a solve counts as a
-        #: pseudo-solution. Loose on purpose: this separates "solved" from "not solved at all",
-        #: not one direct solver's accuracy from another's. The two legitimate substitutions in
-        #: droplet_spread_3d measure 5e-8 and 7e-8, and a pseudo-solution whose update cannot move
-        #: the residual at all is O(1), so anything in between does; this sits four orders below
-        #: the bad case and three above the good ones.
-        self.null_pivot_residual_tolerance=1e-4
+        #: How far ||J x - b|| / ||b|| may rise before such a solve counts as a pseudo-solution
+        #: rather than an inexact solution.
+        #:
+        #: 1.0 is a statement, not a tuned constant: at that ratio the "solution" leaves the linear
+        #: residual as large as the right-hand side, i.e. it is no better than returning x = 0, and
+        #: a Newton update built from it cannot be trusted to point anywhere. Below it the update is
+        #: inexact but still a descent direction, which Newton absorbs.
+        #:
+        #: Measured, across the three regimes the tutorials produced:
+        #:   5e-8, 7e-8      droplet_spread_3d's structurally zero diagonals -- the case ICNTL(24)=1
+        #:                   exists for, where the substitution is exactly right;
+        #:   9e-3 .. 1.7e-2  lubrication_coalescence on arm64, 76 solves -- inexact, and the script
+        #:                   converges through every one of them. A tolerance of 1e-4 rejected these
+        #:                   and drove its timestep below the minimum, turning a passing script into
+        #:                   a failing one;
+        #:   0.0015 .. 537   droplet_spread_3d on arm64, 522 solves, median 27 -- 80% above 1.0.
+        self.null_pivot_residual_tolerance=1.0
 
         # Whether the CURRENT KSP/PC were configured for a proven-symmetric matrix (see
         # _use_symmetric_factorisation_now). Tracked so a flip - a bifurcation tracker toggled -
