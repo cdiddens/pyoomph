@@ -83,8 +83,17 @@ def main() -> int:
     # methods directly (e.g. _set_current_codegen, _resolve_based_on_domain_name), which
     # nanobind.stubgen omits by default (unlike the old pybind11-stubgen, which always
     # included them) - keep them in the stub so editors/type-checkers can resolve them.
-    base_cmd = [args.python, "-m", "nanobind.stubgen",
-                "-m", args.module_name, "-O", str(stage_dir), "-P"]
+    # Routed through stubgen_launcher.py rather than "-m nanobind.stubgen" directly: on Windows
+    # the extension is imported straight out of the build tree, where its MSYS2/UCRT64
+    # dependencies are only on PATH - which CPython >= 3.8 does not search for extension DLLs.
+    # See the module docstring there. On the other platforms the launcher is a passthrough.
+    launcher = Path(__file__).with_name("stubgen_launcher.py")
+    if launcher.exists():
+        base_cmd = [args.python, str(launcher),
+                    "-m", args.module_name, "-O", str(stage_dir), "-P"]
+    else:
+        base_cmd = [args.python, "-m", "nanobind.stubgen",
+                    "-m", args.module_name, "-O", str(stage_dir), "-P"]
 
     result = run(base_cmd, env=env)
     if result.returncode != 0:
