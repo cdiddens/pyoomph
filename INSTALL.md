@@ -16,46 +16,7 @@ Verify whether everything runs fine by
 
 > python -m pyoomph check all
 
-If you encounter segmentation faults during solving, please try to downgrade your MKL package, e.g. via *python -m pip install mkl==2024.1.0*.
-
-### PETSc/SLEPc via WSL
-
-PETSc/SLEPc (used for a much more stable eigensolver, see the [tutorial](https://pyoomph.readthedocs.io/)) cannot be built natively on Windows. If you need it, install pyoomph inside the [Windows Subsystem for Linux (WSL)](https://learn.microsoft.com/windows/wsl/) instead, where it can be built exactly as on native Linux.
-
-From an elevated PowerShell:
-
-```powershell
-wsl --install -d Ubuntu
-```
-
-Reboot if prompted, open the "Ubuntu" app, then inside it install pyoomph as on Linux (see below), keeping the source trees on the Linux filesystem (e.g. `~/...`, not `/mnt/c/...`):
-
-```bash
-sudo apt update
-sudo apt install gcc libopenmpi-dev flex bison
-python3 -m pip install --upgrade pyoomph
-```
-
-Then build PETSc/SLEPc as on Linux:
-
-```bash
-cd A_FOLDER_OF_YOUR_CHOICE
-git clone -b release https://gitlab.com/petsc/petsc.git petsc
-cd petsc
-export PETSC_DIR=$(pwd)
-export PETSC_ARCH=pyoomph_petsc_arch
-./configure --with-mpi --with-petsc4py --download-mumps=yes --download-hypre=yes --download-parmetis=yes --download-ptscotch=yes --download-slepc=yes --download-superlu=yes --download-superlu_dist=yes --download-suitesparse=yes --download-metis=yes --download-scalapack --with-scalar-type=complex
-```
-
-`configure` prints the exact `make` command to run next. Afterwards, add to `~/.bashrc`:
-
-```bash
-export PETSC_DIR=A_FOLDER_OF_YOUR_CHOICE/petsc
-export PETSC_ARCH=pyoomph_petsc_arch
-export PYTHONPATH=$PYTHONPATH:$PETSC_DIR/$PETSC_ARCH/lib
-```
-
-If `make` is killed for running out of memory, raise the memory available to WSL2 via `C:\Users\<you>\.wslconfig` (`[wsl2]` section, `memory=8GB`), then `wsl --shutdown` and reopen. If you use VS Code, install the "WSL" remote extension and open the project from within WSL so the editor picks up the environment variables above. Full details, including how to select the SLEPc/MUMPS eigensolver, are in the [tutorial](https://pyoomph.readthedocs.io/en/latest/tutorial/installation/wsl.html).
+If you encounter segmentation faults during solving, please try to upgrade or downgrade your MKL package, e.g. via *python -m pip install mkl==2024.1.0*.
 
 ## On Linux
 
@@ -67,10 +28,13 @@ If you encounter segmentation faults during solving, please try to downgrade you
 
 ## On Mac
 
-The fast `MKL Pardiso` solver from `mkl` is not available on `arm64` Macs. If you want to use it, install pyoomph in a `Rosetta 2 terminal`, see [here](https://www.courier.com/blog/tips-and-tricks-to-setup-your-apple-m1-for-development/) how to set it up (**note**: recent systems must be handled differently, see [here](https://developer.apple.com/forums/thread/718666)).
+The fast `MKL Pardiso` solver from `mkl` is not available on `arm64` Macs. Since the default solver on `arm64` Macs (`Accelerate`) is unable to tackle larger problems at reasonable times, you definitely either want to use `MKL Pardiso` with a workaround or use `MUMPS` via `PETSc`.
+To use `MKL Pardiso`, install pyoomph in a `Rosetta 2 terminal`, see [here](https://www.courier.com/blog/tips-and-tricks-to-setup-your-apple-m1-for-development/) how to set it up (**note**: recent systems must be handled differently, see [here](https://developer.apple.com/forums/thread/718666)).
 Also, please downgrade `mkl` by
 
 > python3 -m pip install mkl==2021.4.0
+
+The alternative, solving with `PETSc/MUMPS`, runs natively on `arm64`, but requires the installation of `PETSc/MUMPS`. See [here](https://pyoomph.readthedocs.io/en/latest/tutorial/installation/petscslepc.html) for details.
 
 Make sure to have the `Xcode` developer tools, e.g. by installing them via
 
@@ -79,8 +43,6 @@ Make sure to have the `Xcode` developer tools, e.g. by installing them via
 and test pyoomph via
 
 > python -m pyoomph check all
-
-Alternatively, if you do not want to use the `Rosetta 2 terminal` detour, you can also install it directly on arm64 systems. This will use the `Accelerate Framework` as default solver.
 
 
 ## Compilation from source (including MPI)

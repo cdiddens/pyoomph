@@ -6,6 +6,8 @@ On Mac
 .. warning::
 
    If you are using a recent Mac with an Apple silicon (arm64 architecture) processor, you might encounter some problems, since not all required python packages are present in the pip repository yet. Therefore, in order to use the fast MKL Pardiso solver, you can use Rosetta 2 to emulate the x86_64 architecture. You must execute the following commands in a Rosetta terminal. At https://www.courier.com/blog/tips-and-tricks-to-setup-your-apple-m1-for-development/ you can find instructions on how to create such a Rosetta terminal. On more recent systems, please refer to https://developer.apple.com/forums/thread/718666 to setup a corresponding terminal.
+   
+   Alternatively, you should install PETSc with MUMPS, as described in :numref:`petscslepc`.
       
 
 To clone the git repository, you require git, but this comes along with the Xcode developer tools, which is required anyhow. The latter can be installed via

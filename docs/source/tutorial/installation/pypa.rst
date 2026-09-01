@@ -15,7 +15,7 @@ If you get errors, let us know (c.diddens@utwente.nl), and we will see whether w
 
    If you are using a recent Mac with the Apple silicon (arm64 architecture) processor, and you want to use the fast MKL Pardiso solver, you must execute this command in a Rosetta terminal. At https://www.courier.com/blog/tips-and-tricks-to-setup-your-apple-m1-for-development/ you can find instructions on how to create such a Rosetta terminal (**note**: recent systems must be handled differently, see e.g. here: https://developer.apple.com/forums/thread/718666). Also, please see below regarding the `mkl` module.
    
-   You can install pyoomph from source directly on arm64, but unfortunately without support for the fast MKL Pardiso solver. Instead, it will fallback to the Accelerate framework. See :numref:`installonmac` for details. Also, you might have to use a less recent version of python. See https://github.com/pyoomph/pyoomph/blob/main/Mac_arm64_with_Pardiso.md for details.
+   Alternatively, please install the PETSc/MUMPS as described in :numref:`petscslepc`.
 
 
 Depending on your system, you have to do additional steps to obtain the full performance:
