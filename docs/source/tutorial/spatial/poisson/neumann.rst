@@ -27,9 +27,11 @@ In the :py:meth:`~pyoomph.generic.problem.Problem.define_problem` method of the 
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <poisson_neumann.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Spatial_PDEs/poisson_neumann.py``
 		    
 
 It is not necessary to implement a Neumann condition for each equation by hand as done with the ``PoissonNeumannCondition`` class. Instead, pyoomph offers the class :py:class:`~pyoomph.equations.generic.NeumannBC`, which allows us to add the weak contribution :math:`\langle j_\text{N},v \rangle` directly. However, one has to consider the sign: In the weak form of the Poisson equation :math:numref:`eqspatialpoissonweak`, the :math:`\langle \ldots \rangle` term has a negative sign, which is accounted for in the implementation of the ``PoissonNeumannCondition``. The generic class :py:class:`~pyoomph.equations.generic.NeumannBC` uses a positive sign instead. One hence has to use ``NeumannBC(u=1.5)`` to get the same effect as ``PoissonNeumannCondition("u",-1.5)``. Note that the keyword argument in ``NeumannBC(u=1.5)`` should be read as *impose the Neumann flux* :math:`1.5` *for* :math:`u`, **not** *set* :math:`u=1.5`, which would be Dirichlet-like.

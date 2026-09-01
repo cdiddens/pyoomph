@@ -92,6 +92,8 @@ The finer mesh is not optional -- the reference notes the same requirement -- an
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <beads_on_string.py>`
+		Full code available in the
 
-		:download:`Download all examples <../tutorial_example_scripts.zip>`
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Moving_Mesh/beads_on_string.py``

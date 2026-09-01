@@ -72,8 +72,10 @@ The method described here can also be applied to spatio-temporal PDEs, which are
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <lorenz_lyapunov.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Temporal_ODEs/lorenz_lyapunov.py``
 		
                

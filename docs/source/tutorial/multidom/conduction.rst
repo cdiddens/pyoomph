@@ -65,9 +65,11 @@ The driver code is quite trivial
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <temperature_conduction.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Multiple_Domains/temperature_conduction.py``
 		    
 
 

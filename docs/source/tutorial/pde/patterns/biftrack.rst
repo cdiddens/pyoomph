@@ -41,8 +41,10 @@ Similarly, we can set the other :py:class:`~pyoomph.equations.generic.InitialCon
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <kuramoto_sivanshinsky_bifurcation.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``SpatioTemporal_PDEs/kuramoto_sivanshinsky_bifurcation.py``
 		    
 

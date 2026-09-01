@@ -101,7 +101,9 @@ The orbit handler is installed afterwards, i.e. the problem solves for the entir
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <thin_film_bifurcation_gui.py>`
+		Full code available in the
 
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Advanced_Linear_Dynamics/thin_film_bifurcation_gui.py``
 	

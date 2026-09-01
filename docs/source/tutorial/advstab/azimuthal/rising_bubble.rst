@@ -82,7 +82,9 @@ We can also generate a movie of the instability. Please refer to :numref:`secplo
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <rising_bubble.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Advanced_Linear_Dynamics/rising_bubble.py``
 

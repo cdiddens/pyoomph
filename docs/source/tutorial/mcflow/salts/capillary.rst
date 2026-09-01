@@ -77,6 +77,8 @@ Summarizing, at :math:`1\:\mathrm{mM}` of a typical buffer the two are indisting
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <nacl_capillary_evaporation.py>`
+		Full code available in the
 
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Multicomponent_Flow/nacl_capillary_evaporation.py``

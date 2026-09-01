@@ -40,8 +40,10 @@ The animation also works when the mesh is distributed over several processes wit
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <eigendynamics.py>`
+		Full code available in the
 
-		:download:`Download all examples <../tutorial_example_scripts.zip>`
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Plotting_Interface/eigendynamics.py``
 
 

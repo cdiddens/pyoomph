@@ -42,9 +42,11 @@ By default, :py:class:`~pyoomph.equations.generic.DirichletBC` will impose the c
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <poisson_weak_dirichlet.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Discontinuous_Galerkin/poisson_weak_dirichlet.py``
  
 
 Finally, we want to address that the discontinuous Galerkin implementation can easily be switched to a *finite volume method*. In such methods, quantities are usually element-wise constant, i.e. approximated on the space ``"D0"``. If setting ``space="D0"``, all terms involving ``grad(u)`` and ``grad(v)`` will vanish, since the gradients are zero in the element-wise constant space. The weak formulation will hence only read 

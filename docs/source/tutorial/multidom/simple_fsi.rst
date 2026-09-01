@@ -43,7 +43,9 @@ Note that spatial adaptivity is driven here by a :py:class:`~pyoomph.equations.g
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <simple_fsi.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Multiple_Domains/simple_fsi.py``
 		    		

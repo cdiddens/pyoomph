@@ -20,9 +20,11 @@ It is not a problem to add the nonlinear damping term to the residuals - a step 
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <van_der_pol_method_1.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`    
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Temporal_ODEs/van_der_pol_method_1.py``
 
 There is also another way to implement exactly the same equation by using already implemented equations. In the following, we make use of the predefined harmonic oscillator that comes with pyoomph:
 
@@ -50,6 +52,8 @@ If we replace :math:`\delta=-1/2 \mu(1-y)^2`, we get in fact the Van der Pol osc
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <van_der_pol_method_2.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`   
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Temporal_ODEs/van_der_pol_method_2.py``

@@ -67,7 +67,9 @@ As seen in :numref:`figpdetransientstokeslaw`, the final velocity field is not s
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <navier_stokes_around_object.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``SpatioTemporal_PDEs/navier_stokes_around_object.py``
 		    

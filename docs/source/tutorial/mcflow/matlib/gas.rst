@@ -32,7 +32,9 @@ You can hence create an instance of the pure gas ``"air"`` by calling :py:func:`
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <materials_pure_gas.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Multicomponent_Flow/materials_pure_gas.py``
 		   

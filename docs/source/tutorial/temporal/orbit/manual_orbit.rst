@@ -43,6 +43,8 @@ Since the guess is taken from a chaotic trajectory, which of the infinitely many
 
    .. container:: downloadbutton
 
-      :download:`Download this example <manual_orbit.py>`
-      
-      :download:`Download all examples <../../tutorial_example_scripts.zip>`
+      Full code available in the
+
+      :download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+      ``Temporal_ODEs/manual_orbit.py``

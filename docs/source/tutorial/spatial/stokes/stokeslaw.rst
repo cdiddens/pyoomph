@@ -136,7 +136,9 @@ The result is plotted in :numref:`figspatialstokeslaw`. We can easily change the
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <stokes_flow_around_object.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Spatial_PDEs/stokes_flow_around_object.py``
 		    

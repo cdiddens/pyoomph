@@ -46,6 +46,8 @@ To obtain the full response data, we can access the eigenvector of the problem. 
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <linear_response_drum.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Advanced_Linear_Dynamics/linear_response_drum.py``

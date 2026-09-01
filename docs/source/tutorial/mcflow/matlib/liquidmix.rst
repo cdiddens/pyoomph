@@ -20,7 +20,9 @@ We can set the activity coefficients either directly by setting the ``dict`` val
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <materials_liquids.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Multicomponent_Flow/materials_liquids.py``
 		   

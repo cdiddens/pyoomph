@@ -28,9 +28,11 @@ In the :py:meth:`~pyoomph.generic.problem.Problem.define_problem` method, we rem
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <falling_droplet.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Multiple_Domains/falling_droplet.py``
 		   
 
 When we have static meshes (i.e. no equations for the mesh positions are added), we must add ``static_interface=True`` to the :py:class:`~pyoomph.equations.navier_stokes.NavierStokesFreeSurface`. With that, the action of the Lagrange multiplier of the kinematic boundary condition :math:numref:`eqalekinbcweak` will be added to the velocity, not the mesh motion. Since the latter is not allowed to move, only an adjustment of the velocity can guarantee the kinematic boundary condition to hold. Thereby, the kinematic boundary condition is effectively replaced by a zero normal flow condition, i.e. :math:numref:`eqspatialnofluxlagrange`.
@@ -80,7 +82,9 @@ The surfactants get advected to the top of the droplet and hamper the flow in th
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <falling_droplet_with_surfactants.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Multiple_Domains/falling_droplet_with_surfactants.py``
 		   

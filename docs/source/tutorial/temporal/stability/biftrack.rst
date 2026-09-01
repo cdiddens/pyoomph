@@ -94,8 +94,10 @@ The very same methods also work for spatio-temporal differential equations. An e
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <bifurcation_hopf_tracking_lorenz.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Temporal_ODEs/bifurcation_hopf_tracking_lorenz.py``
 		
                

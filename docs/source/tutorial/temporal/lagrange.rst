@@ -22,9 +22,11 @@ If you have read this tutorial until here, implementing this equation should be 
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <pendulum_generalized_coordinate.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`   		
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Temporal_ODEs/pendulum_generalized_coordinate.py``
 
 However, in general, it is not always easy to find the generalized coordinate(s) for which the system automatically fulfills all imposed constraints. In that case, one still can enforce the constraints via Lagrange multipliers. In the given example of the pendulum, let us assume we were unable to find the generalized coordinate :math:`\phi` from the constraint :math:`g(x,y)`. We therefore would have to solve the full system, i.e. the equations of motion
 
@@ -102,9 +104,11 @@ Again, we make use of the :py:class:`~pyoomph.equations.generic.ODEObservables` 
 	
 	.. container:: downloadbutton
 
-		:download:`Download this example <pendulum_lagrange_multiplier.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`   		
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Temporal_ODEs/pendulum_lagrange_multiplier.py``
 
 
 

@@ -22,9 +22,11 @@ Obviously, there is no stationary solution for :math:`r<0`, whereas we have a st
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <bifurcation_fold_param_change.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Temporal_ODEs/bifurcation_fold_param_change.py``
 		
                
 Of course, this code will crash the moment we decrease :math:`r<0`, since there is no stationary solution and hence :py:meth:`~pyoomph.generic.problem.Problem.solve` will fail. Since we know that the fold bifurcation takes place at :math:`r=0`, one could try to increase the parameter again after reaching :math:`r=0`, but then - which branch of the solution will be taken? The stable one at :math:`x=\sqrt{r}` or the unstable one at :math:`x=-\sqrt{r}`.
@@ -48,9 +50,11 @@ where :math:`(x^*,r^*)` is a starting point for which :math:`F(x^*,r^*)=0` holds
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <bifurcation_fold_arclength.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Temporal_ODEs/bifurcation_fold_arclength.py``
 		
 
 First, reuse the classes from the beginning of this page, i.e. from :download:`bifurcation_fold_param_change.py`. We get a start solution :math:`(x^*,r^*)`. Then, we use :py:meth:`~pyoomph.generic.problem.Problem.arclength_continuation` to solve the system above for a step :math:`\Delta s`. In the first step the sign of :math:`\Delta s` (``ds`` in python here) gives the initial direction for the parameter, i.e. ``ds<0`` means we want to initially decrease the parameter :math:`r`. :py:meth:`~pyoomph.generic.problem.Problem.arclength_continuation` will now adjust :math:`r` and solve for the stationary solution at the same time. Furthermore, it returns a new guess for ``ds`` for the next step. In order to capture the curve well, we can add the optional argument ``max_ds`` to limit the maximum step along the tangential direction. After the first call of :py:meth:`~pyoomph.generic.problem.Problem.arclength_continuation`, the direction of the tangent and further parameters required for the next steps are implicitly stored in the :py:class:`~pyoomph.generic.problem.Problem` class. These are reset whenever one performs an :py:meth:`~pyoomph.generic.problem.Problem.arclength_continuation` with respect to another parameter or explicitly calls :py:meth:`~pyoomph.generic.problem.Problem.reset_arc_length_parameters`.
@@ -66,9 +70,11 @@ We can combine the :py:meth:`~pyoomph.generic.problem.Problem.arclength_continua
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <bifurcation_fold_arclength_eigen.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Temporal_ODEs/bifurcation_fold_arclength_eigen.py``
 		
 
 

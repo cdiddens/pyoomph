@@ -97,8 +97,10 @@ The rms is used as the y-axis to show the amplitude of the patterns. Obviously, 
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <kuramoto_sivanshinsky_arclength_eigen.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``SpatioTemporal_PDEs/kuramoto_sivanshinsky_arclength_eigen.py``
 		    
 

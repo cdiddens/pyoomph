@@ -37,7 +37,9 @@ A comparison of results without and with slip length can be seen on the right si
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <droplet_spread_sliplength.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Moving_Mesh/droplet_spread_sliplength.py``
 		    

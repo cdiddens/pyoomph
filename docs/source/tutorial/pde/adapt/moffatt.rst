@@ -214,6 +214,8 @@ whether your constraints are honoured.
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <moffatt_eddies.py>`
+		Full code available in the
 
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``SpatioTemporal_PDEs/moffatt_eddies.py``

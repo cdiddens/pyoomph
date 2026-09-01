@@ -53,7 +53,9 @@ If a boundary is selected by a pattern and also addressed explicitly, both are a
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <poisson_2d.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Spatial_PDEs/poisson_2d.py``
 		    

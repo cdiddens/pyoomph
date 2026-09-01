@@ -49,7 +49,9 @@ Finally, we can just run the problem by gradually increasing the pressure load, 
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <cantilever.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Moving_Mesh/cantilever.py``
 		    		

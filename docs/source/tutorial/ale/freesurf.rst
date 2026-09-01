@@ -126,7 +126,9 @@ As opposed to the lubrication example in :numref:`eqpdelubric_relax`, we use a :
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <free_surface.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Moving_Mesh/free_surface.py``
 		    

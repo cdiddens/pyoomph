@@ -54,7 +54,9 @@ In the results (cf. :numref:`figpdewavedoubleslit`) we indeed see that the incom
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <wave_eq_doubleslit.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``SpatioTemporal_PDEs/wave_eq_doubleslit.py``
 		    

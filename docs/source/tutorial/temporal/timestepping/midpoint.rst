@@ -74,6 +74,8 @@ If :math:`\vec{F}` is linear, the midpoint rule and the trapezoidal rule are ide
 	
 	.. container:: downloadbutton
 
-		:download:`Download this example <oscillator_TPZ_scheme.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Temporal_ODEs/oscillator_TPZ_scheme.py``
