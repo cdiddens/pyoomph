@@ -141,9 +141,11 @@ The discontinuous output is plotted in :numref:`figdgconvdiffu`.
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <convection_diffusion.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Discontinuous_Galerkin/convection_diffusion.py``
 		   
 
 .. note::

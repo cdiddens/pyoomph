@@ -31,9 +31,11 @@ which yields for all :math:`v_\text{g}\neq 0` the known solution :math:`r_\text{
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <bifurcation_fold_tracking.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Temporal_ODEs/bifurcation_fold_tracking.py``
 		
 
 The same works also for a pitchfork bifurcation, but these are subject to a symmetry, which is broken by the bifurcation. If we apply the fold tracking method to the pitchfork normal form :math:numref:`eqodepitchforknf`, we would get the augmented system

@@ -8,12 +8,13 @@
 
 .downloadbutton {
   margin: auto;
-  margin-bottom: 20px;  
-  width: 50%;
+  margin-bottom: 20px;
+  width: fit-content;
+  max-width: 100%;
   border: 2px solid rgb(165, 149, 224);
   background-color: rgb(225, 221, 235);
   text-align: center;
-  padding: 5px;  
+  padding: 5px 20px;
   border-radius: 7px;
 
 }

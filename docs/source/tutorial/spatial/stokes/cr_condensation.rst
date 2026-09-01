@@ -139,7 +139,9 @@ However, there is of course overhead associated with the condensation in the ass
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <cr_static_condensation.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Spatial_PDEs/cr_static_condensation.py``
 		    

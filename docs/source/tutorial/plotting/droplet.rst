@@ -79,6 +79,8 @@ On each output, the plotter(s) will be invoked to create each a plot in the ``_p
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <plotting_evaporating_droplet.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Plotting_Interface/plotting_evaporating_droplet.py``

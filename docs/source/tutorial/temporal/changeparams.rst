@@ -81,7 +81,9 @@ Finally, if all simulations to be started are added, we can invoke the :py:meth:
 	
 	.. container:: downloadbutton
 
-		:download:`Download this example <parallel_running.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`   		
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Temporal_ODEs/parallel_running.py``
 

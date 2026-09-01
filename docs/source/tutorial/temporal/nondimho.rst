@@ -85,6 +85,8 @@ By default, the output will be written to a sub-directory of the current directo
 
    .. container:: downloadbutton
 
-      :download:`Download this example <predefined_harmonic_oscillator.py>`
-      
-      :download:`Download all examples <../tutorial_example_scripts.zip>`
+      Full code available in the
+
+      :download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+      ``Temporal_ODEs/predefined_harmonic_oscillator.py``

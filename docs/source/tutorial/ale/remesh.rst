@@ -58,7 +58,9 @@ One additional option is to add an instance of the class :py:class:`~pyoomph.equ
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <remeshing.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Moving_Mesh/remeshing.py``
 		    

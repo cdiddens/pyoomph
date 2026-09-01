@@ -59,7 +59,9 @@ For running with preCICE, you must place the config file :download:`precice-conf
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <partitioned_heat_conduction_circle.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``PreCICE_Coupling/partitioned_heat_conduction_circle.py``
 		    

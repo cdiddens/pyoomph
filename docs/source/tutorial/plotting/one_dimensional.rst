@@ -92,6 +92,8 @@ be plotted against another field.
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <one_dimensional.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Plotting_Interface/one_dimensional.py``

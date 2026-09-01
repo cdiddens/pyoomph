@@ -37,6 +37,8 @@ The result is depicted in :numref:`figodetrapezoidaldriving`.
 	
 	.. container:: downloadbutton
 
-		:download:`Download this example <custom_math_driven_oscillator.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`  
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Temporal_ODEs/custom_math_driven_oscillator.py``

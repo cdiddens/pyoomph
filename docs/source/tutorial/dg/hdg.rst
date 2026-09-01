@@ -106,6 +106,8 @@ The elimination is exact, so the accuracy is that of the unreduced scheme. Refin
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <hdg_poisson.py>`
+		Full code available in the
 
-		:download:`Download all examples <../tutorial_example_scripts.zip>`
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Discontinuous_Galerkin/hdg_poisson.py``

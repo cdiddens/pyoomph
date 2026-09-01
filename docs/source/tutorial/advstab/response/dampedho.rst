@@ -55,7 +55,9 @@ Before the problem is initialized, we must create a :py:class:`~pyoomph.utils.pe
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <linear_response_oscillator.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Advanced_Linear_Dynamics/linear_response_oscillator.py``
  

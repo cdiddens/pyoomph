@@ -117,6 +117,8 @@ i.e. the break-up costs about what remeshing the same mesh costs anyway, and bot
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <rayleigh_plateau_pinchoff.py>`
+		Full code available in the
 
-		:download:`Download all examples <../tutorial_example_scripts.zip>`
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Moving_Mesh/rayleigh_plateau_pinchoff.py``

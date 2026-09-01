@@ -42,8 +42,10 @@ The issue without shifting the tangent node positions is shown in the left part 
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <droplet_spread_hyperelastic_tangential_shift.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Moving_Mesh/droplet_spread_hyperelastic_tangential_shift.py``
 
 

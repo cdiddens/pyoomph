@@ -90,7 +90,9 @@ The results in figure :numref:`figrayleighplateauinstab` show how the remeshing 
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <rayleigh_plateau.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Moving_Mesh/rayleigh_plateau.py``
 		    

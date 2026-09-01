@@ -35,7 +35,9 @@ The Marangoni instability is the explanation why e.g. evaporating droplets consi
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <marangoni_instability.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``SpatioTemporal_PDEs/marangoni_instability.py``
 		    

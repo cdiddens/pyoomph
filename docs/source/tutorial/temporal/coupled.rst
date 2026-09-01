@@ -36,9 +36,11 @@ Here, in particular the line
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <coupled_oscillators_method_1.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`    
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Temporal_ODEs/coupled_oscillators_method_1.py``
 
 .. container:: center
 
@@ -68,9 +70,11 @@ In the definition of the problem, we can now combine two instances of the ``Sing
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <coupled_oscillators_method_2.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`    
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Temporal_ODEs/coupled_oscillators_method_2.py``
 	
 
 .. container:: center
@@ -103,7 +107,9 @@ Also, the initial conditions are now separated, since initial conditions can onl
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <coupled_oscillators_method_3.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`    
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Temporal_ODEs/coupled_oscillators_method_3.py``
 		

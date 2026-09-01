@@ -58,6 +58,8 @@ Finally, instead of setting a scale at problem level, it is also possible to set
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <dimensional_oscillator_with_units.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Temporal_ODEs/dimensional_oscillator_with_units.py``

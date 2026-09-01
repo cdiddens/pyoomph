@@ -74,7 +74,9 @@ The results are depicted in :numref:`figmcflowheleshaw` and indeed show the expe
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <marangoni_instability.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Multicomponent_Flow/marangoni_instability.py``
 		   

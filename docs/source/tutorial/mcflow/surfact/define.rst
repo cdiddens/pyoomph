@@ -40,7 +40,9 @@ However, ``sigma1`` will still depend on the surface concentration :math:`\Gamma
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <insoluble_surfactant_definition.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Multicomponent_Flow/insoluble_surfactant_definition.py``
 		   

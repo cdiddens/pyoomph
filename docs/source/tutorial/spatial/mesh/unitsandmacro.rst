@@ -87,8 +87,10 @@ Finally, if your parametric coordinate is periodic (an angle, say), implement ``
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <mesh_fish_dimensional_curved.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Spatial_PDEs/mesh_fish_dimensional_curved.py``
 		    
 

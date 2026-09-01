@@ -116,7 +116,9 @@ The results are shown in :numref:`figmultidomiceprop1d`.
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <temperature_conduction_propagation.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Multiple_Domains/temperature_conduction_propagation.py``
 		    

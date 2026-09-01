@@ -26,7 +26,9 @@ The result is depicted in :numref:`figpdelubrication`.
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <lubrication.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``SpatioTemporal_PDEs/lubrication.py``
 		    

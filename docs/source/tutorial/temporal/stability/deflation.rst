@@ -34,9 +34,11 @@ Depending on the generated random numbers, one either finds all three solutions 
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <deflated_solve.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Temporal_ODEs/deflated_solve.py``
 		
 
 Deflation can furthermore be combined with parameter scanning, in a sort of continuation. Opposed to arclength continuation, we do not solve along the arclength of a single solution branch, but just scan over the parameter branch once. But at each scanned parameter value, we try to find new solutions by deflation and try to connect the solutions at the previous parameter value to the new solutions. This algorithm has been proposed in Ref. :cite:`Farrell2016`, which can be invoked using the method :py:meth:`~pyoomph.generic.problem.Problem.deflated_continuation`:
@@ -65,7 +67,9 @@ We can indeed recover the diagram of the pitchfork normal form (cf. :numref:`fig
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <deflated_continuation.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Temporal_ODEs/deflated_continuation.py``
 

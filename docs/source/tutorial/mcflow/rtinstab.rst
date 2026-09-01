@@ -55,7 +55,9 @@ The benefit of using the material library is that it is now trivial to exchange 
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <rayleigh_taylor_instability.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Multicomponent_Flow/rayleigh_taylor_instability.py``
 		   
