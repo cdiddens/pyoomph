@@ -39,7 +39,9 @@ Important differences are the mesh, which is now the north-east (``"NE"``) quart
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <droplet_spread_free_slip.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Moving_Mesh/droplet_spread_free_slip.py``
 		    

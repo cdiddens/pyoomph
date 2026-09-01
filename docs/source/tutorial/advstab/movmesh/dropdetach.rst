@@ -76,6 +76,8 @@ Of course, the choice to nondimensionalize the system by the contact line radius
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <hanging_droplet.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Advanced_Linear_Dynamics/hanging_droplet.py``

@@ -119,6 +119,8 @@ The very same three methods, :py:meth:`~pyoomph.generic.problem.Problem.classify
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <bifurcation_branch_switching.py>`
+		Full code available in the
 
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Temporal_ODEs/bifurcation_branch_switching.py``

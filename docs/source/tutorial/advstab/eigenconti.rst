@@ -40,9 +40,11 @@ Once set up, we can use this problem and solve for the stationary state at the m
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <eigenbranch_continuation.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Advanced_Linear_Dynamics/eigenbranch_continuation.py``
 		    
 
 

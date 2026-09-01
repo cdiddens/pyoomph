@@ -24,7 +24,9 @@ Loading a pure liquid from the material library works exactly as loading a pure 
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <materials_liquids.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Multicomponent_Flow/materials_liquids.py``
 		   

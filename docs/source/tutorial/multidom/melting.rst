@@ -100,7 +100,9 @@ The corresponding results are shown in :numref:`figmultidomicecylinder`. Obvious
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <melting_ice_convection.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Multiple_Domains/melting_ice_convection.py``
 		    

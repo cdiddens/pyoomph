@@ -36,6 +36,8 @@ Some plots are depicted in :numref:`figplottingeigenkse`. As expected, the criti
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <plotting_eigenmodes.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Plotting_Interface/plotting_eigenmodes.py``

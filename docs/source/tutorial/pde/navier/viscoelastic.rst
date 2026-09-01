@@ -112,6 +112,8 @@ The agreement is within :math:`0.005\,\%` over the whole range for which the ref
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <viscoelastic_cylinder.py>`
+		Full code available in the
 
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``SpatioTemporal_PDEs/viscoelastic_cylinder.py``

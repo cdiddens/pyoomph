@@ -146,6 +146,8 @@ An unknown on the facets also changes what the *bulk* unknowns are coupled to. W
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <hybrid_poisson.py>`
+		Full code available in the
 
-		:download:`Download all examples <../tutorial_example_scripts.zip>`
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Discontinuous_Galerkin/hybrid_poisson.py``

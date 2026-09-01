@@ -26,7 +26,9 @@ If you have read the tutorial up to here, you should understand all steps. The i
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <rayleigh_taylor_instability.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``SpatioTemporal_PDEs/rayleigh_taylor_instability.py``
 		    

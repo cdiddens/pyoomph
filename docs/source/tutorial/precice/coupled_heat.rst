@@ -65,7 +65,9 @@ If you run the scripts without setting :py:attr:`~pyoomph.generic.problem.Proble
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <partitioned_heat_conduction.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``PreCICE_Coupling/partitioned_heat_conduction.py``
 		    

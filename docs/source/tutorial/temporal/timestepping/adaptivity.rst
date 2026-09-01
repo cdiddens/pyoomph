@@ -65,7 +65,9 @@ Note that also ``outstep=True`` was passed instead of ``numouts``. It will just 
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <adaptive_lorenz_attractor.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Temporal_ODEs/adaptive_lorenz_attractor.py``
 		

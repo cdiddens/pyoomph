@@ -88,6 +88,8 @@ Across all runs the sum drifts by less than :math:`10^{-15}` relative, i.e. it i
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <double_layer_relaxation.py>`
+		Full code available in the
 
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Multicomponent_Flow/double_layer_relaxation.py``

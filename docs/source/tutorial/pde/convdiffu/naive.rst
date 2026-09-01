@@ -44,7 +44,9 @@ Results at different times are depicted in :numref:`figpdesimpleconvdiffu`.
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <convdiffu_simple.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``SpatioTemporal_PDEs/convdiffu_simple.py``
 		    

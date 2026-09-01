@@ -84,7 +84,9 @@ Both differ by the mass fraction of the surfactant itself, i.e. not at all in th
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <soluble_surfactants.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Multicomponent_Flow/soluble_surfactants.py``
 		   

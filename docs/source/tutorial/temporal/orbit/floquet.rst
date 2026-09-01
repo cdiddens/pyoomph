@@ -67,9 +67,11 @@ For very large systems, where the monodromy matrix is too large to be assembled,
 
    .. container:: downloadbutton
 
-      :download:`Download this example <langford_floquet.py>`
-      
-      :download:`Download all examples <../../tutorial_example_scripts.zip>`
+      Full code available in the
+
+      :download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+      ``Temporal_ODEs/langford_floquet.py``
       
 
 Since the Floquet multipliers at :math:`\mu=2` cross the stability condition :math:`|\lambda|=1` by a complex-conjugated pair, this corresponds to a Neimark-Sacker bifurcation. The orbit becomes unstable to a torus. We can check this by performing time integration. The moment we leave the ``with`` statement of the ``orbit``, pyoomph will initialize the degrees of freedom to the starting point of the orbit. A trivial :py:meth:`~pyoomph.generic.problem.Problem.run` statement will then perform a time integration along the orbit. However, if we start at :math:`\mu>2` (here e.g. :math:`\mu=2.005`), it will be unstable and we can see the torus developing. We just have to replace the orbit loop (i.e. the code after solving for the Hopf bifurcation) by:
@@ -93,6 +95,8 @@ Since the Floquet multipliers at :math:`\mu=2` cross the stability condition :ma
 
    .. container:: downloadbutton
 
-      :download:`Download this example <langford_time_integration.py>`
-      
-      :download:`Download all examples <../../tutorial_example_scripts.zip>`
+      Full code available in the
+
+      :download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+      ``Temporal_ODEs/langford_time_integration.py``

@@ -24,7 +24,9 @@ Due to the inertia, the flow reversal does not happen instantaneously, but shows
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <navier_stokes.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``SpatioTemporal_PDEs/navier_stokes.py``
 		    

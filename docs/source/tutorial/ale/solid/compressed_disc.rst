@@ -45,7 +45,9 @@ In the driver code, we just iterate over the imposed pressure (starting with a n
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <compressed_disc.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Moving_Mesh/compressed_disc.py``
 		    		

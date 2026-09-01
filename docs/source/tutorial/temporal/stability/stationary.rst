@@ -22,7 +22,9 @@ Obviously, one can easily find a stationary solution by the :py:meth:`~pyoomph.g
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <bifurcation_stationary_transcritical.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Temporal_ODEs/bifurcation_stationary_transcritical.py``
 		

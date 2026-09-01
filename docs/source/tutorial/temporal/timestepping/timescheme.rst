@@ -87,6 +87,8 @@ As a final note, other well-established methods, as e.g. the *Runge-Kutta method
     
     .. container:: downloadbutton
 
-        :download:`Download this example <time_stepping_schemes.py>`
-        
-        :download:`Download all examples <../../tutorial_example_scripts.zip>`   
+        Full code available in the
+
+        :download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+        ``Temporal_ODEs/time_stepping_schemes.py``

@@ -84,9 +84,11 @@ The method :py:meth:`~pyoomph.generic.problem.Problem.go_to_param` will graduall
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <droplet_spread_marangoni_and_gravity.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Moving_Mesh/droplet_spread_marangoni_and_gravity.py``
 		    
 
 

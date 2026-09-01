@@ -65,7 +65,9 @@ Of course, also the thermal properties :py:attr:`~pyoomph.materials.generic.Mate
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <materials_gas_mixture.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Multicomponent_Flow/materials_gas_mixture.py``
 		   

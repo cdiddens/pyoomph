@@ -55,9 +55,11 @@ This can all be achieved in a single :py:class:`~pyoomph.equations.generic.Integ
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <cavity_forward_problem.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Spatial_PDEs/cavity_forward_problem.py``
 		
 		
 Inverse problem
@@ -126,9 +128,11 @@ At this point, one could of course do a scan in :math:`U_\text{desired}`, but th
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <cavity_inverse_problem.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Spatial_PDEs/cavity_inverse_problem.py``
 		
 .. note::
 

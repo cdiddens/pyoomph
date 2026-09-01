@@ -43,7 +43,9 @@ Since we are mostly interested in the final state of the droplet, we have not co
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <droplet_spread_3d.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Moving_Mesh/droplet_spread_3d.py``
 		    

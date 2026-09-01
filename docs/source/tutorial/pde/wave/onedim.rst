@@ -48,7 +48,9 @@ Without the ``DirichletBC(u=0)`` terms, the :math:`\langle \cdot, \cdot \rangle`
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <wave_eq.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``SpatioTemporal_PDEs/wave_eq.py``
 		    

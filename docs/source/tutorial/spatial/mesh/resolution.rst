@@ -47,7 +47,9 @@ so that the result looks as depicted in :numref:`figspatialfishgmsheye`. Since o
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <mesh_gmsh_fish_with_holes.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Spatial_PDEs/mesh_gmsh_fish_with_holes.py``
 		    

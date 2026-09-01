@@ -106,7 +106,9 @@ The conservative form can be combined with stability analysis, i.e. with solving
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <gcl_glycerol_water_capillary.py>`
-		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../tutorial_example_scripts.zip>`
+
+		``Multicomponent_Flow/gcl_glycerol_water_capillary.py``
 		   

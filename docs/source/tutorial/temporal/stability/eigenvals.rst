@@ -14,7 +14,9 @@ The rest is more or less the same as the previous code, i.e. first importing the
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <bifurcation_eigenvalues_transcritical.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Temporal_ODEs/bifurcation_eigenvalues_transcritical.py``
 		

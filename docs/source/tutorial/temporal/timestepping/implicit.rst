@@ -53,6 +53,8 @@ Finally, we let our script successively create a problem for each of the time st
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <oscillator_fully_implicit_schemes.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`     			
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Temporal_ODEs/oscillator_fully_implicit_schemes.py``

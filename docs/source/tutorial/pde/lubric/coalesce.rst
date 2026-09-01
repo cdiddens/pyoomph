@@ -29,7 +29,9 @@ One can rather easily add e.g. (in)soluble surfactants or a mixture composition 
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <lubrication_coalescence.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``SpatioTemporal_PDEs/lubrication_coalescence.py``
 		    

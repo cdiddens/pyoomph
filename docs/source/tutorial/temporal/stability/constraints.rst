@@ -32,9 +32,11 @@ Indeed, the result is expected: A marginally stable solution at :math:`\phi=0` w
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <pendulum_gencoord_eigenvalues.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Temporal_ODEs/pendulum_gencoord_eigenvalues.py``
 		
 
 Now, let's turn towards the system with the Lagrange multiplier. Naively, one might anticipate that we can find :math:`5` eigenvalues, since we have :math:`5` degrees of freedom. Let's see:
@@ -49,9 +51,11 @@ First, we use the fact that our system in :numref:`secODEpendulum` was already c
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <pendulum_lagrange_eigenvalues.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Temporal_ODEs/pendulum_lagrange_eigenvalues.py``
 		
 
 While everything runs smoothly, instead of :math:`5` eigenvalues, only :math:`2` are returned, which are exactly the same as the ones in the simple system for the angle :math:`\phi` before. To see why this is the case and what is actually going on in pyoomph, we can go through the calculation of the eigenvalues analytically. First, the system is written as

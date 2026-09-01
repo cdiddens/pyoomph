@@ -29,9 +29,11 @@ and just add this term in the same manner as the Neumann condition, i.e. via :ma
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <poisson_robin_via_neumann.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Spatial_PDEs/poisson_robin_via_neumann.py``
 		    
 
 Of course, you can recover the Neumann condition as a special case by setting :math:`\alpha=0`, but you cannot recover the Dirichlet condition, since :math:`\beta=0` will induce a division by zero.
@@ -65,9 +67,11 @@ The outward unit normal is obtained by :py:meth:`~pyoomph.generic.codegen.BaseEq
 
 	.. container:: downloadbutton
 
-		:download:`Download this example <poisson_robin_via_lagrange.py>`
-		
-		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
+		Full code available in the
+
+		:download:`pyoomph example bundle <../../tutorial_example_scripts.zip>`
+
+		``Spatial_PDEs/poisson_robin_via_lagrange.py``
 		    
 
 For the latter approach, there is also a generic class :py:class:`~pyoomph.equations.generic.EnforcedBC`, which allows us to enforce arbitrary boundary conditions. To get the same result as with the custom implemented class ``PoissonRobinCondition("u",alpha,beta,g)``, the generic class requires to cast it into residual form, i.e. ``EnforcedBC(u=alpha*var("u")+beta*dot(grad(var("u",domain="..")),var("normal"))-g)``.
