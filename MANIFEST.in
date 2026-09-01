@@ -1,3 +1,0 @@
-include src/*.cpp src/*.hpp src/*.h src/nanobind/*.cpp src/thirdparty/*.hpp src/thirdparty/oomph-lib/include/*.cc src/thirdparty/oomph-lib/include/*.h src/thirdparty/tinycc/*.c src/thirdparty/tinycc/*.h
-
-exclude citools

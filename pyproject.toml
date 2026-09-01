@@ -78,6 +78,48 @@ cmake.build-type = "Release"
 # here.
 wheel.packages = ["pyoomph"]
 
+[tool.scikit-build.sdist]
+# What a source build actually needs, and nothing else. Without this the sdist is the whole git
+# checkout: 0.2.0 shipped at 9.6 MB, of which docs/ was 5.9 MB - and its images were missing anyway,
+# because scikit-build-core filters the sdist through .gitignore and this repo ignores *.png, *.pdf,
+# *.jpg and *.mp4 as simulation output. The docs figures are force-added to git, so they are tracked
+# but still dropped here; only the formats .gitignore does not list survived, which is why a single
+# 3.5 MB .gif (docs/source/tutorial/ale/solid/solid_oscillations.gif) was 36 % of the download.
+# Excluding docs/ outright is both smaller and more honest than shipping a docs tree with holes in it.
+#
+# NOT excluded, and each for a reason:
+#   citools/  - cmake/ThirdPartyGiNaC.cmake and cmake/ThirdPartyTQMesh.cmake run
+#               citools/patches/apply_ginac_patch.sh and citools/patches/patch_tqmesh.cmake, so a
+#               build with PYOOMPH_DOWNLOAD_GINAC=ON needs it. (The old MANIFEST.in said
+#               `exclude citools` and would have broken exactly that; it never did any harm only
+#               because scikit-build-core ignores MANIFEST.in entirely - that is a setuptools
+#               mechanism. The file has been deleted rather than fixed.)
+#   tests/    - lets anyone who builds from source verify the result, which is the point of an sdist.
+#
+# The last three entries are not documentation but local build scratch. They are in .gitignore and
+# untracked, yet scikit-build-core still pulls the CMakeLists.txt out of them: it adds CMake project
+# files regardless of the ignore rules. CI never noticed, because it builds the sdist from a fresh
+# checkout where these directories do not exist - but building a release sdist on a development
+# machine leaked local paths (Scratchpad/deadcode/b_paranoid/... and friends) into a public tarball.
+exclude = [
+  "docs",
+  "dev_docs",
+  "agents",
+  ".github",
+  ".devcontainer",
+  "AGENTS.md",
+  "CLAUDE.md",
+  ".readthedocs.yaml",
+  "bisect.sh",
+  "build_for_develop.sh",
+  "clean.sh",
+  "valgrind.sh",
+  "valgrind.supp",
+  "build",
+  "GiNaC_static",
+  "Scratchpad",
+]
+
 [tool.scikit-build.metadata.version]
 provider = "scikit_build_core.metadata.regex"
 input = "pyoomph/_version.py"
