@@ -113,31 +113,11 @@ autodoc_default_options = {"ignore-module-all": True}
 
 # preCICE is a heavy installation and is deliberately not a documentation requirement, so
 # pyoomph/solvers/precice_adapter.py's top-level "import precice" fails when the docs are built
-# (on Read the Docs, for instance) and its API page comes out empty. Stand a stub module in for it.
-#
-# autodoc_mock_imports=["precice"] is the idiomatic way to do this, but it is not enough here:
-# pyoomph/generic/problem.py annotates _precice_interface as "precice.Participant | None", and
-# sphinx_autodoc_typehints (which resolves "if TYPE_CHECKING:" blocks by executing them) cannot
-# evaluate that against autodoc's _MockObject. It then gives up on the whole module, and every
-# annotated Problem attribute silently loses its type cross-references. The stub therefore hands
-# out real classes, so "precice.Participant | None" evaluates like it does with preCICE installed.
-#
-# Only stand in when preCICE is genuinely unavailable, so a machine that has it documents the real
-# thing. "spec.origin is None" catches the namespace package that source/tutorial/precice would
-# otherwise become once build_tutorial_zip() below puts source/tutorial on sys.path: importing it
-# succeeds but yields an empty module, which is exactly what broke the annotations.
-import importlib.util as _importlib_util
-_precice_spec = _importlib_util.find_spec("precice")
-if _precice_spec is None or _precice_spec.origin is None:
-    import types as _types
-    _precice_stub = _types.ModuleType("precice")
-    _precice_stub_classes = {}
-    def _precice_stub_getattr(name):
-        if name.startswith("__"):
-            raise AttributeError(name)
-        return _precice_stub_classes.setdefault(name, type(name, (), {"__module__": "precice"}))
-    _precice_stub.__getattr__ = _precice_stub_getattr
-    sys.modules["precice"] = _precice_stub
+# (on Read the Docs, for instance) and its API page would come out empty. Mocking it keeps the
+# adapter documented. Note that the import would otherwise still succeed by accident:
+# build_tutorial_zip() below puts source/tutorial on sys.path, and the tutorial chapter directory
+# source/tutorial/precice is then picked up as an (empty) namespace package.
+autodoc_mock_imports = ["precice"]
 
 # sphinx_autodoc_typehints resolves "if TYPE_CHECKING:" blocks by actually executing them, to
 # make forward-referenced types resolvable. pyoomph/meshes/mesh.py deliberately has TYPE_CHECKING-

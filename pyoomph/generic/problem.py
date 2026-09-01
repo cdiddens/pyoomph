@@ -82,7 +82,6 @@ if TYPE_CHECKING:
     from .bifurcation_tools import DeflationOperator
     from ..utils.num_text_out import NumericalTextOutputFile
     from ..output.latex import LaTeXPrinter
-    import precice
 
 Z2ErrorEstimator=_pyoomph.Z2ErrorEstimator
 
@@ -1215,7 +1214,11 @@ class Problem(_pyoomph.Problem):
         self.precice_participant:str=""
         #: Must be set to the config file when using preCICE
         self.precice_config_file:str=""
-        self._precice_interface:"precice.Participant | None"=None
+        # Typed as Any rather than "precice.Participant | None": preCICE is an optional
+        # dependency, and a forward reference to it makes every annotation of this class
+        # unresolvable wherever preCICE is missing - which silently costs the documentation
+        # the type cross-references of all annotated Problem attributes.
+        self._precice_interface:Any=None
         
         #: Set e.g. to {"domain/velocity_*":"u","domain/pressure":"p"} to automatically setup field split IS for PETSc with names "u" and "p". If None, the default split is set like the field indices in the Jacobian information file, i.e. using "0", "1", etc. as prefixes
         self.petsc_fieldsplit=None
