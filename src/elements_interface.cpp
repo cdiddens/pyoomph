@@ -262,8 +262,33 @@ namespace pyoomph
 	// class "<domain>/<field>", which is exactly how the coupling tables are keyed.
 	void InterfaceElementBase::fill_local_dof_contribution_indices(std::vector<int> &dest)
 	{
-		BulkElementBase::fill_local_dof_contribution_indices(dest);
+		// The three steps are ordered: what is ours, then what we borrow, and only then the leftovers.
+		// The last step declares a dof to be part of no contribution at all, which is only true of the
+		// dofs the middle step could NOT attribute -- see mark_foreign_nodal_dofs_as_noncontributing().
+		BulkElementBase::fill_own_local_dof_contribution_indices(dest);
+		this->adopt_neighbour_dof_contribution_indices(dest);
 
+		// The leftovers pass declares a dof to hold no field of ours, on the grounds that a nodal value
+		// past ncont_interpolated_values() belongs to some other code. For a dof we BORROW that premise
+		// is wrong -- the generated code addresses it through one of the equation remappings, which is
+		// the whole point of them -- so those dofs keep the unattributed -1 (coupled to everything)
+		// even when the adoption above could not name them.
+		std::vector<char> borrowed(dest.size(), 0);
+		auto note = [&](const std::vector<int> &m)
+		{
+			for (size_t i = 0; i < m.size(); i++)
+				if (m[i] >= 0 && (size_t)m[i] < borrowed.size()) borrowed[m[i]] = 1;
+		};
+		note(bulk_eqn_map); note(bulk_bulk_eqn_map); note(opp_interf_eqn_map); note(opp_bulk_eqn_map);
+		std::vector<int> keep_unattributed;
+		for (size_t le = 0; le < dest.size(); le++)
+			if (dest[le] == -1 && borrowed[le]) keep_unattributed.push_back((int)le);
+		BulkElementBase::mark_foreign_nodal_dofs_as_noncontributing(dest);
+		for (size_t k = 0; k < keep_unattributed.size(); k++) dest[keep_unattributed[k]] = -1;
+	}
+
+	void InterfaceElementBase::adopt_neighbour_dof_contribution_indices(std::vector<int> &dest)
+	{
 		const JITFuncSpec_Table_FiniteElement_t *ft = jitcode->get_func_table();
 		if (!ft || !ft->contribution_names || !ft->contribution_entries_size) return;
 		std::map<std::string, int> my_class;
@@ -289,7 +314,14 @@ namespace pyoomph
 				if (my_le < 0 || (size_t)my_le >= dest.size()) continue;
 				if (dest[my_le] != -1) continue; // Already attributed by the walk above; leave it alone
 				const int sc = sidx[sl];
-				if (sc == -2) { dest[my_le] = -2; continue; } // "Part of no contribution" carries over
+				// A source's -2 is a statement about the SOURCE's block, not about ours, so it is no
+				// answer at all here and the dof stays unattributed (= coupled to everything). The
+				// opposite interface element of a two-domain interface says -2 for the temperature of
+				// its own bulk - its interface code has no temperature field - while our code addresses
+				// exactly that dof, through the class "<their domain>/temperature", to write the
+				// temperature-continuity constraint. Carrying the -2 over emptied that row and column
+				// and lost the multiplier's whole coupling to the far side.
+				if (sc == -2) continue;
 				if (sc < 0 || (unsigned)sc >= sft->contribution_entries_size) continue;
 				const char *nm = sft->contribution_names[sc];
 				if (!nm) continue;
@@ -317,7 +349,33 @@ namespace pyoomph
 			// disjointness the split relies on would not hold: adopt it as near-side throughout.
 			const bool self_facet = (opposite_side->bulk_element_pt() == this->bulk_element_pt());
 			adopt(opposite_side, opp_interf_eqn_map, !self_facet);
-			adopt(dynamic_cast<BulkElementBase *>(opposite_side->bulk_element_pt()), opp_bulk_eqn_map, !self_facet);
+			BulkElementBase *oppblk = dynamic_cast<BulkElementBase *>(opposite_side->bulk_element_pt());
+			// The far side's BULK is worth asking even when the generated code never needs its shapes,
+			// which is when opp_bulk_eqn_map stays empty: the dofs we carry from the far side are its
+			// bulk's fields, and the far interface code frequently has no name for them at all (it does
+			// not use them - only WE do, through the constraint that couples the two sides). Its bulk
+			// does, and by the same name our own coupling table is keyed with. The remapping is a
+			// global-equation match either way (see update_equation_remapping_from_element), so doing it
+			// here is the same answer the stored map would have given.
+			if (!opp_bulk_eqn_map.empty()) adopt(oppblk, opp_bulk_eqn_map, !self_facet);
+			else if (oppblk)
+			{
+				std::map<unsigned, int> mine;
+				for (unsigned i = 0; i < this->ndof(); i++)
+				{
+					const int g = this->eqn_number(i);
+					if (g >= 0) mine[(unsigned)g] = (int)i;
+				}
+				std::vector<int> map_by_eqn(oppblk->ndof(), -1);
+				for (unsigned i = 0; i < oppblk->ndof(); i++)
+				{
+					const int g = oppblk->eqn_number(i);
+					if (g < 0) continue;
+					auto it = mine.find((unsigned)g);
+					if (it != mine.end()) map_by_eqn[i] = it->second;
+				}
+				adopt(oppblk, map_by_eqn, !self_facet);
+			}
 		}
 	}
 

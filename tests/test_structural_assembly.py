@@ -896,3 +896,81 @@ def test_structure_id_changes_when_the_dof_vector_is_augmented():
         p.deactivate_bifurcation_tracking()
         assert p.ndof() == ndof_plain
         assert p.jacobian_structure_id != sid_augmented
+
+
+# ---------------------------------------------------------------------------------------------------
+# Dofs borrowed across a two-sided interface
+# ---------------------------------------------------------------------------------------------------
+
+class _MutuallyConnectedDomainsProblem(Problem):
+    """Two domains sharing an interface, with a field tied across it FROM EACH SIDE.
+
+    That makes both interface elements borrow dofs from the other one, which is what the field
+    attribution (BulkElementBase::get_local_dof_contribution_indices) has to survive: each side asks the
+    other for an attribution the other is itself still computing. It also puts the far side's field
+    where only WE have a name for it -- the near side's continuity multiplier couples to the far side's
+    u, while the far interface code has no u at all, so its own answer for that dof is "no field of
+    mine". Reading that as "nothing is written here" emptied the multiplier's whole coupling to the far
+    side and the assembly then refused itself (or, with the frozen route off, truncated the Jacobian).
+    """
+
+    def __init__(self, N=4):
+        super().__init__()
+        self.N = N
+
+    def define_problem(self):
+        from pyoomph.equations.poisson import PoissonEquation
+        from pyoomph.equations.generic import ConnectFieldsAtInterface
+        self += RectangularQuadMesh(name=lambda x, y: "lower" if y < 0.5 else "upper",
+                                    size=1, N=self.N, boundary_names={"lower_upper": "interface"})
+        for dom in ("lower", "upper"):
+            self += (PoissonEquation(name="u", source=1) + PoissonEquation(name="v", source=1)) @ dom
+        self += DirichletBC(u=0, v=0) @ "lower/bottom"
+        self += DirichletBC(u=1, v=1) @ "upper/top"
+        self += ConnectFieldsAtInterface("u") @ "lower/interface"
+        self += ConnectFieldsAtInterface("v") @ "upper/interface"
+
+
+def test_two_sided_interface_keeps_the_borrowed_couplings():
+    with _MutuallyConnectedDomainsProblem() as p:
+        p.quiet()
+        p.initialise()
+        p.solve()
+
+        p.keep_structural_zeros = True
+        p.prune_structural_zeros_by_field_coupling = True
+        J_pruned = p.assemble_jacobian(with_residual=False)
+        p.prune_structural_zeros_by_field_coupling = False
+        J_conn = p.assemble_jacobian(with_residual=False)
+        p.keep_structural_zeros = False
+        J_ref = p.assemble_jacobian(with_residual=False)
+
+        D = (J_pruned - J_conn).tocsr()
+        D.eliminate_zeros()
+        assert D.nnz == 0, "pruning changed a value"
+        missing = ((J_ref != 0).astype(int) - (J_pruned != 0).astype(int) > 0)
+        assert missing.nnz == 0, "the pruned pattern lost an entry the numerical assembly produces"
+        assert J_pruned.nnz < J_conn.nnz, "expected the field coupling to prune something"
+
+
+def test_two_sided_interface_attributes_the_opposite_field():
+    """The tight answer, not just a safe one: the dofs each side carries from the other are the far
+    domain's fields, and the near code has a contribution class named after them. Nothing but the far
+    side's BULK can supply that name -- the far INTERFACE code does not use those fields."""
+    with _MutuallyConnectedDomainsProblem() as p:
+        p.quiet()
+        p.initialise()
+        for path, expect in (("lower/interface", "upper/u"), ("upper/interface", "lower/v")):
+            elem = list(p.get_mesh(path).elements())[0]
+            assert elem.get_opposite_interface_element() is not None
+            names, _, _ = elem._get_contribution_tables()
+            cidx = elem._get_dof_contribution_indices()
+            dofnames = elem.get_debug_jacobian_info()[2]
+            attributed = {names[c] for name, c in zip(dofnames, cidx)
+                          if name.startswith("@OPPSIDE") and 0 <= c < len(names)}
+            assert expect in attributed, \
+                path + ": the borrowed " + expect + " dofs stayed unattributed"
+            uncoupled = [name for name, c in zip(dofnames, cidx)
+                         if name.startswith("@OPPSIDE") and c == -2]
+            assert not uncoupled, \
+                path + ": borrowed dofs must never be declared uncoupled: " + str(uncoupled)

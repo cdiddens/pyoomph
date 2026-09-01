@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.1]
+
+Released as urgent patch of 0.2.0. 
+
+### Fixed
+
+- **A two-sided interface could exhaust the machine's memory during the first assembly.** The pruned sparsity pattern (`prune_structural_zeros_by_field_coupling`, on by
+  default since 0.2.0) let the two sides of a coupled interface ask each other for an answer each was
+  still computing, which recursed without bound. 
+
 ## [0.2.0] - 2026-08-30
 
 About six weeks and 940+ commits since 0.1.9. Four themes: h-adaptivity generalised from quads and

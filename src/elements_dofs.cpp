@@ -367,6 +367,12 @@ namespace pyoomph
 	// is attributed to the field of the constrained node, which is what its master dofs contribute to.
 	void BulkElementBase::fill_local_dof_contribution_indices(std::vector<int> &dest)
 	{
+		this->fill_own_local_dof_contribution_indices(dest);
+		this->mark_foreign_nodal_dofs_as_noncontributing(dest);
+	}
+
+	void BulkElementBase::fill_own_local_dof_contribution_indices(std::vector<int> &dest)
+	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 
 		// Positions (nodal coordinates), non-hanging then hanging
@@ -483,24 +489,32 @@ namespace pyoomph
 			set_contrib(dest, eleminfo.nodal_local_eqn[0][j + functable->info_ED0.buffer_offset_basebulk],
 						functable->info_ED0.field_contribution_index, j);
 
-		// Values that some OTHER code added to our nodes -- an interface element's extra dofs seen from
-		// the bulk element, or a second interface's seen from the first. They sit past
-		// ncont_interpolated_values(), which is exactly how get_dof_names() identifies them (it labels
-		// them "<added interface dof>"). This element has no field for them, hence no residual and no
-		// Jacobian entry: their row and column of its block are empty, which is a positive statement
-		// and not the absence of one, so they get -2 rather than being left "not attributed".
-		//
-		// Anything the walk above already attributed is left alone: this only fills in dofs still at -1.
+	}
+
+	// Values that some OTHER code added to our nodes -- an interface element's extra dofs seen from
+	// the bulk element, or a second interface's seen from the first. They sit past
+	// ncont_interpolated_values(), which is exactly how get_dof_names() identifies them (it labels
+	// them "<added interface dof>"). This element has no field for them, hence no residual and no
+	// Jacobian entry: their row and column of its block are empty, which is a positive statement
+	// and not the absence of one, so they get -2 rather than being left "not attributed".
+	//
+	// Anything already attributed is left alone: this only fills in dofs still at -1. It therefore has
+	// to run LAST, after an interface element has adopted what it borrows from its neighbours -- when
+	// two domains share the nodes of their common interface (a connected mesh), the opposite side's
+	// fields sit past our ncont too, and the element writes into them through the constraint that
+	// couples the two sides. Marking those -2 before the adoption emptied exactly those rows and
+	// columns, and the temperature-continuity Lagrange multiplier of a two-domain interface lost its
+	// whole coupling to the far side.
+	void BulkElementBase::mark_foreign_nodal_dofs_as_noncontributing(std::vector<int> &dest)
+	{
+		const unsigned ncont = this->ncont_interpolated_values();
+		for (unsigned int l = 0; l < this->nnode(); l++)
 		{
-			const unsigned ncont = this->ncont_interpolated_values();
-			for (unsigned int l = 0; l < this->nnode(); l++)
+			oomph::Node *nod_pt = this->node_pt(l);
+			for (unsigned int n = ncont; n < nod_pt->nvalue(); n++)
 			{
-				oomph::Node *nod_pt = this->node_pt(l);
-				for (unsigned int n = ncont; n < nod_pt->nvalue(); n++)
-				{
-					const int le = this->nodal_local_eqn(l, n);
-					if (le >= 0 && (size_t)le < dest.size() && dest[le] == -1) dest[le] = -2;
-				}
+				const int le = this->nodal_local_eqn(l, n);
+				if (le >= 0 && (size_t)le < dest.size() && dest[le] == -1) dest[le] = -2;
 			}
 		}
 	}
@@ -519,8 +533,18 @@ namespace pyoomph
 			// -1 everywhere to begin with: anything the walk below does not attribute stays "unknown",
 			// which downstream must read as "assume coupled to everything" (see elements.hpp).
 			local_dof_contribution_indices.assign(this->ndof(), -1);
-			this->fill_local_dof_contribution_indices(local_dof_contribution_indices);
+			// Marked valid BEFORE the walk, because the walk can come back here for this very element:
+			// an interface element adopts the attribution of the element on the far side of the facet
+			// (InterfaceElementBase::fill_local_dof_contribution_indices), and the two sides of a
+			// two-sided interface are linked to each other, so each would ask the other for the answer
+			// it is itself still computing. That recursion is unbounded, and it ate all the memory of
+			// the machine during the very first assembly of a two-domain interface problem.
+			// A re-entrant call now reads the vector as it stands, which is always safe: the walk only
+			// ever replaces a -1, so each entry is either already final or still "unattributed", and
+			// unattributed is the conservative answer (coupled to everything). Nothing resizes the
+			// vector from here on, so the reference handed out stays valid.
 			local_dof_contribution_indices_valid = true;
+			this->fill_local_dof_contribution_indices(local_dof_contribution_indices);
 		}
 		return local_dof_contribution_indices;
 	}

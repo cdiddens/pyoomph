@@ -1107,6 +1107,11 @@ namespace pyoomph
     std::vector<int> local_dof_contribution_indices;
     bool local_dof_contribution_indices_valid = false;
     virtual void fill_local_dof_contribution_indices(std::vector<int> &dest); // Overridden by InterfaceElementBase for the dofs it borrows from other elements
+    // The two halves of the walk above, so that InterfaceElementBase can adopt the attribution of its
+    // neighbours in between them. The second one is a statement about what is LEFT OVER and may only
+    // be made once everything that can be attributed has been.
+    void fill_own_local_dof_contribution_indices(std::vector<int> &dest);
+    void mark_foreign_nodal_dofs_as_noncontributing(std::vector<int> &dest);
 
   public:
     // Compares the analytically assembled Jacobian (from fill_in_generic_residual_contribution_jit)
@@ -1687,6 +1692,7 @@ namespace pyoomph
     // Additionally attributes the dofs this element BORROWS from other elements (its own bulk, the
     // opposite interface element, the opposite's bulk), which the base walk cannot see.
     void fill_local_dof_contribution_indices(std::vector<int> &dest) override;
+    void adopt_neighbour_dof_contribution_indices(std::vector<int> &dest);
     void get_dnormal_dcoords_at_s(const oomph::Vector<double> &s, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dnormal_dcoord, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2normal_dcoord2) const override;
     unsigned n_normal_coord_nodes() const override { return this->bulk_element_pt()->nnode(); }
     unsigned normal_coord_node(unsigned l) const override { return const_cast<InterfaceElementBase *>(this)->bulk_node_number(l); }
