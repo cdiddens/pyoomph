@@ -656,6 +656,16 @@ class ViscoelasticEquations(Equations):
             # discrete solution but not the equation being solved, and switching it on must not move
             # a converged answer.
             #
+            # The upwinding direction must be the velocity that actually convects the field, which
+            # on a moving mesh is the ALE one: material_derivative(..., ALE="auto") assembles
+            # dt|_mesh + (u - u_mesh).grad, so the transport operator is (u - u_mesh).grad. Using
+            # the material velocity u here instead makes the added bilinear form
+            # int tau*((u-u_mesh).grad Psi)*(u.grad w) indefinite -- wherever the two velocities
+            # disagree in direction it is anti-diffusion, and it destabilises rather than
+            # stabilises, with a growth rate that scales like 1/h.
+            supg_wind = wind
+            if self.get_current_code_generator()._coordinates_as_dofs:
+                supg_wind = wind - mesh_velocity()
             # "cartesian_element_length_h" rather than "element_length_h": the latter takes the
             # Eulerian element size to the power 1/dim, and in axisymmetric coordinates that size
             # carries the 2*pi*r factor, so it is not a length.
@@ -671,10 +681,10 @@ class ViscoelasticEquations(Equations):
             # where u vanishes over most of the domain. That put NaNs in the Jacobian and the first
             # Newton step went to 1e105. Here the radicand is bounded below by (1/lambda)^2, so the
             # only root has a strictly positive argument and a bounded derivative everywhere.
-            tau = self.supg_factor / square_root(4 * dot(wind, wind) / h ** 2
+            tau = self.supg_factor / square_root(4 * dot(supg_wind, supg_wind) / h ** 2
                                                  + (1 / self.relaxation_time) ** 2)
             tau=subexpression(tau) if self.use_subexpression else tau
-            supg_test = self._assemble(lambda c: tau * dot(wind, grad(testfunction(name + "_" + c))))
+            supg_test = self._assemble(lambda c: tau * dot(supg_wind, grad(testfunction(name + "_" + c))))
             self.add_residual(weak(residual, supg_test))
 
         # Polymer contribution to the momentum equation. The (Navier-)Stokes equations assemble
@@ -781,7 +791,14 @@ class ViscoelasticEquations(Equations):
         else:
             decomposition = LogConfTensorDecompositionCartesian2d(epsilon=self.eigen_epsilon,
                                                                   use_subexpression=self.use_subexpression)
-        B, Omega = decomposition(R, gradu, self._diagonal(eigenvalues))
+        # The decomposition is a multi-return callback, i.e. it is evaluated on plain floats and
+        # knows nothing about units: whatever unit grad(u) carries would simply be dropped, leaving
+        # B and Omega dimensionless while the transport and relaxation terms still carry 1/time.
+        # So grad(u) is divided by the natural rate scale on the way in and the factor is put back
+        # on the way out. With a dimensionless setup the scale is 1 and nothing changes.
+        rate_scale = scale_factor(self.velocity_name) / scale_factor("spatial")
+        B, Omega = decomposition(R, gradu / rate_scale, self._diagonal(eigenvalues))
+        B, Omega = B * rate_scale, Omega * rate_scale
 
         relax = self.model.log_relaxation_matrix(C, Cinv, trC, identity) / self.relaxation_time
         rotation = matproduct(Omega, psi) - matproduct(psi, Omega)
