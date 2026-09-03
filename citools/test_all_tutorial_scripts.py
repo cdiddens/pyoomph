@@ -158,6 +158,14 @@ _MISSING_MODULE=re.compile(rb"ModuleNotFoundError: No module named '([A-Za-z0-9_
 _UNAVAILABLE_SOLVER=re.compile(rb"^RuntimeError: .* is not available \(ModuleNotFoundError: No module named '([A-Za-z0-9_.]+)'\)")
 _BROKEN_IMPORT=re.compile(rb"^ImportError: (.*)$")
 _TRACEBACK_FRAME=re.compile(rb'^  File "([^"]+)"')
+# Under mpirun every stderr line is tagged "[rank N] " - on every rank and in every --mpi-output mode,
+# see pyoomph/generic/logging.py _ConsoleWrapper._decorate. The three anchored patterns above would
+# therefore never match in the MPI pass (only _MISSING_MODULE, which searches, survived), so the tag
+# comes off before a line is examined.
+_RANK_TAG=re.compile(rb"^\[rank \d+\] ?")
+
+def untag_rank(line):
+  return _RANK_TAG.sub(b"",line)
 
 def missing_optional_module(output):
   """(package, why) when an optional package, and nothing else, ended this script - else None.
@@ -183,7 +191,7 @@ def missing_optional_module(output):
   lines=output.strip().splitlines()
   if not lines:
     return None
-  last=lines[-1]
+  last=untag_rank(lines[-1])
   m=_UNAVAILABLE_SOLVER.match(last)
   if m is not None:
     name=m.group(1).decode().split(".")[0]
@@ -195,7 +203,7 @@ def missing_optional_module(output):
   m=_BROKEN_IMPORT.match(last)
   if m is None:
     return None
-  frames=[f.group(1).decode() for f in (_TRACEBACK_FRAME.match(l) for l in lines) if f]
+  frames=[f.group(1).decode() for f in (_TRACEBACK_FRAME.match(untag_rank(l)) for l in lines) if f]
   for name in _OPTIONAL_MODULES:
     if any(("/"+name+"/") in p or p.endswith("/"+name+".py") for p in frames):
       return (name,"is installed but cannot be loaded here ("+m.group(1).decode()+")")
@@ -207,16 +215,40 @@ def missing_optional_module(output):
 # for why - so without dropping that epilogue every optional-package skip would be counted as a real
 # failure in the MPI pass, which is exactly the noise the skip mechanism exists to avoid.
 _DASH_RULE=re.compile(rb"^-{20,}$")
+# Not everything mpirun appends is fenced, and since 2026-08-18 pyoomph appends a line of its own.
+# Both sit AFTER the traceback and so become "the last line" that missing_optional_module() reads:
+#
+#   pyoomph: uncaught ... -- aborting the whole job.
+#       generic/mpi.py's excepthook (commit a8973de2), which turns a rank dying alone - and the other
+#       three then spinning in a collective until the step's timeout - into an MPI_Abort. It prints
+#       this note after the traceback it has just let through.
+#   [duarte:37160] N more processes have sent help message ...
+#       Open MPI's help-message aggregator, written by mpirun itself once the job is down. Plain
+#       "[host:pid] " lines, with no dash rules around them.
+#
+# Together they are why the mpirun pass reported rayleigh_plateau_pinchoff.py as FAILED on the
+# 2026-09-02 and 2026-09-03 nightlies while the serial pass skipped it for the same missing shapely.
+_UNFENCED_EPILOGUE=(re.compile(rb"^\[[^\]\s]+:\d+\]\s"),
+                    re.compile(rb"^pyoomph: uncaught \w+ on MPI rank \d+ of \d+ -- aborting the whole job\."))
 
 def strip_mpirun_epilogue(output):
   lines=output.rstrip().splitlines()
-  while len(lines)>=2 and _DASH_RULE.match(lines[-1].strip()):
-    for i in range(len(lines)-2,-1,-1):
-      if _DASH_RULE.match(lines[i].strip()):
-        del lines[i:]
-        break
-    else:
-      break # an unpaired rule: not one of mpirun's blocks, leave the output alone
+  peeled=True
+  while peeled: # the two kinds interleave, so keep going until a pass changes nothing
+    peeled=False
+    while len(lines)>=2 and _DASH_RULE.match(lines[-1].strip()):
+      for i in range(len(lines)-2,-1,-1):
+        if _DASH_RULE.match(lines[i].strip()):
+          del lines[i:]
+          peeled=True
+          break
+      else:
+        break # an unpaired rule: not one of mpirun's blocks, leave the output alone
+      while lines and not lines[-1].strip():
+        lines.pop()
+    while lines and any(p.match(untag_rank(lines[-1].strip())) for p in _UNFENCED_EPILOGUE):
+      lines.pop()
+      peeled=True
     while lines and not lines[-1].strip():
       lines.pop()
   return b"\n".join(lines)
