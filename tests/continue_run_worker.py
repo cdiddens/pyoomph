@@ -42,7 +42,10 @@ from pyoomph.expressions import *
 # Interrupt after this nondimensional time, imitating a killed run. Reported through SystemExit rather
 # than an exception so the state files stay exactly as an interrupted run would have left them.
 ABORT_AT = float(os.environ.get("PYOOMPH_ABORT_AT", "-1"))
-VARIANT = os.environ["PYOOMPH_VARIANT"]
+# Read in main() rather than here: the nightly runs `pytest *.py` from inside tests/, so pytest is
+# handed this helper as an explicit argument and force-imports it (neither collect_ignore_glob nor
+# pytest_ignore_collect applies to a file named on the command line). At import time the variable is
+# not set, and reading it here turned collection into a KeyError.
 
 
 class DrivenOde(ODEEquations):
@@ -74,21 +77,27 @@ def report(problem, tag):
         ",".join("%.17g" % tp.dt(i) for i in range(tp.ndt()))))
 
 
-with ContinueProblem() as problem:
-    if VARIANT == "fixed":
-        # dt=0.037 does not divide outstep=0.1, so every third step is clamped short to land on an
-        # output time - which is exactly where the state file is written.
-        problem.run(1.0, timestep=0.037, outstep=0.1)
-    elif VARIANT == "tempadapt":
-        problem.run(1.0, startstep=0.01, temporal_error=1e-4, outstep=0.1, maxstep=0.09)
-    elif VARIANT == "numouts":
-        problem.run(1.0, timestep=0.037, numouts=7)
-    elif VARIANT == "tworuns":
-        # Two run statements with different steps. Interrupted between them, the second one must start
-        # with its own 0.023 rather than inheriting the first one's 0.037.
-        problem.run(0.4, timestep=0.037, outstep=0.1)
-        problem.run(1.0, timestep=0.023, outstep=0.1)
-    else:
-        raise RuntimeError("unknown variant " + VARIANT)
-    report(problem, "FINAL")
-print("PYOOMPH_WORKER_DONE")
+def main():
+    VARIANT = os.environ["PYOOMPH_VARIANT"]
+    with ContinueProblem() as problem:
+        if VARIANT == "fixed":
+            # dt=0.037 does not divide outstep=0.1, so every third step is clamped short to land on an
+            # output time - which is exactly where the state file is written.
+            problem.run(1.0, timestep=0.037, outstep=0.1)
+        elif VARIANT == "tempadapt":
+            problem.run(1.0, startstep=0.01, temporal_error=1e-4, outstep=0.1, maxstep=0.09)
+        elif VARIANT == "numouts":
+            problem.run(1.0, timestep=0.037, numouts=7)
+        elif VARIANT == "tworuns":
+            # Two run statements with different steps. Interrupted between them, the second one must start
+            # with its own 0.023 rather than inheriting the first one's 0.037.
+            problem.run(0.4, timestep=0.037, outstep=0.1)
+            problem.run(1.0, timestep=0.023, outstep=0.1)
+        else:
+            raise RuntimeError("unknown variant " + VARIANT)
+        report(problem, "FINAL")
+    print("PYOOMPH_WORKER_DONE")
+
+
+if __name__ == "__main__":
+    main()

@@ -113,4 +113,9 @@ def main():
     _run(args)
 
 
-main()
+# Guarded: the nightly runs `pytest *.py` from inside tests/, which hands pytest every helper
+# script in this directory as an explicit argument. pytest force-imports those (neither
+# collect_ignore_glob nor pytest_ignore_collect applies to a file named on the command line), so an
+# unguarded main() ran argparse at collection time and killed the whole session with SystemExit: 2.
+if __name__ == "__main__":
+    main()
