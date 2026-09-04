@@ -495,18 +495,6 @@ def square_root(what:ExpressionOrNum, order:int=2) -> Expression:
 	return what ** rational_num(1, order)
 
 
-#def piecewise(condition,true_result,false_result):
-#	true_result=true_result if isinstance(true_result, _pyoomph.Expression) else _pyoomph.Expression(true_result)
-#	false_result = false_result if isinstance(false_result, _pyoomph.Expression) else _pyoomph.Expression(false_result)
-#	if isinstance(condition,bool):
-#		if condition:
-#			return true_result
-#		else:
-#			return false_result
-#	else:
-#		condition=condition if isinstance(condition,_pyoomph.Expression) else _pyoomph.Expression(condition)
-#		return _pyoomph.GiNaC_piecewise(condition,true_result,false_result)
-
 def heaviside(x:ExpressionOrNum):
     """
 	Heaviside step function, i.e. ``1`` for ``x>0``, ``0`` for ``x<0`` and ``1/2`` for ``x=0``.
@@ -547,6 +535,146 @@ def piecewise_geq0(cond:ExpressionOrNum,iftrue:ExpressionOrNum,iffalse:Expressio
 	#print("cond",cond,iftrue,iffalse)
 	return _pyoomph.GiNaC_piecewise_geq0(cond,iftrue,iffalse)
 	#return heaviside(cond)*(iftrue-iffalse)+iffalse
+
+def piecewise_gt0(cond:ExpressionOrNum,iftrue:ExpressionOrNum,iffalse:ExpressionOrNum)->Expression:
+	"""
+	Strict counterpart of :py:func:`~pyoomph.expressions.piecewise_geq0`: returns `iftrue` when `cond` is strictly
+	greater than zero and `iffalse` otherwise, i.e. the two differ only at `cond` being exactly zero.
+
+	Units are handled as in :py:func:`~pyoomph.expressions.piecewise_geq0`, i.e. the unit of `cond` is arbitrary and
+	divided out, whereas `iftrue` and `iffalse` must agree in units, which then are the units of the result.
+
+	Parameters:
+		cond (ExpressionOrNum): The condition to check.
+		iftrue (ExpressionOrNum): The value to return if `cond` is greater than zero.
+		iffalse (ExpressionOrNum): The value to return if `cond` is less than or equal to zero.
+
+	Returns:
+		Expression: The resulting piecewise function.
+	"""
+	cond=cond if isinstance(cond,_pyoomph.Expression) else _pyoomph.Expression(cond)
+	iftrue=iftrue if isinstance(iftrue,_pyoomph.Expression) else _pyoomph.Expression(iftrue)
+	iffalse=iffalse if isinstance(iffalse,_pyoomph.Expression) else _pyoomph.Expression(iffalse)
+	return _pyoomph.GiNaC_piecewise_gt0(cond,iftrue,iffalse)
+
+def conditional(cond:Union["_pyoomph.RelationalExpression",bool,ExpressionOrNum],iftrue:ExpressionOrNum,iffalse:ExpressionOrNum)->Expression:
+	"""
+	Branches on a symbolic comparison, e.g. ``conditional(var("time")<2*second, 1, 2)``. The comparison is kept
+	symbolically until the expression is either called with concrete values, e.g. ``expr(time=4*second)``, or compiled
+	into the generated code, where it becomes a ternary.
+
+	This function is required because Python's own ternary ``iftrue if cond else iffalse`` cannot be used: Python always
+	casts the condition to a plain ``bool`` first, so the branch would be selected immediately instead of symbolically.
+
+	Comparisons can be combined with ``~`` (not), ``&`` (and), ``|`` (or) and ``^`` (xor), e.g.
+	``conditional((var("time")>1*second) & (var("time")<2*second), 1, 2)``. Python's keywords ``not``, ``and`` and ``or``
+	cannot be used for the same reason as the ternary, and neither can a chained comparison like ``a<b<c``, which Python
+	expands into ``(a<b) and (b<c)``; write ``(a<b) & (b<c)`` instead. Mind that the bitwise operators bind *tighter*
+	than the comparisons, so each operand needs its own parentheses. The named
+	:py:func:`~pyoomph.expressions.logical_and`, :py:func:`~pyoomph.expressions.logical_or`,
+	:py:func:`~pyoomph.expressions.logical_not` and :py:func:`~pyoomph.expressions.logical_xor` avoid that pitfall.
+
+	Only the four inequalities ``<``, ``<=``, ``>`` and ``>=`` build such a symbolic comparison. ``==`` and ``!=`` are
+	deliberately left alone, since Python requires them to return a plain ``bool`` for expressions to remain usable in
+	dicts, sets and ``in`` tests; ``a == b`` therefore is an identity comparison and
+	:py:meth:`~pyoomph._pyoomph_core.Expression.is_equal` or ``(a-b).is_zero()`` is what tests two expressions for
+	equality. A symbolic equality branch can be written as two nested conditionals, e.g.
+	``conditional(a<=b, conditional(a>=b, iftrue, iffalse), iffalse)``, but mind that this compares floating point
+	numbers exactly in the generated code.
+
+	Both sides of the comparison must have the same unit. As in :py:func:`~pyoomph.expressions.piecewise_geq0`, the
+	branches `iftrue` and `iffalse` must agree in units as well, which then are the units of the result, and a plain
+	``0`` is accepted as a branch irrespective of the unit of the other branch.
+
+	Parameters:
+		cond: A comparison of two expressions (``<``, ``<=``, ``>``, ``>=``), a plain ``bool``, or an expression, which
+			is then tested for being ``>=0``.
+		iftrue (ExpressionOrNum): The value to return if the condition holds.
+		iffalse (ExpressionOrNum): The value to return otherwise.
+
+	Returns:
+		Expression: The resulting conditional expression.
+	"""
+	iftrue=iftrue if isinstance(iftrue,_pyoomph.Expression) else _pyoomph.Expression(iftrue)
+	iffalse=iffalse if isinstance(iffalse,_pyoomph.Expression) else _pyoomph.Expression(iffalse)
+	if isinstance(cond,bool):
+		return iftrue if cond else iffalse
+	if isinstance(cond,_pyoomph.RelationalExpression):
+		return _pyoomph.GiNaC_conditional(cond,iftrue,iffalse)
+	return piecewise_geq0(cond,iftrue,iffalse)
+
+def _as_condition(cond:"_pyoomph.RelationalExpression")->"_pyoomph.RelationalExpression":
+	if not isinstance(cond,_pyoomph.RelationalExpression):
+		raise TypeError("Conditions can only be combined with each other, but got "+str(type(cond))+". Write e.g. 'expression>=0' to turn an expression into a condition.")
+	return cond
+
+def logical_not(cond:"_pyoomph.RelationalExpression")->"_pyoomph.RelationalExpression":
+	"""
+	Negates a condition, i.e. the same as ``~cond``.
+
+	Python's ``not`` cannot be used, since it casts the condition to a plain ``bool``. The operator ``~`` does the job,
+	but binds tighter than the comparisons, i.e. it must be written as ``~(a<b)``. This function is the spelled-out
+	alternative.
+
+	Parameters:
+		cond: The condition to negate.
+
+	Returns:
+		RelationalExpression: The negated condition.
+	"""
+	return ~_as_condition(cond)
+
+def logical_and(*conds:"_pyoomph.RelationalExpression")->"_pyoomph.RelationalExpression":
+	"""
+	Combines conditions with a logical and, i.e. the same as ``a & b & ...``, which Python's ``and`` cannot express.
+
+	Parameters:
+		*conds: At least one condition. All of them must hold.
+
+	Returns:
+		RelationalExpression: The combined condition.
+	"""
+	if len(conds)==0:
+		raise ValueError("logical_and requires at least one condition")
+	res=_as_condition(conds[0])
+	for c in conds[1:]:
+		res=res & _as_condition(c)
+	return res
+
+def logical_or(*conds:"_pyoomph.RelationalExpression")->"_pyoomph.RelationalExpression":
+	"""
+	Combines conditions with a logical or, i.e. the same as ``a | b | ...``, which Python's ``or`` cannot express.
+
+	Parameters:
+		*conds: At least one condition. At least one of them must hold.
+
+	Returns:
+		RelationalExpression: The combined condition.
+	"""
+	if len(conds)==0:
+		raise ValueError("logical_or requires at least one condition")
+	res=_as_condition(conds[0])
+	for c in conds[1:]:
+		res=res | _as_condition(c)
+	return res
+
+def logical_xor(*conds:"_pyoomph.RelationalExpression")->"_pyoomph.RelationalExpression":
+	"""
+	Combines conditions with an exclusive or, i.e. the same as ``a ^ b ^ ...``, which holds whenever an odd number of
+	the conditions hold.
+
+	Parameters:
+		*conds: At least one condition.
+
+	Returns:
+		RelationalExpression: The combined condition.
+	"""
+	if len(conds)==0:
+		raise ValueError("logical_xor requires at least one condition")
+	res=_as_condition(conds[0])
+	for c in conds[1:]:
+		res=res ^ _as_condition(c)
+	return res
 
 def trace(M:Expression)->Expression:
 	"""

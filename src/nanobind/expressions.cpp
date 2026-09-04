@@ -426,8 +426,8 @@ void PyReg_Expressions(nb::module_ &m)
 		m, "Expression",
 		"A symbolic (GiNaC) expression: pyoomph's core representation of weak-form residuals, fields, "
 		"parameters and any other symbolic quantity. Supports the usual arithmetic operators (also mixed "
-		"with plain int/float/complex and GiNaC_GlobalParam), comparison against a numeric value (evaluated "
-		"numerically first), and indexing into vector/matrix-valued expressions.")
+		"with plain int/float/complex and GiNaC_GlobalParam), comparisons with <, <=, > and >= (which yield a held "
+		"RelationalExpression, see conditional), and indexing into vector/matrix-valued expressions.")
 		.def(nb::init<const int &>())
 		.def(nb::init<const double &>())
 		.def(nb::init<const GiNaC::ex &>())
@@ -543,58 +543,42 @@ void PyReg_Expressions(nb::module_ &m)
 			 { return lh + rh; }, nb::is_operator())
 		.def("__isub__", [](const GiNaC::ex &lh, const GiNaC::GiNaCGlobalParameterWrapper &rh)
 			 { return lh - rh; }, nb::is_operator())
+		// Comparisons build a held RelationalExpression instead of a bool, so that a condition can stay symbolic until it is
+		// either substituted (expr(t=4*second)) or compiled into the generated code via conditional(cond,iftrue,iffalse).
+		// A relation that *is* numerically decidable still converts to a bool implicitly (RelationalExpression.__bool__),
+		// so "if expr < 3.0:" keeps working exactly as before.
+		.def("__lt__", [](const GiNaC::ex &lh, const GiNaC::ex &rh)
+			 { return pyoomph::expressions::SymbolicCondition(lh, rh, pyoomph::expressions::SymbolicCondition::rel_lt); }, nb::is_operator())
+		.def("__gt__", [](const GiNaC::ex &lh, const GiNaC::ex &rh)
+			 { return pyoomph::expressions::SymbolicCondition(lh, rh, pyoomph::expressions::SymbolicCondition::rel_gt); }, nb::is_operator())
+		.def("__le__", [](const GiNaC::ex &lh, const GiNaC::ex &rh)
+			 { return pyoomph::expressions::SymbolicCondition(lh, rh, pyoomph::expressions::SymbolicCondition::rel_le); }, nb::is_operator())
+		.def("__ge__", [](const GiNaC::ex &lh, const GiNaC::ex &rh)
+			 { return pyoomph::expressions::SymbolicCondition(lh, rh, pyoomph::expressions::SymbolicCondition::rel_ge); }, nb::is_operator())
+		.def("__lt__", [](const GiNaC::ex &lh, const GiNaC::GiNaCGlobalParameterWrapper &rh)
+			 { return pyoomph::expressions::SymbolicCondition(lh, 0 + rh, pyoomph::expressions::SymbolicCondition::rel_lt); }, nb::is_operator())
+		.def("__gt__", [](const GiNaC::ex &lh, const GiNaC::GiNaCGlobalParameterWrapper &rh)
+			 { return pyoomph::expressions::SymbolicCondition(lh, 0 + rh, pyoomph::expressions::SymbolicCondition::rel_gt); }, nb::is_operator())
+		.def("__le__", [](const GiNaC::ex &lh, const GiNaC::GiNaCGlobalParameterWrapper &rh)
+			 { return pyoomph::expressions::SymbolicCondition(lh, 0 + rh, pyoomph::expressions::SymbolicCondition::rel_le); }, nb::is_operator())
+		.def("__ge__", [](const GiNaC::ex &lh, const GiNaC::GiNaCGlobalParameterWrapper &rh)
+			 { return pyoomph::expressions::SymbolicCondition(lh, 0 + rh, pyoomph::expressions::SymbolicCondition::rel_ge); }, nb::is_operator())
+		.def("__lt__", [](const GiNaC::ex &lh, const int &rh)
+			 { return pyoomph::expressions::SymbolicCondition(lh, GiNaC::ex(rh), pyoomph::expressions::SymbolicCondition::rel_lt); }, nb::is_operator())
+		.def("__gt__", [](const GiNaC::ex &lh, const int &rh)
+			 { return pyoomph::expressions::SymbolicCondition(lh, GiNaC::ex(rh), pyoomph::expressions::SymbolicCondition::rel_gt); }, nb::is_operator())
+		.def("__le__", [](const GiNaC::ex &lh, const int &rh)
+			 { return pyoomph::expressions::SymbolicCondition(lh, GiNaC::ex(rh), pyoomph::expressions::SymbolicCondition::rel_le); }, nb::is_operator())
+		.def("__ge__", [](const GiNaC::ex &lh, const int &rh)
+			 { return pyoomph::expressions::SymbolicCondition(lh, GiNaC::ex(rh), pyoomph::expressions::SymbolicCondition::rel_ge); }, nb::is_operator())
 		.def("__lt__", [](const GiNaC::ex &lh, const double &rh)
-			{ 
-			   try 
-			   {
-			     double res=pyoomph::expressions::eval_to_double(lh);
-			     return res< rh;
-			   }
-			   catch (const std::exception &e) 
-			   {
-			     std::ostringstream oss; oss<<"Cannot convert " << lh << " to double for comparison with a numeric value";
-			     throw_runtime_error(oss.str());
-			   } 				
-			}, nb::is_operator())
-         .def("__gt__", [](const GiNaC::ex &lh, const double &rh)
-			{ 
-			   try 
-			   {
-			     double res=pyoomph::expressions::eval_to_double(lh);
-			     return res> rh;
-			   }
-			   catch (const std::exception &e) 
-			   {
-			     std::ostringstream oss; oss<<"Cannot convert " << lh << " to double for comparison with a numeric value";
-			     throw_runtime_error(oss.str());
-			   } 				
-			}, nb::is_operator())	
-            .def("__le__", [](const GiNaC::ex &lh, const double &rh)
-			{ 
-			   try 
-			   {
-			     double res=pyoomph::expressions::eval_to_double(lh);
-			     return res<= rh;
-			   }
-			   catch (const std::exception &e) 
-			   {
-			     std::ostringstream oss; oss<<"Cannot convert " << lh << " to double for comparison with a numeric value";
-			     throw_runtime_error(oss.str());
-			   } 				
-			}, nb::is_operator())
-         .def("__ge__", [](const GiNaC::ex &lh, const double &rh)
-			{ 
-			   try 
-			   {
-			     double res=pyoomph::expressions::eval_to_double(lh);
-			     return res>= rh;
-			   }
-			   catch (const std::exception &e) 
-			   {
-			     std::ostringstream oss; oss<<"Cannot convert " << lh << " to double for comparison with a numeric value";
-			     throw_runtime_error(oss.str());
-			   } 				
-			}, nb::is_operator())						
+			 { return pyoomph::expressions::SymbolicCondition(lh, GiNaC::ex(rh), pyoomph::expressions::SymbolicCondition::rel_lt); }, nb::is_operator())
+		.def("__gt__", [](const GiNaC::ex &lh, const double &rh)
+			 { return pyoomph::expressions::SymbolicCondition(lh, GiNaC::ex(rh), pyoomph::expressions::SymbolicCondition::rel_gt); }, nb::is_operator())
+		.def("__le__", [](const GiNaC::ex &lh, const double &rh)
+			 { return pyoomph::expressions::SymbolicCondition(lh, GiNaC::ex(rh), pyoomph::expressions::SymbolicCondition::rel_le); }, nb::is_operator())
+		.def("__ge__", [](const GiNaC::ex &lh, const double &rh)
+			 { return pyoomph::expressions::SymbolicCondition(lh, GiNaC::ex(rh), pyoomph::expressions::SymbolicCondition::rel_ge); }, nb::is_operator())
 		.def("__round__",[](const GiNaC::ex &self)
 		{
 		  try 
@@ -686,6 +670,11 @@ void PyReg_Expressions(nb::module_ &m)
 			   return 0+pyoomph::expressions::replace_global_params_by_current_values(self);
 			 }, nb::rv_policy::reference, "Return a copy of this expression with every GiNaC_GlobalParam symbol replaced by its current numerical value.")
 		.def("is_zero", &GiNaC::ex::is_zero, "Whether this expression is symbolically (structurally) zero.")
+		.def("is_equal", &GiNaC::ex::is_equal, nb::arg("other"),
+			 "Whether this expression and ``other`` are structurally identical. Since ``==`` is deliberately not overloaded "
+			 "on an Expression (it must keep returning a bool, so that expressions can be used in dicts, sets and ``in`` "
+			 "tests), this is the explicit equality test. It compares the expression trees as they are, without simplifying "
+			 "first, so use ``(a-b).is_zero()`` instead whenever a mathematical rather than a structural comparison is meant.")
 		.def("__float__", [](const GiNaC::ex &self)
 			 { try
 			   {
@@ -770,6 +759,43 @@ void PyReg_Expressions(nb::module_ &m)
   	 GiNaC::print_latex pypc(oss);
   	 self.print(pypc);
 	 return oss.str(); }, "Return the LaTeX representation of this expression.");
+
+	nb::class_<pyoomph::expressions::SymbolicCondition>(
+		m, "RelationalExpression",
+		"A held condition, i.e. a comparison (``<``, ``<=``, ``>``, ``>=``) of two Expressions, optionally combined with "
+		"``~`` (not), ``&`` (and), ``|`` (or) and ``^`` (xor). It stays symbolic, i.e. both sides may still depend on "
+		"fields, time or global parameters. Pass it to ``conditional(cond, iftrue, iffalse)`` to build an expression that "
+		"branches on it, either upon substitution or in the generated code. Whenever the condition is numerically "
+		"decidable, it also converts to a plain bool, so that it can be used in an ``if`` statement directly. Note that "
+		"Python's ternary ``a if cond else b`` and the keywords ``not``, ``and`` and ``or`` cannot be used, since Python "
+		"always casts the condition to a bool - hence the bitwise operators. Mind that these bind tighter than the "
+		"comparisons, i.e. each operand needs its own parentheses.")
+		.def("__bool__", [](const pyoomph::expressions::SymbolicCondition &self)
+			 { return self.to_bool(); })
+		.def("__repr__", [](const pyoomph::expressions::SymbolicCondition &self)
+			 { return self.to_string(); }, "Return the Python-style string representation of this condition.")
+		.def("__invert__", [](const pyoomph::expressions::SymbolicCondition &self)
+			 { return pyoomph::expressions::SymbolicCondition(pyoomph::expressions::SymbolicCondition::log_not, {self}); }, nb::is_operator())
+		.def("__and__", [](const pyoomph::expressions::SymbolicCondition &self, const pyoomph::expressions::SymbolicCondition &other)
+			 { return pyoomph::expressions::SymbolicCondition(pyoomph::expressions::SymbolicCondition::log_and, {self, other}); }, nb::is_operator())
+		.def("__or__", [](const pyoomph::expressions::SymbolicCondition &self, const pyoomph::expressions::SymbolicCondition &other)
+			 { return pyoomph::expressions::SymbolicCondition(pyoomph::expressions::SymbolicCondition::log_or, {self, other}); }, nb::is_operator())
+		.def("__xor__", [](const pyoomph::expressions::SymbolicCondition &self, const pyoomph::expressions::SymbolicCondition &other)
+			 { return pyoomph::expressions::SymbolicCondition(pyoomph::expressions::SymbolicCondition::log_xor, {self, other}); }, nb::is_operator())
+		.def_ro("lhs", &pyoomph::expressions::SymbolicCondition::lhs, "The left hand side of the comparison (only meaningful for a plain comparison).")
+		.def_ro("rhs", &pyoomph::expressions::SymbolicCondition::rhs, "The right hand side of the comparison (only meaningful for a plain comparison).")
+		.def("is_comparison", [](const pyoomph::expressions::SymbolicCondition &self)
+			 { return self.is_comparison(); }, "Whether this is a plain comparison rather than a combination of conditions.")
+		.def("indicator", [](const pyoomph::expressions::SymbolicCondition &self)
+			 { return 0 + self.indicator(); }, "The condition as an Expression that is 1 where it holds and 0 elsewhere.")
+		.def("operator_string", [](const pyoomph::expressions::SymbolicCondition &self)
+			 { return self.opstring(); }, "The operator as a string, i.e. ``<``, ``<=``, ``>``, ``>=`` for a comparison and ``~``, ``&``, ``|``, ``^`` for a combination.");
+
+	m.def(
+		"GiNaC_conditional", [](const pyoomph::expressions::SymbolicCondition &cond, const GiNaC::ex &iftrue, const GiNaC::ex &iffalse)
+		{ return cond.as_conditional(iftrue, iffalse); },
+		nb::arg("cond"), nb::arg("iftrue"), nb::arg("iffalse"),
+		"Returns iftrue if the comparison cond holds, else iffalse. Mapped onto piecewise_geq0/piecewise_gt0 of the difference of both sides.");
 
 	nb::class_<pyoomph::CustomCoordinateSystem, pyoomph::PyCustomCoordinateSystem>(
 		m, "CustomCoordinateSystem",
@@ -947,6 +973,10 @@ void PyReg_Expressions(nb::module_ &m)
 		"GiNaC_piecewise_geq0", [](const GiNaC::ex &cond, const GiNaC::ex &a,const GiNaC::ex &b)
 		{ return 0 + pyoomph::expressions::piecewise_geq0(cond, a,b); },
 		nb::arg("cond"), nb::arg("a"), nb::arg("b"), "Returns a if cond>=0, else b"); // TODO Derivatives of step
+	m.def(
+		"GiNaC_piecewise_gt0", [](const GiNaC::ex &cond, const GiNaC::ex &a, const GiNaC::ex &b)
+		{ return 0 + pyoomph::expressions::piecewise_gt0(cond, a, b); },
+		nb::arg("cond"), nb::arg("a"), nb::arg("b"), "Returns a if cond>0, else b");
 	m.def(
 		"GiNaC_minimum", [](const GiNaC::ex &a, const GiNaC::ex &b)
 		{ return 0 + pyoomph::expressions::minimum(a, b); },

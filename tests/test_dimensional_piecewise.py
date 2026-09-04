@@ -69,9 +69,11 @@ def test_zero_branch_takes_any_unit():
     for expression in (piecewise_geq0(x * meter, 1 * meter, 0), piecewise_geq0(x * meter, 0, 1 * meter)):
         factor, unit, _ = _split(expression)
         assert (factor * unit - meter).is_zero()
-    # ... and two zero branches make the whole expression vanish
-    _, _, rest = _split(piecewise_geq0(x * meter, 0 * meter, 0 * meter))
-    assert rest.is_zero()
+    # ... and two zero branches make the whole expression vanish. It does so already before the units
+    # are collected, since a condition that selects between two equal values is dropped right away.
+    assert piecewise_geq0(x * meter, 0 * meter, 0 * meter).is_zero()
+    factor, unit, rest = _split(piecewise_geq0(x * meter, 0 * meter, 0 * meter))
+    assert (factor * unit * rest).is_zero()
 
 
 def test_piecewise_with_inconsistent_branch_units_is_rejected():
