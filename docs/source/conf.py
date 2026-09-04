@@ -136,6 +136,7 @@ class _SuppressSpuriousGuardedImportWarning(_logging.Filter):
 _logging.getLogger("sphinx.sphinx_autodoc_typehints").addFilter(_SuppressSpuriousGuardedImportWarning())
 
 
+
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
 
