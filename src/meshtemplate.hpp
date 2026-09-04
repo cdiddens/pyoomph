@@ -414,11 +414,22 @@ namespace pyoomph
   };
 
   // A curve interpolating a sequence of control points `pts` with a
-  // Catmull-Rom spline. The parametric coordinate is the spline parameter t
-  // (arclength-ish, one segment per pair of consecutive control points).
-  // Since Catmull-Rom splines have no closed-form inverse, position_to_parametric
-  // works by sampling the spline (see gen_samples()) and searching/refining
-  // from the nearest sample.
+  // Catmull-Rom spline.
+  //
+  // The parametric coordinate is the ARCLENGTH along the curve, not the raw spline parameter t (one
+  // unit per pair of consecutive control points). That distinction matters because the macro element
+  // blends the parametric coordinates of a facet's two ends linearly (see
+  // MeshTemplateCurvedEntity::blend_parametric): the chart has to be flat, i.e. proportional to
+  // distance travelled along the curve, or the blend does not land where it is asked to. The raw t is
+  // only proportional to distance when the control points are evenly spaced, and a spline built by a
+  // remesh from the nodes of an adaptively refined interface is the opposite of evenly spaced. With t
+  // as the chart, the midpoint of an element edge whose two ends straddle a refinement transition
+  // slid tangentially towards the densely sampled end - measured at 13% of the edge length near a
+  // contact line - and every further refinement level slid the new nodes again, turning well-shaped
+  // triangles into slivers (quality 0.78 -> 0.28) even though the nodes all sat exactly on the curve.
+  //
+  // Since Catmull-Rom splines have no closed-form inverse, position_to_parametric works by sampling
+  // the spline (see gen_samples()) and refining from the nearest sample.
   class CurvedEntityCatmullRomSpline : public MeshTemplateCurvedEntity
   {
   protected:
@@ -426,9 +437,17 @@ namespace pyoomph
     std::vector<double> samples;
     std::vector<std::vector<double>> samplepos;
     unsigned N;
+    // Evenly spaced spline parameters and the arclength reached at each of them, i.e. the table that
+    // converts between the two parametrisations. Built once, in the constructor.
+    std::vector<double> arclen_t, arclen_s;
     // Precompute `num` samples of the spline position, used to seed the
     // (numerical) inversion in position_to_parametric.
     void gen_samples(unsigned num);
+    // Fill arclen_t/arclen_s with `per_segment` sub-intervals per control point interval.
+    void build_arclength_table(unsigned per_segment);
+    // The two directions of the reparametrisation, both piecewise linear in the table above.
+    double arclength_from_t(double t) const;
+    double t_from_arclength(double s) const;
 
   public:
     // Evaluate the spline position at parameter t.

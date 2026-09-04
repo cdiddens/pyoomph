@@ -2547,7 +2547,65 @@ Index : Local coordinates (s0,s1,s2)
 		//	# TODO: Allow closed
 		pts.insert(pts.begin(), vs);
 		pts.push_back(ve);
-		gen_samples(100);
+		// Enough samples to seed the inversion inside the right control point interval even for a long
+		// spline: a fixed 100 samples over a 168-segment interface left the initial guess almost two
+		// segments away from the answer.
+		gen_samples(std::max<unsigned>(100, 4 * (N - 1) + 1));
+		build_arclength_table(20);
+	}
+
+	// Tabulate the arclength reached at evenly spaced spline parameters, by summing the chords of a
+	// fine sampling. `per_segment` sub-intervals per control point interval: the error of a chord sum
+	// is O(h^2) per interval, so 20 puts the table well below the tolerance anything here cares about,
+	// and the table is built once per curved entity.
+	void CurvedEntityCatmullRomSpline::build_arclength_table(unsigned per_segment)
+	{
+		const unsigned n = per_segment * (N - 1) + 1;
+		arclen_t.resize(n);
+		arclen_s.resize(n);
+		std::vector<double> prev, curr;
+		for (unsigned i = 0; i < n; i++)
+		{
+			arclen_t[i] = (N - 1.0) * i / (n - 1.0);
+			CurvedEntityCatmullRomSpline::interpolate(arclen_t[i], curr); // called from the constructor
+			if (i == 0)
+				arclen_s[i] = 0.0;
+			else
+			{
+				double d = 0.0;
+				for (unsigned int j = 0; j < curr.size(); j++)
+					d += (curr[j] - prev[j]) * (curr[j] - prev[j]);
+				arclen_s[i] = arclen_s[i - 1] + sqrt(d);
+			}
+			prev = curr;
+		}
+	}
+
+	// t -> arclength. The table's t values are evenly spaced, so the interval is found by division.
+	double CurvedEntityCatmullRomSpline::arclength_from_t(double t) const
+	{
+		const double dt = arclen_t[1] - arclen_t[0];
+		t = std::min(std::max(t, 0.0), N - 1.0);
+		unsigned i = static_cast<unsigned>(t / dt);
+		if (i + 1 >= arclen_t.size())
+			return arclen_s.back();
+		const double w = (t - arclen_t[i]) / dt;
+		return arclen_s[i] + w * (arclen_s[i + 1] - arclen_s[i]);
+	}
+
+	// arclength -> t. The arclengths increase monotonically, so a bisection finds the interval.
+	double CurvedEntityCatmullRomSpline::t_from_arclength(double s) const
+	{
+		if (s <= arclen_s.front())
+			return arclen_t.front();
+		if (s >= arclen_s.back())
+			return arclen_t.back();
+		const size_t i = std::upper_bound(arclen_s.begin(), arclen_s.end(), s) - arclen_s.begin() - 1;
+		const double ds = arclen_s[i + 1] - arclen_s[i];
+		// A stationary point of the parametrisation would give a zero-length interval; take its left
+		// end rather than dividing by zero.
+		const double w = (ds > 0.0 ? (s - arclen_s[i]) / ds : 0.0);
+		return arclen_t[i] + w * (arclen_t[i + 1] - arclen_t[i]);
 	}
 
 	// Serialize the (already phantom-point-extended) control point list.
@@ -2623,10 +2681,11 @@ Index : Local coordinates (s0,s1,s2)
 		}
 	}
 
-	// Trivial forward map: just evaluate the spline at parameter[0].
+	// Forward map: the parametric coordinate is an arclength, so convert it to the spline parameter
+	// before evaluating.
 	void CurvedEntityCatmullRomSpline::parametric_to_position(const unsigned &, const std::vector<double> &parametric, std::vector<double> &position)
 	{
-		interpolate(parametric[0], position);
+		interpolate(t_from_arclength(parametric[0]), position);
 	}
 	// Numerically invert the spline (no closed form exists): first find the closest
 	// precomputed sample point to `position`, pick the coordinate direction with the
@@ -2700,7 +2759,7 @@ Index : Local coordinates (s0,s1,s2)
 			}
 			throw_runtime_error("Cannot invert spline");
 		}
-		parametric[0] = troot;
+		parametric[0] = arclength_from_t(troot);
 	}
 
 	/*
