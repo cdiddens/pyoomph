@@ -120,7 +120,15 @@ def main() -> int:
             # The GUI path: adaptation is requested through the controller, which calls
             # Problem.remesh_handler_during_continuation after each step. That handler restores the
             # continuation tangent from the history slots, and used to do so WITHOUT renormalising it -
-            # the same defect as the plain adapt path - so the invariant below is the real assertion.
+            # the same defect as the plain adapt path - so the invariant below is one real assertion.
+            #
+            # It is not enough on its own, which is why |d(dof)/ds| and the plotted tangent are checked
+            # too: the handler ALSO used to re-read history slots 5 and 6 after force_remesh had already
+            # restored from them, and with no remesher on the templates force_remesh bails out before it
+            # ever writes those slots. The tangent then came back all zeros, which satisfies
+            # (dparameter/ds)^2 + theta^2*|dU/ds|^2 = 1 EXACTLY, with dparameter/ds = 1 - so the
+            # invariant test passed while the continuation had quietly degenerated into naive parameter
+            # continuation, unable to turn a fold.
             from pyoomph.utils.bifurcation_gui import BifurcationGUI
             from pyoomph.utils.bifurcation_gui.controller import _FixedViewLimits
             gui = BifurcationGUI(problem, "lam")
@@ -131,12 +139,31 @@ def main() -> int:
             c.adapt_every_n = 2
             c.start(0.05)
             ndof0 = problem.ndof()
+            obskey = c._get_current_observable()
+            tangs = []
             for _ in range(6):
                 c.step()
+                t = c._tangs.get(obskey)
+                tangs.append(None if t is None else float(t[1]))
             err = invariant_error(problem)
-            print("GUIPOLICY {:s} ndof {:d} -> {:d} invariant {:.3e}".format(
-                args.gui_policy, ndof0, problem.ndof(), err))
+            ddof_norm = float(numpy.linalg.norm(problem.get_arclength_dof_derivative_vector()))
+            print("GUIPOLICY {:s} ndof {:d} -> {:d} invariant {:.3e} |ddof| {:.4g}".format(
+                args.gui_policy, ndof0, problem.ndof(), err, ddof_norm))
+            print("TANGENTS " + " ".join("None" if t is None else "{:.6g}".format(t) for t in tangs))
             assert err < 1e-10, "the arclength invariant broke under policy "+args.gui_policy
+            # adapt_every_n=2 means the sixth step is an adapting one, so this reads the tangent at
+            # exactly the moment it used to be destroyed. Measured there: 0.5952 -> 0.
+            assert ddof_norm > 1e-8, \
+                ("the continuation tangent was wiped out by the adaptation under policy "
+                 + args.gui_policy + ": |d(dof)/ds| is " + str(ddof_norm))
+            # And the direction the GUI would draw must stay on the branch. u_avg grows monotonically
+            # along it, so every tangent is positive and they are within a factor of two of each other;
+            # before the fix the adapting steps read 0.002115 and 6.308e-05 against neighbours of 0.11
+            # and 0.19, which is an arrow pointing nowhere.
+            assert all(t is not None and t > 0.0 for t in tangs), \
+                "the plotted tangent lost its direction across an adaptation: " + str(tangs)
+            assert max(tangs) < 3.0*min(tangs), \
+                "the plotted tangent collapsed or blew up across an adaptation: " + str(tangs)
             if args.gui_policy == "off":
                 assert problem.ndof() == ndof0, "'off' must not adapt"
             else:

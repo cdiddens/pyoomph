@@ -3792,7 +3792,8 @@ class BifurcationController:
         if not orbit:
             # Adapting renumbers the equations, which pulls the augmented orbit dof vector out from
             # under the handler and invalidates every set of time blocks already stored on the branch.
-            self._adapt_after_step()
+            if self._adapt_after_step():
+                self._refresh_point_after_adapt(self._get_current_point())
         # origin is where this step started: a step off the end of the branch extends it, rather than
         # being placed among the points already there.
         self.reorder_branch_upon_point_insertion(self._get_current_branch(),self._get_current_point(),
@@ -4924,6 +4925,30 @@ class BifurcationController:
         elif force:
             self._steps_since_adapt=0
         return did
+
+    def _refresh_point_after_adapt(self,point):
+        """Re-record `point` on the mesh the adaptation left behind.
+
+        :py:meth:`_add_current_state` runs BEFORE :py:meth:`_adapt_after_step`, so everything it
+        captured -- the observables, the dump, dparameter/ds -- describes the mesh that has just been
+        thrown away. The observables are the ones that show: :py:meth:`_update_tangents` builds the
+        plotted direction as (observable(dofs + eps*ddof) - the RECORDED value)/eps with eps=1e-6, so
+        an interpolation jump of 1e-5 in the observable -- an entirely ordinary remesh -- arrives as a
+        tangent component of 10. The parameter component dp is read from the solver and stays right,
+        which is why the symptom is an arrow pointing hard the wrong way along the OBSERVABLE axis
+        only.
+
+        The dump is rewritten for the same reason: it is the file the point is reloaded from, and the
+        state it held was the pre-remesh one, on a mesh with a different dof count.
+        """
+        point.obs_values.update(self.evaluate_observables())
+        if point.dparam_ds is not None:
+            # The remesh path renormalises the continuation tangent, so this moved too.
+            point.dparam_ds=float(self.problem.get_arc_length_parameter_derivative())
+        try:
+            self.problem.save_state(point.statefile)
+        except Exception as e:
+            self.log("Could not re-save the state after remeshing:",repr(e))
 
     def _adapt_to_eigenfunction(self):
         """Refine towards an eigenfunction after a remesh, if that was asked for.

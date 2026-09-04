@@ -1570,6 +1570,31 @@ def test_adaptivity_during_continuation(policy, tmp_path):
     assert "GUIPOLICY " + policy in out
 
 
+def test_a_remesh_carries_the_whole_continuation_tangent(tmp_path):
+    """A REMESH must carry both halves of d(dof)/ds, and its direction, onto the new mesh.
+
+    force_remesh() parks the two continuation vectors in history slots 5 and 6 and reads them back.
+    It used to read them before interp.interpolate() had run, so the field half came back as exact
+    zeros and the position half as the mesh generator's coordinates; and on a remesher that adapts
+    (num_adapt>0) the _adapt() in the loop then stashed the still-stale live vector back over the
+    freshly interpolated slots, which handed back the OLD mesh's entries on the new numbering.
+
+    Neither shows up in the arclength invariant: the renormalisation afterwards scales whatever it is
+    handed to unit length, so (dparameter/ds)^2 + theta^2*|dU/ds|^2 = 1 held to 1e-16 in both failure
+    modes. The worker measures the two response magnitudes and their RATIO instead - the ratio is
+    invariant under that renormalisation, so it compares directions rather than lengths.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "remesh_tangent_worker.py")
+    proc = subprocess.run([sys.executable, worker, "--outdir", os.path.join(str(tmp_path), "out")],
+                          cwd=here, capture_output=True, text=True, timeout=900)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+
+
 def test_a_state_saved_on_an_adapted_mesh_restores_its_tangent(tmp_path):
     """Loading a state must apply its continuation tangent AFTER the equations are renumbered.
 

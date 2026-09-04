@@ -4222,14 +4222,14 @@ class Problem(_pyoomph.Problem):
 
             
             
+        # force_remesh carries the arclength vectors across the new mesh and renormalises them itself,
+        # inside its interpolation pass where the slots are actually populated. This used to re-read
+        # history slots 5 and 6 HERE, once more, and push that back as the tangent -- and by this
+        # point they hold nothing useful: with no remesher force_remesh bails out before it ever
+        # stashes, and after a real remesh they have been consumed. Measured on a two-phase
+        # moving-mesh continuation: |d(dof)/ds| was 157.2 before the remesh and 33.9 once
+        # force_remesh had carried it over, and this block then set it to exactly 0.
         self.force_remesh(num_adapt=num_adapt)
-        
-        # Reobtain the arclength vectors
-        if self._last_arclength_parameter is not None:
-            dof_deriv=self.get_history_dofs(5)
-            dof_current=self.get_history_dofs(6)
-            self._update_dof_vectors_for_continuation(dof_deriv,dof_current)
-            self._renormalise_continuation_tangent(dof_deriv,dof_current)
         
         if biftrack != "":
             if resolve_before_eigen:
@@ -4242,6 +4242,11 @@ class Problem(_pyoomph.Problem):
                 self.solve(max_newton_iterations=resolve_max_newton_steps,globally_convergent_newton=resolve_globally_convergent_newton)
         elif resolve:
             self.solve(max_newton_iterations=resolve_max_newton_steps,globally_convergent_newton=resolve_globally_convergent_newton)
+        # This used to fall off the end returning None, i.e. False, contradicting the docstring and
+        # every caller that asks whether a remesh happened -- the GUI's adapt policy never reset its
+        # step counter and never ran its post-remesh work, because the one remesh it did was reported
+        # as "nothing to do".
+        return True
 
     def _domain_name_pattern_candidates(self,node:"EquationTree",depth:int)->tuple[set[str],str]:
         """The names a glob child of `node` may expand to, together with a phrase naming them for the
@@ -9985,7 +9990,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                     remeshers.append(t.remesher)
 
         if len(remeshers)==0:
-            return
+            return False
         # Both deliberately after the "is there anything to remesh at all" test, so that a
         # remesh_if_necessary() which finds nothing to do still returns quietly when distributed,
         # and both before the first mesh is touched - see _check_distributed_remeshing_scope.
@@ -10081,18 +10086,24 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         def perform_interpolation():
             for _, interp in interpolators.items(): 
                 interp.interpolate() 
+            # Immediately, and after EVERY interpolation pass, not once at the end. History slots 5
+            # and 6 are the two continuation vectors, and interpolate() has just written them onto the
+            # new mesh; the live Dof_derivative is still the OLD mesh's and is meaningless here. The
+            # _adapt() that follows in the num_adapt loop stashes whatever is live back into those
+            # very slots before it refines, so leaving the stale vector in place made _adapt() undo
+            # the transfer -- the tangent came back bit-identical to the pre-remesh one, i.e. the old
+            # mesh's entries reinterpreted on the new numbering (measured: |ddof| and max|dX/ds| both
+            # unchanged to 6 digits while d(int c^2)/ds was 42 % off).
+            if has_continuation_data:
+                dof_deriv=numpy.asarray(self.get_history_dofs(5),dtype=float)
+                if dof_deriv.any():
+                    self._update_dof_vectors_for_continuation(dof_deriv,self.get_history_dofs(6))
             if self._debug_remeshing:
                 # And the state on the NEW mesh, so the two outputs bracket the transfer exactly.
                 if not self.is_quiet():
                     print("Writing an output AFTER remeshing (_debug_remeshing)")
                 self.output()
 
-
-        if has_continuation_data:
-            print("RESTORING CONTINUATION DATA")
-            dof_deriv=self.get_history_dofs(5)
-            dof_current=self.get_history_dofs(6)
-            self._update_dof_vectors_for_continuation(dof_deriv,dof_current)
 
         num_adapt = self._remesh_adaption_steps(num_adapt)
 
@@ -10151,10 +10162,18 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         # teardown - and why its _templatemesh, in contrast, must be.
         for name, oldmesh in old_meshes.items():
             _destroy_superseded_mesh(oldmesh)
-        
-        
 
+        # The carried tangent has the right direction but not the right length: |dU/ds|^2 is a sum over
+        # degrees of freedom, and the new mesh has a different number of them. Read back from the LIVE
+        # vectors rather than from history slots 5 and 6, which the mesh rebuild above has since
+        # reassigned. See _renormalise_continuation_tangent for what depends on the length.
+        if has_continuation_data:
+            dof_deriv=self.get_arclength_dof_derivative_vector()
+            if len(dof_deriv)>0:
+                self._renormalise_continuation_tangent(dof_deriv,
+                                                       self.get_arclength_dof_current_vector())
 
+        return True
 
     def _define_state_header(self,state:DumpFile)->str:
         """Read or write the header of a state file: what it is, which format version, and how it is sharded.
