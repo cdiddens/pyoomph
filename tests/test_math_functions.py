@@ -37,8 +37,9 @@ import math
 import numpy
 import pytest
 
-from pyoomph import ODEEquations, Problem
-from pyoomph.expressions import acosh, asinh, atanh, erf, erfc, imag_part, imaginary_i, real_part, var, var_and_test
+from pyoomph import ODEEquations, Problem, _pyoomph
+from pyoomph.expressions import acosh, asinh, atanh, erf, erfc, heaviside, imag_part, imaginary_i, real_part, var, var_and_test
+from pyoomph.expressions.units import meter, milli
 from pyoomph.generic.ccompiler import BaseCCompiler
 
 # shift keeps both the function and its derivative finite at the initial guess 0 as well as at the solution
@@ -162,3 +163,35 @@ def test_erf_of_a_complex_argument_is_rejected():
             imag_part(function(x + imaginary_i() * y))
         with pytest.raises(RuntimeError, match="only real arguments are supported"):
             real_part(function(x + imaginary_i() * y))
+
+
+def test_the_real_part_of_a_field_free_expression_is_split_right_away():
+    """
+    real_part()/imag_part() used to stay held whenever the argument contained no field.
+
+    They are held while the argument still carries unresolved placeholders, since a later stage may
+    resolve them better. Once it does not, GiNaC can usually do the split outright, and the result
+    has to be taken: a held call is neither separable into units - the residual was rejected with
+    "The units of ... cannot be separated from the rest at all" - nor printable as C, since there is
+    no get_real_part() in the generated code. It reached every expression whose only variable is a
+    global parameter, and even a constant such as real_part(3*mm + 20i*mm).
+    """
+    def split(expression):
+        factor, unit, rest, success = _pyoomph.GiNaC_collect_units(expression)
+        assert success, "units and rest are not separable in " + str(expression)
+        return factor * unit * rest
+
+    a, b = 3 * milli * meter, 20 * milli * meter
+    assert (split(real_part(a + imaginary_i() * b)) - a).is_zero()
+    assert (split(imag_part(a + imaginary_i() * b)) - b).is_zero()
+    # the same with a global parameter, which is what a real residual looks like
+    problem = Problem()
+    s = problem.get_global_parameter("s").get_symbol()
+    assert (split(real_part(s * meter + imaginary_i() * b)) - s * meter).is_zero()
+    assert (split(imag_part(s * meter + imaginary_i() * b)) - b).is_zero()
+    assert (split(real_part(heaviside(s - 0.5) * (a + imaginary_i() * b))) - heaviside(s - 0.5) * a).is_zero()
+
+
+def test_an_incomplete_split_is_still_held():
+    """A field placeholder cannot be split yet, so the real_part stays for a later stage to resolve."""
+    assert "real_part" in str(real_part(var("u")))

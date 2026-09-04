@@ -2149,6 +2149,13 @@ namespace pyoomph
 
 		////////////////
 
+		// True if a real/imaginary-part split left something standing that GiNaC could not resolve, i.e. if the result
+		// still contains a real_part()/imag_part() node. Those have no C counterpart, so such a result must not be used.
+		static bool has_unresolved_part(const ex &e)
+		{
+			return GiNaC::has(e, GiNaC::real_part_function(GiNaC::wild())) || GiNaC::has(e, GiNaC::imag_part_function(GiNaC::wild()));
+		}
+
 		// eval_func for get_real_part(): numeric/constant arguments are evaluated directly via GiNaC::real_part; matrices are
 		// handled entrywise. While the argument still contains unresolved pyoomph placeholders (need_to_hold), GiNaC's own
 		// real_part() is applied instead, since it distributes automatically over +,-,*,/ and can be pushed arbitrarily deep
@@ -2182,7 +2189,18 @@ namespace pyoomph
 					return GiNaC::real_part(wrapped);
 				}
 				else
-					return get_real_part(wrapped).hold();
+				{
+					// GiNaC's real_part() also handles a fully resolved argument: it distributes over +,-,*,/ and
+					// dispatches to each function's real_part_func, the hooks of the custom callbacks included. Take that
+					// result whenever the split came out complete. Holding instead is only worth it while something
+					// remains unresolved and a later stage may still do better, since a held get_real_part() can neither
+					// be separated into units nor be printed as C - a residual containing one used to be rejected with
+					// "The units of 1 term(s) cannot be separated from the rest at all".
+					GiNaC::ex res = GiNaC::real_part(wrapped);
+					if (has_unresolved_part(res))
+						return get_real_part(wrapped).hold();
+					return res;
+				}
 			}
 		}
 
@@ -2230,7 +2248,13 @@ namespace pyoomph
 				else if (need_to_hold(wrapped))
 					return GiNaC::imag_part(wrapped);
 				else
-					return get_imag_part(wrapped).hold();
+				{
+					// Same as in get_real_part_eval above
+					GiNaC::ex res = GiNaC::imag_part(wrapped);
+					if (has_unresolved_part(res))
+						return get_imag_part(wrapped).hold();
+					return res;
+				}
 			}
 		}
 
