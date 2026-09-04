@@ -32,8 +32,6 @@ from pyoomph.expressions.units import *
 # Load tools for periodic driving response and text file output
 from pyoomph.utils.periodic_driving_response import *
 from pyoomph.utils.num_text_out import *
-# Merging the mesh data of a distributed mesh onto rank 0 (only relevant with --distribute)
-from pyoomph.meshes.meshdatamerge import run_with_global_mesh_data
 
 # Driven damped wave equation
 class DrumEquation(Equations):
@@ -103,10 +101,14 @@ with DrumProblem() as problem:
             # Get the response as nondimensional data. The response is stored as eigenvector, so we split it in real and imaginary part.
             # global_mesh=True because the projection integrates over the WHOLE radius: with --distribute
             # each rank holds only its own arc of it, and a spline through a partial radius would give a
-            # different (and wrong) amplitude on every rank. Merged onto rank 0, which is also the only
-            # rank NumericalTextOutputFile writes from.
+            # different (and wrong) amplitude on every rank. These two calls are collective, i.e. every
+            # rank must reach them with the same arguments, and the merged result arrives on rank 0 only.
             nd_resp_real=problem.get_cached_mesh_data("drum",eigenmode="real",eigenvector=0,nondimensional=True,global_mesh=True)
             nd_resp_imag=problem.get_cached_mesh_data("drum",eigenmode="imag",eigenvector=0,nondimensional=True,global_mesh=True)
+            # From here on, everything is rank-0 work only: the other ranks got None above and
+            # NumericalTextOutputFile writes from rank 0 anyway. No collective call may follow.
+            if get_mpi_rank()!=0:
+                return
             interr=radial_spline(nd_resp_real)
             interi=radial_spline(nd_resp_imag)
             # Calculate the Bessel decomposition of the response
@@ -121,9 +123,6 @@ with DrumProblem() as problem:
             # add a row to the output
             outfile.add_row(pdr.get_driving_frequency()/hertz,*bessel_data)
         for response in pdr.iterate_over_driving_frequencies(freqs=freqs,unit=hertz):        
-            # run_with_global_mesh_data lets rank 0 run the projection while the other ranks serve its
-            # merge requests. Serially it just calls it. Without it, the global_mesh=True requests above
-            # would have to be reached by every rank in lockstep, which a rank-0-only body cannot do.
-            run_with_global_mesh_data({"drum":problem},project_and_write)
-
-        
+            # Called by every rank: the merge requests inside are collective, only the evaluation
+            # and the output afterwards are restricted to rank 0.
+            project_and_write()
