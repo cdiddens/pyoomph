@@ -548,6 +548,22 @@ namespace pyoomph
 					for (unsigned int field_index=0;field_index<space_info->numfields-space_info->numfields_basebulk;field_index++)
 					{
 					   unsigned add_field_index=space_info->interface_dof_indices[field_index];
+					   // The interface dof of a node only exists once some interface element covering that node
+					   // has been constructed. While the interface mesh is still being generated (a restriction
+					   // expression is evaluated on each face element right after it is built, see
+					   // Mesh::generate_interface_elements) the masters of a hanging node may sit on a face
+					   // element that comes later in the loop and therefore carry no such dof yet. There is
+					   // nothing to interpolate from in that case - skip the field rather than dereferencing a
+					   // null index map, which used to segfault when a state with an adapted mesh was reloaded.
+					   if (!dest_bn->has_additional_dof(add_field_index)) continue;
+					   bool all_masters_have_dof=true;
+					   for (unsigned int m=0;m<hang_info->nmaster();m++)
+					   {
+							BoundaryNode * boundnode=dynamic_cast<BoundaryNode*>(hang_info->master_node_pt(m));
+							if (!boundnode) throw_runtime_error("master_node is not a BoundaryNode");
+							if (!boundnode->has_additional_dof(add_field_index)) { all_masters_have_dof=false; break; }
+					   }
+					   if (!all_masters_have_dof) continue;
 					   unsigned dest_value_index=dest_bn->index_of_first_value_assigned_by_face_element(add_field_index);	
 					   for (unsigned int t=0;t<node->ntstorage();t++)
 					   {
@@ -556,7 +572,6 @@ namespace pyoomph
 						   {
 								pyoomph::Node * master_node=static_cast<pyoomph::Node*>(hang_info->master_node_pt(m));
 								BoundaryNode * boundnode=dynamic_cast<BoundaryNode*>(master_node);
-								if (!boundnode) throw_runtime_error("master_node is not a BoundaryNode");
 								unsigned master_value_index=boundnode->index_of_first_value_assigned_by_face_element(add_field_index);
 								val+=master_node->value(t,master_value_index)*hang_info->master_weight(m);
 						   }
@@ -580,12 +595,22 @@ namespace pyoomph
 						for (unsigned int field_index=0;field_index<space_info->numfields-space_info->numfields_basebulk;field_index++)
 						{
 					   	   unsigned add_field_index=space_info->interface_dof_indices[field_index];
+						   // Same caveat as above: nothing to average from before every contributing node owns
+						   // the interface dof.
+						   if (!dest_boundnode->has_additional_dof(add_field_index)) continue;
+						   bool all_masters_have_dof=true;
+						   for (unsigned int m=1;m<dummy_value_interpolation[idummy].size();m++)
+						   {
+							  pyoomph::BoundaryNode * boundnode=dynamic_cast<pyoomph::BoundaryNode*>(this->node_pt(dummy_value_interpolation[idummy][m]));
+							  if (!boundnode) throw_runtime_error("master_node is not a BoundaryNode");
+							  if (!boundnode->has_additional_dof(add_field_index)) { all_masters_have_dof=false; break; }
+						   }
+						   if (!all_masters_have_dof) continue;
 						   double val=0.0;
 						   for (unsigned int m=1;m<dummy_value_interpolation[idummy].size();m++)
 						   {
 							  pyoomph::Node * master_node=static_cast<pyoomph::Node*>(this->node_pt(dummy_value_interpolation[idummy][m]));
 							  pyoomph::BoundaryNode * boundnode=dynamic_cast<pyoomph::BoundaryNode*>(master_node);
-							  if (!boundnode) throw_runtime_error("master_node is not a BoundaryNode");
 							  unsigned master_index=boundnode->index_of_first_value_assigned_by_face_element(add_field_index);
 							  val+=master_node->value(t, master_index);
 						   }
