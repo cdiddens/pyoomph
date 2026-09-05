@@ -75,17 +75,10 @@ class PETScSolverError(SolverError):
 
 
 
-# MUMPS INFOG(1) codes that all say the same thing: an internal work array was sized from the fill-in
-# the analysis phase predicted, numerical pivoting then needed more room than that, and MUMPS stopped
-# instead of reallocating. Its own manual's answer is to raise ICNTL(14) -- the percentage of slack
-# added to the prediction -- and rerun.
-_MUMPS_ICNTL14_ERRORS = (-8, -9, -11, -12, -14, -15, -17, -20)
-
-# INFOG(1) = -19 is deliberately NOT in that list although it reads like a memory error. It means the
-# factorisation exceeded ICNTL(23), the hard cap on working memory in MB, and raising ICNTL(14) against
-# a cap only asks for more of something already forbidden. The lever there is ICNTL(23) itself, which
-# is the user's to set (pyoomph never does), so this is reported rather than escalated.
-_MUMPS_ICNTL23_ERROR = -19
+# Both lists, and the doubling policy below, now live in .generic so that the direct MUMPS backend
+# (solvers/mumps.py) reads the same ones -- see the comment there. Re-exported under the old names so
+# that nothing else in this file had to change.
+from .generic import _MUMPS_ICNTL14_ERRORS,_MUMPS_ICNTL23_ERROR,_next_mumps_icntl14
 
 
 def _mumps_infog_from_pc(pc:Any,which:int)->int | None:
@@ -132,7 +125,7 @@ def _increase_mumps_icntl14(option:str,quiet:bool)->bool:
             current = int(opts.getInt(option)) #type:ignore
         except Exception:
             pass
-    new_value = min(max(2*current, 40), 1000)
+    new_value = _next_mumps_icntl14(current)
     if new_value == current:
         return False
     _SetDefaultPetscOption(option, new_value, force=True)
