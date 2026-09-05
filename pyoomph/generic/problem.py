@@ -3507,6 +3507,7 @@ class Problem(_pyoomph.Problem):
         linear_solver_group.add_argument('--umfpack', help="use UMFPACK solver", action='store_true')
         linear_solver_group.add_argument('--pardiso', help="use Pardiso solver", action='store_true')
         linear_solver_group.add_argument('--petsc_mumps',help="use PETSc as linear solver with MUMPS as backend",action="store_true")
+        linear_solver_group.add_argument('--mumps',help="use MUMPS directly as linear solver (needs the pyoomph_mumps package; unlike --petsc_mumps it does not go through PETSc)",action="store_true")
         linear_solver_group.add_argument('--accelerate',help="use Apple Accelerate sparse solver (macOS only)",action='store_true')
         # Mutually exclusive for the same reason as linear_solver_group above.
         eigen_solver_group = self.cmdlineparser.add_mutually_exclusive_group()
@@ -3514,6 +3515,9 @@ class Problem(_pyoomph.Problem):
         eigen_solver_group.add_argument('--slepc_mumps',help="use SLEPc as eigensolver with MUMPS as backend",action="store_true")
         eigen_solver_group.add_argument('--spectra',help="use the built-in Spectra eigensolver (needs no PETSc, but is serial)",action="store_true")
         eigen_solver_group.add_argument('--arpack',help="use scipy's ARPACK-based eigensolver (serial, cannot target an eigenvalue)",action="store_true")
+        # Spelled differently from the linear --mumps because argparse has one flat namespace: the two
+        # registries may both call the backend "mumps", the command line cannot.
+        eigen_solver_group.add_argument('--mumps_eigen',help="use the Spectra eigensolver with MUMPS factorising the shifted matrix (needs the pyoomph_mumps package)",action="store_true")
         # Mutually exclusive for the same reason as linear_solver_group above.
         ccompiler_group = self.cmdlineparser.add_mutually_exclusive_group()
         ccompiler_group.add_argument('--tcc', help="use internal TCC compiler", action='store_true')
@@ -3566,6 +3570,8 @@ class Problem(_pyoomph.Problem):
             self.set_linear_solver("pardiso")
         elif self.cmdlineargs.petsc_mumps:
             self.set_linear_solver("petsc_mumps")
+        elif self.cmdlineargs.mumps:
+            self.set_linear_solver("mumps")
         elif self.cmdlineargs.accelerate:
             self.set_linear_solver("accelerate")
 
@@ -3593,6 +3599,8 @@ class Problem(_pyoomph.Problem):
             self.set_eigensolver("slepc")
         elif self.cmdlineargs.spectra:
             self.set_eigensolver("spectra")
+        elif self.cmdlineargs.mumps_eigen:
+            self.set_eigensolver("mumps")
 
 
 

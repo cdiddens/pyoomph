@@ -66,8 +66,8 @@ DefaultMatrixType:TypeAlias=scipy.sparse.csr_matrix # spelled as an alias: a bar
 _TypeGenericLASolver=TypeVar("_TypeGenericLASolver",bound=type["GenericLinearSystemSolver"])
 _TypeGenericEigenSolver=TypeVar("_TypeGenericEigenSolver",bound=type["GenericEigenSolver"])
 
-CoreLinearSolverEnum:TypeAlias=Literal["superlu","umfpack","petsc","pardiso","accelerate","petsc_mumps"]
-CoreEigenSolverEnum:TypeAlias=Literal["scipy","pardiso","spectra","slepc","accelerate","slepc_mumps"]
+CoreLinearSolverEnum:TypeAlias=Literal["superlu","umfpack","petsc","pardiso","accelerate","petsc_mumps","mumps"]
+CoreEigenSolverEnum:TypeAlias=Literal["scipy","pardiso","spectra","slepc","accelerate","slepc_mumps","mumps"]
 EigenSolverWhich:TypeAlias=Literal["LM","SM","LR","SR","SI"]
 _default_la_solver:"GenericLinearSystemSolver | CoreLinearSolverEnum | None"=None
 _default_eigen_solver:"GenericEigenSolver | CoreEigenSolverEnum | None"=None
@@ -76,8 +76,36 @@ _default_eigen_solver_resolver:"Callable[[],GenericEigenSolver | CoreEigenSolver
 if TYPE_CHECKING:
     from ..generic.problem import Problem
 
+# MUMPS INFOG(1) codes that all say the same thing: an internal work array was sized from the fill-in
+# the analysis phase predicted, numerical pivoting then needed more room than that, and MUMPS stopped
+# instead of reallocating. Its own manual's answer is to raise ICNTL(14) -- the percentage of slack
+# added to the prediction -- and rerun.
+#
+# Here rather than in either backend because pyoomph now reaches MUMPS by two independent routes --
+# solvers/petsc.py through PETSc, solvers/mumps.py directly -- and the two must not drift apart about
+# which codes mean "give it more room". The direct backend cannot import the list from petsc.py
+# anyway: that module needs petsc4py to import at all.
+_MUMPS_ICNTL14_ERRORS=(-8,-9,-11,-12,-14,-15,-17,-20)
+
+# INFOG(1) = -19 is deliberately NOT in that list although it reads like a memory error. It means the
+# factorisation exceeded ICNTL(23), the hard cap on working memory in MB, and raising ICNTL(14) against
+# a cap only asks for more of something already forbidden. The lever there is ICNTL(23) itself, which
+# is the user's to set (pyoomph never does), so this is reported rather than escalated.
+_MUMPS_ICNTL23_ERROR=-19
+
+def _next_mumps_icntl14(current:int)->int:
+	"""The ICNTL(14) to try after `current` failed, or `current` itself when there is no room left.
+
+	Doubling from a floor of 40 up to a cap of 1000, the policy PETSCSolver has used since it grew
+	this retry. The value is meant to be KEPT for the rest of the run rather than applied only to the
+	retry: a matrix that needed the extra room once needs it again at the next step, and re-failing
+	each time to rediscover that is waste.
+	"""
+	return min(max(2*current,40),1000)
+
 _PETSCSLEPC_INSTALL_URL="https://pyoomph.readthedocs.io/en/latest/tutorial/installation/petscslepc.html"
 _PYPA_INSTALL_URL="https://pyoomph.readthedocs.io/en/latest/tutorial/installation/pypa.html"
+_PYOOMPH_MUMPS_INSTALL_URL="https://github.com/pyoomph/pyoomph"
 _SOLVER_INSTALL_HINTS:dict[str,tuple[str,str]]={
 	"petsc":("PETSc",_PETSCSLEPC_INSTALL_URL),
 	"petsc_mumps":("PETSc with MUMPS support",_PETSCSLEPC_INSTALL_URL),
@@ -85,6 +113,9 @@ _SOLVER_INSTALL_HINTS:dict[str,tuple[str,str]]={
 	"slepc_mumps":("SLEPc with MUMPS support",_PETSCSLEPC_INSTALL_URL),
 	"pardiso":("Intel MKL (Pardiso)",_PYPA_INSTALL_URL),
 	"accelerate":("the macOS Accelerate framework",_PYPA_INSTALL_URL),
+	# Both the linear solver and the eigensolver named "mumps" come from the same separate package,
+	# so one hint serves both registries.
+	"mumps":("the pyoomph_mumps package (a direct MUMPS binding, which builds MUMPS itself)",_PYOOMPH_MUMPS_INSTALL_URL),
 }
 
 def _mpi_any_rank(flag:bool)->bool:

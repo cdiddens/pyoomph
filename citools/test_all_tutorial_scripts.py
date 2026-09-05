@@ -40,6 +40,12 @@ parser.add_argument("--report-json", metavar="PATH", default=None, help="Also wr
 parser.add_argument("--mpirun", type=int, default=0, metavar="N", help="Run each script under 'mpirun -n N' instead of directly. Default 0, i.e. no mpirun")
 parser.add_argument("--omp", type=int, default=0, metavar="N", help="Pass '--omp N' to each script, i.e. assemble the elements on N threads. Default 0, i.e. leave each script on the serial element loop. Composes with --mpirun, which is threads per rank then")
 parser.add_argument("--distribute", help="Pass --distribute to each script, i.e. distribute the mesh over the ranks. Only meaningful together with --mpirun", action="store_true")
+# Deliberately general rather than one option per solver. Note what forcing a solver DOES, though:
+# it changes what is being computed, not just how fast. petsc_mumps collapses hopf_switch's arclength
+# continuation and plain --petsc (an iterative KSP) fails outright on the augmented systems, so a
+# failure under this flag is not by itself a failure of the backend - re-run the same script without
+# it before concluding anything.
+parser.add_argument("--extra-arg", action="append", default=[], metavar="ARG", help="Pass this argument on to every script. Repeatable, e.g. --extra-arg --mumps. See the note in the source about what forcing a solver changes")
 # For chasing one flaky script across the platforms: a full pass is hours per OS, and a script that
 # only fails once in a while has to be run as the CI runs it - same wheel, same runner - not once in
 # a scratch directory. Substring rather than glob, on "Folder/script.py", so that a bare script name
@@ -469,6 +475,7 @@ for d in glob.glob("./*/"):
       cmd.append("--distribute")
     if args.omp>0:
       cmd+=["--omp",str(args.omp)]
+    cmd+=args.extra_arg
     started_at=time.time()
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
     #proc = subprocess.Popen([sys.executable, '-u', f], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -582,6 +589,7 @@ if report_json is not None:
                "python":sys.version.split()[0],
                "options":{"quick_test":args.quick_test,"tcc":args.tcc,"no_petsc":args.no_petsc,
                           "mpirun":args.mpirun,"omp":args.omp,"distribute":args.distribute,
+                          "extra_arg":args.extra_arg,
                           "timeout":args.timeout,
                           "skips":skips,"only":args.only},
                "scripts":records},jf,indent=1)
