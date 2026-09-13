@@ -1410,3 +1410,78 @@ def test_a_state_file_reloads_into_a_problem_whose_mesh_comes_from_the_template(
     assert b.get_mesh("domain").get_tracers("bulk").nlocal() == len(_REMESH_BULK)
     located = numpy.array(imesh.locate_points(surf_b.get_positions(), lagrangian=False), dtype=float)
     assert numpy.all(located[:, 0] > 0.5), "a restored tracer is not in the interface mesh at all"
+
+
+# ----------------------------------------------------------------------------------------------
+# Units
+# ----------------------------------------------------------------------------------------------
+#
+# Seed coordinates and lengths follow the problem's spatial scale, the same convention the mesh
+# templates state (MeshTemplate.nondim_size). TracerSeedGrid used to apply it to its spacing only,
+# while taking its bbox - a pair of mesh corners, and the thing that replaces bounding_box() - as
+# nondimensional, so the two arguments of one seed were in different units.
+
+class _UnitsEqs(Equations):
+    """Something to solve, whose weak form is dimensionless under any spatial scale."""
+
+    def define_fields(self):
+        self.define_scalar_field("u", "C2", scale=1, testscale=scale_factor("spatial") ** 2)
+
+    def define_residuals(self):
+        u, v = var_and_test("u")
+        self.add_residual(weak(grad(u), grad(v)))
+
+
+def _unit_seeded_positions(seed, scaled, tmp_path, tag):
+    from pyoomph.expressions.units import milli, meter, second
+
+    class _P(Problem):
+        def define_problem(self):
+            if scaled:
+                self.set_scaling(spatial=1 * milli * meter, temporal=1 * second)
+                mesh = RectangularQuadMesh(size=[4 * milli * meter, 2 * milli * meter], N=[8, 4])
+                advection = vector(1, 0) * milli * meter / second
+            else:
+                mesh = RectangularQuadMesh(size=[4, 2], N=[8, 4])
+                advection = vector(1, 0)
+            self.add_mesh(mesh)
+            self += (_UnitsEqs() + TracerParticles(advection, seed=seed)) @ "domain"
+
+    p = _P()
+    p.set_output_directory(str(tmp_path / tag))
+    p.quiet()
+    p.initialise()
+    # Nondimensional either way: these are mesh coordinates, and the mesh is the same mesh.
+    return numpy.sort(p.get_mesh("domain").get_tracers().get_positions(), axis=0)
+
+
+def test_seed_coordinates_follow_the_spatial_scale(tmp_path):
+    from pyoomph.expressions.units import milli, meter
+    mm = milli * meter
+
+    plain = _unit_seeded_positions(TracerSeedGrid(0.5, bbox=([0.5, 0.5], [3.5, 1.5])),
+                                   False, tmp_path, "units_grid_plain")
+    assert len(plain) == 12, "the nondimensional reference itself seeded %d particles" % len(plain)
+    dimensional = _unit_seeded_positions(
+        TracerSeedGrid(0.5 * mm, bbox=([0.5 * mm, 0.5 * mm], [3.5 * mm, 1.5 * mm])),
+        True, tmp_path, "units_grid_dim")
+    assert dimensional.shape == plain.shape, \
+        "the dimensional grid seeded %d particles, the nondimensional one %d" % (len(dimensional), len(plain))
+    assert numpy.max(numpy.abs(dimensional - plain)) == 0.0, "the two lattices are not the same lattice"
+
+    # the explicit positions of TracerSeedPoints are the user's input too, and follow the same rule
+    plain_pts = _unit_seeded_positions(TracerSeedPoints([[1.0, 0.5], [2.0, 1.0]]),
+                                       False, tmp_path, "units_pts_plain")
+    dim_pts = _unit_seeded_positions(TracerSeedPoints([[1.0 * mm, 0.5 * mm], [2.0 * mm, 1.0 * mm]]),
+                                     True, tmp_path, "units_pts_dim")
+    assert numpy.max(numpy.abs(dim_pts - plain_pts)) == 0.0
+
+
+def test_a_nondimensional_bbox_on_a_dimensional_problem_says_so(tmp_path):
+    """The mix this convention exists to prevent, and the reason it must not pass silently: a bbox of
+    bare numbers against a millimetre scale is a box a thousand times too large, which the seeder
+    would happily accept and simply drop every candidate outside the mesh."""
+    from pyoomph.expressions.units import milli, meter
+    with pytest.raises(RuntimeError, match="must be given dimensionally"):
+        _unit_seeded_positions(TracerSeedGrid(0.5 * milli * meter, bbox=([0.5, 0.5], [3.5, 1.5])),
+                               True, tmp_path, "units_mixed")

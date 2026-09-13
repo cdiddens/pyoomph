@@ -24,6 +24,10 @@ rather than a box), :py:class:`~pyoomph.equations.tracers.TracerSeedRandom` and
 :py:class:`~pyoomph.equations.tracers.TracerSeedCallable`. All of them work in one, two and three
 dimensions.
 
+Positions and lengths given to a seed - the lattice spacing above, an explicit position, a bounding
+box - follow the same convention as the mesh templates: on a problem with a dimensional spatial
+scale they are dimensional as well, e.g. ``TracerSeedGrid(0.15*milli*meter)``.
+
 Let us put them in a channel whose top wall oscillates, so that the mesh is in constant motion:
 
 .. literalinclude:: tracers.py

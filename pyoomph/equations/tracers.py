@@ -89,6 +89,37 @@ class TracerSeed:
     #: and sets it False, seeding each process's own share instead.
     global_candidates: bool = True
 
+    def nondim_coordinates(self, mesh: "AnySpatialMesh", values: Any, what: str) -> numpy.ndarray:
+        """Divide seed coordinates or lengths by the problem's spatial scale.
+
+        The same convention the mesh templates use (:py:meth:`~pyoomph.meshes.mesh.MeshTemplate
+        .nondim_size`): on a problem with a dimensional spatial scale, every coordinate and every
+        length handed to a seed is dimensional as well, e.g. ``0.5*milli*meter``. Everything a seed
+        returns from :py:meth:`generate`, and everything :py:meth:`bounding_box` reports, is
+        nondimensional - those are mesh coordinates.
+
+        Accepts a scalar or an array of any shape, and returns it as a float array of that shape.
+        """
+        spatial = mesh.get_problem().get_scaling("spatial")
+        try:
+            # A dimensionless scale divides the whole array by one number, which is both the common
+            # case and the fast one. A dimensional one has to go through GiNaC per entry.
+            scale = float(spatial)
+        except RuntimeError:
+            scale = None
+        try:
+            if scale is not None:
+                return numpy.asarray(values, dtype=float) / scale
+            asobj = numpy.asarray(values, dtype=object)
+            flat = [float(v / spatial) for v in asobj.ravel().tolist()]
+            return numpy.asarray(flat, dtype=float).reshape(asobj.shape)
+        except (RuntimeError, TypeError) as e:
+            raise RuntimeError("Cannot nondimensionalise " + what + " " + str(values) +
+                               " with the spatial scale " + str(spatial) + " of the problem.\n"
+                               "If the problem uses dimensional scales (set_scaling(spatial=...)), tracer "
+                               "seed coordinates and lengths must be given dimensionally as well, e.g. "
+                               "1*meter.\nOriginal error: " + str(e)) from e
+
     def bounding_box(self, mesh: "AnySpatialMesh", dim: int) -> tuple[list[float], list[float]]:
         """Nondimensional bounding box of the mesh's nodes.
 
@@ -108,14 +139,17 @@ class TracerSeed:
 
 
 class TracerSeedPoints(TracerSeed):
-    """Explicit positions, as an (N, dim) array or a list of points."""
+    """Explicit positions, as an (N, dim) array or a list of points.
+
+    The positions are dimensional whenever the problem is, i.e. ``[[1*milli*meter, 0]]`` rather than
+    the nondimensional ``[[1.0, 0]]`` - see :py:meth:`TracerSeed.nondim_coordinates`."""
 
     def __init__(self, positions: Any, tag: int = 0):
         super().__init__(tag)
         self.positions = positions
 
     def generate(self, mesh: "AnySpatialMesh", dim: int) -> numpy.ndarray:
-        arr = numpy.atleast_2d(numpy.asarray(self.positions, dtype=float))
+        arr = numpy.atleast_2d(self.nondim_coordinates(mesh, self.positions, "the seed positions"))
         if arr.shape[1] != dim:
             raise ValueError("TracerSeedPoints got " + str(arr.shape[1]) + "-dimensional positions for a " +
                              str(dim) + "-dimensional mesh")
@@ -131,11 +165,13 @@ class TracerSeedGrid(TracerSeed):
 
     Args:
         spacing: distance between neighbouring candidates, dimensional if the problem is.
-        bbox: ``(mins, maxs)`` to override the mesh bounding box.
+        bbox: ``(mins, maxs)`` to override the mesh bounding box, in the same units as ``spacing``,
+            i.e. dimensional if the problem is.
         inset: how far to stay away from the bounding box faces, as a multiple of ``spacing``.
     """
 
-    def __init__(self, spacing: ExpressionOrNum, bbox: tuple[Sequence[float], Sequence[float]] | None = None,
+    def __init__(self, spacing: ExpressionOrNum,
+                 bbox: tuple[Sequence[ExpressionOrNum], Sequence[ExpressionOrNum]] | None = None,
                  inset: float = 0.5, tag: int = 0):
         super().__init__(tag)
         self.spacing = spacing
@@ -143,11 +179,15 @@ class TracerSeedGrid(TracerSeed):
         self.inset = inset
 
     def generate(self, mesh: "AnySpatialMesh", dim: int) -> numpy.ndarray:
-        d = float(self.spacing / mesh.get_problem().get_scaling("spatial"))
+        d = float(self.nondim_coordinates(mesh, self.spacing, "the grid spacing"))
         if d <= 0:
             raise ValueError("TracerSeedGrid needs a positive spacing")
         if self.bbox is not None:
-            mins, maxs = list(self.bbox[0]), list(self.bbox[1])
+            # Through the same conversion as the spacing: the box is a pair of corners of the mesh,
+            # so it is stated the way every other coordinate is. It used to be taken raw, which made
+            # it the one nondimensional length in a seed that is otherwise dimensional.
+            mins = list(self.nondim_coordinates(mesh, self.bbox[0], "the bounding box minima"))
+            maxs = list(self.nondim_coordinates(mesh, self.bbox[1], "the bounding box maxima"))
         else:
             mins, maxs = self.bounding_box(mesh, dim)
         axes: list[numpy.ndarray] = []
@@ -225,6 +265,11 @@ class TracerSeedElement(TracerSeed):
 
 class TracerSeedCallable(TracerSeed):
     """Positions from a user function ``fn(mesh) -> (N, dim) array``.
+
+    The function is handed the mesh and answers in the mesh's own NONDIMENSIONAL coordinates - unlike
+    the positions of :py:class:`TracerSeedPoints`, which are the user's own input and follow the
+    problem's spatial scale. Use ``problem.get_scaling("spatial")`` inside ``fn`` if it computes from
+    dimensional quantities.
 
     Args:
         global_candidates: whether ``fn`` returns the same points on every process. Leave it True
