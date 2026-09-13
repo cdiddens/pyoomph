@@ -312,23 +312,28 @@ class MeshDataCacheEntry:
         return srt
 
     @overload
-    def get_unit(self,field:str,as_string:Literal[False]=...,with_brackets:bool=...)->ExpressionOrNum: ...
+    def get_unit(self,field:str,as_string:Literal[False]=...,with_brackets:bool=...,separator:str | None=...)->ExpressionOrNum: ...
 
     @overload
-    def get_unit(self,field:list[str],as_string:Literal[False]=...,with_brackets:bool=...)->list[ExpressionOrNum]: ...
+    def get_unit(self,field:list[str],as_string:Literal[False]=...,with_brackets:bool=...,separator:str | None=...)->list[ExpressionOrNum]: ...
 
     @overload
-    def get_unit(self,field:str,as_string:Literal[True],with_brackets:bool=...)->str: ...
+    def get_unit(self,field:str,as_string:Literal[True],with_brackets:bool=...,separator:str | None=...)->str: ...
 
     @overload
-    def get_unit(self,field:list[str],as_string:Literal[True],with_brackets:bool=...)->list[str]: ...
+    def get_unit(self,field:list[str],as_string:Literal[True],with_brackets:bool=...,separator:str | None=...)->list[str]: ...
 
-    def get_unit(self,field:str | list[str],as_string:bool=False,with_brackets:bool=True)->ExpressionOrNum | list[ExpressionOrNum] | str | list[str]:
+    def get_unit(self,field:str | list[str],as_string:bool=False,with_brackets:bool=True,separator:str | None=None)->ExpressionOrNum | list[ExpressionOrNum] | str | list[str]:
+        """The unit of a field, as an expression or as a string.
+
+        ``separator`` is handed to :py:func:`~pyoomph.expressions.units.unit_to_string`: pass
+        :py:data:`~pyoomph.expressions.units.UNIT_SEPARATOR_IN_FILES` when the string goes into a
+        data file header, where a space would read as a column break."""
         if isinstance(field,list):
             if as_string:
-                return [self.get_unit(f,as_string=True,with_brackets=with_brackets) for f in field]
+                return [self.get_unit(f,as_string=True,with_brackets=with_brackets,separator=separator) for f in field]
             else:
-                return [self.get_unit(f,as_string=False,with_brackets=with_brackets) for f in field]
+                return [self.get_unit(f,as_string=False,with_brackets=with_brackets,separator=separator) for f in field]
         if self.nondimensional or (field=="normal_x" or field=="normal_y" or field=="normal_z"):
             return "" if as_string else 1
         s:ExpressionOrNum
@@ -350,7 +355,7 @@ class MeshDataCacheEntry:
             float(unit)
         except:
             if as_string:
-                res = str(unit_to_string(unit, estimate_prefix=False))
+                res = str(unit_to_string(unit, estimate_prefix=False, separator=separator))
             else:
                 res=unit
         if res==1 and as_string:

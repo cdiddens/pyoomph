@@ -135,20 +135,36 @@ class CelsiusClass:
 
 celsius = CelsiusClass()
 
-#: Written between the symbols of a compound unit, e.g. "kg m^2/s^3". Output headers are tab-joined
-#: AND read back tab-separated (LoadedTextDataFile), so a space here cannot break a column - it did
-#: while the reader still split the header on arbitrary whitespace.
+#: Written between the symbols of a compound unit, e.g. "kg m^2/s^3", wherever a unit is meant to be
+#: read by a person - plot labels, printed messages, the bifurcation GUI.
 UNIT_SEPARATOR=" "
+
+#: The same, for units written into a data file's header. pyoomph's own reader splits the header on
+#: tabs and copes with a space (see LoadedTextDataFile), but anything else that reads such a file -
+#: numpy.loadtxt on the header line, awk, a spreadsheet import, a one-line split() - takes a space as
+#: a column break and tears "power[kg m^2/s^3]" into three columns. So the separator in a file is a
+#: character that no reader splits on.
+UNIT_SEPARATOR_IN_FILES="*"
 
 __simplified_units:dict[str,dict[str,tuple[int,int]]] = {}
 
 @overload
-def unit_to_string(inp:ExpressionOrNum,estimate_prefix:Literal[True]=...)->tuple[str,float,float]: ...
+def unit_to_string(inp:ExpressionOrNum,estimate_prefix:Literal[True]=...,separator:str | None=...)->tuple[str,float,float]: ...
 
 @overload
-def unit_to_string(inp:ExpressionOrNum,estimate_prefix:Literal[False])->str: ...
+def unit_to_string(inp:ExpressionOrNum,estimate_prefix:Literal[False],separator:str | None=...)->str: ...
 
-def unit_to_string(inp:ExpressionOrNum,estimate_prefix:bool=True) -> str | tuple[str, float, float]:
+def unit_to_string(inp:ExpressionOrNum,estimate_prefix:bool=True,separator:str | None=None) -> str | tuple[str, float, float]:
+    """Write a unit as a string, e.g. "kg m^2/s^3".
+
+    Args:
+        inp: the quantity whose unit is wanted.
+        estimate_prefix: also choose an SI prefix for the magnitude, and return the factors that go
+            with it - ``(string, value, multiplier)`` instead of just the string.
+        separator: what to write between the symbols of a compound unit. Defaults to
+            :py:data:`UNIT_SEPARATOR`, a space. Pass :py:data:`UNIT_SEPARATOR_IN_FILES` for a unit
+            that goes into a data file, where a space is a column break to most readers.
+    """
     __prefixes:dict[float,str]={1e-18:"a",1e-15:"f",1e-12:"p",1e-9:"n",1e-6:"u",1e-3:"m",1:"",
                                 1e3:"k",1e6:"M",1e9:"G",1e12:"T",1e15:"P",1e18:"E"}
     __shorts = {"meter": "m", "second": "s", "kilogram": "kg", "kelvin": "K", "mol": "mol", "ampere": "A"}
@@ -263,8 +279,9 @@ def unit_to_string(inp:ExpressionOrNum,estimate_prefix:bool=True) -> str | tuple
 
     numer_parts=contrib_part(1)
     denom_parts=contrib_part(-1)
-    numer=UNIT_SEPARATOR.join(numer_parts)
-    denom=UNIT_SEPARATOR.join(denom_parts)
+    sep=UNIT_SEPARATOR if separator is None else separator
+    numer=sep.join(numer_parts)
+    denom=sep.join(denom_parts)
 
     def with_denominator(head:str,den:str)->str:
         """``head/den``, bracketing a denominator of several factors.

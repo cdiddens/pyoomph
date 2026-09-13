@@ -123,11 +123,12 @@ class LoadedTextDataFile:
                 
         self.data: NPFloatArray = numpy.loadtxt(filename, ndmin=2)  # type:ignore
         # Split the header on TABS, which is what pyoomph joins it with, not on arbitrary whitespace.
-        # A column name can contain a space since compound units are written out separated, e.g.
-        # "power[kg m^2/s^3]". Whitespace-splitting tore such a name into several tokens, which put
-        # every following name on the wrong column and offered the surplus tokens up as parameters,
-        # where they raised an IndexError. Files written elsewhere may still be space-separated, so
-        # fall back to that when there is no tab at all.
+        # A column name written today contains no space - units go into a file with
+        # UNIT_SEPARATOR_IN_FILES between their symbols, e.g. "power[kg*m^2/s^3]" - but one written
+        # before that does ("power[kg m^2/s^3]"), and whitespace-splitting tore such a name into
+        # several tokens, which put every following name on the wrong column and offered the surplus
+        # tokens up as parameters, where they raised an IndexError. Files written elsewhere may still
+        # be space-separated, so fall back to that when there is no tab at all.
         header_body=header.strip().strip("#").strip()
         header_names=header_body.split("\t") if "\t" in header_body else header_body.split()
         header_names=[s.strip() for s in header_names if s.strip()]

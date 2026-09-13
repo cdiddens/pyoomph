@@ -36,7 +36,7 @@
 import pytest
 
 from pyoomph.expressions.units import (unit_to_string, meter, second, kilogram, kelvin, newton,
-                                       pascal, watt, volt, farad, milli, kilo)
+                                       pascal, watt, volt, farad, milli, kilo, UNIT_SEPARATOR_IN_FILES)
 
 
 # (input, expected unit string, expected printed number). Each expectation is checkable by hand:
@@ -123,3 +123,41 @@ def test_estimate_prefix_false_is_untouched():
     assert unit_to_string(-0.5/second, estimate_prefix=False) == "1/s"
     assert unit_to_string(1e5*pascal, estimate_prefix=False) == "Pa"
     assert unit_to_string(1.0*watt, estimate_prefix=False) == "W"
+
+
+# ----------------------------------------------------------------------------------------------
+# The separator, and the file headers that must not carry a space
+# ----------------------------------------------------------------------------------------------
+
+SEPARATOR_CASES = [
+    (1.0*kilogram*meter**2/second**4, "kg m^2/s^4", "kg*m^2/s^4"),
+    (1.0*kilogram*meter**2/second**3/kelvin, "kg m^2/(K s^3)", "kg*m^2/(K*s^3)"),
+    (1.0*meter**2/second, "m^2/s", "m^2/s"),                 # nothing to separate
+    (1.0*watt, "W", "W"),                                    # a derived name is one symbol
+]
+
+
+@pytest.mark.parametrize("value,readable,in_file", SEPARATOR_CASES)
+def test_the_separator_is_selectable(value, readable, in_file):
+    """The readable form keeps the space it has always had; a file gets one that nothing splits on."""
+    assert unit_to_string(value, estimate_prefix=False) == readable
+    assert unit_to_string(value, estimate_prefix=False, separator=UNIT_SEPARATOR_IN_FILES) == in_file
+    assert unit_to_string(value, estimate_prefix=False, separator="") == readable.replace(" ", "")
+
+
+def test_the_prefix_estimating_form_takes_the_separator_too():
+    """The GUI path returns a triple rather than a string, and reaches the same join."""
+    unit, factor, mult = unit_to_string(1e-9*kilogram*meter**2/second**3/kelvin,
+                                        separator=UNIT_SEPARATOR_IN_FILES)
+    assert " " not in unit and "*" in unit
+    assert unit == "ug*m^2/(K*s^3)"
+    assert factor*mult == pytest.approx(1.0)   # 1e-9 kg m^2/(K s^3) IS 1 ug m^2/(K s^3)
+
+
+def test_a_unit_written_into_a_file_has_no_space_in_it():
+    """A space in a header is a column break to everything that is not pyoomph's own reader - numpy
+    .loadtxt on the header line, awk, a spreadsheet import - so "power[kg m^2/s^4]" became three
+    columns and every name after it landed against the wrong data."""
+    for value, _readable, _in_file in SEPARATOR_CASES:
+        assert " " not in unit_to_string(value, estimate_prefix=False, separator=UNIT_SEPARATOR_IN_FILES)
+    assert " " not in UNIT_SEPARATOR_IN_FILES

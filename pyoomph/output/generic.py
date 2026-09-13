@@ -30,7 +30,7 @@ import os
 import weakref
 from pathlib import Path
 from ..expressions.generic import Expression,  ExpressionOrNum, GlobalParameter
-from ..expressions.units import unit_to_string
+from ..expressions.units import unit_to_string, UNIT_SEPARATOR_IN_FILES
 
 from ..meshes.mesh import ODEStorageMesh
 
@@ -288,12 +288,12 @@ class _TextOutput(_BaseNumpyOutput):
             d=cache.get_data(f)
             if d is not None:
                 datag.append(d)
-                header.append(f + cache.get_unit(f,as_string=True))
+                header.append(f + cache.get_unit(f,as_string=True,separator=UNIT_SEPARATOR_IN_FILES))
         if self.discontinuous:
             numDL=cache.DL_data.shape[1]
             for k,v in cache.elemental_field_inds.items():
                 if k in self.fields:
-                    header.append(k + cache.get_unit(k,as_string=True))
+                    header.append(k + cache.get_unit(k,as_string=True,separator=UNIT_SEPARATOR_IN_FILES))
                     if v>=numDL:
                         datag.append(cache.D0_data[:,v-numDL])
                     else:
@@ -529,7 +529,7 @@ class _OutputTxtAlongLine(_BaseOutputter):
                     inter = inter[~inter.mask] #type:ignore
                 dataL.append(numpy.array(inter,dtype=numpy.float64)) #type:ignore
             data:NPFloatArray=numpy.array(dataL).transpose() #type:ignore
-            units=meshdata.get_unit(fields,with_brackets=True,as_string=True)
+            units=meshdata.get_unit(fields,with_brackets=True,as_string=True,separator=UNIT_SEPARATOR_IN_FILES)
             descs=[fields[i]+units[i] for i in range(len(fields))]
 
             return cast(NPFloatArray,data),descs #type:ignore
@@ -690,7 +690,7 @@ class _GridFileOutput(_BaseOutputter):
                     inter = inter[~inter.mask] #type:ignore
                 dataL.append(numpy.array(inter,dtype=numpy.float64)) #type:ignore
             data:NPFloatArray=numpy.array(dataL).transpose() #type:ignore
-            units=meshdata.get_unit(fields,with_brackets=True,as_string=True)
+            units=meshdata.get_unit(fields,with_brackets=True,as_string=True,separator=UNIT_SEPARATOR_IN_FILES)
             descs=[fields[i]+units[i] for i in range(len(fields))]
 
             return cast(NPFloatArray,data),descs #type:ignore
@@ -839,7 +839,7 @@ class _ODEFileOutput(_BaseODEOutput):
                 try:
                     float(unit)
                 except:
-                    descs[i]=descs[i]+"["+unit_to_string(unit,estimate_prefix=False)+"]"
+                    descs[i]=descs[i]+"["+unit_to_string(unit,estimate_prefix=False,separator=UNIT_SEPARATOR_IN_FILES)+"]"
         
         for (i, n),v in zip(enumerate(obs.keys(), start=len(values)),obs.values()):
             if n in compiled_ifuncs:
@@ -848,7 +848,7 @@ class _ODEFileOutput(_BaseODEOutput):
                 try:
                     float(unit)
                 except:
-                    descs[i] = descs[i] + "[" + unit_to_string(unit,estimate_prefix=False) + "]"
+                    descs[i] = descs[i] + "[" + unit_to_string(unit,estimate_prefix=False,separator=UNIT_SEPARATOR_IN_FILES) + "]"
                     scales[i]=1/unit
             else:
                 if isinstance(v,_pyoomph.Expression):
@@ -859,7 +859,7 @@ class _ODEFileOutput(_BaseODEOutput):
                     try:
                         float(unit)
                     except:
-                        descs[i] = descs[i] + "[" + unit_to_string(unit,estimate_prefix=False) + "]"
+                        descs[i] = descs[i] + "[" + unit_to_string(unit,estimate_prefix=False,separator=UNIT_SEPARATOR_IN_FILES) + "]"
                 else:
                     scales[i]=1.0
                     
@@ -878,7 +878,7 @@ class _ODEFileOutput(_BaseODEOutput):
                     float(unit)
                     tunit=""
                 except:
-                    tunit= "[" + unit_to_string(unit,estimate_prefix=False) + "]"
+                    tunit= "[" + unit_to_string(unit,estimate_prefix=False,separator=UNIT_SEPARATOR_IN_FILES) + "]"
                 firstcols.append("time"+tunit)
             elif isinstance(fc,GlobalParameter):
                 firstcols.append(fc.get_name())
@@ -1377,7 +1377,7 @@ class _IntegralObservableOutput(_BaseOutputter):
                         float(unit)
                         tunit = ""
                     except:
-                        tunit = "[" + unit_to_string(unit, estimate_prefix=False) + "]"
+                        tunit = "[" + unit_to_string(unit, estimate_prefix=False, separator=UNIT_SEPARATOR_IN_FILES) + "]"
                     firstcols.append("time" + tunit)
                 elif isinstance(fc, _pyoomph.GiNaC_GlobalParam):
                     firstcols.append(fc.get_name())
@@ -1391,7 +1391,7 @@ class _IntegralObservableOutput(_BaseOutputter):
                 if n[0]!="_":
                     entry=n
                     if self._units.get(n,1)!=1:
-                        entry+="["+unit_to_string(self._units.get(n,1),estimate_prefix=False)+"]"
+                        entry+="["+unit_to_string(self._units.get(n,1),estimate_prefix=False,separator=UNIT_SEPARATOR_IN_FILES)+"]"
                     desc.append(entry)
             if self._continue_info is None:
                 for f in self._files.values():

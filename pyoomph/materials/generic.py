@@ -514,7 +514,9 @@ class MaterialProperties:
             _newlines: Add a new line after each set of values in the text files.
         """
         res,unit,inds,consts=self.evaluate_at_multiple_params(expr,_sort=_sort,**kwargs)
-        u2str:Callable[[ExpressionOrNum],str] =lambda u : "["+unit_to_string(u,estimate_prefix=False)+"]" if u!=1 else ""
+        # The file separator, not the readable one: this goes into a tab-separated header that other
+        # tools split on whitespace.
+        u2str:Callable[[ExpressionOrNum],str] =lambda u : "["+unit_to_string(u,estimate_prefix=False,separator=UNIT_SEPARATOR_IN_FILES)+"]" if u!=1 else ""
         #if len(inds)>1:
         #    raise RuntimeError("Cannot sample a property along more than one range to file")
         with open(fname,"wt") as f:
