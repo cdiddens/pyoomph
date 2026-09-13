@@ -1369,3 +1369,44 @@ def test_tracers_keep_advecting_correctly_after_a_remeshing_event():
     assert tr.nlocal() == 3, "particles were lost across the remesh"
     r1 = numpy.hypot(*tr.get_positions().T)
     assert numpy.max(numpy.abs(r1 - r0)) < 1e-8, "the remesh disturbed the trajectory"
+
+
+def test_a_state_file_reloads_into_a_problem_whose_mesh_comes_from_the_template(tmp_path):
+    """Restarting a tracer run from its own dump, which is what a state file is for.
+
+    A state file carries its own mesh template, and when that differs from the one the fresh problem
+    built - which is the case for every generated mesh, and always after a remesh - the load replaces
+    the bulk meshes wholesale. That replacement used not to carry the tracer collections over the way
+    remeshing does, so the replacement mesh arrived with none: the load then found zero collections
+    where the file has one and refused the whole file, a few lines after building the mesh it was
+    about to fill.
+    """
+    a = _remesh_problem("state_templ_save")
+    a.solve(timestep=0.02)
+    a.force_remesh()
+    bulk_a = a.get_mesh("domain").get_tracers("bulk")
+    surf_a = a.get_mesh("domain/interface").get_tracers("surf")
+    ref = {"bulk": (list(bulk_a.get_ids()), bulk_a.get_positions().copy()),
+           "surf": (list(surf_a.get_ids()), surf_a.get_positions().copy())}
+    dump = str(tmp_path / "remeshed_tracers.dump")
+    a.save_state(dump)
+
+    b = _remesh_problem("state_templ_load")
+    b.load_state(dump)
+    for name, mesh in (("bulk", "domain"), ("surf", "domain/interface")):
+        tr = b.get_mesh(mesh).get_tracers(name, error_on_missing=False)
+        assert tr is not None, "the '" + name + "' collection is gone after the load"
+        ids, pos = ref[name]
+        assert list(tr.get_ids()) == ids, "'" + name + "' identities were not restored"
+        assert numpy.max(numpy.abs(tr.get_positions() - pos)) < 1e-13, \
+            "'" + name + "' positions were not restored"
+
+    # and the restored collections are attached to the mesh that is actually there now, not to the
+    # superseded one the load threw away, so they can still be located and advected
+    b.solve(timestep=0.02)
+    imesh = b.get_mesh("domain/interface")
+    surf_b = imesh.get_tracers("surf")
+    assert surf_b.nlocal() == len(_REMESH_SURF)
+    assert b.get_mesh("domain").get_tracers("bulk").nlocal() == len(_REMESH_BULK)
+    located = numpy.array(imesh.locate_points(surf_b.get_positions(), lagrangian=False), dtype=float)
+    assert numpy.all(located[:, 0] > 0.5), "a restored tracer is not in the interface mesh at all"

@@ -10277,9 +10277,18 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                 assert oldmesh._codegen._code is not None
                 oldmesh._codegen._code._exchange_mesh(newmesh) 
 #                print("REPLACING MESH ",name,"from",oldmesh,"to",newmesh)
-                newmesh._construct_after_remesh() 
+                newmesh._construct_after_remesh()
                 for tree_depth in range(3):
-                    newmesh._generate_interface_elements(tree_depth) 
+                    newmesh._generate_interface_elements(tree_depth)
+                # Carry the tracer collections over, exactly as the remeshing path does (see
+                # remesh_handler_during_solve). Without this the replacement mesh arrived with an
+                # empty _tracers, so _define_tracer_state_file - which runs a few lines further down
+                # in this very load - found zero collections where the file has one and refused the
+                # whole state file. An interface mesh gets the same treatment inside its own
+                # constructor; only the bulk meshes are replaced here.
+                newmesh._tracers=oldmesh._tracers
+                for _,tracercoll in newmesh._tracers.items():
+                    tracercoll._set_mesh(newmesh)
             # Rebuild
             if len(new_meshes)>=0:
                 self.rebuild_global_mesh_from_list(rebuild=True)
@@ -10706,6 +10715,14 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                     for tname, (pdata, tdata) in per.items():
                         col = m.get_tracers(tname, error_on_missing=False)
                         if col is not None:
+                            # Point the collection at this mesh first. When the state file brought its
+                            # own mesh template along, m is a freshly built interface mesh that merely
+                            # inherited the collection dict from its predecessor, and the collection
+                            # still refers to that predecessor - which has since been cleared, so
+                            # locating the particles about to be read failed on an empty mesh.
+                            # TracerParticles.after_remeshing() re-points it too, but that only runs at
+                            # the very end of the load, long after these positions have to be resolved.
+                            col._set_mesh(m) #type:ignore
                             col._load_state(pdata, tdata, True) #type:ignore
             finally:
                 self._pending_interface_tracers = None

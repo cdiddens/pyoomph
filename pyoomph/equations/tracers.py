@@ -347,8 +347,17 @@ class TracerParticles(Equations):
         # mesh object for the same domain, carrying the same collections over, and that is exactly
         # the case this guard must not fire on. What it is for is two TracerParticles claiming one
         # name on two genuinely different domains.
-        if (existing is not None and self._mesh is not None
-                and mesh.get_full_name() != self._mesh.get_full_name()):
+        # A mesh that has been superseded - by remeshing, or by a state file bringing its own mesh
+        # template - is torn down, and an interface mesh then has no parent left to name it. Such a
+        # mesh is not a live domain, so it is never the clash this guard looks for, and asking it for
+        # its name raises instead of answering.
+        previous_name = None
+        # A bulk mesh has no _parent at all, hence the sentinel: only an interface mesh that HAS the
+        # attribute and has had it cleared counts as torn down.
+        if self._mesh is not None and getattr(self._mesh, "_parent", "bulk") is not None:
+            previous_name = self._mesh.get_full_name()
+        if (existing is not None and previous_name is not None
+                and mesh.get_full_name() != previous_name):
             raise RuntimeError("Tracers named " + repr(self.tracer_name) +
                                " already exist on domain " + mesh.get_full_name())
         self._mesh = mesh
