@@ -360,6 +360,9 @@ class GmshTemplate(MeshedMeshTemplate):
         self._pointhash:dict[tuple[float,float,float],Point] = {}
         self._point_size_hash:dict[Point,float] = {}
         self._onedims_attached_to_point:dict[Point,set[Line | Spline | BSpline | CircleArc | EllipseArc]]={}
+        #: The corner sizes of the template this one was rebuilt from, when the geometry itself is a
+        #: stored .msh and therefore holds none. See _get_boundary_corner_size_map.
+        self._inherited_corner_size_map:dict[str,dict[tuple[float,...],float]] | None=None
         
 
         self._mesh_size_callback=None
@@ -438,6 +441,11 @@ class GmshTemplate(MeshedMeshTemplate):
         new._reset()
         new._loaded_from_mesh_file = meshfile
         new._meshfile = meshfile
+        # Taken before the geometry containers are gone for good: a stored .msh describes no points,
+        # lines or names, so the replacement cannot work out its own corner sizes and a remesher
+        # pointed at it would size every boundary end as if use_corner_sizes had been off. Read
+        # through the accessor, so that a second restart in the same session inherits them again.
+        new._inherited_corner_size_map = self._get_boundary_corner_size_map()
         return new
 
     def point(self, x:ExpressionOrNum, y:ExpressionOrNum=0.0, z:ExpressionOrNum=0.0, size:ExpressionNumOrNone=None, *,name:str | None=None,consider_spatial_scale:bool | None=None)->Point:
@@ -984,6 +992,9 @@ class GmshTemplate(MeshedMeshTemplate):
                     if attname==name:
                         continue
                     res[name][tuple(p.x)]=self._point_size_hash[p] #type:ignore
+        if not res and self._inherited_corner_size_map is not None:
+            # No geometry of our own: this template is a stored .msh read back from a state file.
+            return self._inherited_corner_size_map
         return res
 
     def sphere(self, origin:Point, radius:ExpressionOrNum=1, surface_name:str | None=None, mesh_size:float | None=None, name:str | None=None, with_curved_entity:bool=True)->Any:

@@ -267,10 +267,11 @@ class Remesher2dBoundaryLineCollection:
 
     def create_entries(self):
         cmapI = self.remesher._corner_size_map #type:ignore
-        if cmapI is not None:
-            cmap=cmapI[self.name]
-        else:
-            cmap=None
+        # .get(): the map only lists boundaries that meet a differently named one, so a boundary that
+        # does not - a closed curve, or one whose geometry the template no longer describes - is
+        # simply absent from it, and sizing that one from its own points is what the None branch does
+        # anyway. Indexing it raised instead.
+        cmap = cmapI.get(self.name) if cmapI is not None else None
         for c in self.curves:
             coords = numpy.array([[c[i].x(0), c[i].x(1), 0.0] for i in range(len(c))]) #type:ignore            
             isline = False

@@ -53,6 +53,7 @@ import pytest
 from pyoomph import *
 from pyoomph.expressions import *
 from pyoomph.equations.ALE import PseudoElasticMesh
+from pyoomph.meshes.gmsh import GmshTemplate
 
 DT = 0.05
 STEPS_BEFORE = 3
@@ -374,3 +375,110 @@ def test_runmode_continue_reproduces_the_uninterrupted_run(tmp_path, variant, ab
     assert deviation <= tol, "%s: u differs by %.3e (tolerance %.0e)" % (tag, deviation, tol)
     if tol == 0.0:
         assert resumed["dts"] == reference["dts"], "%s: dt history %s vs %s" % (tag, resumed["dts"], reference["dts"])
+
+
+# ----------------------------------------------------------------------------------------------
+# Restarting a run that remeshes
+# ----------------------------------------------------------------------------------------------
+#
+# A state file written after a remesh carries its own .msh along, and the load rebuilds the template
+# from that file rather than from the script's define_geometry. The rebuilt template describes no
+# points, lines or names at all - the geometry it stands for is the stored mesh - and the remesher is
+# re-pointed at it, so the next remesh had nothing to take its boundary corner sizes from. It first
+# raised (KeyError on the first boundary name), and with that alone repaired it silently remeshed to
+# a different resolution than the run it was continuing.
+
+class _RemeshedBlob(GmshTemplate):
+    """Quarter disc whose curved boundary is rebuilt as a spline through the previous nodes."""
+
+    def define_geometry(self):
+        self.default_resolution = 0.12
+        # A corner with a resolution of its own, which is precisely what the corner size map carries:
+        # without it the whole boundary is meshed at default_resolution and the mesh comes out coarser.
+        p00 = self.point(0, 0, size=0.02)
+        if not self.is_remeshing():
+            p10, p01 = self.point(1, 0), self.point(0, 1)
+            self.circle_arc(p10, p01, center=p00, name="interface")
+        else:
+            coords = self.get_boundary_coordinates("domain/interface", sort_along_axis="x+")
+            pts = [self.point(x, y) for x, y in coords[0]]
+            self.spline(pts, name="interface")
+            p10, p01 = pts[-1], pts[0]
+        self.create_lines(p10, "substrate", p00, "axis", p01)
+        self.plane_surface("substrate", "axis", "interface", name="domain")
+
+
+class _RemeshRestartProblem(Problem):
+    def define_problem(self):
+        from pyoomph.meshes.remesher import Remesher2d
+        from pyoomph.equations.poisson import PoissonEquation
+        m = _RemeshedBlob()
+        m.remesher = Remesher2d(m)
+        self.add_mesh(m)
+        self += (PoissonEquation(source=1) + DirichletBC(u=0) @ "interface") @ "domain"
+
+
+def _blob_problem(tmp_path, tag):
+    p = _RemeshRestartProblem()
+    p.set_output_directory(str(tmp_path / tag))
+    p.quiet()
+    p.initialise()
+    return p
+
+
+def _node_coordinates(problem):
+    mesh = problem.get_mesh("domain")
+    return numpy.array(sorted((n.x(0), n.x(1)) for n in mesh.nodes()))
+
+
+def test_a_restarted_run_remeshes_the_way_the_uninterrupted_one_does(tmp_path):
+    dump = str(tmp_path / "remeshed.dump")
+
+    reference = _blob_problem(tmp_path, "remesh_ref")
+    reference.solve(timestep=0.02)
+    reference.force_remesh()
+    reference.save_state(dump)
+    reference.solve(timestep=0.02)
+    reference.force_remesh()
+    expected = _node_coordinates(reference)
+
+    resumed = _blob_problem(tmp_path, "remesh_resumed")
+    resumed.load_state(dump)
+    resumed.solve(timestep=0.02)
+    resumed.force_remesh()   # used to raise KeyError before it got this far
+    got = _node_coordinates(resumed)
+
+    assert got.shape == expected.shape, \
+        "the resumed run remeshed to %d nodes, the uninterrupted one to %d" % (len(got), len(expected))
+    assert numpy.max(numpy.abs(got - expected)) == 0.0, "the two meshes are not the same mesh"
+
+
+def test_a_template_read_straight_from_a_mesh_file_can_be_remeshed(tmp_path):
+    """The same gap without a state file: a GmshTemplate built on a .msh describes no geometry either.
+
+    Its corner size map is empty rather than missing, so nothing falls back - the remesher indexed it
+    by boundary name and raised. There is nothing to inherit here, so this one just has to size the
+    boundaries from their own points, which is what the map being absent has always meant.
+    """
+    import glob
+    from pyoomph.meshes.remesher import Remesher2d
+    from pyoomph.equations.poisson import PoissonEquation
+
+    source = _blob_problem(tmp_path, "msh_source")
+    written = glob.glob(str(tmp_path / "msh_source" / "_gmsh" / "*.msh"))
+    assert written, "the template wrote no .msh to read back"
+
+    class _FromFile(Problem):
+        def define_problem(self):
+            m = GmshTemplate(written[0])
+            m.remesher = Remesher2d(m)
+            self.add_mesh(m)
+            self += (PoissonEquation(source=1) + DirichletBC(u=0) @ "interface") @ "domain"
+
+    p = _FromFile()
+    p.set_output_directory(str(tmp_path / "msh_remesh"))
+    p.quiet()
+    p.initialise()
+    p.solve(timestep=0.02)
+    p.force_remesh()   # used to raise KeyError on the first boundary name
+    assert p.get_mesh("domain").nnode() > 0
