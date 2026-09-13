@@ -490,6 +490,25 @@ namespace pyoomph
 		return GiNaCFromExArray(vex);
 	}
 
+	// is_zero() generalized to vector- and matrix-valued expressions: a matrix counts as zero when
+	// every entry is zero. GiNaC::ex::is_zero() is false for any matrix, even the zero matrix, since
+	// a matrix node is never the zero expression. Entries may themselves be matrix-valued, hence the
+	// recursion.
+	static bool is_zero_incl_matrices(const GiNaC::ex &e)
+	{
+		if (e.is_zero())
+			return true;
+		GiNaC::ex evm = e.evalm();
+		if (!GiNaC::is_a<GiNaC::matrix>(evm))
+			return evm.is_zero();
+		const GiNaC::matrix &m = GiNaC::ex_to<GiNaC::matrix>(evm);
+		for (unsigned int i = 0; i < m.rows(); i++)
+			for (unsigned int j = 0; j < m.cols(); j++)
+				if (!is_zero_incl_matrices(m(i, j)))
+					return false;
+		return true;
+	}
+
 	// Wrap a global parameter as a plain GiNaC expression.
 	static GiNaC::ex GiNaCFromGlobalParam(GiNaC::GiNaCGlobalParameterWrapper w)
 	{
@@ -748,7 +767,11 @@ void PyReg_Expressions(nb::module_ &m)
 			 {
 			   return 0+pyoomph::expressions::replace_global_params_by_current_values(self);
 			 }, nb::rv_policy::reference, "Return a copy of this expression with every GiNaC_GlobalParam symbol replaced by its current numerical value.")
-		.def("is_zero", &GiNaC::ex::is_zero, "Whether this expression is symbolically (structurally) zero.")
+		.def("is_zero", [](const GiNaC::ex &self, bool tensors)
+			 { return tensors ? pyoomph::is_zero_incl_matrices(self) : self.is_zero(); }, nb::arg("tensors") = false,
+			 "Whether this expression is symbolically (structurally) zero. A vector- or matrix-valued expression is "
+			 "never zero in this sense, not even the zero vector, since a matrix node is not the zero expression. Pass "
+			 "``tensors=True`` to generalize the test to such expressions, where it holds whenever every entry is zero.")
 		.def("is_equal", &GiNaC::ex::is_equal, nb::arg("other"),
 			 "Whether this expression and ``other`` are structurally identical. Since ``==`` is deliberately not overloaded "
 			 "on an Expression (it must keep returning a bool, so that expressions can be used in dicts, sets and ``in`` "

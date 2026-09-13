@@ -47,7 +47,7 @@ from conftest import has_complex_target_eigensolver
 from pyoomph import Problem, Equations, DirichletBC, InitialCondition
 from pyoomph.expressions import (var, var_and_test, weak, matrix, vector, grad, div, dyadic, dot, trace,
                                  identity_matrix, partial_t, testfunction,
-                                 contract, double_dot, matproduct, transpose, directional_derivative,
+                                 contract, double_dot, is_zero, matproduct, transpose, directional_derivative,
                                  Expression)
 from pyoomph.expressions.coordsys import AxisymmetricCoordinateSystem
 from pyoomph.equations.ALE import PrescribedMovingMesh, BaseMovingMeshEquations
@@ -68,7 +68,8 @@ def _components(expression, n=3):
     Not (a-b).is_zero(): is_zero() asks whether the *expression* is the zero expression, not whether it
     is a zero matrix, so it answers False for a difference that evalm() prints as [[0],[0],[0]] as soon
     as either side is an unevaluated product such as 2*[[1],[2],[3]]. (double_dot_eval in the core uses
-    is_zero_matrix() for exactly this reason.)
+    is_zero_matrix() for exactly this reason, and is_zero(..., tensors=True) is the Python spelling of
+    it.) Comparing the components keeps the failure message informative, which a bool would not.
     """
     resolved = expression.evalm()
     return [float(resolved[i]) for i in range(n)]
@@ -115,6 +116,38 @@ def test_vector_and_matrix_contractions_are_unchanged():
     assert float(contract(ROWCOL, ROWCOL)) == pytest.approx(1695.0)
     # scaling by a scalar
     assert _components(contract(Expression(2), vector(1, 2, 3))) == pytest.approx([2.0, 4.0, 6.0])
+
+
+def test_is_zero_needs_tensors_for_vectors_and_matrices():
+    """
+    is_zero() is False for every matrix, even the zero one; tensors=True tests the entries instead.
+
+    A matrix node is not the zero expression, so the plain test cannot answer the question that is
+    actually meant for a vector- or matrix-valued expression. With tensors=True the expression is
+    evalm()'ed first, so an unevaluated product such as 0*[[1],[2],[3]] is recognised as well.
+    """
+    zero_vector, zero_matrix = vector(0, 0, 0), matrix([[0, 0], [0, 0]])
+
+    assert not zero_vector.is_zero()
+    assert not is_zero(zero_vector)
+    assert zero_vector.is_zero(tensors=True)
+    assert is_zero(zero_vector, tensors=True)
+    assert is_zero(zero_matrix, tensors=True)
+
+    # a single nonzero entry is enough, in either shape
+    assert not is_zero(vector(0, var("x"), 0), tensors=True)
+    assert not is_zero(matrix([[0, var("x")], [0, 0]]), tensors=True)
+    assert not is_zero(identity_matrix(), tensors=True)
+
+    # the difference of two spellings of the same tensor, which is what this is for
+    assert is_zero(ROWCOL - transpose(transpose(ROWCOL)), tensors=True)
+    assert is_zero(identity_matrix() - identity_matrix(), tensors=True)
+    assert is_zero(Expression(0) * vector(1, 2, 3), tensors=True)
+
+    # scalars are untouched by the flag
+    assert is_zero(var("x") - var("x"), tensors=True)
+    assert not is_zero(var("x"), tensors=True)
+    assert is_zero(0, tensors=True)
 
 
 def test_dot_between_two_matrices_is_rejected():

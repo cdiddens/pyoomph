@@ -403,13 +403,14 @@ def test_scale_factor(arg:str | NameStrSequence,tag:list[str]=[],domain:"str | F
 test_scale_factor.__test__=False #type:ignore
 
 
-def is_zero(arg:ExpressionOrNum,parameters_to_float:bool=False)->bool:
+def is_zero(arg:ExpressionOrNum,parameters_to_float:bool=False,tensors:bool=False)->bool:
 	"""
 	Check if the given argument (Expression or numerical value) is zero.
 
 	Parameters:
 	arg (ExpressionOrNum): The argument to be checked.
  	parameters_to_float: Flag indicating whether to convert a global parameter to its float values. Defaults to False, i.e. always False applied on a global parameter.
+ 	tensors: Flag indicating whether vector- and matrix-valued expressions should be considered as well. By default, these are never zero, not even the zero vector, since a matrix is not the zero expression. With tensors=True, such an expression is zero whenever all of its entries are zero.
 
 	Returns:
 	bool: True if the argument is zero, False otherwise.
@@ -421,7 +422,7 @@ def is_zero(arg:ExpressionOrNum,parameters_to_float:bool=False)->bool:
 	if isinstance(arg,(float,int,bool)):
 		return arg==0
 	elif isinstance(arg,Expression): # type: ignore
-		return arg.is_zero()
+		return arg.is_zero(tensors=tensors)
 	elif isinstance(arg,_pyoomph.GiNaC_GlobalParam):
 		if parameters_to_float:
 			return arg.value==0
