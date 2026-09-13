@@ -215,6 +215,68 @@ class GmshSizeCallback:
 
 
 
+#: Gmsh errors that do not mean the mesh is unusable. These are what the high-order optimizer reports
+#: when it gives up on reaching Mesh.HighOrderThresholdMin - once per pass, then once as a summary. It
+#: then leaves the mesh as it found it, which is the very mesh Mesh.HighOrderOptimize=0 would have
+#: produced, so refusing to go on would reject a mesh gmsh is perfectly willing to hand over. Matched
+#: as substrings, since some of them are prefixed by the patch they are about.
+_GMSH_NONFATAL_ERRORS=("Failed to reach critical value in pass",
+                       "Failed to reach target in pass",
+                       "Optimization failed (some measures below critical value)",
+                       "Optimization partially failed (all measures above critical value",
+                       "partially failed (measure above critical value but below target)")
+
+
+def _generate_without_aborting(dim:int,mesher:"GmshTemplate | None"):
+    """``gmsh.model.mesh.generate(dim)``, with gmsh's errors turned back into Python exceptions.
+
+    Gmsh's ``General.AbortOnError`` defaults to 2, "throw an exception unless in interactive mode",
+    and its C API turns such an exception into the error that the Python binding raises. That works
+    only where the throw can unwind. The high-order optimizer raises its error from inside an OpenMP
+    region, where it cannot: the process dies of ``std::terminate`` - SIGABRT, no traceback, nothing
+    to catch - and the script is simply gone. An anisotropic order-2 mesh reaches it easily, e.g. a
+    torus of minor radius 0.03 meshed at order 2, where the optimizer ends on
+    "Failed to reach critical value in pass 0 for measure(s): ScaledJac".
+
+    So gmsh is told to report rather than throw (mode 1), and the messages it reported are turned
+    into an exception here, outside of any OpenMP region. Errors that only say the mesh is of poor
+    quality are passed on as a warning instead, since gmsh does return a mesh for those.
+    """
+    old_abort=gmsh.option.getNumber("General.AbortOnError") #type:ignore
+    gmsh.option.setNumber("General.AbortOnError",1) #type:ignore
+    gmsh.logger.start() #type:ignore
+    try:
+        gmsh.model.mesh.generate(dim) #type:ignore
+        messages:list[str]=list(gmsh.logger.get()) #type:ignore
+    finally:
+        gmsh.logger.stop() #type:ignore
+        gmsh.option.setNumber("General.AbortOnError",old_abort) #type:ignore
+
+    _report_gmsh_errors(messages,mesher)
+
+
+def _report_gmsh_errors(messages:"list[str]",mesher:"GmshTemplate | None"):
+    """Raise on the errors gmsh logged, or warn about the ones it can live with.
+
+    Split out of :py:func:`_generate_without_aborting` so that the classification can be tested
+    without meshing anything: what must not happen is an unknown error being waved through, since
+    with AbortOnError=1 nothing else reports it any more.
+    """
+    errors=[m.split(":",1)[1].strip() if ":" in m else m for m in messages if m.startswith("Error")]
+    if not errors:
+        return
+    fatal=[e for e in errors if not any(frag in e for frag in _GMSH_NONFATAL_ERRORS)]
+    if fatal:
+        raise RuntimeError("Gmsh could not mesh the geometry:\n  "+"\n  ".join(sorted(set(fatal))))
+    hint=""
+    if mesher is None or (mesher.order==2 and mesher.high_order_optimize):
+        hint=("\nThe mesh is used as it is, i.e. as if the optimization had not been asked for. Set "
+              "high_order_optimize=0 on the mesh template to skip it, or make the elements less "
+              "anisotropic where it fails.")
+    print("Warning: the Gmsh high-order optimizer gave up on this mesh:\n  "
+          +"\n  ".join(sorted(set(errors)))+hint)
+
+
 def generate_mesh_to_file(geom:pygmsh.geo.Geometry | pygmsh.occ.Geometry, outdir:str, trunk:str, mesher:"GmshTemplate | None"=None,dim:int=2, order:int | None=None, algorithm:"int | float | None"=None, verbose:bool=False, recombine_algo:"int | float | None"=None,
                           postgen_cb:Callable[[], None] | None=None, only_geo:bool=False,mesh_mode:str | None=None,mesh_size_callback:GmshSizeCallback | Callable[[int, int, float, float, float], float] | None=None,quiet:bool=False):
     if quiet:
@@ -278,7 +340,9 @@ def generate_mesh_to_file(geom:pygmsh.geo.Geometry | pygmsh.occ.Geometry, outdir
     if order and order == 2:
         gmsh.option.setNumber("Mesh.ElementOrder", 2) #type:ignore
         gmsh.option.setNumber("Mesh.SecondOrderLinear", 0) #type:ignore
-        gmsh.option.setNumber("Mesh.HighOrderOptimize", 1) #type:ignore
+        # See GmshTemplate.high_order_optimize for what this costs on a mesh it cannot curve.
+        ho_opt=1 if mesher is None else int(mesher.high_order_optimize)
+        gmsh.option.setNumber("Mesh.HighOrderOptimize", ho_opt) #type:ignore
         gmsh.option.setNumber("Mesh.SecondOrderIncomplete", 0) # This is important to not generate serendipity elements, e.g. Wedge15 instead of Wedge18 #type:ignore
 
 
@@ -315,7 +379,7 @@ def generate_mesh_to_file(geom:pygmsh.geo.Geometry | pygmsh.occ.Geometry, outdir
         gmsh.model.mesh.setSizeCallback(mesh_size_callback) #type:ignore
     if quiet:
             gmsh.option.setNumber("General.Terminal",0)
-    gmsh.model.mesh.generate(dim)
+    _generate_without_aborting(dim,mesher)
     if postgen_cb is not None:
         postgen_cb()
 
@@ -381,6 +445,14 @@ class GmshTemplate(MeshedMeshTemplate):
         
         #: Selects the default element type of the mesh. Can be ``"quads"`` (try to create quads if possible), ``"tris"`` (only triangles), ``"SV"`` (Scott-Vogelius elements) or ``"only_quads"`` (only quadrilateral elements by splitting triangles)
         self.mesh_mode:Literal["quads","tris","SV","only_quads"]="quads"
+        #: What Gmsh's high-order optimizer is asked to do on an ``order=2`` mesh (its
+        #: ``Mesh.HighOrderOptimize``): 0 not to run at all, 1 (the default) to optimize, 2 elastic
+        #: analogy plus optimization, 3 elastic analogy, 4 fast curving. It improves the curving of
+        #: elements next to a curved boundary, and on strongly anisotropic elements it can fail to
+        #: reach its quality target - which used to end the process with an uncatchable SIGABRT and is
+        #: now a warning (see :py:func:`_generate_without_aborting`). Set it to 0 if the warning shows
+        #: up and the curving is of no concern.
+        self.high_order_optimize:int=1
         #: The default order of the elements. Can be 1 or 2. Note that if only first order (``"C1"``) elements are created, the mesh will be reduced to first order, even if the mesh is set to second order. Likewise, a first order mesh will be split to second order if second order elements (``"C2"``) are created on it.
         self.order = 2
         #: If True (default), planar 2d elements that come out of Gmsh clockwise are relabelled during construction so that every element has a positive ``det(dx/ds)``. Gmsh orients the elements after the surface normal, i.e. after the winding of the curve loop, which for a loop assembled programmatically (e.g. by a :py:class:`~pyoomph.meshes.remesher.Remesher2d`) can come out either way. pyoomph integrates with ``sqrt(det(g_ab))``, which is non-negative, so an inside-out mesh used to be harmless - but it makes ``set_detect_inverted_elements(True)`` flag the entire mesh. Also fixes the mirrored half of a :py:attr:`mirror_mesh`.
