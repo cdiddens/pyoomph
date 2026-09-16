@@ -27,6 +27,7 @@ from __future__ import annotations
 # ========================================================================
  
 from abc import abstractmethod
+import weakref
 
 from ..typings import *
 from ..expressions.cb import CustomMultiReturnExpression
@@ -426,7 +427,17 @@ class UNIFACMultiReturnExpression(CustomMultiReturnExpression):
         super().__init__()
         
         from .generic import PureLiquidProperties
-        self.mix=mix
+        # Weak on purpose, and read back through the "mix" property below: the mixture owns this
+        # object (MixtureLiquidProperties._unifac_multi_return, see materials/generic.py), and the
+        # activity coefficients it builds from it are GiNaC expressions that pin THIS object from
+        # the C++ side via a reference-counted leaf (CustomMultiReturnExpressionWrapper, see
+        # src/expressions.hpp). A strong attribute here closed the cycle
+        #   mixture -> activity_coefficients -> Expression -(leaf reference)-> self -> mixture
+        # whose leaf edge is invisible to Python's cyclic collector, so the whole mixture - and
+        # every expression hanging off it - survived to interpreter shutdown and was reported as
+        # "nanobind: leaked N instances". Only __init__ needs the mixture, so nothing has to keep
+        # it alive on this side. Same reasoning as RemesherBase.problem (meshes/remesher.py).
+        self._mix_ref=weakref.ref(mix)
         self.FD_epsilon=FD_epsilon
         self.constant_temperature=constant_temperature
         self._constant_temperature_in_K=float(self.constant_temperature/kelvin) if self.constant_temperature is not None else None
@@ -493,6 +504,23 @@ class UNIFACMultiReturnExpression(CustomMultiReturnExpression):
         #: and a longer compile. Set it to False to get the finite-differenced Jacobian back.
         self.analytic_c_jacobian:bool=True
     
+    @property
+    def mix(self) -> "MixtureLiquidProperties":
+        """The mixture this activity model was built for.
+
+        Held weakly (see __init__), so it is only available while the mixture itself is alive.
+        That is always the case where it is read - during __init__, from the mixture's own
+        set_activity_coefficients() - and nothing keeps a UNIFACMultiReturnExpression reachable
+        except that mixture and the expressions it owns.
+        """
+        mix = self._mix_ref()
+        if mix is None:
+            raise RuntimeError(
+                "The MixtureLiquidProperties this " + type(self).__name__ + " was built for has "
+                "already been destroyed. It is referenced weakly on purpose, to keep the mixture "
+                "collectible; hold on to the mixture itself if you need it here.")
+        return mix
+
     def get_num_returned_scalars(self, nargs: int) -> int:
         if nargs!=len(self.argument_order)+(1 if self._constant_temperature_in_K is None else 0):
             raise RuntimeError("Must be called with "+str(len(self.argument_order))+" arguments, namely the molar fractions in the order "+str(self.argument_order)+" and the temperature at the end if no constant temperature is specified. Got "+str(nargs)+" arguments instead")
