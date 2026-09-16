@@ -1552,11 +1552,19 @@ void PyReg_Expressions(nb::module_ &m)
 		"GiNaC_delayed_expansion", [](std::function<GiNaC::ex()> func)
 		{
 	  pyoomph::DelayedPythonCallbackExpansion * cbexpr=new pyoomph::DelayedPythonCallbackExpansion(func);
-	  // The GiNaC leaf stores a COPY of the wrapper (PYGINACSTRUCT), so the wrapper itself does not
-	  // have to outlive this call - it used to be heap-allocated and then leaked. Only cbexpr, which
-	  // the copy points at, is deliberately kept alive for as long as the expression can be expanded.
+	  // The GiNaC leaf stores a COPY of the wrapper (PYGINACSTRUCT), and every copy holds a counted
+	  // reference on cbexpr, so cbexpr - together with the Python callable that nanobind's
+	  // std::function caster keeps inside it - lives for exactly as long as some leaf can still be
+	  // expanded, and is freed with the last one.
+	  //
+	  // No keep_alive here. This used to carry a mutual nb::keep_alive<0,1>()+keep_alive<1,0>(): the
+	  // returned Expression pinned "func" and "func" pinned the returned Expression, so neither could
+	  // ever be collected and every call leaked both - reported at shutdown as "nanobind: leaked N
+	  // instances" plus one leaked keep_alive record per call. It was the last surviving instance of
+	  // the hack that 80112bba removed from GiNaC_wrap_coordinate_system() and GiNaC_python_cb_function()
+	  // in favour of the reference-counted leaves used here.
 	  return 0+GiNaC::GiNaCDelayedPythonCallbackExpansion(pyoomph::DelayedPythonCallbackExpansionWrapper(cbexpr)); },
-		nb::keep_alive<0, 1>(), nb::keep_alive<1, 0>(), nb::arg("func"),
+		nb::arg("func"),
 		"Wrap the Python callable ``func`` (taking no arguments, returning an Expression) as a symbolic placeholder that is only evaluated once actually expanded/needed.");
 
 	m.def("GiNaC_UnitVect", [](const unsigned &dir, const int &ndim, const int &flags, const GiNaC::ex &coordsys)

@@ -213,22 +213,48 @@ namespace pyoomph
   protected:
     static unsigned next_creation_index;
     unsigned creation_index;
+    // How many DelayedPythonCallbackExpansionWrapper copies - i.e. GiNaC leaves - still point here.
+    unsigned leaf_references;
   public:
     std::function<GiNaC::ex()> f;
-    DelayedPythonCallbackExpansion(std::function<GiNaC::ex()> func) : creation_index(next_creation_index++), f(func) {}
+    DelayedPythonCallbackExpansion(std::function<GiNaC::ex()> func) : creation_index(next_creation_index++), leaf_references(0), f(func) {}
     // Monotonically increasing, construction-order-assigned id - see FiniteElementField::get_creation_index()
     // for why DelayedPythonCallbackExpansionWrapper's operator< uses this instead of the raw pointer.
     unsigned get_creation_index() const { return creation_index; }
+
+    // Owned by the leaves that embed it, exactly as CustomMathExpressionBase's Python wrapper is (see
+    // acquire_leaf_reference() there). "f" holds the Python callable through nanobind's std::function
+    // caster, so this count is what gives that callable a finite lifetime: GiNaC_delayed_expansion()
+    // used to pin it - and the Expression it returned - forever with a mutual nb::keep_alive instead.
+    void acquire_leaf_reference() { leaf_references++; }
+    void release_leaf_reference()
+    {
+      if (leaf_references && --leaf_references == 0)
+        delete this;
+    }
   };
 
-  // Thin pointer wrapper so a DelayedPythonCallbackExpansion* can be embedded as a GiNaC leaf
+  // Thin pointer wrapper so a DelayedPythonCallbackExpansion* can be embedded as a GiNaC leaf. Each copy
+  // owns a counted reference, so the expansion - and the Python callable inside it - dies with the last
+  // leaf that could still expand it, rather than outliving the interpreter.
   class DelayedPythonCallbackExpansionWrapper
   {
   public:
     DelayedPythonCallbackExpansion *cme;
-    DelayedPythonCallbackExpansionWrapper(DelayedPythonCallbackExpansion *c) : cme(c) {}
-    DelayedPythonCallbackExpansionWrapper(const DelayedPythonCallbackExpansionWrapper &c) : cme(c.cme) {}
-    virtual ~DelayedPythonCallbackExpansionWrapper() {}
+    DelayedPythonCallbackExpansionWrapper(DelayedPythonCallbackExpansion *c) : cme(c) { if (cme) cme->acquire_leaf_reference(); }
+    DelayedPythonCallbackExpansionWrapper(const DelayedPythonCallbackExpansionWrapper &c) : cme(c.cme) { if (cme) cme->acquire_leaf_reference(); }
+    DelayedPythonCallbackExpansionWrapper &operator=(const DelayedPythonCallbackExpansionWrapper &c)
+    {
+      if (this != &c)
+      {
+        // Acquire before releasing, so self-referential assignment cannot free the target first.
+        if (c.cme) c.cme->acquire_leaf_reference();
+        if (cme) cme->release_leaf_reference();
+        cme = c.cme;
+      }
+      return *this;
+    }
+    virtual ~DelayedPythonCallbackExpansionWrapper() { if (cme) cme->release_leaf_reference(); }
   };
 
   bool operator==(const DelayedPythonCallbackExpansionWrapper &lhs, const DelayedPythonCallbackExpansionWrapper &rhs);
