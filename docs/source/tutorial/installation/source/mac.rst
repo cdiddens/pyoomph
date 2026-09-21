@@ -6,7 +6,13 @@ On Mac
 .. warning::
 
    If you are using a recent Mac with an Apple silicon (arm64 architecture) processor, you might encounter some problems, since not all required python packages are present in the pip repository yet. Therefore, in order to use the fast MKL Pardiso solver, you can use Rosetta 2 to emulate the x86_64 architecture. You must execute the following commands in a Rosetta terminal. At https://www.courier.com/blog/tips-and-tricks-to-setup-your-apple-m1-for-development/ you can find instructions on how to create such a Rosetta terminal. On more recent systems, please refer to https://developer.apple.com/forums/thread/718666 to setup a corresponding terminal.
-   
+
+   Apple has deprecated x86_64 support in its newer Command Line Tools (version 27 and later), which are installed by ``xcode-select --install``. Since these cannot compile x86_64 code any more, using the fast MKL Pardiso solver via a Rosetta terminal requires **Command Line Tools 26.6**:
+
+   1. Download "Command Line Tools 26.6" (the universal ``.dmg``) from https://developer.apple.com/download/all/.
+   2. If a newer version is already installed, remove it by ``sudo rm -rf /Library/Developer/CommandLineTools``.
+   3. Select the installed tools by ``sudo xcode-select -s /Library/Developer/CommandLineTools``.
+
    Alternatively, you should install PETSc with MUMPS, as described in :numref:`petscslepc`.
       
 
