@@ -429,12 +429,21 @@ def test_axially_short_neck_is_reported_not_silently_missed():
         detect_and_plan([ch], 0.08, None)
 
 
-def test_pinch_gap_shorter_than_distmin_raises():
-    # the opening carves a ~0.08-long gap at each waist; asking to bridge anything below
-    # 0.5 would immediately undo the pinch, which is a contradictory parameter choice
+def test_pinch_survives_a_distmin_wider_than_its_own_gap():
+    # The opening carves a ~0.08-long gap at the waist, and a distmin far wider than that used
+    # to re-bridge it and abort the plan -- although the two fragments being bridged are the
+    # two halves this very call has just cut apart.  Siblings are exempt from the closing step,
+    # so the pinch goes through, and the parent volume is still split exactly at the waist.
     pts = _cosine_jet(0.5, 0.44, 2.0, 1, 801)
-    with pytest.raises(RuntimeError, match="re-bridges"):
-        detect_and_plan([_chain(pts, ends=("fixed", "fixed"))], 0.08, 0.5)
+    plan = detect_and_plan([_chain(pts, ends=("fixed", "fixed"))], 0.08, 0.5,
+                           volume_tolerance=1e-9)
+    assert [e.kind for e in plan.events] == ["pinch"]
+    assert abs(plan.events[0].z_center - 1.0) < 0.05
+    assert len(plan.new_chains) == 2
+    tot = plan.fragment_volumes_before[0]
+    assert abs(sum(plan.fragment_volumes_after) - tot) <= 1e-9 * tot
+    for V in plan.fragment_volumes_after:
+        assert abs(V - _band_volume(pts, 0.0, plan.events[0].z_center)) <= 1e-9 * tot
 
 
 def test_missing_shapely_message(monkeypatch):
@@ -450,3 +459,32 @@ def test_missing_shapely_message(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", fake)
     with pytest.raises(RuntimeError, match="pip install shapely"):
         axt._require_shapely()
+
+
+# --------------------------------------------------------------------------------------
+# Axis spans of a remesh without a plan (pyoomph.equations.topological_changes)
+# --------------------------------------------------------------------------------------
+
+def test_merge_spans_fuses_the_pieces_of_one_fragment():
+    from pyoomph.equations.topological_changes import _merge_spans
+    # one fragment on z = 0..2, handed over in three pieces (mesh partitioning), and a second
+    # one well clear of it: the pieces fuse, the two fragments stay apart
+    spans = [(0.0, 0.7), (0.7, 1.4), (1.4, 2.0), (3.0, 5.0)]
+    assert _merge_spans(spans, [0.0, 2.0, 3.0, 5.0], 1e-9) == [(0.0, 2.0), (3.0, 5.0)]
+
+
+def test_merge_spans_keeps_two_crossed_fragments_apart():
+    from pyoomph.equations.topological_changes import _merge_spans
+    # the state an inversion remesh is asked to rebuild: the rear tip of the upper fragment has
+    # crossed the tip of the lower one, so their axis spans overlap. Fusing them would leave two
+    # interface loops with a single axis line, which cannot be closed.
+    spans = [(0.0, 2.0), (1.98, 5.0)]
+    out = _merge_spans(spans, [0.0, 2.0, 1.98, 5.0], 1e-9)
+    assert len(out) == 2
+    assert out[0][0] == 0.0 and out[-1][1] == 5.0
+    assert out[0][1] == out[1][0] == pytest.approx(1.99)   # the overlap halved, no gap, no overlap
+
+
+def test_merge_spans_without_separators_is_the_plain_union():
+    from pyoomph.equations.topological_changes import _merge_spans
+    assert _merge_spans([(0.0, 2.0), (1.98, 5.0)]) == [(0.0, 5.0)]

@@ -329,7 +329,15 @@ class _TopologicalChangesMixin(_TopoMixinBase):
                     end_types=_end_types_of(pts, _interface_extent(old_interface), _AXIS_TOL_FALLBACK),
                     nondimensional=nondimensional))
             # The axis segments are straight, so their two extreme points carry all the information.
-            inside = _merge_spans([(float(seg[0][1]), float(seg[-1][1])) for seg in old_axis])
+            # The axis tips of the interface chains separate one fragment's axis span from the
+            # next, so a fold that makes two fragments overlap on the axis cannot silently fuse
+            # them into a single axis line.
+            extent = _interface_extent(old_interface)
+            axis_tol = max(_AXIS_TOL_FALLBACK * extent, 1e-300)
+            tips = [float(p[1]) for seg in old_interface for p in (seg[0], seg[-1])
+                    if abs(float(p[0])) < axis_tol]
+            inside = _merge_spans([(float(seg[0][1]), float(seg[-1][1])) for seg in old_axis],
+                                  tips, axis_tol)
             res.fragment_volumes = [float(revolved_volume(_closed_half_section(
                 numpy.array([[float(x), float(y)] for x, y in seg], dtype=float)))) * SS ** 3
                 for seg in old_interface]
@@ -1408,11 +1416,34 @@ def _closed_half_section(pts: NPFloatArray) -> NPFloatArray:
     return numpy.vstack([pts, numpy.array(extra, dtype=float)])
 
 
-def _merge_spans(spans: Sequence[tuple[float, float]]) -> list[tuple[float, float]]:
+def _merge_spans(spans: Sequence[tuple[float, float]],
+                 separators: Sequence[float] = (), tol: float = 0.0) -> list[tuple[float, float]]:
+    """Merge overlapping or touching axial spans, but never across a separator.
+
+    Without separators this is the plain union, which is what the axis coverage of a phase is:
+    the same fragment's span is routinely handed over in several pieces (mesh partitioning cuts
+    it), and those must fuse.  Two *different* fragments must not, and physically they never
+    overlap -- but the state that a remesh after an inverted element is asked to rebuild is
+    exactly the one where nodes have crossed, and there the rear tip of a drop can reach past the
+    tip of the ligament behind it.  Fusing those two spans gives a geometry with two interface
+    loops and a single axis line, which cannot be closed ("Cannot close line loop for surface
+    liquid"), so a merge whose interior contains an interface chain's axial tip is refused.
+    """
     out: list[tuple[float, float]] = []
+    seps = [float(z) for z in separators]
     for a, b in sorted((min(a, b), max(a, b)) for a, b in spans):
         if out and a <= out[-1][1]:
-            out[-1] = (out[-1][0], max(out[-1][1], b))
+            lo, hi = out[-1][0], max(out[-1][1], b)
+            if b > out[-1][1] and any(lo + tol < z < hi - tol for z in seps):
+                # Two fragments that have crossed. They are kept apart, and the overlap is
+                # halved between them rather than left as two axis lines lying on top of each
+                # other: the state is degenerate either way, and this is the one the mesher can
+                # still build, which is what gives the inversion remesh a chance to recover.
+                mid = 0.5 * (a + out[-1][1])
+                out[-1] = (lo, mid)
+                out.append((mid, b))
+            else:
+                out[-1] = (lo, hi)
         else:
             out.append((a, b))
     return out
