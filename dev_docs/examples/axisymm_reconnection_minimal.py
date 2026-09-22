@@ -44,12 +44,16 @@ class JetMesh(TopologicalChangesGmshTemplate):
             interfaces = [self.spline(pts, name="interface")]
             axes = [self.create_lines(pts[0], "bottom", self.point(0, 0), "axisymm",
                                       self.point(0, pr.L), "top", pts[-1])[1]]
+            pr.n_fragments = 1
         else:
             # ONE code path for a reconnection and for an ordinary quality remesh: with no plan
             # pending, get_reconnected_boundaries() describes the current geometry instead.
             rb = self.get_reconnected_boundaries("liquid/interface", "liquid/axisymm")
             interfaces = [self.spline_from_chain(ch, "interface") for ch in rb.interface_chains]
             axes = self.lines_from_axis_segments(rb.axis_segments, "axisymm")
+            # The fragment count every rank agrees on: the plan is made on rank 0 and broadcast, so
+            # these chains are the same everywhere. See _fragments() below for why that matters.
+            pr.n_fragments = len(rb.interface_chains)
             # The two symmetry planes. After the pinch each fragment owns one of them, i.e. one
             # "fixed" chain end and one fresh "axis" cap - so this is a loop, not two literals.
             for ch in rb.interface_chains:
@@ -84,6 +88,7 @@ class RayleighPlateauProblem(Problem):
         self.amplitude = 0.5
         self.hmin = 0.04
         self.rmin = 0.08                   # two elements across the neck when it pinches
+        self.n_fragments = 1               # set by the mesh at every build; see _fragments()
 
     def define_problem(self):
         self.set_coordinate_system("axisymmetric")
@@ -105,11 +110,14 @@ class RayleighPlateauProblem(Problem):
 
 
 def _fragments(problem):
-    """How many connected pieces the interface has, i.e. how many drops there are."""
-    from pyoomph.meshes.meshdatacache import MeshDataCache
-    data = MeshDataCache(tesselate_tri=False, nondimensional=True).get_data(
-        problem.get_mesh("liquid/interface"))
-    return len(data.get_interface_line_segments()[0])
+    """How many connected pieces the interface has, i.e. how many drops there are.
+
+    Read off the last mesh built, not off the interface mesh itself. Sorting the interface into
+    connected segments with a MeshDataCache is rank-LOCAL: under --distribute it describes this
+    rank's partition, so each rank gets its own answer. The loop below branches on this count and
+    then calls a collective, which on differing answers deadlocks rather than fails.
+    """
+    return problem.n_fragments
 
 
 if __name__ == "__main__":

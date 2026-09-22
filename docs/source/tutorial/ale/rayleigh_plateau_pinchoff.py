@@ -67,6 +67,11 @@ class PinchingJetMesh(TopologicalChangesGmshTemplate):
             # One interface chain per connected fluid fragment, sorted by ascending y, and one axis
             # segment per fragment. Before the pinch there is one of each, afterwards three.
             interfaces = [self.spline_from_chain(chain, "interface") for chain in rb.interface_chains]
+            # How many fragments there are is a statement about the WHOLE interface, and this is the
+            # one place every rank has it: the plan is made on rank 0 and broadcast, so every rank
+            # builds the same chains. Counting the local interface mesh instead (which is what
+            # get_cached_mesh_data gives) answers a different question on every rank.
+            pr.n_fragments = len(rb.interface_chains)
             axes = self.lines_from_axis_segments(rb.axis_segments, "axisymm")
             # The symmetry planes at z=0 and z=L. Every chain end is either "fixed" (it ends on a
             # boundary that was there before, i.e. on one of the two symmetry planes) or "axis" (it
@@ -108,6 +113,7 @@ class RayleighPlateauPinchOffProblem(Problem):
         self.hmax = 0.35                     # coarsest allowed element
         # The neck radius at which we declare the column broken
         self.rmin = 2 * self.hmin
+        self.n_fragments = 1                 # set by the mesh at every build, see below
         self.post_pinch_steps = 6            # how far to continue past the event
 
     def define_problem(self):
@@ -149,10 +155,12 @@ class RayleighPlateauPinchOffProblem(Problem):
 
     def get_number_of_fragments(self):
         # How many connected pieces the interface consists of, i.e. how many drops there are.
-        # The interface mesh is a set of line elements, and the data cache can sort them into
-        # connected segments for us.
-        data = self.get_cached_mesh_data("liquid/interface",tesselate_tri=False,nondimensional=True)        
-        return len(data.get_interface_line_segments()[0])
+        # Taken from the last mesh built, because that is the number every rank agrees on: the
+        # surgery plan is broadcast, so define_geometry above builds the same chains everywhere.
+        # The obvious alternative - sorting the interface mesh into connected segments with
+        # get_cached_mesh_data - is rank-LOCAL under --distribute, and a loop that branches on it
+        # branches differently on each rank and deadlocks at the next collective.
+        return self.n_fragments
 
     def run_until_broken(self, dt_factor=0.15, maxstep=0.25, post_dt=0.01, max_steps=200):
         # As in the previous section, we tie the time step to the minimum radius: the inertial
