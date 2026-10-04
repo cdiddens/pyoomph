@@ -34,6 +34,7 @@ from pyoomph.expressions.units import degree
 from pyoomph.equations.navier_stokes import StokesEquations, NoSlipBC
 from pyoomph.meshes.gmsh import GmshTemplate
 from pyoomph.output.plotting import MatplotlibPlotter
+from pyoomph.generic.mpi import get_mpi_min, get_mpi_sum
 
 
 class WedgeMesh(GmshTemplate):
@@ -99,16 +100,21 @@ class MoffattProblem(Problem):
         """How far into the corner the mesh actually reaches: the smallest nodal radius."""
         mesh = self.get_mesh("wedge")
         radii = [numpy.hypot(n.x(0), n.x(1)) for n in mesh.nodes()]
-        return min(r for r in radii if r > 0)
+        local = min([r for r in radii if r > 0], default=float("inf"))
+        # With --distribute each process only holds its own partition, and the apex sits in exactly
+        # one of them. Reduced, so the number is the mesh's rather than this process' share of it.
+        return get_mpi_min(local)
 
 
     def elements_per_decade(self):
         mesh = self.get_mesh("wedge")
+        # Halo copies belong to another process, which counts them itself.
+        elems = [e for e in mesh.elements() if e.non_halo_proc_ID() < 0]
         centres = [numpy.mean([[e.node_pt(i).x(0), e.node_pt(i).x(1)] for i in range(e.nnode())], axis=0)
-                for e in mesh.elements()]
-        radii = numpy.array([numpy.hypot(c[0], c[1]) for c in centres])
+                for e in elems]
+        radii = numpy.array([numpy.hypot(c[0], c[1]) for c in centres]) if centres else numpy.zeros((0,))
         bounds = [(0, 1e-3), (1e-3, 1e-2), (1e-2, 1e-1), (1e-1, 1.01)]
-        return [int(((radii >= lo) & (radii < hi)).sum()) for lo, hi in bounds]
+        return [int(get_mpi_sum(int(((radii >= lo) & (radii < hi)).sum()))) for lo, hi in bounds]
 
 
 
@@ -125,13 +131,19 @@ class MoffattStreamPlotter(MatplotlibPlotter):
     label = ""
 
     def local_velocity_range(self):
-        """The velocity range actually present in the view, so each zoom gets its own decades."""
-        mesh = self.get_problem().get_mesh("wedge")
-        indices = mesh.get_nodal_field_indices()
-        ix, iy = indices["velocity_x"], indices["velocity_y"]
-        speeds = [numpy.hypot(n.value(ix), n.value(iy)) for n in mesh.nodes()
-                  if numpy.hypot(n.x(0), n.x(1)) <= self.zoom]
-        vmax = max(speeds)
+        """The velocity range actually present in the view, so each zoom gets its own decades.
+
+        Read from the merged mesh data rather than from the mesh objects: with --distribute the
+        plotting process holds only its own partition, and a zoom this deep easily contains none of
+        it at all. global_mesh=True is answered by the other processes from the serve loop that
+        surrounds define_plot().
+        """
+        data = self.get_problem().get_cached_mesh_data("wedge", global_mesh=True)
+        assert data is not None  # only rank 0 plots, and that is the rank the merged data goes to
+        x, y = data.get_coordinates()[0], data.get_coordinates()[1]
+        speeds = numpy.hypot(data.get_data("velocity_x"), data.get_data("velocity_y"))
+        inview = numpy.hypot(x, y) <= self.zoom
+        vmax = float(numpy.max(speeds[inview])) if numpy.any(inview) else float(numpy.max(speeds))
         return 1e-4*vmax, vmax
 
     def define_plot(self):
