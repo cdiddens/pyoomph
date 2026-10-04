@@ -28,6 +28,7 @@ The main author may be contacted at c.diddens@utwente.nl
 #include <cassert>
 #include <chrono>
 #include <functional>
+#include <set>
 
 #include "elements.hpp"
 #include "elements_concrete.hpp"
@@ -515,6 +516,24 @@ namespace pyoomph
   // level-wise element numbers keeps it independent of how many elements the other ranks hold, so the
   // same description can be replayed on any partition (and serially).
   //
+  // Built from the STAMPED addresses (element_structural_key), not from a live walk of the tree. A
+  // live walk cannot answer this on a distributed mesh that was already refined when it was
+  // distributed: Problem::distribute() re-roots the forest at whatever the leaves were then (see
+  // global_root_path in elements.hpp), so the live root of a kept leaf is an element that never went
+  // through assign_global_base_element_indices() and reports global_base_index == -1. Every such
+  // tree used to land in the single map entry -1, merging the signatures of unrelated roots under the
+  // sentinel, which _sorted_records then reported as "two processes describe different refinement
+  // trees for root element -1". Measured on droplet_spread_marangoni_and_gravity.py at 4 ranks:
+  // one tree per rank, all four keyed -1. The stamp survives both the distribution and the
+  // refinement afterwards, so it is the only thing that still says where a leaf sits.
+  //
+  // What a rank can therefore report is the part of each tree it holds: the paths of its own
+  // elements (halo copies included) and their ancestors. A rank that holds only part of a tree
+  // reports that part as a tree of its own, with the subtrees it does not hold appearing as leaves;
+  // the union over the ranks, taken in _sorted_records, is the whole tree. Serially the set is
+  // complete to begin with and the result is bit-identical to the old live walk, so the file format
+  // is unchanged.
+  //
   // One pass over the elements for all roots together: doing it per root meant re-scanning the whole
   // element vector to find that root, which is quadratic and dominated the writing of a state file
   // (222 ms of 228 ms on a 900-element mesh).
@@ -523,35 +542,39 @@ namespace pyoomph
     roots.clear();
     lengths.clear();
     data.clear();
-    std::map<long, oomph::Tree *> tree_of_root; // ordered, so the roots come out ascending
+    std::map<long, std::set<long>> paths_of_root; // ordered, so the roots come out ascending
     for (unsigned ie = 0; ie < this->nelement(); ie++)
     {
-      BulkElementBase *root = root_element_of(this->element_pt(ie));
-      if (!root)
-        continue;
-      oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(this->element_pt(ie));
-      oomph::Tree *t = (re && re->tree_pt() ? re->tree_pt()->root_pt() : NULL);
-      auto it = tree_of_root.find(root->global_base_index);
-      if (it == tree_of_root.end())
-        tree_of_root[root->global_base_index] = t;
-      else if (!it->second)
-        it->second = t;
+      long r = -1, p = 1;
+      if (!element_structural_key(this->element_pt(ie), r, p))
+        continue; // unaddressable, exactly as the old live-root lookup skipped a rootless element
+      std::set<long> &present = paths_of_root[r];
+      // Insert the element and then its ancestors. Stopping at the first path already present keeps
+      // this linear in the number of elements rather than in elements x depth.
+      for (long q = p; q > 0; q /= 8)
+        if (!present.insert(q).second)
+          break;
     }
-    std::function<void(oomph::Tree *)> walk = [&](oomph::Tree *t)
+    for (auto &entry : paths_of_root)
     {
-      unsigned ns = t->nsons();
-      data.push_back((int)ns);
-      for (unsigned s = 0; s < ns; s++)
-        walk(t->son_pt(s));
-    };
-    for (auto &entry : tree_of_root)
-    {
+      const std::set<long> &present = entry.second;
       roots.push_back(entry.first);
       size_t before = data.size();
-      if (entry.second)
-        walk(entry.second);
+      std::function<void(long)> walk = [&](long path)
+      {
+        // Son s of path is path*8+(s+1); 3 bits per level, so at most 8 sons (an octree).
+        int ns = 0;
+        for (int s = 0; s < 8; s++)
+          if (present.count(path * 8 + (s + 1)))
+            ns = s + 1;
+        data.push_back(ns);
+        for (int s = 0; s < ns; s++)
+          walk(path * 8 + (s + 1));
+      };
+      if (present.count(1))
+        walk(1);
       else
-        data.push_back(0); // no tree at all, i.e. a mesh that cannot be refined
+        data.push_back(0); // cannot happen: path 1 is the ancestor of every element of this root
       lengths.push_back((int)(data.size() - before));
     }
   }

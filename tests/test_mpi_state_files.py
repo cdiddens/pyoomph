@@ -77,18 +77,23 @@ pytestmark = [pytest.mark.skipif(_SKIP_REASON is not None, reason=str(_SKIP_REAS
 _FINGERPRINT_RTOL = 1e-10
 
 
-def _run(nproc, tmpdir, mode, fname, resave_to=None, adapt=False, distribute=True, timeout=900):
+def _run(nproc, tmpdir, mode, fname, resave_to=None, adapt=False, levels=2, adapt_rounds=2,
+         refine_to_level=0, distribute=True, timeout=900):
     """Run the worker, in-process when nproc is 1, under mpirun otherwise."""
     if nproc == 1:
         sys.path.insert(0, _HERE)
         try:
             import mpi_state_file_worker
             return [mpi_state_file_worker.run_case(mode, fname, resave_to=resave_to, adapt=adapt,
+                                                   levels=levels, adapt_rounds=adapt_rounds,
+                                                   refine_to_level=refine_to_level,
                                                    outdir=os.path.join(str(tmpdir), "serial"))]
         finally:
             sys.path.remove(_HERE)
     cmd = ["mpirun", "-n", str(nproc), sys.executable, _WORKER, mode, fname,
-           "--outdir", os.path.join(str(tmpdir), "out" + str(nproc))]
+           "--outdir", os.path.join(str(tmpdir), "out" + str(nproc)),
+           "--levels", str(levels), "--adapt-rounds", str(adapt_rounds),
+           "--refine-to-level", str(refine_to_level)]
     if resave_to is not None:
         cmd += ["--resave-to", resave_to]
     if adapt:
@@ -188,3 +193,43 @@ def test_distributed_adaptive_round_trip(tmp_path):
     per_rank = _run(3, tmp_path, "save", fname, adapt=True)
     loaded = _run(1, tmp_path, "load", fname)[0]
     _assert_same_state(loaded, per_rank[0], "adaptive state written on 3 ranks")
+
+
+def test_uniformly_prerefined_distributed_mesh_is_addressable(tmp_path):
+    """A mesh that is uniformly refined BEFORE it is distributed, which re-roots the forest.
+
+    This is the configuration the tutorial scripts failed in and the round trips above do not reach.
+    ``RefineToLevel`` raises the mesh's ``_initial_uniform_refinement_level``, and that refinement
+    happens while the mesh is still whole - so ``Problem::distribute()`` partitions LEAVES of the
+    refinement trees, and re-roots the forest at whatever each rank kept. Those new roots never went
+    through ``assign_global_base_element_indices()``, which could only run before the distribution,
+    so their ``global_base_index`` is -1.
+
+    Two things used to go wrong at once, and both are asserted here:
+
+      * the refinement signatures were keyed by that live root's number, so every re-rooted tree
+        collapsed onto the sentinel -1 and the writer refused the file ("two processes describe
+        different refinement trees for root element -1"). min_signature_root pins that directly, and
+        measured on the pre-fix tree it is -1 on all four ranks with a single root each - exactly what
+        droplet_spread_marangoni_and_gravity.py reported;
+      * the refusal was raised on rank 0 only, from inside a section whose remaining collectives the
+        other ranks had already committed to - so instead of failing the run HUNG, at 100% CPU on
+        every rank, with a half-written state file. The timeout in _run is what makes that a failure
+        rather than a suite that never returns.
+
+    Note that refining AFTER the distribution is not enough: the trees keep the roots they were
+    distributed with, and that is why the adaptive round trips above pass on the pre-fix tree too.
+
+    See dev_docs/distributed_tutorial_failures.md.
+    """
+    fname = str(tmp_path / "prerefined.dump")
+    per_rank = _run(4, tmp_path, "save", fname, adapt=True, levels=4, adapt_rounds=2, refine_to_level=2)
+    assert per_rank[0]["distributed"], "the mesh was not distributed"
+    for r in per_rank:
+        assert r["min_signature_root"] >= 0, (
+            "rank %d reports refinement signatures for root element %d: a tree whose root has no "
+            "base-element number, so its signature is merged with every other such tree"
+            % (r["rank"], r["min_signature_root"]))
+    # ... and the file it wrote is a real one: read it back without the partition that wrote it.
+    loaded = _run(1, tmp_path, "load", fname, levels=4, refine_to_level=2)[0]
+    _assert_same_state(loaded, per_rank[0], "pre-refined state written on 4 ranks")

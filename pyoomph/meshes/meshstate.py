@@ -52,7 +52,7 @@ See dev_docs/distributed_state_files.md.
 from ..typings import *
 import numpy
 
-from ..generic.mpi import get_mpi_nproc, get_mpi_rank, get_mpi_world_comm
+from ..generic.mpi import get_mpi_nproc, get_mpi_rank, get_mpi_world_comm, mpi_share_any_failure
 
 if TYPE_CHECKING:
     from .mesh import AnySpatialMesh, BulkTemplateMesh, InterfaceMesh
@@ -123,6 +123,37 @@ def _lexicographically_smaller(b: NPAnyIntArray, a: NPAnyIntArray) -> NPBoolArra
                                      ((b[:, 1] == a[:, 1]) & (b[:, 2] < a[:, 2])))))
 
 
+def _agree_or_raise(error: "BaseException | None", distributed: bool, context: str) -> None:
+    """Turn a rank-local failure into a collective one: every rank raises here, or none does.
+
+    Everything in this module is written in collectives - gathers, alltoalls, allreduces - and a
+    `raise` that only one rank reaches desynchronises them. That is not a theoretical hazard: the
+    consistency check in _sorted_records used to run on rank 0 alone (the others return right after
+    the gather), so rank 0 unwound out of Problem._define_state_file and ended up in save_state's
+    mpi_share_any_failure while ranks 1..n-1 were still calling save_interface_state's gather - one
+    round of the four interface meshes further on. Depending on the payload sizes that gave either a
+    silent, unbounded hang at 100% CPU on every rank or an MPI_ERR_TRUNCATE, and save_state's rescue
+    could not catch it: it wraps the section, while the section itself contains the collectives.
+
+    So the rule this enforces is that **the decision to fail is collective**. Call it at a point every
+    rank reaches, after the same number of collectives on each of them; the rank that saw the failure
+    re-raises its own exception, so its traceback survives, and the others raise a RuntimeError naming
+    it. See dev_docs/distributed_tutorial_failures.md.
+    """
+    if distributed and get_mpi_nproc() > 1:
+        mpi_share_any_failure(error, context=context)
+    elif error is not None:
+        raise error
+
+
+def _any_rank(flag: bool, distributed: bool) -> bool:
+    """True if any rank says so. For loop conditions that gate a collective."""
+    if not distributed or get_mpi_nproc() <= 1:
+        return flag
+    from ..generic.mpi import get_mpi_any
+    return bool(get_mpi_any(flag))
+
+
 def _reconcile_node_keys(mesh: "AnySpatialMesh", keys: NPAnyIntArray) -> NPAnyIntArray:
     """Reduce every shared node's key to the smallest one any process computed for it.
 
@@ -158,14 +189,18 @@ def _reconcile_node_keys(mesh: "AnySpatialMesh", keys: NPAnyIntArray) -> NPAnyIn
             payload.append(mine)
         received = comm.alltoall(payload)
         changed = False
+        failure: BaseException | None = None
         for p in range(nproc):
             if p == rank or received[p] is None or len(received[p]) == 0:
                 continue
             idx = shared[p]
             if len(received[p]) != len(idx):
-                raise StateFileInconsistency(
+                # Recorded rather than raised: the rounds below are collective, so a rank that left
+                # here on its own would strand the others in the next alltoall. See _agree_or_raise.
+                failure = StateFileInconsistency(
                     "Shared node scheme mismatch between rank " + str(rank) + " and rank " + str(p) +
                     " while reconciling the state file keys")
+                break
             here = idx >= 0
             theirs = numpy.asarray(received[p])[here]
             mine = keys[idx[here]]
@@ -175,7 +210,9 @@ def _reconcile_node_keys(mesh: "AnySpatialMesh", keys: NPAnyIntArray) -> NPAnyIn
                 keys[target] = theirs[better]
                 changed = True
         from mpi4py import MPI  # type:ignore # only reached on a distributed mesh, so mpi4py is there
-        if not comm.allreduce(bool(changed), op=MPI.LOR):
+        more = comm.allreduce(bool(changed), op=MPI.LOR)
+        _agree_or_raise(failure, True, "reconciling the state file node keys")
+        if not more:
             break
     return keys
 
@@ -193,6 +230,7 @@ def _local_contribution(mesh: "AnySpatialMesh") -> dict[str, NPAnyArray]:
     elem_keys = numpy.asarray(mesh.get_element_structural_keys(), dtype=numpy.int64).reshape(nelem, 2)
     flat, stride = mesh.get_element_node_indices()
     elem_nodes = numpy.asarray(flat, dtype=numpy.int64).reshape(nelem, int(stride)) if nelem else numpy.zeros((0, 1), dtype=numpy.int64)
+    unaddressable: BaseException | None = None
     if numpy.any(elem_keys[:, 0] < 0):
         # Naming the mesh and the count: which mesh it is decides where the missing call belongs, and
         # "all of them" versus "a handful" separates a mesh that was never numbered from one whose
@@ -202,10 +240,13 @@ def _local_contribution(mesh: "AnySpatialMesh") -> dict[str, NPAnyArray]:
             where = mesh.get_full_name()
         except Exception:
             where = repr(mesh)
-        raise StateFileInconsistency(
+        unaddressable = StateFileInconsistency(
             "The mesh '" + where + "' has " + str(bad) + " of " + str(nelem) + " elements without a global base "
             "index. assign_global_base_element_indices() must run before the problem is distributed - a state "
             "file written from rank-local element numbers could only be read back by the very run that wrote it")
+    # Agreed BEFORE the reconciliation, which is collective: one rank raising while the others enter
+    # its alltoall is the desynchronisation _agree_or_raise exists for.
+    _agree_or_raise(unaddressable, _mesh_is_distributed(mesh), "addressing the mesh for the state file")
 
     node_keys = _reconcile_node_keys(mesh, _node_keys(mesh, elem_keys, elem_nodes))
     owned = _owned_elements(mesh)
@@ -283,6 +324,44 @@ def _check_duplicates_agree(keys: NPAnyIntArray, lengths: NPAnyIntArray, data: N
                     "the two records are different " + what + "s that were given the same key")
 
 
+def _signature_to_paths(signature: NPAnyIntArray) -> set[int]:
+    """Preorder son counts -> the packed path of every node of the tree, the root's being 1.
+
+    The inverse of _paths_to_signature, and of what Mesh::get_all_refinement_signatures emits. A path
+    set is the form the signatures can be MERGED in: two processes describing overlapping parts of one
+    tree have nothing to reconcile once both are sets of paths."""
+    out: set[int] = set()
+    position = 0
+    stack = [1]
+    while stack:
+        path = stack.pop()
+        nsons = int(signature[position])
+        position += 1
+        out.add(path)
+        # Pushed in reverse so that son 0 and its whole subtree come off the stack before son 1, which
+        # is the order the preorder walk wrote them in.
+        for s in range(nsons - 1, -1, -1):
+            stack.append(path * 8 + s + 1)
+    return out
+
+
+def _paths_to_signature(paths: set[int]) -> list[int]:
+    """... and back: the preorder son counts of the tree spanned by `paths`."""
+    out: list[int] = []
+    stack = [1]
+    while stack:
+        path = stack.pop()
+        # Son s of path is path*8+(s+1); 3 bits per level, so at most 8 sons (an octree).
+        nsons = 0
+        for s in range(8):
+            if path * 8 + s + 1 in paths:
+                nsons = s + 1
+        out.append(nsons)
+        for s in range(nsons - 1, -1, -1):
+            stack.append(path * 8 + s + 1)
+    return out
+
+
 def _sorted_records(local: dict[str, NPAnyArray], distributed: bool, check: bool) -> dict[str, NPAnyArray] | None:
     """Gather every process' contribution and reduce it to one sorted, duplicate-free set."""
     if not distributed:
@@ -296,23 +375,25 @@ def _sorted_records(local: dict[str, NPAnyArray], distributed: bool, check: bool
         merged = dict(zip(["roots", "sig_lens", "sig_data", "node_keys", "node_lens", "node_data",
                            "elem_keys", "elem_lens", "elem_data"], gathered))
 
-    # Refinement signatures: one per root, and the processes sharing a root must describe the same tree
+    # Refinement signatures: one per root, UNIONED over the processes that reported it.
+    #
+    # Not compared for equality, which is what this used to do. A process holds the part of a tree its
+    # own elements (and their halo copies) sit in, and that need not be the whole tree: the check then
+    # refused to write a perfectly describable state file. Taking the union instead is correct by
+    # construction - every leaf of the tree is held by some process, as an owned element or as a halo
+    # copy, so the union of the reported paths is exactly the set of paths a serial run walks - and it
+    # cannot disagree with itself, so there is nothing left to be inconsistent about. `check` therefore
+    # no longer applies here; the node and element records below still use it.
     roots, sig_lens, sig_data = merged["roots"], merged["sig_lens"], merged["sig_data"]
-    sig_by_root: dict[int, NPAnyIntArray] = {}
+    paths_by_root: dict[int, set[int]] = {}
     offs = numpy.concatenate(([0], numpy.cumsum(numpy.asarray(sig_lens, dtype=numpy.int64))))
     for i, r in enumerate(roots):
-        sig = sig_data[offs[i]:offs[i + 1]]
-        previous = sig_by_root.get(int(r))
-        if previous is None:
-            sig_by_root[int(r)] = sig
-        elif check and not numpy.array_equal(previous, sig):
-            raise StateFileInconsistency(
-                "Two processes describe different refinement trees for root element " + str(int(r)) +
-                ". A process must see the whole tree of every root it touches (its own elements plus the halo "
-                "copies of the others) for the refinement to be storable independently of the partition")
-    sorted_roots = numpy.array(sorted(sig_by_root.keys()), dtype=numpy.int64)
-    out_lens = numpy.array([len(sig_by_root[int(r)]) for r in sorted_roots], dtype=numpy.int32)
-    out_sigs = numpy.concatenate([sig_by_root[int(r)] for r in sorted_roots]) if len(sorted_roots) else numpy.zeros((0,), dtype=numpy.int32)
+        paths_by_root.setdefault(int(r), set()).update(_signature_to_paths(sig_data[offs[i]:offs[i + 1]]))
+    sorted_roots = numpy.array(sorted(paths_by_root.keys()), dtype=numpy.int64)
+    per_root = [_paths_to_signature(paths_by_root[int(r)]) for r in sorted_roots]
+    out_lens = numpy.array([len(p) for p in per_root], dtype=numpy.int32)
+    out_sigs = (numpy.concatenate([numpy.asarray(p, dtype=numpy.int32) for p in per_root])
+                if len(sorted_roots) else numpy.zeros((0,), dtype=numpy.int32))
 
     node_keys, node_lens, node_data = _dedup(merged["node_keys"], merged["node_lens"], merged["node_data"], "node", check)
     elem_keys, elem_lens, elem_data = _dedup(merged["elem_keys"], merged["elem_lens"], merged["elem_data"], "element", check)
@@ -333,23 +414,36 @@ def save_interface_state(mesh: "InterfaceMesh", state: "DumpFile", check_consist
     Addressed by (root element index, packed refinement path, face index) rather than by element
     number, so the record survives a different partition - the same key the interior-facet halo scheme
     pairs facets across ranks with. Halo copies are skipped: their owner writes them."""
+    distributed = _mesh_is_distributed(mesh)
     nelem = mesh.nelement()
     keys = numpy.asarray(mesh.get_interface_element_structural_keys(), dtype=numpy.int64).reshape(nelem, 3)
+    unaddressable: BaseException | None = None
     if nelem and numpy.any(keys[:, 0] < 0):
-        raise StateFileInconsistency(
+        unaddressable = StateFileInconsistency(
             "Interface mesh elements without a global base index; assign_global_base_element_indices() "
             "must run before the problem is distributed")
+    # Agreed before the gather below, for the reason _agree_or_raise gives.
+    _agree_or_raise(unaddressable, distributed, "addressing an interface mesh for the state file")
     owned = _owned_elements(mesh)
     data, lens = mesh.save_elemental_state()
     my_data, my_lens = _block_gather(data, lens, numpy.flatnonzero(owned))
     my_keys: NPAnyIntArray = keys[owned]
-    distributed = _mesh_is_distributed(mesh)
+    gathered = None
     if distributed:
         gathered = _gather_blocks(my_keys, my_lens, my_data)
-        if gathered is None:
-            return
-        my_keys, my_lens, my_data = gathered[0], gathered[1], gathered[2]
-    my_keys, my_lens, my_data = _dedup(my_keys, my_lens, my_data, "interface element", check_consistency)
+    error: BaseException | None = None
+    try:
+        if not distributed or gathered is not None:
+            if gathered is not None:
+                my_keys, my_lens, my_data = gathered[0], gathered[1], gathered[2]
+            my_keys, my_lens, my_data = _dedup(my_keys, my_lens, my_data, "interface element", check_consistency)
+    except BaseException as e:
+        error = e
+    # _dedup only runs on rank 0 here, so its failures are exactly the one-sided kind: every rank has
+    # to reach this point, which is why the non-root ranks no longer return straight after the gather.
+    _agree_or_raise(error, distributed, "writing an interface mesh's part of the state file")
+    if distributed and get_mpi_rank() != 0:
+        return
     for value in (my_keys, my_lens, my_data):
         state.numpy_data(lambda value=value: value, lambda v: v)  # type:ignore
 
@@ -416,8 +510,18 @@ def save_mesh_state(mesh: "AnySpatialMesh", state: "DumpFile", check_consistency
     rank that wrote nothing would be left unable to restore. It does not matter when writing a file,
     because save_state drops the redundant writers before reaching here."""
     distributed = _mesh_is_distributed(mesh)
-    local = _local_contribution(mesh)
-    records = _sorted_records(local, distributed, check_consistency)
+    records: dict[str, NPAnyArray] | None = None
+    error: BaseException | None = None
+    try:
+        local = _local_contribution(mesh)
+        records = _sorted_records(local, distributed, check_consistency)
+    except BaseException as e:
+        error = e
+    # The consistency checks inside _sorted_records see the merged records, so they run on rank 0
+    # alone and can only ever raise there. Agreeing here - at a point every rank reaches, with the
+    # same collectives behind it on each of them - is what keeps rank 0 from unwinding out of
+    # Problem._define_state_file while the others march into the next gather. See _agree_or_raise.
+    _agree_or_raise(error, distributed, "writing the mesh part of the state file")
     if distributed and get_mpi_rank() != 0:
         return
     assert records is not None
@@ -449,12 +553,16 @@ def _replay_refinement(mesh: "AnySpatialMesh", roots: NPAnyIntArray, sig_lens: N
     nsons: dict[tuple[int, int], int] = {}
     for i, r in enumerate(roots):
         nsons.update(_decode_signature(int(r), sig_data[offs[i]:offs[i + 1]]))
+    distributed = _mesh_is_distributed(mesh)
     while True:
         keys = numpy.asarray(mesh.get_element_structural_keys(), dtype=numpy.int64).reshape(mesh.nelement(), 2)
         # Every element of the mesh is a leaf, so anything the file describes as having sons must be split.
         # Halo elements are refined along with the owned ones, which is what keeps the local trees whole.
         to_refine = [i for i, (r, p) in enumerate(keys) if nsons.get((int(r), int(p)), 0) > 0]
-        if not to_refine:
+        # The number of rounds is agreed, not decided locally: the refinement is collective, and the
+        # partitions do not run out of work at the same time - a process whose own share is already at
+        # its final depth would otherwise leave the loop while the others call into the next round.
+        if not _any_rank(bool(to_refine), distributed):
             break
         mesh.refine_selected_elements_by_index(to_refine)
 

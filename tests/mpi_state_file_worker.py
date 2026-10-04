@@ -57,9 +57,10 @@ class PoissonEqs(Equations):
 
 
 class StateProblem(Problem):
-    def __init__(self, N=6, adapt=False):
+    def __init__(self, N=6, adapt=False, levels=2, refine_to_level=0):
         super().__init__()
-        self.N, self.adapt = N, adapt
+        self.N, self.adapt, self.levels = N, adapt, levels
+        self.refine_to_level = refine_to_level
         self.write_states = False
         self.eigen_data_in_states = False
         self.continuation_data_in_states = False
@@ -69,8 +70,14 @@ class StateProblem(Problem):
         eqs = PoissonEqs() + DirichletBC(u=0) @ "left"
         if self.adapt:
             eqs += SpatialErrorEstimator(u=1)
+        if self.refine_to_level > 0:
+            # Uniform refinement BEFORE Problem::distribute(), which is what makes the forest get
+            # re-rooted: see test_deeply_refined_distributed_mesh_is_addressable. RefineToLevel raises
+            # the mesh's _initial_uniform_refinement_level, and that part of the refinement happens
+            # while the mesh is still whole.
+            eqs += RefineToLevel(self.refine_to_level)
         self += eqs @ "domain"
-        self.max_refinement_level = 2
+        self.max_refinement_level = self.levels
 
 
 def fingerprint(problem):
@@ -89,14 +96,30 @@ def fingerprint(problem):
     return [get_mpi_sum(weighted), get_mpi_sum(square), get_mpi_sum(count)]
 
 
-def run_case(mode, fname, resave_to=None, N=6, adapt=False, outdir="_state_test"):
+def refinement_roots(problem):
+    """The root indices Mesh.get_all_refinement_signatures() reports, as a sorted list.
+
+    Every one of them must be a real base-element number. A -1 is the sentinel of an element whose
+    root could not be addressed, and it used to appear on every distributed mesh that was already
+    refined when it was distributed: Problem::distribute() re-roots the forest at whatever the leaves
+    were then, and those new roots never went through assign_global_base_element_indices(). The
+    signatures of unrelated trees then all landed in the single map entry -1.
+    See dev_docs/distributed_tutorial_failures.md.
+    """
+    roots, _lens, _data = problem.get_mesh("domain").get_all_refinement_signatures()
+    return sorted(int(r) for r in roots)
+
+
+def run_case(mode, fname, resave_to=None, N=6, adapt=False, levels=2, adapt_rounds=2,
+             refine_to_level=0, outdir="_state_test"):
     result = {"rank": get_mpi_rank(), "nproc": get_mpi_nproc(), "mode": mode}
-    with StateProblem(N=N, adapt=adapt) as problem:
+    with StateProblem(N=N, adapt=adapt, levels=levels, refine_to_level=refine_to_level) as problem:
         problem.set_output_directory(outdir)
         problem.solve()
         if adapt:
-            problem.solve(spatial_adapt=2)
+            problem.solve(spatial_adapt=adapt_rounds)
         result["distributed"] = bool(problem.is_distributed())
+        result["min_signature_root"] = min(refinement_roots(problem), default=0)
         if mode == "save":
             result["fingerprint"] = fingerprint(problem)
             problem.save_state(fname)
@@ -121,11 +144,15 @@ if __name__ == "__main__":
     parser.add_argument("--outdir", default="_state_test")
     parser.add_argument("--size", type=int, default=6)
     parser.add_argument("--adapt", action="store_true")
+    parser.add_argument("--levels", type=int, default=2)
+    parser.add_argument("--adapt-rounds", type=int, default=2)
+    parser.add_argument("--refine-to-level", type=int, default=0)
     parser.add_argument("--distribute", action="store_true")  # consumed by pyoomph itself
     args, _ = parser.parse_known_args()
     try:
         out = run_case(args.mode, args.file, resave_to=args.resave_to, N=args.size,
-                       adapt=args.adapt, outdir=args.outdir)
+                       adapt=args.adapt, levels=args.levels, adapt_rounds=args.adapt_rounds,
+                       refine_to_level=args.refine_to_level, outdir=args.outdir)
     except BaseException as e:
         out = {"rank": get_mpi_rank(), "nproc": get_mpi_nproc(), "error": str(e),
                "traceback": traceback.format_exc()}
