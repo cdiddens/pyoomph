@@ -400,13 +400,15 @@ class _MeshFileOutput(_BaseNumpyOutput):
 		if self.active is False:
 			return
 
+		# Collective, and asked before anything can return: every rank must reach it. `active` is set
+		# from the owning MeshFileOutput, so it is the same everywhere and the check above is safe.
+		# See _BaseOutputter.mesh_is_partitioned for why the mesh's own flag cannot be used here.
+		partitioned=self.mesh_is_partitioned()
 
-
-
-		if (not mesh.is_mesh_distributed()) and self.mpi_rank>0:
+		if (not partitioned) and self.mpi_rank>0:
 			return
 
-		if get_mpi_nproc()>1 and mesh.is_mesh_distributed():
+		if get_mpi_nproc()>1 and partitioned:
 			# Get nelement for all meshes and merge them via MPI
 			my_nelement=mesh.nelement()
 			assert MPI is not None # get_mpi_nproc()>1 implies mpi4py is available, see pyoomph.generic.mpi
@@ -680,7 +682,7 @@ class _MeshFileOutput(_BaseNumpyOutput):
 			
 			meshout = meshio.Mesh(points, cells, point_data=field_data,cell_data=cell_data) #type:ignore
 		allfiles =None
-		if self.mesh.is_mesh_distributed():
+		if partitioned:  # the agreed answer, not the local flag: see mesh_is_partitioned
 			fname = self.fname_trunk + "_{:06d}_{:d}".format(step,self.mpi_rank) + "." + self.file_ext
 			contributing_procs = numpy.argwhere(all_nelement>0)[:,0] #type:ignore
 			allfiles=[self.fname_trunk + "_{:06d}_{:d}".format(step,i) + "." + self.file_ext for i in contributing_procs]

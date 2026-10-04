@@ -55,7 +55,7 @@ from .. import _pyoomph_core as _pyoomph
 from scipy.io import savemat,loadmat #type:ignore
 
 from ..typings import *
-from ..generic.mpi import get_mpi_rank
+from ..generic.mpi import get_mpi_rank, get_mpi_nproc, get_mpi_any
 import numpy
 
 if TYPE_CHECKING:
@@ -86,6 +86,31 @@ class _BaseOutputter:
     @problem.setter
     def problem(self,p:"Problem | None"):
         self._problem_wr=weakref.ref(p) if p is not None else (lambda:None)
+
+    def mesh_is_partitioned(self)->bool:
+        """``is_mesh_distributed()`` for this outputter's mesh, answered the same way on every rank.
+
+        Every ``output()`` below opens with "nothing partitioned and I am not rank 0, so there is
+        nothing for me to do" - and then goes on to a collective: a merge of the global mesh data, or
+        an allgather of the per-rank element counts. The local flag cannot carry that decision,
+        because it is NOT the same on every rank: a rank whose partition holds no element of an
+        interface mesh does not carry it. ``Mesh::needs_pooling_across_ranks`` (src/mesh.cpp) says so
+        in as many words and asks everybody for exactly this reason.
+
+        A rank that answers differently from the others does not write a wrong file, it hangs them.
+        Both rising_bubble tutorials did that under --distribute: three ranks returned from
+        MeshFileOutput.output() and went on into the next solve's assign_eqn_numbers while the fourth
+        sat in the allgather alone, which the harness eventually killed at its 2 h timeout. The stack
+        pointed at vendored oomph-lib's synchronise_eqn_numbers; the rank missing from it was the whole
+        story. See dev_docs/distributed_tutorial_failures.md.
+
+        Collective, so every rank has to reach it before any of them returns.
+        """
+        mesh=getattr(self,"mesh",None)
+        local=bool(mesh.is_mesh_distributed()) if mesh is not None else False
+        if get_mpi_nproc()<=1:
+            return local
+        return bool(get_mpi_any(local))
 
     def after_remeshing(self,eqtree:"EquationTree"):
         pass
@@ -344,14 +369,15 @@ class _TextOutput(_BaseNumpyOutput):
 
     def output(self,step:int):        
         mesh = self.mesh
-        if (not mesh.is_mesh_distributed()) and self._mpi_rank > 0:
+        if (not self.mesh_is_partitioned()) and self._mpi_rank > 0:
             return
         if self.eigenvector is not None:
             if self.eigenvector >= len(self.mesh.get_problem()._last_eigenvectors): #type:ignore
                 return  # No output hrere
         # Collective when the mesh is distributed and global_mesh is set, so every rank has to get
-        # here - which is why the early return above only lets a rank out when there is nothing to
-        # merge in the first place.
+        # here - which is why the early return above asks mesh_is_partitioned() rather than this mesh's
+        # own flag. The flag is not the same on every rank, so it used to let a rank out that the merge
+        # was waiting for.
         cache=self.get_cached_mesh_data(self.mesh,nondimensional=self.nondimensional,tesselate_tri=self.tesselate_tri,eigenvector=self.eigenvector,eigenmode=self.eigenvector_mode,discontinuous=self.discontinuous,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions,operator=self.operator,global_mesh=self.global_mesh)
         if cache is None:
             return  # a rank that contributed to the merge; rank 0 writes the file
@@ -596,7 +622,9 @@ class _OutputTxtAlongLine(_BaseOutputter):
 
     def output(self,step:int):
         mesh=self.mesh
-        if (not mesh.is_mesh_distributed()) and self._mpi_rank>0:
+        # mesh_is_partitioned(), not the mesh's own flag: get_data_and_descs() merges, and the flag is
+        # not the same on every rank. See _BaseOutputter.mesh_is_partitioned.
+        if (not self.mesh_is_partitioned()) and self._mpi_rank>0:
             return
         if self.eigenvector is not None:
             if self.eigenvector >= len(self.mesh.get_problem()._last_eigenvectors): #type:ignore
@@ -736,7 +764,9 @@ class _GridFileOutput(_BaseOutputter):
 
     def output(self,step:int):
         mesh=self.mesh
-        if (not mesh.is_mesh_distributed()) and self._mpi_rank>0:
+        # mesh_is_partitioned(), not the mesh's own flag: get_data_and_descs() merges, and the flag is
+        # not the same on every rank. See _BaseOutputter.mesh_is_partitioned.
+        if (not self.mesh_is_partitioned()) and self._mpi_rank>0:
             return
         if self.eigenvector is not None:
             if self.eigenvector >= len(self.mesh.get_problem()._last_eigenvectors): #type:ignore
