@@ -3281,6 +3281,29 @@ class Problem(_pyoomph.Problem):
         self._require_no_distributed_periodic_refinement("Mesh adaptation",nref+nunref)
         return nref,nunref
 
+    def _agreed_adapt_counts(self,nref:int,nunref:int)->"tuple[int,int]":
+        """``(nref, nunref)`` summed over the ranks, i.e. what the whole mesh did.
+
+        :py:meth:`_adapt` reports what THIS rank's partition refined and unrefined. A rank whose share
+        is already at the level the error estimator asks for reports ``(0, 0)`` while the others report
+        work - and every caller turns ``(0, 0)`` into "stop now". What is then skipped is collective:
+        another round of the adaptation itself, a renumbering, or (in
+        :py:meth:`refine_eigenfunction`) the whole re-solve and re-eigensolve. So a rank-local count
+        does not make one rank adapt a little less, it DEADLOCKS the others.
+
+        That is what hung both rising_bubble tutorials under --distribute. Traced by labelling every
+        collective in the solve path and diffing the per-rank sequences: all four ranks agreed for 538
+        events and then one went to its MeshFileOutput while the other three entered
+        actions_before_stationary_solve - the `self.solve()` of refine_eigenfunction, which the fourth
+        had returned past on `nref==0 and nunref==0`. The stacks alone pointed at vendored oomph-lib's
+        synchronise_eqn_numbers, which is only where the three ranks that were still together ended up
+        waiting. See dev_docs/distributed_tutorial_failures.md.
+        """
+        if get_mpi_nproc()<=1:
+            return nref,nunref
+        from .mpi import get_mpi_sum
+        return int(get_mpi_sum(int(nref))),int(get_mpi_sum(int(nunref)))
+
     def _compile_meshes(self):
         # Only now does every domain's codegen know its coordinate space (it is set while the fields are
         # defined), which is what the junction check compares.
@@ -4591,7 +4614,7 @@ class Problem(_pyoomph.Problem):
                 perform_interpolation()
                 if not self.is_quiet():
                     print("Remeshing adaption:", s, "of", num_adapt)
-                nref, nunref = self._adapt()
+                nref, nunref = self._agreed_adapt_counts(*self._adapt())
                 if nref == 0 and nunref == 0:
                     no_need_to_reassign = True
                     break
@@ -4888,19 +4911,10 @@ class Problem(_pyoomph.Problem):
                     self._during_initialization=False
                     if not self.is_quiet():
                         print("Initial adaption:",s,"of",self.initial_adaption_steps)
-                    nref,nunref=self._adapt()
-                    if get_mpi_nproc()>1:
-                        # Make sure nref and nunref are all considered
-                        nref_sum = get_mpi_sum(nref)
-                        nunref_sum = get_mpi_sum(nunref)
-                        if nref_sum == 0 and nunref_sum == 0:
-                            no_need_to_reassign = True
-                            break
-                        pass
-                    else:
-                        if nref==0 and nunref==0:
-                            no_need_to_reassign=True
-                            break
+                    nref,nunref=self._agreed_adapt_counts(*self._adapt())
+                    if nref==0 and nunref==0:
+                        no_need_to_reassign=True
+                        break
                     if self.is_distributed() and self.call_load_balance_in_initial_adaption:                        
                         self.load_balance()
                 if self.initial_adaption_steps>0 and not (no_need_to_reassign):
@@ -6747,8 +6761,10 @@ class Problem(_pyoomph.Problem):
         for i in range(numadapt):
             
             with self.custom_adapt(True):
-                nref,nunref=self.adapt()
-                if nref==0 and nunref==0:                    
+                nref,nunref=self._agreed_adapt_counts(*self.adapt())
+                if nref==0 and nunref==0:
+                    # Agreed, not rank-local: what this returns past is self.solve() and
+                    # solve_eigenproblem(), both collective. See _agreed_adapt_counts.
                     return self.get_last_eigenvalues()[0],self.get_last_eigenvectors()[0]
             if resolve_base_state:
                 self.solve()
@@ -8237,7 +8253,7 @@ class Problem(_pyoomph.Problem):
 
             # First, we get all equations which must be zero for the base state and on the eigenvector
           
-            must_reapply_bcs=self._equation_system._before_eigen_solve(self.get_eigen_solver(), azimuthal_mode)
+            must_reapply_bcs=self._agreed_must_reassign_eqs(self._equation_system._before_eigen_solve(self.get_eigen_solver(), azimuthal_mode))
           
             if must_reapply_bcs:
                 self.reapply_boundary_conditions() # Equation numbering might have been changed. Update it here!
@@ -8292,7 +8308,7 @@ class Problem(_pyoomph.Problem):
                     omega = 0
 
             # First, we get all equations which must be zero for the base state and on the eigenvector
-            must_reapply_bcs=self._equation_system._before_eigen_solve(self.get_eigen_solver(), normal_k=cartesian_wavenumber_k) #type:ignore
+            must_reapply_bcs=self._agreed_must_reassign_eqs(self._equation_system._before_eigen_solve(self.get_eigen_solver(), normal_k=cartesian_wavenumber_k)) #type:ignore
             if must_reapply_bcs:
                 self.reapply_boundary_conditions() # Equation numbering might have been changed. Update it here!
                 self.reapply_boundary_conditions()
@@ -9032,9 +9048,33 @@ class Problem(_pyoomph.Problem):
                 self._last_eigenvalues_k=numpy.array([vlist]*len(self.get_last_eigenvalues()),dtype=numpy.float64) #type:ignore
         return self._last_eigenvalues, self._last_eigenvectors
 
+    def _agreed_must_reassign_eqs(self,local:bool)->bool:
+        """Whether the equations must be renumbered, answered the same way on every rank.
+
+        ``_before_stationary_or_transient_solve`` / ``_before_eigen_solve`` walk THIS rank's equations
+        and flip THIS rank's Dirichlet activation flags, so their verdict is rank-local. An
+        AxisymmetryBC sitting on an interface that a rank holds no element of has nothing to flip and
+        answers False while the other ranks answer True - and the verdict gates
+        reapply_boundary_conditions(), i.e. assign_eqn_numbers() and its MPI_Alltoall. A rank that
+        answers differently therefore does not renumber differently, it DEADLOCKS the others.
+
+        Fixed on the way past the two defects that DID hang both rising_bubble
+        tutorials under --distribute (:py:meth:`_agreed_adapt_counts` and
+        _BaseOutputter.mesh_is_partitioned), rather than observed failing itself - it is the same shape
+        and the consequence is the same deadlock, so it is not worth leaving in place to find out.
+        See dev_docs/distributed_tutorial_failures.md.
+
+        OR rather than AND: a rank that changed a pinning has to be followed by all of them, and
+        renumbering when nothing changed only costs time.
+        """
+        if get_mpi_nproc()<=1:
+            return bool(local)
+        from .mpi import get_mpi_any
+        return bool(get_mpi_any(bool(local)))
+
     # will be called when a stationary solve is tried after a transient solve or when solving for the first time
     def actions_before_stationary_solve(self,force_reassign_eqs:bool=False):
-        must_reassign_eqs=self._equation_system._before_stationary_or_transient_solve(stationary=True) 
+        must_reassign_eqs=self._agreed_must_reassign_eqs(self._equation_system._before_stationary_or_transient_solve(stationary=True))
         if must_reassign_eqs or force_reassign_eqs:
             self.reapply_boundary_conditions()
             self.relink_external_data()
@@ -9044,7 +9084,7 @@ class Problem(_pyoomph.Problem):
 
     # will be called when a transient solve is tried after a stationary solve or when solving for the first time
     def actions_before_transient_solve(self,force_reassign_eqs:bool=False):
-        must_reassign_eqs = self._equation_system._before_stationary_or_transient_solve(stationary=False) 
+        must_reassign_eqs = self._agreed_must_reassign_eqs(self._equation_system._before_stationary_or_transient_solve(stationary=False))
         if must_reassign_eqs or force_reassign_eqs:
             self.reapply_boundary_conditions()
             self.relink_external_data()
@@ -9080,7 +9120,7 @@ class Problem(_pyoomph.Problem):
         # returning anything wrong. Removing the restore below fails tests/test_eigen_during_tracking.py
         # ::test_refusals with exactly that crash.
         snapshot=self._dirichlet_activation_snapshot() if must_not_renumber else None
-        must_reassign_eqs = self._equation_system._before_eigen_solve(self.get_eigen_solver(),eigen_m,eigen_k)
+        must_reassign_eqs = self._agreed_must_reassign_eqs(self._equation_system._before_eigen_solve(self.get_eigen_solver(),eigen_m,eigen_k))
         #print("MUST REASSIGN IS",must_reassign_eqs,eigen_m,eigen_k)
         #exit()
         if must_not_renumber and (must_reassign_eqs or force_reassign_eqs):
@@ -10472,7 +10512,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                 perform_interpolation()
                 if not self.is_quiet():
                     print("Remeshing adaption:", s, "of", num_adapt)
-                nref, nunref = self._adapt()
+                nref, nunref = self._agreed_adapt_counts(*self._adapt())
                 if nref == 0 and nunref == 0:
                     no_need_to_reassign = True
                     break
