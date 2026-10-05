@@ -1482,10 +1482,24 @@ namespace pyoomph
 
 	// See the class comment in problem.hpp. The dynamic_cast is on the AssemblyHandler, which every
 	// tracker derives from alongside AugmentedSparsityProvider.
+	// Whichever augmented system is installed owns a helper: a C++ tracker through its
+	// AugmentedSparsityProvider mixin, or a Python DofAugmentations. The Python route leaves the
+	// DEFAULT assembly handler in place, so asking only the handler finds nothing there.
+	AugmentedDofDistributionHelper *Problem::augmented_dof_distribution_helper()
+	{
+		AugmentedSparsityProvider *prov = dynamic_cast<AugmentedSparsityProvider *>(this->assembly_handler_pt());
+		if (prov)
+		{
+			AugmentedDofDistributionHelper *h = prov->dof_distribution_helper();
+			if (h) return h;
+		}
+		if (this->active_augmentation) return this->active_augmentation->dof_distribution_helper();
+		return NULL;
+	}
+
 	Problem::BaseDofDistributionScope::BaseDofDistributionScope(Problem *problem)
 	{
-		AugmentedSparsityProvider *prov = dynamic_cast<AugmentedSparsityProvider *>(problem->assembly_handler_pt());
-		if (prov) Helper = prov->dof_distribution_helper();
+		Helper = problem->augmented_dof_distribution_helper();
 		if (Helper) Helper->install_base_distribution();
 	}
 
@@ -3315,8 +3329,20 @@ namespace pyoomph
 	{
 		if (n_unaugmented_dofs == 0)
 			return;
-		this->GetDofPtr().resize(n_unaugmented_dofs);
-    	this->GetDofDistributionPt()->build(this->communicator_pt(),n_unaugmented_dofs, false);
+		if (this->active_augmentation)
+		{
+			// restore_base_distribution() resizes Dof_pt back and puts the base distribution back the
+			// way it was installed: rebuilt in place when replicated, pointer-swapped when distributed.
+			// The old unconditional build(..., false) here was wrong whenever the base WAS distributed.
+			DofAugmentations *aug = this->active_augmentation;
+			this->active_augmentation = NULL;
+			aug->release_distribution();
+		}
+		else
+		{
+			this->GetDofPtr().resize(n_unaugmented_dofs);
+			this->GetDofDistributionPt()->build(this->communicator_pt(),n_unaugmented_dofs, false);
+		}
     	this->GetSparcseAssembleWithArraysPA().resize(0);
 		n_unaugmented_dofs=0;
 	}
@@ -8301,33 +8327,66 @@ namespace pyoomph
 			throw_runtime_error("Cannot add augmented dofs to a problem that already has augmented dofs");
 		}
 		this->n_unaugmented_dofs=this->ndof();
+
+		// The same dof bookkeeping the C++ trackers of bifurcation.cpp use, rather than a second
+		// mechanism beside it. Replicated, it reproduces what the loop below used to do exactly: every
+		// rank pushes every augmented dof and the distribution is built non-distributed in place.
+		// Under --distribute it pushes only this rank's rows of each vector block, puts each scalar on
+		// rank 0 alone, and installs an interleaved augmented distribution by POINTER SWAP -- the dof
+		// halo scheme keeps a raw pointer to the distribution object, so rebuilding it in place while
+		// an augmented one is installed would leave the scheme describing a layout that no longer
+		// exists. See AugmentedDofDistributionHelper in src/bifurcation.hpp.
+		//
+		// initialise() must come first, before any dof is pushed and while the DEFAULT assembly handler
+		// is installed: it snapshots the base distribution and rebuilds the halo scheme against the
+		// BASE equations. That holds here -- set_custom_assembler() -> initialize() ->
+		// _create_dof_augmentation() -> _add_augmented_dofs() all run with the default handler.
+		aug.helper = new AugmentedDofDistributionHelper();
+		aug.helper->initialise(this);
+
+		std::vector<AugmentedDofDistributionHelper::Block> layout;
 		unsigned vindex=0,sindex=0,pindex=0;
 		for (unsigned int ti=0;ti<aug.types.size();ti++)
 		{
 			if (aug.types[ti]==0)
 			{
-				auto &v=aug.augmented_vectors[vindex];
-				for (unsigned i=0;i<v.size();i++)
+				// Python registers the guess at full global length; keep this rank's rows of it.
+				auto &staged=aug.augmented_vectors[vindex];
+				if (staged.size()!=aug.helper->base_nrow())
 				{
-					this->GetDofPtr().push_back(&(v[i]));
+					throw_runtime_error("An augmented dof vector of length "+std::to_string(staged.size())+
+										" was registered for a problem with "+std::to_string(aug.helper->base_nrow())+
+										" base dofs. An augmented vector block must have one entry per base dof.");
 				}
+				oomph::DoubleVectorWithHaloEntries *block=new oomph::DoubleVectorWithHaloEntries();
+				aug.helper->build_base_vector(*block);
+				const unsigned first_row=aug.helper->base_first_row();
+				const unsigned n_row_local=aug.helper->base_nrow_local();
+				for (unsigned n=0;n<n_row_local;n++) (*block)[n]=staged[first_row+n];
+				aug.vector_blocks.push_back(block);
+				layout.push_back(AugmentedDofDistributionHelper::Block::vector(block));
 				vindex++;
 			}
 			else if (aug.types[ti]==1)
 			{
-				this->GetDofPtr().push_back(&(aug.augmented_scalars[sindex]));
+				layout.push_back(AugmentedDofDistributionHelper::Block::scalar(&(aug.augmented_scalars[sindex])));
 				sindex++;
 			}
 			else if (aug.types[ti]==2)
 			{
-				this->GetDofPtr().push_back(&this->get_global_parameter(aug.augmented_parameters[pindex])->value());
+				layout.push_back(AugmentedDofDistributionHelper::Block::scalar(&this->get_global_parameter(aug.augmented_parameters[pindex])->value()));
 				pindex++;
 			}
 		}
+		aug.helper->build_augmented_dofs(layout);
+		// The staged copies are dead once the blocks hold the values: keeping them would leave two
+		// sources of truth for the same unknowns, and only the blocks are in Dof_pt.
+		aug.augmented_vectors.clear();
+		aug.augmented_vectors.shrink_to_fit();
+
 		aug.split_offsets.push_back(this->GetDofPtr().size());
 		aug.finalized=true;
-
-		this->GetDofDistributionPt()->build(this->communicator_pt(),this->GetDofPtr().size(), false);
+		this->active_augmentation=&aug;
 	}
 
 
@@ -9085,27 +9144,94 @@ namespace pyoomph
 		return start;
 	}      
 
+	// Index 0 is the base dof block; index i>0 is the (i-1)-th registered entry, which is how the
+	// callers in bifurcation_tools.py read it (split(startindex=1) = "everything I added").
+	//
+	// Read from the vector blocks and the scalars directly rather than by walking Dof_pt with
+	// split_offsets. Those offsets describe the NAIVE [base | block | block | scalar] numbering, which
+	// stops being the order Dof_pt is in as soon as the layout is distributed -- rank d then holds its
+	// base rows, then its rows of each block, with the scalars on rank 0 alone. The blocks are the
+	// source of truth for their own values in every regime, so this needs no translation table.
+	//
+	// A vector block comes back as this rank's OWNED rows. Serially and on a replicated run that is
+	// the whole thing, exactly as before; under --distribute it is a row block, and a caller that
+	// treats it as a global vector is wrong in a way that only MPI exposes.
 	std::vector<std::vector<double>> DofAugmentations::split(unsigned int startindex,int endindex)
 	{
 		if (!finalized) throw_runtime_error("Cannot split non-finalized dofs");
-		auto  dofptr=this->problem->GetDofPtr();		
-		if (dofptr.size()!=split_offsets.back()) throw_runtime_error("Invalid number of dofs. Likely, the dofs has changed meanwhile");
+		if (!helper) throw_runtime_error("The augmented dofs have no distribution helper; they were not added to the problem");
 		std::vector<std::vector<double>> res;
-		if (endindex<0) endindex=split_offsets.size()+(endindex);		
+		// Addressable blocks are 0 (the base dofs) .. types.size(), so the exclusive end that means
+		// "everything" is types.size()+1. Negative endindex counts back from there, which reproduces
+		// the old arithmetic on split_offsets (whose size was types.size()+2).
+		const int end_of_all=(int)types.size()+1;
+		if (endindex<0) endindex=end_of_all+1+endindex;
 		if (endindex<0) return res;
-		if (endindex>=(int)split_offsets.size())  throw_runtime_error("Invalid end index");
+		if (endindex>end_of_all) throw_runtime_error("Invalid end index");
 		for (int i=(int)startindex;i<endindex;i++)
 		{
-			unsigned length=split_offsets[i+1]-split_offsets[i];
-			//std::cout << "SPlIT INDEX "<< i << " " << length << " FROM " << split_offsets[i] << " TO " << split_offsets[i+1] <<std::endl;
-			res.push_back(std::vector<double>(length));
-			for (unsigned int vi=0;vi<length;vi++) 
+			if (i==0)
 			{
-				//std::cout << "DOFPTR" << " at " << split_offsets[i]+vi << "  " << dofptr[split_offsets[i]+vi] <<std::endl << std::flush;
-				res.back()[vi]=*dofptr[split_offsets[i]+vi];
+				// The base dofs, as the problem's own local rows.
+				const unsigned n=helper->base_nrow_local();
+				res.push_back(std::vector<double>(n));
+				auto &dofptr=this->problem->GetDofPtr();
+				for (unsigned k=0;k<n;k++) res.back()[k]=*dofptr[k];
+				continue;
+			}
+			const unsigned ti=(unsigned)(i-1);
+			// Which vector/scalar/parameter this entry is: count the earlier ones of each kind.
+			unsigned vindex=0,sindex=0,pindex=0;
+			for (unsigned t=0;t<ti;t++)
+			{
+				if (types[t]==0) vindex++;
+				else if (types[t]==1) sindex++;
+				else pindex++;
+			}
+			if (types[ti]==0)
+			{
+				oomph::DoubleVectorWithHaloEntries *block=vector_blocks[vindex];
+				const unsigned n=block->nrow_local();
+				res.push_back(std::vector<double>(n));
+				for (unsigned k=0;k<n;k++) res.back()[k]=(*block)[k];
+			}
+			else if (types[ti]==1)
+			{
+				res.push_back(std::vector<double>(1,augmented_scalars[sindex]));
+			}
+			else
+			{
+				res.push_back(std::vector<double>(1,this->problem->get_global_parameter(augmented_parameters[pindex])->value()));
 			}
 		}
 		return res;
+	}
+
+	// Puts the base dof distribution back and drops the helper. Called from
+	// Problem::reset_augmented_dof_vector_to_nonaugmented() and from the destructor, so a Python
+	// object that outlives its augmentation does not free a helper the problem is still pointing at.
+	void DofAugmentations::release_distribution()
+	{
+		if (helper)
+		{
+			helper->restore_base_distribution();
+			delete helper;
+			helper = NULL;
+		}
+		for (auto *b : vector_blocks) delete b;
+		vector_blocks.clear();
+	}
+
+	// Frees our own storage and NOTHING else. Deliberately does not touch the problem: this object is
+	// owned by Python and may well be collected after the Problem it was made from is gone, and a
+	// destructor that reached into the problem to put a distribution back would do it through a
+	// dangling pointer. Restoring the distribution is Problem::reset_augmented_dof_vector_to_nonaugmented()'s
+	// job, which is what AugmentedAssemblyHandler.finalize() calls; by then the dofs are out of Dof_pt.
+	DofAugmentations::~DofAugmentations()
+	{
+		if (helper) { delete helper; helper = NULL; }
+		for (auto *b : vector_blocks) delete b;
+		vector_blocks.clear();
 	}
 
 }

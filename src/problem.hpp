@@ -39,6 +39,13 @@ The main author may be contacted at c.diddens@utwente.nl
 
 #include "hessian_tensor.hpp"
 
+// Only ever held by pointer here (DofAugmentations::vector_blocks), so a declaration is enough and
+// double_vector_with_halo.h stays out of every translation unit that includes this header.
+namespace oomph
+{
+  class DoubleVectorWithHaloEntries;
+}
+
 namespace pyoomph
 {
 
@@ -46,7 +53,7 @@ namespace pyoomph
   class Problem;
   class FiniteElementCode;
   class CCompiler;
-  class AugmentedDofDistributionHelper; // src/bifurcation.hpp, held by BaseDofDistributionScope
+  class AugmentedDofDistributionHelper; // src/bifurcation.hpp, held by BaseDofDistributionScope and DofAugmentations
 
   // enum FieldSpace {C1=1, C2=2};
 
@@ -217,16 +224,30 @@ namespace pyoomph
       Problem * problem;
       std::vector<unsigned> types,split_offsets; // Per-entry type tag and offset (in the augmented dof block) used to reconstruct split()
       unsigned total_length; // Total number of augmented dofs added so far
+      // Staging only: the values Python registered, at FULL GLOBAL length, before the layout exists.
+      // add_augmented_dofs() moves each of them into one of vector_blocks below and clears this.
       std::vector<std::vector<double>> augmented_vectors;
       std::vector<double> augmented_scalars;
       std::vector<std::string> augmented_parameters;
       bool finalized;
+      // The dof bookkeeping, shared with the C++ trackers of bifurcation.cpp. A POINTER because
+      // AugmentedDofDistributionHelper is only forward-declared here (it lives in bifurcation.hpp,
+      // which includes this header). Owned; created in Problem::add_augmented_dofs().
+      AugmentedDofDistributionHelper *helper = NULL;
+      // One per registered vector block, each built on the BASE dof distribution: the owned rows when
+      // distributed, all of them otherwise. Individually allocated and held by pointer because
+      // Dof_pt stores the address of every entry -- a std::vector of them would invalidate all of it
+      // the first time it reallocated. Owned.
+      std::vector<oomph::DoubleVectorWithHaloEntries*> vector_blocks;
     public:
       DofAugmentations(Problem * _problem);
+      ~DofAugmentations();
       unsigned add_vector(const std::vector<double> & v); // Registers a vector of augmented dofs, returns its offset
       unsigned add_scalar(const double & s); // Registers a single augmented scalar dof, returns its offset
       unsigned add_parameter(std::string); // Registers a global parameter as an augmented dof, returns its offset
       std::vector<std::vector<double>> split(unsigned startindex,int endindex); // Splits the augmented part of the dof vector back into the individually registered pieces
+      AugmentedDofDistributionHelper *dof_distribution_helper() { return helper; }
+      void release_distribution(); // Restores the base dof distribution and drops the helper
 
   };
 
@@ -1549,6 +1570,15 @@ namespace pyoomph
     void reset_augmented_dof_vector_to_nonaugmented(); // Discards any augmentation (bifurcation tracking, arclength, custom) dofs and returns to the plain physical dof vector
     void add_augmented_dofs(DofAugmentations &aug); // Appends the dofs registered in aug to the problem's dof vector
     DofAugmentations * create_dof_augmentation() {return new DofAugmentations(this);}
+    // The DofAugmentations whose dofs are currently in Dof_pt, or NULL. Not owned -- the Python object
+    // owns itself; this is only how the problem finds the distribution it has to put back.
+    DofAugmentations *active_augmentation = NULL;
+    // The dof bookkeeping of whatever augmented system is installed: a C++ tracker's (through its
+    // AugmentedSparsityProvider) or a Python DofAugmentations'. NULL when the problem is unaugmented.
+    // BaseDofDistributionScope must ask HERE rather than only the assembly handler: a Python augmentation
+    // leaves the DEFAULT handler installed, so a handler-only lookup reports "no helper" and
+    // get_base_dof_distribution_info() then describes the AUGMENTED layout.
+    AugmentedDofDistributionHelper *augmented_dof_distribution_helper();
     void start_orbit_tracking(const std::vector<std::vector<double>> &history, const double &T,int bspline_order,int gl_order,std::vector<double> knots,unsigned T_constraint_mode); // Sets up periodic-orbit tracking from an initial guessed history (time series of dof snapshots) with period T, represented via B-splines
     void after_bifurcation_tracking_step(); // Post-processing hook called after each continuation step while bifurcation tracking is active (e.g. to renormalize the eigenvector)
     double &global_parameter(const std::string &n); // Reference to the value() of the named global parameter (creating it if necessary)
