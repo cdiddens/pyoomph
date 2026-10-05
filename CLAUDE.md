@@ -96,6 +96,10 @@ identical numbers and looks like a perfect result.
 
 ## Conventions
 
+- **`dev_docs/` lives in the `pyoomph_release` repository**, not here, so the internal development
+  notes stay out of the public repository. Source comments and the docs still cite them by their old
+  path (`dev_docs/mpi_augmented_systems.md`, …); read those relative to the `pyoomph_release`
+  checkout (usually `$HOME/code/pyoomph_release`).
 - **Vendored oomph-lib.** Changes inside `src/thirdparty/oomph-lib/` are marked with a `//FOR PYOOMPH`
   comment *and* described in `src/thirdparty/INFO_oomph-lib`. Both, every time.
 - **Correct the record.** Several long-standing comments in this codebase turned out to describe
