@@ -1584,6 +1584,79 @@ namespace pyoomph
 	// deflation operator is installed - see get_residual_scale_factor()). A scalar times a row block
 	// is correct on any distribution and needs no communication, which is the whole reason deflation
 	// can ride on the ordinary assembly rather than the custom-assembler pipeline.
+	// Copy a Python-supplied GLOBALLY indexed residual vector into whatever row block the caller
+	// built. Serially, and on a replicated run where the caller handed in an unbuilt vector, the
+	// block is the whole thing and this is the previous loop verbatim.
+	//
+	// The old code copied src.size() entries with residuals[i], which indexes LOCAL rows: under
+	// mpirun that ran off the end of the local storage with nothing to catch it. The symptom was not
+	// a crash at the write but a wrong answer or a corrupted neighbour later.
+	void Problem::copy_custom_residuals_into(const std::vector<double> &src, oomph::DoubleVector &dest)
+	{
+		if (!dest.built())
+		{
+			oomph::LinearAlgebraDistribution dist(this->communicator_pt(), src.size(), false);
+			dest.build(&dist, 0.0);
+		}
+		if (dest.nrow() != src.size())
+		{
+			throw_runtime_error("The custom assembler returned " + std::to_string(src.size()) +
+								" residuals, but the vector it has to fill has " + std::to_string(dest.nrow()) +
+								" global rows. The assembler and the problem disagree about ndof.");
+		}
+		const unsigned nrow_local = dest.nrow_local();
+		const unsigned first_row = dest.first_row();
+		double *v = dest.values_pt();
+		for (unsigned i = 0; i < nrow_local; i++)
+			v[i] = src[first_row + i];
+	}
+
+	// Same for the Jacobian: slice the Python-supplied global CSR down to the caller's row block and
+	// rebase the row starts to it. Column indices are global and stay as they are - that is the
+	// layout oomph's own distributed assembly produces and the one PETSc's MPIAIJ wants.
+	void Problem::build_custom_jacobian(CustomResJacInformation &info, oomph::CRDoubleMatrix &jacobian)
+	{
+		const unsigned n_global = info.residuals.size();
+		// The distribution has to exist before build(ncol,...): that overload writes nrow_local() rows
+		// and takes the count from the distribution, so an unbuilt one makes it write a full row_start
+		// array into a zero-row matrix. Every call out of a Newton solve hands in a matrix oomph has
+		// already distributed; _assemble_residual_jacobian() (Problem.assemble_jacobian() from Python)
+		// passes a fresh CRDoubleMatrix and used to segfault here with a Python assembler installed.
+		if (!jacobian.distribution_built())
+		{
+			oomph::LinearAlgebraDistribution dist(this->communicator_pt(), n_global, false);
+			jacobian.build(&dist);
+		}
+		if (info.Jrow_start.size() != n_global + 1)
+		{
+			throw_runtime_error("The custom assembler returned a CSR row-start array of " +
+								std::to_string(info.Jrow_start.size()) + " entries for " +
+								std::to_string(n_global) + " residuals; " + std::to_string(n_global + 1) +
+								" were expected. The Jacobian and the residual describe different systems.");
+		}
+		const unsigned nrow_local = jacobian.nrow_local();
+		const unsigned first_row = jacobian.first_row();
+		if (first_row + nrow_local > n_global)
+		{
+			throw_runtime_error("The linear solver asked for rows " + std::to_string(first_row) + ".." +
+								std::to_string(first_row + nrow_local) + " of a system the custom assembler "
+								"built with only " + std::to_string(n_global) + " rows.");
+		}
+		const int offset = info.Jrow_start[first_row];
+		const int nnz_local = info.Jrow_start[first_row + nrow_local] - offset;
+		oomph::Vector<double> values(nnz_local);
+		oomph::Vector<int> column_index(nnz_local);
+		oomph::Vector<int> row_start(nrow_local + 1);
+		for (int k = 0; k < nnz_local; k++)
+		{
+			values[k] = info.Jvals[offset + k];
+			column_index[k] = info.Jcolumn_index[offset + k];
+		}
+		for (unsigned r = 0; r <= nrow_local; r++)
+			row_start[r] = info.Jrow_start[first_row + r] - offset;
+		jacobian.build(n_global, values, column_index, row_start);
+	}
+
 	void Problem::apply_residual_scale_factor(oomph::DoubleVector &residuals)
 	{
 		if (!residual_scale_hook_active) return;
@@ -2217,18 +2290,11 @@ namespace pyoomph
 		{
 			CustomResJacInformation info(false,"");
 			get_custom_residuals_jacobian(&info);
-			if (!residuals.built())
-			{
-				oomph::LinearAlgebraDistribution dist(this->communicator_pt(), info.residuals.size(), false);
-				residuals.build(&dist, 0.0);
-			}
 			if (!this->dirichlets_by_removing_from_dof_vector)
 			{
 				throw_runtime_error("TODO: Cannot use custom residuals when dirichlet conditions are not removed from the dof vector, since the user-provided residual vector would still contain contributions from the dirichlet dofs, which would be wrong");
 			}
-
-			for (unsigned int i = 0; i < info.residuals.size(); i++)
-				residuals[i] = info.residuals[i];
+			copy_custom_residuals_into(info.residuals, residuals);
 		}
 	}
 
@@ -2255,18 +2321,11 @@ namespace pyoomph
 			if (pindex<0) throw_runtime_error("Cannot resolve the double pointer of a global parameter to this problem");			
 			CustomResJacInformation info(false,global_params_by_index[pindex]->get_name());
 			get_custom_residuals_jacobian(&info);
-			if (!result.built())
-			{
-				oomph::LinearAlgebraDistribution dist(this->communicator_pt(), info.residuals.size(), false);
-				result.build(&dist, 0.0);
-			}
 			if (!this->dirichlets_by_removing_from_dof_vector)
 			{
 				 throw_runtime_error("TODO: Cannot remove dirichlet dofs from the derivative by a global parameter by matrix manipulation yet.");
 			}
-
-			for (unsigned int i = 0; i < info.residuals.size(); i++)
-				result[i] = info.residuals[i];
+			copy_custom_residuals_into(info.residuals, result);
 		}
 
 	}
@@ -2307,34 +2366,8 @@ namespace pyoomph
 		{
 			CustomResJacInformation info(true,"");
 			get_custom_residuals_jacobian(&info);
-			//       std::cout << "RET FROM PYTH" << std::endl;
-
-			if (!residuals.built())
-			{
-				oomph::LinearAlgebraDistribution dist(this->communicator_pt(), info.residuals.size(), false);
-				residuals.build(&dist, 0.0);
-			}
-			for (unsigned int i = 0; i < info.residuals.size(); i++)
-				residuals[i] = info.residuals[i];
-
-			//       std::cout << "BUILD J  "<< info.residuals.size() << "  " << info.Jcolumn_index.size() << "  " << info.Jrow_start.size() << std::endl;
-			// The distribution has to be set up first, exactly like the residuals above: the build()
-			// overload below writes nrow_local() rows and takes that from the distribution, so an
-			// unbuilt one makes it write a full row_start array into a zero-row matrix. Every call
-			// coming out of a Newton solve hands in a matrix oomph-lib has already distributed, which
-			// is why this went unnoticed; _assemble_residual_jacobian(), i.e. Problem.assemble_jacobian()
-			// from Python, passes a fresh CRDoubleMatrix and segfaulted whenever a Python-side custom
-			// assembler (a CustomBifurcationTracker) was installed. Note the copy loop still writes
-			// info.residuals.size() entries regardless of what the caller's distribution says -- see
-			// dev_docs/mpi_augmented_systems.md B2, which is still open and is why this whole branch
-			// is refused under MPI.
-			if (!jacobian.distribution_built())
-			{
-				oomph::LinearAlgebraDistribution dist(this->communicator_pt(), info.residuals.size(), false);
-				jacobian.build(&dist);
-			}
-			jacobian.build(info.residuals.size(), info.Jvals, info.Jcolumn_index, info.Jrow_start);
-			//       std::cout << "DONE BUILD J" << std::endl;
+			copy_custom_residuals_into(info.residuals, residuals);
+			build_custom_jacobian(info, jacobian);
 			if (!this->dirichlets_by_removing_from_dof_vector)
 			{
 				throw_runtime_error("TODO: Cannot remove dirichlet dofs from the jacobian matrix by matrix manipulation when using custom jacobian, since the user-provided jacobian matrix would still contain contributions from the dirichlet dofs, which would be wrong");

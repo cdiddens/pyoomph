@@ -1508,6 +1508,13 @@ namespace pyoomph
     bool residual_scale_hook_active = false;
     virtual double get_residual_scale_factor() { return 1.0; }
     void apply_residual_scale_factor(oomph::DoubleVector &residuals); // Multiplies residuals in place by get_residual_scale_factor()
+    // The custom-assembler (use_custom_residual_jacobian) handoff. A Python assembler returns the
+    // WHOLE system, indexed 0..ndof-1, while the caller has already built the vector/matrix on the
+    // linear solver's distribution - which under mpirun is a row block, and not even the same
+    // partition as the dof distribution. These copy only the caller's rows; serially the block is
+    // everything, so nothing changes there. See dev_docs/mpi_augmented_systems.md B2.
+    void copy_custom_residuals_into(const std::vector<double> &src, oomph::DoubleVector &dest);
+    void build_custom_jacobian(CustomResJacInformation &info, oomph::CRDoubleMatrix &jacobian);
     std::vector<double> get_local_dof_values(); // This rank's block of the dof vector (the values Dof_pt points at); NOT gathered, unlike get_current_dofs()
     #ifdef OOMPH_HAS_MPI
     using oomph::Problem::actions_before_distribute;
