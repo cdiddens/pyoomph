@@ -35,7 +35,7 @@ from ..typings import *
 from .. import _pyoomph_core as _pyoomph
 import numpy,scipy
 from .assembly import CustomAssemblyBase
-from ..solvers.generic import DefaultMatrixType
+from ..solvers.generic import DefaultMatrixType,zero_csr_rows,csr_rows_to_identity
 
 from scipy.sparse import csr_matrix      
 
@@ -810,24 +810,6 @@ class CustomBifurcationTracker(AugmentedAssemblyHandler):
                     best_phi=phi
             V=numpy.exp(1j*best_phi)*V
 
-            if False:
-                pR,pI=numpy.real(V),numpy.imag(V)
-                def optimize(theta):
-                    p=(pR+pI*1j)*numpy.exp(1j*theta)
-                    return abs(numpy.dot(numpy.real(p),numpy.imag(p))),abs(numpy.dot(numpy.imag(p),numpy.imag(p)))
-                besttheta,bestval,smallest_im=0,None,None
-                for testtheta in numpy.linspace(0,2*numpy.pi,100):
-                    val,imim=optimize(testtheta)
-                    if (bestval is None or val<bestval) and (smallest_im is None or imim<smallest_im):
-                        bestval=val
-                        besttheta=testtheta
-                        smallest_im=imim
-                V/=numpy.linalg.norm(numpy.real(V))
-                #theta=scipy.optimize.minimize_scalar(optimize,bounds=(0,2*numpy.pi),method="bounded",options={"xatol":1e-15,"maxiter":100}).x
-                theta=scipy.optimize.root_scalar(lambda t:optimize(t)[0],x0=besttheta).root
-                V=(pR+pI*1j)*numpy.exp(1j*theta)
-                V/=numpy.linalg.norm(numpy.real(V))
-
             V/=numpy.linalg.norm(numpy.real(V))
 
             #print("Eigenvector ReIm",numpy.dot(numpy.real(V),numpy.imag(V)))
@@ -1164,17 +1146,16 @@ class _NormalModeBifurcationTrackerBase(CustomBifurcationTracker):
             J=[J]
         if not isinstance(M,list):
             M=[M]
-        N=J[0].shape[0]
-        Adiag=numpy.ones(N)
-        Adiag[numpy.array(sorted(list(self.eigen_zero_dofs if eigen else self.base_zero_dofs)),dtype=numpy.int64)] = 0.0
-        Bdiag=1-Adiag
-        A=scipy.sparse.spdiags(Adiag, [0], N, N).tocsr()
-        B=scipy.sparse.spdiags(Bdiag, [0], N, N).tocsr()
+        # Row operations rather than diag(mask) @ Jmat: the pinned rows of Jmat become delta_ij and
+        # those of Mmat become zero, which is what the product expressed, but scaling a row is local
+        # to whoever owns it while a sparse-sparse product is not. Bitwise identical to the previous
+        # form, pattern included -- see zero_csr_rows() on why the pruning is part of that.
+        zero_rows=numpy.array(sorted(self.eigen_zero_dofs if eigen else self.base_zero_dofs),dtype=numpy.int64)
         res=[]
         for Jmat in J:
-            res.append(A@Jmat+B)
+            res.append(csr_rows_to_identity(Jmat,zero_rows))
         for Mmat in M:
-            res.append(A@Mmat)
+            res.append(zero_csr_rows(Mmat,zero_rows))
         return tuple(res)
 
     def get_forced_to_zero_dofs(self):

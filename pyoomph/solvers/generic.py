@@ -63,6 +63,54 @@ class SolverError(RuntimeError):
 	"""
 
 DefaultMatrixType:TypeAlias=scipy.sparse.csr_matrix # spelled as an alias: a bare assignment is a variable, which cannot be used in an annotation
+
+
+def zero_csr_rows(A:DefaultMatrixType,rows:"NPAnyIntArray",first_row:int=0)->DefaultMatrixType:
+	"""Return a copy of ``A`` with the given GLOBAL rows zeroed, explicit zeros pruned.
+
+	``A`` may be a row block: ``first_row`` is the global index of its first row, and rows outside
+	``[first_row, first_row+A.shape[0])`` are ignored -- they belong to whichever rank owns them, and
+	that rank zeroes them itself.
+
+	This replaces the ``scipy.sparse.spdiags(mask) @ A`` idiom. Not for speed: a diagonal times a
+	matrix is a sparse-sparse PRODUCT, which on a row-distributed matrix needs the other ranks'
+	rows, whereas scaling a row is purely local. One operation that works unchanged on a row block
+	is worth more here than the one-liner it replaces (dev_docs/mpi_augmented_systems.md Part II).
+
+	The ``eliminate_zeros()`` is what makes it bitwise identical to the product, pattern included:
+	scipy's sparse product prunes every explicit zero in the result, not only the ones it created.
+	Note what that means for the CALLER -- the pattern of the result depends on the VALUES of A, so
+	it can move between two assemblies of the same system. See dev_docs/structural_assembly.md
+	section 6.5; it is why a border block must be built structurally dense instead.
+	"""
+	out=A.tocsr().copy()
+	nrow_local=out.shape[0]
+	local=numpy.asarray(rows,dtype=numpy.int64)-first_row
+	local=local[(local>=0)&(local<nrow_local)]
+	if len(local):
+		starts=out.indptr[local] #type:ignore
+		ends=out.indptr[local+1] #type:ignore
+		for s,e in zip(starts,ends):
+			out.data[s:e]=0.0 #type:ignore
+	out.eliminate_zeros()
+	return out
+
+
+def csr_rows_to_identity(A:DefaultMatrixType,rows:"NPAnyIntArray",first_row:int=0)->DefaultMatrixType:
+	"""``zero_csr_rows()`` plus 1.0 on those rows' diagonal, i.e. the row becomes delta_ij.
+
+	The diagonal is added rather than multiplied in, for the same reason: a matrix plus a diagonal
+	is row-local, so each rank can do its own rows with no communication.
+	"""
+	out=zero_csr_rows(A,rows,first_row)
+	glob=numpy.asarray(rows,dtype=numpy.int64)
+	glob=numpy.unique(glob[(glob-first_row>=0)&(glob-first_row<out.shape[0])])
+	# Built from the owned rows explicitly rather than from a full-length diagonal array: no entry is
+	# created for a row this block does not own, and none is created with the value zero.
+	ident=scipy.sparse.csr_matrix((numpy.ones(len(glob)),(glob-first_row,glob)),shape=out.shape)
+	return (out+ident).tocsr()
+
+
 _TypeGenericLASolver=TypeVar("_TypeGenericLASolver",bound=type["GenericLinearSystemSolver"])
 _TypeGenericEigenSolver=TypeVar("_TypeGenericEigenSolver",bound=type["GenericEigenSolver"])
 
@@ -860,15 +908,12 @@ class EigenMatrixSetDofsToZero(EigenMatrixManipulatorBase):
 
 	def apply_on_J_and_M(self,solver:"GenericEigenSolver",J:DefaultMatrixType,M:DefaultMatrixType) -> tuple[DefaultMatrixType, DefaultMatrixType]:
 		self.zeromap=self._resolve_zeromap()
-		#print("GOING TO SET TO ZERO",self.zeromap)
-		N=J.shape[0]
-		Adiag=numpy.ones(N)
-		Adiag[numpy.array(sorted(list(self.zeromap)),dtype=numpy.int64)] = 0.0
-		Bdiag=1-Adiag
-		A=scipy.sparse.spdiags(Adiag, [0], N, N).tocsr()
-		B=scipy.sparse.spdiags(Bdiag, [0], N, N).tocsr()
-		J=A@J+B # Set removed rows to delta_ij
-		M=A@M # Set removed rows to zero
+		# The same two row operations apply_on_distributed_J_and_M() expresses as zeroRows(diag=1.0)
+		# and zeroRows(diag=0.0); sharing the helpers keeps the scipy and PETSc routes describing one
+		# constraint rather than two. Bitwise identical to the diag(mask) @ J + diag(1-mask) it replaces.
+		rows=numpy.array(sorted(self.zeromap),dtype=numpy.int64)
+		J=csr_rows_to_identity(J,rows) # Set removed rows to delta_ij
+		M=zero_csr_rows(M,rows) # Set removed rows to zero
 		return J,M
 		
 
