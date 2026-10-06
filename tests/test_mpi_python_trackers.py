@@ -65,6 +65,7 @@ import shutil
 import subprocess
 import sys
 
+import numpy
 import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -104,10 +105,28 @@ pytestmark = [pytest.mark.skipif(_SKIP_REASON is not None, reason=str(_SKIP_REAS
 # a wrong constraint row moves a critical parameter by percent.
 _PARAM_RTOL = 1e-9
 _OBS_RTOL = 1e-8
+# The critical-wavenumber family needs a TIGHTER NEWTON TOLERANCE, not a looser comparison, and
+# finding that out was the whole of the work on it. At pyoomph's default 1e-8 the serial and MPI runs
+# disagreed by 3.95e-7 in the critical parameter -- 44 times worse than any other family -- and the
+# first explanation (the class divides by a finite-difference step of ~1e-6, so round-off is
+# amplified a millionfold) was WRONG: the gap was exactly 3.954e-07 at k_fd_step = 1e-6, 1e-5 AND
+# 1e-4, i.e. completely independent of the step.
+#
+# What it actually was: the runs stopped at different points inside the same tolerance ball. Serial's
+# last Newton step overshot to a residual of 6.9e-14 while np=2 stopped at 8.5e-9, just under the
+# 1e-8 default -- and a tangency condition is a DOUBLE root, so the system is ill-conditioned and a
+# residual of 8.5e-9 is worth 4e-7 in the parameter. Asking for 1e-11 instead makes serial and np=2
+# agree to 5e-12 on the oscillatory case and 7e-11 on the stationary one, both inside the ordinary
+# _PARAM_RTOL, so this family gets no special tolerance at all.
+#
+# The stationary case then reproduces the closed form to 13 digits, which is what _ANALYTIC below
+# asserts -- a far stronger statement than cross-regime agreement, and the reason it is worth
+# spending the extra Newton steps.
+_FD_NEWTON_TOL = 1e-11
 
 
 def _run(nproc, tmpdir, distribute=False, cxx=False, nonlinear=False, N=8, case="fold",
-         expect_failure=False, timeout=900):
+         expect_failure=False, timeout=900, newton_tol=None):
     outdir = os.path.join(str(tmpdir), "out")
     os.makedirs(outdir, exist_ok=True)
     cmd = []
@@ -120,6 +139,11 @@ def _run(nproc, tmpdir, distribute=False, cxx=False, nonlinear=False, N=8, case=
         cmd += ["--cxx"]
     if nonlinear:
         cmd += ["--nonlinear-constraint"]
+    # The codim-2 family is solved harder by default, because at pyoomph's 1e-8 the runs stop at
+    # different points inside the same tolerance ball -- see _FD_NEWTON_TOL.
+    tol = newton_tol if newton_tol is not None else (_FD_NEWTON_TOL if case in _FD_CASES else None)
+    if tol is not None:
+        cmd += ["--newton-tol", repr(float(tol))]
     env = dict(os.environ)
     ompi_tmp = os.path.join(str(tmpdir), "_ompi_session")
     os.makedirs(ompi_tmp, exist_ok=True)
@@ -143,7 +167,9 @@ def _run(nproc, tmpdir, distribute=False, cxx=False, nonlinear=False, N=8, case=
     return sorted(per_rank, key=lambda r: r["rank"])
 
 
-_GROUPS = {"fold": [False, False, True],
+_GROUPS = {"critical_wavenumber": [False, False, False, True, True],
+           "critical_wavenumber_osc": [False] * 5 + [True] * 4,
+           "fold": [False, False, True],
            "pitchfork": [False, False, True, True],
            "hopf": [False, False, False, True, True],
            # An eigenbranch tracker drives no parameter: the eigenvalue itself is the extra scalar,
@@ -164,9 +190,27 @@ _GROUPS = {"fold": [False, False, True],
 # The augmented size: a fold adds [V | p], a pitchfork [V | p | slack], a Hopf [Vr | Vi | p | omega].
 _AUG = {"fold": lambda n: 2 * n + 1, "pitchfork": lambda n: 2 * n + 2, "hopf": lambda n: 3 * n + 2,
         "eigenbranch_real": lambda n: 2 * n + 1, "eigenbranch_complex": lambda n: 3 * n + 2,
-        "normal_mode": lambda n: 2 * n + 1, "normal_mode_osc": lambda n: 3 * n + 2}
+        "normal_mode": lambda n: 2 * n + 1, "normal_mode_osc": lambda n: 3 * n + 2,
+        # Codim-2: the parameter AND the wavenumber are unknowns, and each eigenvector block is
+        # joined by its k-derivative dV/dk. Stationary: [V, W] + (parameter, k). Oscillatory:
+        # [Vr, Vi, Wr, Wi] + (parameter, omega, k, mu).
+        "critical_wavenumber": lambda n: 3 * n + 2, "critical_wavenumber_osc": lambda n: 5 * n + 4}
 _CASES = ["fold", "pitchfork", "hopf", "eigenbranch_real", "eigenbranch_complex",
-          "normal_mode", "normal_mode_osc"]
+          "normal_mode", "normal_mode_osc", "critical_wavenumber", "critical_wavenumber_osc"]
+
+# The codim-2 family: solved to _FD_NEWTON_TOL rather than the default, for the reason given there.
+_FD_CASES = {"critical_wavenumber", "critical_wavenumber_osc"}
+
+# The uniform Turing system's critical point in closed form: B = (1 + A/sqrt(d))^2 at
+# k = sqrt(A)/d^(1/4), with the worker's A=2, d=8. Not an invariant of the discretisation -- it is
+# the exact answer for the uniform state, which the worker's LineMesh represents exactly -- so it can
+# be asserted to solver accuracy rather than to mesh accuracy.
+_ANALYTIC = {"critical_wavenumber": {"critical": (1 + 2.0 / numpy.sqrt(8.0)) ** 2,
+                                     "critical_k": numpy.sqrt(2.0) / 8.0 ** 0.25}}
+
+
+def _param_rtol(case):
+    return _PARAM_RTOL
 
 
 @pytest.mark.parametrize("case", _CASES)
@@ -188,6 +232,14 @@ def test_the_python_tracker_finds_the_bifurcation(tmp_path, nproc, distribute, c
     for r in per_rank[1:]:
         assert r["critical"] == pytest.approx(per_rank[0]["critical"], rel=1e-12)
         assert r["eigfunc_usqr"] == pytest.approx(per_rank[0]["eigfunc_usqr"], rel=1e-12)
+    if case in _ANALYTIC:
+        # The strongest assertion in this file: the uniform Turing system's critical point is known
+        # in closed form and the mesh represents the uniform state exactly, so this is solver
+        # accuracy, not discretisation accuracy. Measured at 13 digits under MPI. A tangency row that
+        # was merely plausible would not land here.
+        for key, exact in _ANALYTIC[case].items():
+            assert per_rank[0][key] == pytest.approx(exact, rel=1e-8), (
+                "%s came out %.17g, the closed form is %.17g" % (key, per_rank[0][key], exact))
 
 
 @pytest.mark.parametrize("case", _CASES)
@@ -196,9 +248,23 @@ def test_mpirun_agrees_with_serial(tmp_path, nproc, distribute, case):
     serial = _run(1, tmp_path / "serial", case=case)[0]
     got = _run(nproc, tmp_path / ("np%d%s" % (nproc, "d" if distribute else "")),
                distribute=distribute, case=case)[0]
-    assert got["critical"] == pytest.approx(serial["critical"], rel=_PARAM_RTOL), (
-        "np=%d%s found the fold at %.17g, serial at %.17g"
+    assert got["critical"] == pytest.approx(serial["critical"], rel=_param_rtol(case)), (
+        "np=%d%s found the bifurcation at %.17g, serial at %.17g"
         % (nproc, " --distribute" if distribute else "", got["critical"], serial["critical"]))
+    if "critical_k" in serial:
+        # The second unknown of the codim-2 system, and the one this family exists for: a wrong
+        # tangency row moves k while leaving the critical parameter plausible.
+        assert got["critical_k"] == pytest.approx(serial["critical_k"], rel=_param_rtol(case)), (
+            "np=%d%s found k=%.17g, serial %.17g"
+            % (nproc, " --distribute" if distribute else "", got["critical_k"], serial["critical_k"]))
+        assert got["has_imag"] is serial["has_imag"], \
+            "the branch taken differs from serial: has_imag %r vs %r" % (
+                got["has_imag"], serial["has_imag"])
+        if serial["has_imag"]:
+            # Absolute value, as for the complex eigenbranch: either member of the conjugate pair is
+            # the same branch.
+            assert abs(got["critical_omega"]) == pytest.approx(abs(serial["critical_omega"]),
+                                                               rel=_param_rtol(case))
     # The mesh integral of the squared eigenfunction: the one assertion that constrains WHERE on the
     # mesh the eigenvector's entries ended up, which a wrong translation would move while leaving the
     # critical parameter alone.
@@ -253,6 +319,30 @@ def test_the_newton_converges_quadratically(tmp_path, nproc, distribute, case):
     quadratic rate is what this asserts.
     """
     steps = _run(nproc, tmp_path, distribute=distribute, case=case)[0]["newton_residuals"]
+    if case in _FD_CASES:
+        # The codim-2 family is NOT quadratic early on, and that is intrinsic rather than an MPI
+        # defect: its tangency rows need d2J/dk dsigma, which has no analytic form, so the Jacobian
+        # it solves with is a finite-difference approximation and the rate is quadratic only once the
+        # step is small enough for the FD error to stop dominating. Measured serially, which is the
+        # proof it is not about distribution: 1.8e-2, 1.28e-2, 4.3e-3, 6.3e-4, 1.9e-5, 8.5e-9 --
+        # factors of 0.71 and 0.34 at the start and squaring at the end. So what is asserted is the
+        # TERMINAL rate plus a bound on the step count, which is still enough to catch the defect
+        # this test exists for: a stale rank-0-only scalar crawls at a constant factor all the way
+        # down and never reaches the terminal regime.
+        assert steps, "no residual history"
+        assert len(steps) <= 12, "the codim-2 solve took %d Newton steps: %s" % (len(steps), steps)
+        assert steps[-1] < _FD_NEWTON_TOL, "the solve did not converge: %s" % steps
+        # A FACTOR, not an exponent. Squaring stops being the right bound once the residual reaches
+        # the round-off floor: the measured tail is 1.09e-5 -> 1.28e-9 -> 1.20e-13, and 1.28e-9
+        # squared is 1.6e-18, below anything the arithmetic can reach. What separates this from the
+        # defect is the SIZE of the reduction -- about 1e-4 per step here against the ~0.3 of a
+        # constant-factor crawl -- so two orders of magnitude is both comfortably satisfied and
+        # nowhere near a linear rate.
+        assert steps[-1] < 0.01 * steps[-2], (
+            "the terminal step went %.3e -> %.3e (factor %.3g); a constant factor all the way down "
+            "is the signature of a state the ranks disagree about: %s"
+            % (steps[-2], steps[-1], steps[-1] / steps[-2], steps))
+        return
     if steps and steps[0] < 1e-10:
         # Nothing to converge: an eigenbranch tracker is handed the eigenvalue the eigensolve just
         # found, so its augmented residual can start at round-off already. There is no rate to judge;

@@ -1745,6 +1745,34 @@ class CriticalWavenumberTracker(_NormalModeBifurcationTrackerBase):
         prob=self.get_problem()
         rc,ic,kn=self.real_contribution,self.imag_contribution,self.mode_parameter
         V=self.eigenvector*self.eigenscale
+        # The layouts do not exist yet -- this runs from __init__, before the augmentation is
+        # installed -- but patch_matrices needs a first_row, and _patch_first_row() answers 0 when
+        # base_layout is None, which is wrong for a row block that does not start at 0. So the BASE
+        # layout is set here; _refresh_layouts() re-reads it once the augmentation is in.
+        from .distributed_la import RowLayout
+        from .mpi import get_mpi_nproc,get_mpi_any,mpi_allgather_square_csr
+        self.base_layout=RowLayout.base(prob) if prob.is_distributed() else RowLayout.serial(
+            prob._get_n_unaugmented_dofs() or prob.ndof())
+        # This one solve stays REPLICATED, unlike everything else in this class, and the reason is
+        # that it is complex: A = J_c + lambda*M_c with lambda = i*omega. The backend's distributed
+        # solve goes through solve_python_built_distributed, whose contract is real-valued
+        # throughout, so there is no distributed route for it. It is a one-off at construction, so
+        # the matrices are gathered to global squares -- sparsely, via mpi_allgather_square_csr, not
+        # densely -- and every rank then runs the identical algebra on identical data. That also
+        # disposes of the hazard in the try/except below: a rank that threw while the others did not
+        # would deadlock at the next collective, and here the only collectives are the assembly and
+        # the gathers, which are outside the branch, while what remains is rank-deterministic. The
+        # fallback is agreed across the ranks regardless, because "deterministic" is an argument and
+        # get_mpi_any is a guarantee.
+        def _gather(mat):
+            if not self.base_layout.distributed:
+                return mat
+            return mpi_allgather_square_csr(self.base_layout.n,self.base_layout.first_row,
+                                            self.base_layout.nrow_local,mat,
+                                            context="replicating a matrix for the dV/dk guess").tocsr()
+        failure=None
+        sol=None
+        N=self.base_layout.n
         try:
             if self.has_imag:
                 def req(a):
@@ -1768,7 +1796,11 @@ class CriticalWavenumberTracker(_NormalModeBifurcationTrackerBase):
                 JR,MR,dJRdk=self.patch_matrices(eigen=True,J=[JR],M=[MR,dJRdk])
                 Jc,Mc,Jck,Mck=JR,MR,dJRdk,None
                 lam=0.0
-            N=Jc.shape[0]
+            # Gathered here, after the patching and before any branch: these are the collectives,
+            # and they must not sit inside a decision one rank could take differently.
+            Jc,Mc=_gather(Jc),_gather(Mc)
+            Jck=_gather(Jck)
+            Mck=_gather(Mck) if Mck is not None else None
             A=Jc+lam*Mc
             rhs=-(Jck@V+(lam*(Mck@V) if Mck is not None else 0))
             border=Mc@V # dlambda/dk multiplies M_c*V
@@ -1778,10 +1810,20 @@ class CriticalWavenumberTracker(_NormalModeBifurcationTrackerBase):
             sol=numpy.asarray(scipy.sparse.linalg.spsolve(Abord,numpy.hstack([rhs,0]).astype(Abord.dtype))).ravel()
             if not numpy.all(numpy.isfinite(sol)):
                 raise RuntimeError("non-finite solution of the bordered system")
-            return sol[:N],complex(sol[N])
         except Exception as e:
-            print("Could not compute an initial guess for dV/dk ("+str(e)+"), starting from zero instead")
+            failure=e
+        # Collective: every rank falls back, or none does. A rank that proceeded alone would sit in
+        # the first collective of the Newton solve for ever.
+        if get_mpi_nproc()>1:
+            anyfail=get_mpi_any(failure is not None)
+        else:
+            anyfail=failure is not None
+        if anyfail:
+            print("Could not compute an initial guess for dV/dk ("+str(failure)+
+                  "), starting from zero instead")
             return numpy.zeros_like(V),0j
+        assert sol is not None
+        return sol[:N],complex(sol[N])
 
     def define_augmented_dofs(self, dofs):
         # dV/dk is stored already at the eigenscale (the bordered solve above was fed V*eigenscale),
@@ -1853,8 +1895,35 @@ class CriticalWavenumberTracker(_NormalModeBifurcationTrackerBase):
         return res[:nextra],res[nextra:],[Z]*npair
 
     def _zero_matrix(self)->DefaultMatrixType:
-        n=self.get_problem()._get_n_unaugmented_dofs() or self.get_problem().ndof()
-        return scipy.sparse.csr_matrix((n,n))
+        """An empty stand-in for an imaginary contribution the problem does not have.
+
+        Shaped (nrow_local, n), like everything else the multi-assembly returns: a square (n, n)
+        would be the only matrix on this path that was not a row block, and it is added to and
+        multiplied alongside real ones. It is used before the layouts exist too (from
+        _guess_k_derivative, in __init__), hence the fallback to a serial layout rather than
+        self.base_layout.
+        """
+        from .distributed_la import RowLayout
+        layout=self.base_layout
+        if layout is None:
+            prob=self.get_problem()
+            n=prob._get_n_unaugmented_dofs() or prob.ndof()
+            layout=RowLayout.base(prob) if prob.is_distributed() else RowLayout.serial(n)
+        return scipy.sparse.csr_matrix((layout.nrow_local,layout.n))
+
+    def supports_mpi(self)->bool:
+        """Both branches run under MPI, in both regimes.
+
+        The only part of this class that is not row-distributed is the one-off dV/dk guess in
+        __init__, which is complex and therefore gathered -- see _guess_k_derivative. Everything the
+        Newton solve touches is this rank's rows.
+        """
+        return True
+
+    def after_layouts_ready(self):
+        from .distributed_la import DistVector
+        self.V0_local=DistVector.from_global(self.V0,self.base_layout)
+        self.V0_replicated=self.replicated(self.V0)
 
     def _kfd_delta(self)->float:
         return self.k_fd_step*max(abs(float(self._mode_param.value)),1.0)
@@ -1875,20 +1944,32 @@ class CriticalWavenumberTracker(_NormalModeBifurcationTrackerBase):
         # The imaginary contribution is never named here: every request for it goes through
         # _pairs_assemble, which knows whether the problem has one.
         rc,kn=self.real_contribution,self.mode_parameter
-        col=lambda C:self.as_matrix_column(C)
-        row=lambda R:self.as_matrix_row(R)
+        la,base,aug,table=self.la,self.base_layout,self.augmented_layout,self.eqn_table
+        groups=self.group_is_scalar
+        # Row blocks with GLOBAL column indices, so "matrix @ global vector" is already this rank's
+        # block and every product chain below reads exactly as it did serially. What changes is the
+        # three boundaries: the augmented dofs come back as DistVectors and are gathered once per
+        # assembly (the Hessian contraction vectors pay that gather anyway), the inner products
+        # against V0 become allreduces, and hstack/block_array become la.stack/la.block, which place
+        # the blocks through the augmented layout's translation table instead of by naive offset.
+        M_ = lambda m: la.matrix(m,base,base.n)
+        V_ = lambda v: la.vector(v,base)
+        col=lambda C:la.col(V_(C))
+        row=lambda R:la.row(R)
         # Derivative matrices are patched like a mass matrix (rows of forced-zero eigen dofs simply
         # zeroed), NOT like a Jacobian (which additionally gets a 1 on the diagonal). The Jacobian
         # patch turns the eigen row of such a dof into the equation V_j=0; the k- or parameter-
         # derivative of that equation is zero, so putting the identity back there would contradict it.
         if not self.has_imag:
-            Vr,Wr,p,k=self.get_augmented_dofs().split(startindex=1)
+            Vr,Wr,p,k=self.split_vectors(startindex=1)
+            Vr_g,Wr_g=Vr.to_global(),Wr.to_global()
             if not require_jacobian and dparameter is None:
                 R,JR,dJRdk=self.start_multiassembly().R().J(rc).dJdp(kn,rc).assemble()
                 R,=self.patch_residuals(eigen=False,R=[R])
                 JR,dJRdk=self.patch_matrices(eigen=True,J=[JR],M=[dJRdk])
-                return numpy.hstack([R,JR@Vr,dJRdk@Vr+JR@Wr,
-                                     numpy.dot(Vr,self.V0)-self.eigenscale,numpy.dot(Wr,self.V0)])
+                return la.stack([V_(R),V_(JR@Vr_g),V_(dJRdk@Vr_g+JR@Wr_g),
+                                 Vr.dot(self.V0_local)-self.eigenscale,Wr.dot(self.V0_local)],
+                                groups,base,aug,table)
             if not require_jacobian:
                 assert dparameter is not None
                 def _dp_real():
@@ -1901,42 +1982,45 @@ class CriticalWavenumberTracker(_NormalModeBifurcationTrackerBase):
                 dRdp,dJRdp=_dp_real()
                 # d/dsigma of the eigen rows is analytic; d/dsigma of the tangency rows also needs
                 # d2J/dsigma dk, which is not, hence the second pass at a shifted k.
-                dEdp=dJRdp@Vr
+                dEdp=dJRdp@Vr_g
                 delta=self._kfd_delta()
                 _,dJRdp_s=self._at_k_offset(delta,_dp_real)
-                dFdp=(dJRdp_s@Vr-dEdp)/delta+dJRdp@Wr
-                return numpy.hstack([dRdp,dEdp,dFdp,0.0,0.0])
+                dFdp=(dJRdp_s@Vr_g-dEdp)/delta+dJRdp@Wr_g
+                return la.stack([V_(dRdp),V_(dEdp),V_(dFdp),0.0,0.0],groups,base,aug,table)
             assert dparameter is None, "dparameter not supported for require_jacobian=True"
             assm=self.start_multiassembly().R().J().dRdp(self.parameter)
-            assm.J(rc).dJdp(self.parameter,rc).dJdp(kn,rc).dJdU(Vr,rc).dJdU(Wr,rc)
+            assm.J(rc).dJdp(self.parameter,rc).dJdp(kn,rc).dJdU(Vr_g,rc).dJdU(Wr_g,rc)
             R,J,dRdp,JR,dJRdp,dJRdk,HVr,HWr=assm.assemble()
             R,=self.patch_residuals(eigen=False,R=[R])
             J,=self.patch_matrices(eigen=False,J=[J])
             JR,dJRdp,dJRdk,HVr,HWr=self.patch_matrices(eigen=True,J=[JR],M=[dJRdp,dJRdk,HVr,HWr])
-            dEdU,dEdp,dEdk=HVr,dJRdp@Vr,dJRdk@Vr
+            dEdU,dEdp,dEdk=HVr,dJRdp@Vr_g,dJRdk@Vr_g
             if self.exact_k_derivative_jacobian:
                 def _shifted_real():
-                    a=self.start_multiassembly().dJdp(self.parameter,rc).dJdp(kn,rc).dJdU(Vr,rc)
+                    a=self.start_multiassembly().dJdp(self.parameter,rc).dJdp(kn,rc).dJdU(Vr_g,rc)
                     s_dJRdp,s_dJRdk,s_HVr=a.assemble()
                     s_dJRdp,s_dJRdk,s_HVr=self.patch_matrices(eigen=True,J=[JR],M=[s_dJRdp,s_dJRdk,s_HVr])[1:]
-                    return s_HVr,s_dJRdp@Vr,s_dJRdk@Vr
+                    return s_HVr,s_dJRdp@Vr_g,s_dJRdk@Vr_g
                 delta=self._kfd_delta()
                 s_dEdU,s_dEdp,s_dEdk=self._at_k_offset(delta,_shifted_real)
                 dkdEdU,dkdEdp,dkdEdk=(s_dEdU-dEdU)/delta,(s_dEdp-dEdp)/delta,(s_dEdk-dEdk)/delta
             else:
                 dkdEdU,dkdEdp,dkdEdk=0*dEdU,0*dEdp,0*dEdk
-            Raug=numpy.hstack([R,JR@Vr,dJRdk@Vr+JR@Wr,
-                               numpy.dot(Vr,self.V0)-self.eigenscale,numpy.dot(Wr,self.V0)])
-            Jaug=scipy.sparse.block_array([
-                [J,        None,   None, col(dRdp),  None],
-                [dEdU,     JR,     None, col(dEdp),  col(dEdk)],
-                [dkdEdU+HWr,dJRdk, JR,   col(dkdEdp+dJRdp@Wr),col(dkdEdk+dJRdk@Wr)],
-                [None,     row(self.V0),None,None,   None],
-                [None,     None,   row(self.V0),None,None]]).tocsr()
+            Raug=la.stack([V_(R),V_(JR@Vr_g),V_(dJRdk@Vr_g+JR@Wr_g),
+                           Vr.dot(self.V0_local)-self.eigenscale,Wr.dot(self.V0_local)],
+                          groups,base,aug,table)
+            V0r=self.V0_replicated
+            Jaug=la.block([
+                [M_(J),            None,        None,     col(dRdp),               None],
+                [M_(dEdU),         M_(JR),      None,     col(dEdp),               col(dEdk)],
+                [M_(dkdEdU+HWr),   M_(dJRdk),   M_(JR),   col(dkdEdp+dJRdp@Wr_g),  col(dkdEdk+dJRdk@Wr_g)],
+                [None,             row(V0r),    None,     None,                    None],
+                [None,             None,        row(V0r), None,                    None]],
+                groups,base,aug,table)
             return Raug,Jaug #type:ignore
         else:
-            Vr,Vi,Wr,Wi,p,omega_a,k,mu_a=self.get_augmented_dofs().split(startindex=1)
-            omega,mu=float(omega_a[0]),float(mu_a[0])
+            Vr,Vi,Wr,Wi,p,omega,k,mu=self.split_vectors(startindex=1)
+            Vr_g,Vi_g,Wr_g,Wi_g=Vr.to_global(),Vi.to_global(),Wr.to_global(),Wi.to_global()
             def _plain():
                 _,re_,im_=self._pairs_assemble(lambda a,c:a.J(c).M(c).dJdp(kn,c).dMdp(kn,c))
                 JR,MR,dJRdk,dMRdk=re_
@@ -1946,13 +2030,14 @@ class CriticalWavenumberTracker(_NormalModeBifurcationTrackerBase):
                 R,=self.start_multiassembly().R().assemble()
                 R,=self.patch_residuals(eigen=False,R=[R])
                 JR,JI,MR,MI,dJRdk,dJIdk,dMRdk,dMIdk=_plain()
-                Er,Ei=self._cplx_rows(self._matvec((JR,JI,MR,MI),Vr,Vi),omega)
-                Pr,Pi=self._cplx_rows(self._matvec((dJRdk,dJIdk,dMRdk,dMIdk),Vr,Vi),omega)
-                Qr,Qi=self._cplx_rows(self._matvec((JR,JI,MR,MI),Wr,Wi),omega)
-                Owr,Owi=self._omega_rows(MR,MI,Vr,Vi)
-                return numpy.hstack([R,Er,Ei,Pr+Qr+mu*Owr,Pi+Qi+mu*Owi,
-                                     numpy.dot(Vr,self.V0)-self.eigenscale,numpy.dot(Vi,self.V0),
-                                     numpy.dot(Wr,self.V0),numpy.dot(Wi,self.V0)])
+                Er,Ei=self._cplx_rows(self._matvec((JR,JI,MR,MI),Vr_g,Vi_g),omega)
+                Pr,Pi=self._cplx_rows(self._matvec((dJRdk,dJIdk,dMRdk,dMIdk),Vr_g,Vi_g),omega)
+                Qr,Qi=self._cplx_rows(self._matvec((JR,JI,MR,MI),Wr_g,Wi_g),omega)
+                Owr,Owi=self._omega_rows(MR,MI,Vr_g,Vi_g)
+                return la.stack([V_(R),V_(Er),V_(Ei),V_(Pr+Qr+mu*Owr),V_(Pi+Qi+mu*Owi),
+                                 Vr.dot(self.V0_local)-self.eigenscale,Vi.dot(self.V0_local),
+                                 Wr.dot(self.V0_local),Wi.dot(self.V0_local)],
+                                groups,base,aug,table)
             if not require_jacobian:
                 assert dparameter is not None
                 def _dp():
@@ -1964,15 +2049,16 @@ class CriticalWavenumberTracker(_NormalModeBifurcationTrackerBase):
                     _,dJRdp,dJIdp,dMRdp,dMIdp=self.patch_matrices(eigen=True,J=[re_[0]],M=[re_[0],im_[0],re_[1],im_[1]])
                     return dRdp,(dJRdp,dJIdp,dMRdp,dMIdp)
                 dRdp,dmats=_dp()
-                dEr,dEi=self._cplx_rows(self._matvec(dmats,Vr,Vi),omega)
-                dQr,dQi=self._cplx_rows(self._matvec(dmats,Wr,Wi),omega)
-                dOwr,dOwi=self._omega_rows(dmats[2],dmats[3],Vr,Vi)
+                dEr,dEi=self._cplx_rows(self._matvec(dmats,Vr_g,Vi_g),omega)
+                dQr,dQi=self._cplx_rows(self._matvec(dmats,Wr_g,Wi_g),omega)
+                dOwr,dOwi=self._omega_rows(dmats[2],dmats[3],Vr_g,Vi_g)
                 delta=self._kfd_delta()
                 _,smats=self._at_k_offset(delta,_dp)
-                sEr,sEi=self._cplx_rows(self._matvec(smats,Vr,Vi),omega)
+                sEr,sEi=self._cplx_rows(self._matvec(smats,Vr_g,Vi_g),omega)
                 dFr=(sEr-dEr)/delta+dQr+mu*dOwr
                 dFi=(sEi-dEi)/delta+dQi+mu*dOwi
-                return numpy.hstack([dRdp,dEr,dEi,dFr,dFi,0,0,0,0])
+                return la.stack([V_(dRdp),V_(dEr),V_(dEi),V_(dFr),V_(dFi),0.0,0.0,0.0,0.0],
+                                groups,base,aug,table)
             assert dparameter is None, "dparameter not supported for require_jacobian=True"
             R,J,dRdp=self.start_multiassembly().R().J().dRdp(self.parameter).assemble()
             R,=self.patch_residuals(eigen=False,R=[R])
@@ -1980,8 +2066,8 @@ class CriticalWavenumberTracker(_NormalModeBifurcationTrackerBase):
             JR,JI,MR,MI,dJRdk,dJIdk,dMRdk,dMIdk=_plain()
             def _add_param_and_hessians(a,c):
                 a.dJdp(self.parameter,c).dMdp(self.parameter,c)
-                a.dJdU(Vr,c).dJdU(Vi,c).dMdU(Vr,c).dMdU(Vi,c)
-                a.dJdU(Wr,c).dJdU(Wi,c).dMdU(Wr,c).dMdU(Wi,c)
+                a.dJdU(Vr_g,c).dJdU(Vi_g,c).dMdU(Vr_g,c).dMdU(Vi_g,c)
+                a.dJdU(Wr_g,c).dJdU(Wi_g,c).dMdU(Wr_g,c).dMdU(Wi_g,c)
             _,gr,gi=self._pairs_assemble(_add_param_and_hessians)
             gr=self.patch_matrices(eigen=True,J=[JR],M=list(gr))[1:]
             gi=self.patch_matrices(eigen=True,J=[JR],M=list(gi))[1:]
@@ -1993,19 +2079,19 @@ class CriticalWavenumberTracker(_NormalModeBifurcationTrackerBase):
             HW=[gr[6],gr[7],gi[6],gi[7],gr[8],gr[9],gi[8],gi[9]]
             hess=lambda H:self._pairs(H)
             dEdU_re,dEdU_im=self._cplx_rows(hess(HV),omega)
-            dEdp_re,dEdp_im=self._cplx_rows(self._matvec((dJRdp,dJIdp,dMRdp,dMIdp),Vr,Vi),omega)
-            Pr,Pi=self._cplx_rows(self._matvec((dJRdk,dJIdk,dMRdk,dMIdk),Vr,Vi),omega)
+            dEdp_re,dEdp_im=self._cplx_rows(self._matvec((dJRdp,dJIdp,dMRdp,dMIdp),Vr_g,Vi_g),omega)
+            Pr,Pi=self._cplx_rows(self._matvec((dJRdk,dJIdk,dMRdk,dMIdk),Vr_g,Vi_g),omega)
             if self.exact_k_derivative_jacobian:
                 delta=self._kfd_delta()
                 def _add_shifted(s,c):
                     s.dJdp(kn,c).dMdp(kn,c).dJdp(self.parameter,c).dMdp(self.parameter,c)
-                    s.dJdU(Vr,c).dJdU(Vi,c).dMdU(Vr,c).dMdU(Vi,c)
+                    s.dJdU(Vr_g,c).dJdU(Vi_g,c).dMdU(Vr_g,c).dMdU(Vi_g,c)
                 def _shifted():
                     _,sr,si=self._pairs_assemble(_add_shifted)
                     sr=self.patch_matrices(eigen=True,J=[JR],M=list(sr))[1:]
                     si=self.patch_matrices(eigen=True,J=[JR],M=list(si))[1:]
-                    sP=self._cplx_rows(self._matvec((sr[0],si[0],sr[1],si[1]),Vr,Vi),omega)
-                    sdEdp=self._cplx_rows(self._matvec((sr[2],si[2],sr[3],si[3]),Vr,Vi),omega)
+                    sP=self._cplx_rows(self._matvec((sr[0],si[0],sr[1],si[1]),Vr_g,Vi_g),omega)
+                    sdEdp=self._cplx_rows(self._matvec((sr[2],si[2],sr[3],si[3]),Vr_g,Vi_g),omega)
                     sdEdU=self._cplx_rows(hess([sr[4],sr[5],si[4],si[5],sr[6],sr[7],si[6],si[7]]),omega)
                     return sP,sdEdp,sdEdU
                 sP,sdEdp,sdEdU=self._at_k_offset(delta,_shifted)
@@ -2017,15 +2103,15 @@ class CriticalWavenumberTracker(_NormalModeBifurcationTrackerBase):
                 dkdEdp=(0*dEdp_re,0*dEdp_im)
                 dkdEdU=(0*dEdU_re,0*dEdU_im)
             # Everything below is analytic.
-            Qr,Qi=self._cplx_rows(self._matvec((JR,JI,MR,MI),Wr,Wi),omega)
-            Er,Ei=self._cplx_rows(self._matvec((JR,JI,MR,MI),Vr,Vi),omega)
-            Owr,Owi=self._omega_rows(MR,MI,Vr,Vi)               # dE/domega, and dF/dmu
-            Owr_W,Owi_W=self._omega_rows(MR,MI,Wr,Wi)           # dE/domega with V->W
-            Owr_k,Owi_k=self._omega_rows(dMRdk,dMIdk,Vr,Vi)     # d/dk of dE/domega (analytic)
-            Owr_p,Owi_p=self._omega_rows(dMRdp,dMIdp,Vr,Vi)     # d/dparameter of dE/domega
+            Qr,Qi=self._cplx_rows(self._matvec((JR,JI,MR,MI),Wr_g,Wi_g),omega)
+            Er,Ei=self._cplx_rows(self._matvec((JR,JI,MR,MI),Vr_g,Vi_g),omega)
+            Owr,Owi=self._omega_rows(MR,MI,Vr_g,Vi_g)               # dE/domega, and dF/dmu
+            Owr_W,Owi_W=self._omega_rows(MR,MI,Wr_g,Wi_g)           # dE/domega with V->W
+            Owr_k,Owi_k=self._omega_rows(dMRdk,dMIdk,Vr_g,Vi_g)     # d/dk of dE/domega (analytic)
+            Owr_p,Owi_p=self._omega_rows(dMRdp,dMIdp,Vr_g,Vi_g)     # d/dparameter of dE/domega
             dEdU_W_re,dEdU_W_im=self._cplx_rows(hess(HW),omega)
-            dEdp_W_re,dEdp_W_im=self._cplx_rows(self._matvec((dJRdp,dJIdp,dMRdp,dMIdp),Wr,Wi),omega)
-            P_W_re,P_W_im=self._cplx_rows(self._matvec((dJRdk,dJIdk,dMRdk,dMIdk),Wr,Wi),omega)
+            dEdp_W_re,dEdp_W_im=self._cplx_rows(self._matvec((dJRdp,dJIdp,dMRdp,dMIdp),Wr_g,Wi_g),omega)
+            P_W_re,P_W_im=self._cplx_rows(self._matvec((dJRdk,dJIdk,dMRdk,dMIdk),Wr_g,Wi_g),omega)
             # d/du of dE/domega, i.e. the mass-matrix half of the Hessian combination
             OwU_re,OwU_im=-(HV[5]+HV[6]),HV[4]-HV[7]
             # dE/dV blocks, and their k-derivative, which IS analytic (the primed matrices)
@@ -2033,42 +2119,52 @@ class CriticalWavenumberTracker(_NormalModeBifurcationTrackerBase):
             EVi_re,EVi_im=-JI-omega*MR,JR-omega*MI
             kEVr_re,kEVr_im=dJRdk-omega*dMIdk,dJIdk+omega*dMRdk
             kEVi_re,kEVi_im=-dJIdk-omega*dMRdk,dJRdk-omega*dMIdk
-            Raug=numpy.hstack([R,Er,Ei,Pr+Qr+mu*Owr,Pi+Qi+mu*Owi,
-                               numpy.dot(Vr,self.V0)-self.eigenscale,numpy.dot(Vi,self.V0),
-                               numpy.dot(Wr,self.V0),numpy.dot(Wi,self.V0)])
-            Jaug=scipy.sparse.block_array([
+            Raug=la.stack([V_(R),V_(Er),V_(Ei),V_(Pr+Qr+mu*Owr),V_(Pi+Qi+mu*Owi),
+                           Vr.dot(self.V0_local)-self.eigenscale,Vi.dot(self.V0_local),
+                           Wr.dot(self.V0_local),Wi.dot(self.V0_local)],
+                          groups,base,aug,table)
+            V0r=self.V0_replicated
+            Jaug=la.block([
                 # u                        Vr                   Vi                   Wr        Wi        gamma                            omega                    k                          mu
-                [J,                        None,                None,                None,     None,     col(dRdp),                       None,                    None,                      None],
-                [dEdU_re,                  EVr_re,              EVi_re,              None,     None,     col(dEdp_re),                    col(Owr),                col(Pr),                   None],
-                [dEdU_im,                  EVr_im,              EVi_im,              None,     None,     col(dEdp_im),                    col(Owi),                col(Pi),                   None],
-                [dkdEdU[0]+dEdU_W_re+mu*OwU_re, kEVr_re-mu*MI,  kEVi_re-mu*MR,       EVr_re,   EVi_re,   col(dkdEdp[0]+dEdp_W_re+mu*Owr_p),col(Owr_k+Owr_W),       col(dkP[0]+P_W_re+mu*Owr_k),col(Owr)],
-                [dkdEdU[1]+dEdU_W_im+mu*OwU_im, kEVr_im+mu*MR,  kEVi_im-mu*MI,       EVr_im,   EVi_im,   col(dkdEdp[1]+dEdp_W_im+mu*Owi_p),col(Owi_k+Owi_W),       col(dkP[1]+P_W_im+mu*Owi_k),col(Owi)],
-                [None,row(self.V0),None,None,None,None,None,None,None],
-                [None,None,row(self.V0),None,None,None,None,None,None],
-                [None,None,None,row(self.V0),None,None,None,None,None],
-                [None,None,None,None,row(self.V0),None,None,None,None]]).tocsr()
+                [M_(J),                        None,                None,                None,     None,     col(dRdp),                       None,                    None,                      None],
+                [M_(dEdU_re),                  M_(EVr_re),          M_(EVi_re),          None,     None,     col(dEdp_re),                    col(Owr),                col(Pr),                   None],
+                [M_(dEdU_im),                  M_(EVr_im),          M_(EVi_im),          None,     None,     col(dEdp_im),                    col(Owi),                col(Pi),                   None],
+                [M_(dkdEdU[0]+dEdU_W_re+mu*OwU_re), M_(kEVr_re-mu*MI), M_(kEVi_re-mu*MR), M_(EVr_re), M_(EVi_re), col(dkdEdp[0]+dEdp_W_re+mu*Owr_p),col(Owr_k+Owr_W),       col(dkP[0]+P_W_re+mu*Owr_k),col(Owr)],
+                [M_(dkdEdU[1]+dEdU_W_im+mu*OwU_im), M_(kEVr_im+mu*MR), M_(kEVi_im-mu*MI), M_(EVr_im), M_(EVi_im), col(dkdEdp[1]+dEdp_W_im+mu*Owi_p),col(Owi_k+Owi_W),       col(dkP[1]+P_W_im+mu*Owi_k),col(Owi)],
+                [None,row(V0r),None,None,None,None,None,None,None],
+                [None,None,row(V0r),None,None,None,None,None,None],
+                [None,None,None,row(V0r),None,None,None,None,None],
+                [None,None,None,None,row(V0r),None,None,None,None]],
+                groups,base,aug,table)
             return Raug,Jaug #type:ignore
-
     def actions_after_successful_newton_solve(self):
         prob=self.get_problem()
         if self.has_imag:
-            Vr,Vi,Wr,Wi,p,omega,k,mu=self.get_augmented_dofs().split(startindex=1)
-            self.store_eigenvector({(1j*omega[0]):(numpy.array(Vr)+numpy.array(Vi)*1j)})
+            Vr,Vi,Wr,Wi,p,omega,k,mu=self.split_vectors(startindex=1)
+            # store_eigenvector's contract is a globally replicated vector at full length: every
+            # consumer indexes it by global equation number.
+            self.store_eigenvector({(1j*omega):(Vr.to_global()+Vi.to_global()*1j)})
         else:
-            Vr,Wr,p,k=self.get_augmented_dofs().split(startindex=1)
-            self.store_eigenvector({0.0:numpy.array(Vr)})
+            Vr,Wr,p,k=self.split_vectors(startindex=1)
+            self.store_eigenvector({0.0:numpy.array(Vr.to_global())})
         # store_eigenvector clears the mode bookkeeping; put the wavenumber we just found back, so
         # that get_last_eigenmodes_k()/get_last_eigenmodes_m() still describes the stored
         # eigenvector. The azimuthal one is deliberately NOT cast to an integer here: it is a real
         # unknown of this system, and rounding it would report something that was never solved for.
         if self.azimuthal:
-            prob._last_eigenvalues_m=numpy.array([k[0]])
+            prob._last_eigenvalues_m=numpy.array([k])
         else:
-            prob._last_eigenvalues_k=numpy.array([k[0]])
+            prob._last_eigenvalues_k=numpy.array([k])
 
     def get_critical_mode(self)->float:
-        """The converged mode unknown: the Cartesian wavenumber k or the (real) azimuthal mode m."""
-        return float(self.get_augmented_dofs().split(startindex=1)[-2 if self.has_imag else -1][0])
+        """The converged mode unknown: the Cartesian wavenumber k or the (real) azimuthal mode m.
+
+        Through split_vectors, which hands a scalar group back as a plain float on every rank. The
+        scalars live on rank 0 alone in the augmented layout, so indexing a raw split() block would
+        be an IndexError everywhere else; PythonAugmentationSyncHandler is what makes the value
+        itself agree across the ranks after each Newton update.
+        """
+        return float(self.split_vectors(startindex=1)[-2 if self.has_imag else -1])
 
     def get_critical_wavenumber(self)->float:
         """The critical Cartesian wavenumber k, non-dimensional -- divide by the spatial scaling for
@@ -2088,7 +2184,7 @@ class CriticalWavenumberTracker(_NormalModeBifurcationTrackerBase):
         """Imaginary part of the neutral eigenvalue; zero for a stationary instability."""
         if not self.has_imag:
             return 0.0
-        return float(self.get_augmented_dofs().split(startindex=1)[-3][0])
+        return float(self.split_vectors(startindex=1)[-3])
 
     def get_dlambda_dmode(self)->complex:
         """dlambda/dk (or dlambda/dm) at the critical point. Its real part is zero by construction --

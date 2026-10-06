@@ -53,8 +53,9 @@ from pyoomph.generic.mpi import get_mpi_rank, get_mpi_nproc
 # The continuation parameter's name per case. The Brusselator's is B; the others use lam.
 _PARAM = {"fold": "lam", "pitchfork": "lam", "hopf": "B",
           "eigenbranch_real": "lam", "eigenbranch_complex": "B", "normal_mode": "B",
-          "normal_mode_osc": "B"}
-from pyoomph.generic.bifurcation_tools import (ComplexEigenbranchTracker, FoldTracker,
+          "normal_mode_osc": "B", "critical_wavenumber": "B", "critical_wavenumber_osc": "B"}
+from pyoomph.generic.bifurcation_tools import (ComplexEigenbranchTracker,
+                                                CriticalWavenumberTracker, FoldTracker,
                                                 HopfTracker, NormalModeBifurcationTracker,
                                                 PitchForkTracker, RealEigenbranchTracker)
 
@@ -253,10 +254,14 @@ def main():
     ap.add_argument("--N", type=int, default=8)
     ap.add_argument("--distribute", action="store_true")
     ap.add_argument("--nonlinear-constraint", action="store_true")
+    ap.add_argument("--newton-tol", type=float, default=None)
+    ap.add_argument("--k-fd-step", type=float, default=None,
+                    help="CriticalWavenumberTracker's finite-difference step in the wavenumber")
     ap.add_argument("--cxx", action="store_true", help="use the C++ handler instead, for comparison")
     ap.add_argument("--case", default="fold",
                     choices=["fold", "pitchfork", "hopf", "eigenbranch_real", "eigenbranch_complex",
-                             "normal_mode", "normal_mode_osc"])
+                             "normal_mode", "normal_mode_osc", "critical_wavenumber",
+                             "critical_wavenumber_osc"])
     args, _ = ap.parse_known_args()
 
     payload: dict = {"rank": get_mpi_rank(), "nproc": max(get_mpi_nproc(), 1),
@@ -266,8 +271,11 @@ def main():
             problem = PitchforkProblem(args.N)
         elif args.case in ("hopf", "eigenbranch_complex"):
             problem = HopfProblem(args.N if args.N != 8 else 20)
-        elif args.case == "normal_mode":
+        elif args.case in ("normal_mode", "critical_wavenumber"):
             problem = NormalModeProblem(args.N if args.N != 8 else 12)
+        elif args.case == "critical_wavenumber_osc":
+            problem = NormalModeProblem(args.N if args.N != 8 else 12, A=1.0, d=1.0, offset=0.0,
+                                        advection=0.6)
         elif args.case == "normal_mode_osc":
             # A = 1 and equal diffusion puts the uniform state in the Hopf regime, and the advection
             # makes the normal mode oscillatory, so the tracker takes its has_imag branch.
@@ -277,6 +285,9 @@ def main():
             problem = BratuProblem(args.N)
         with problem as p:
             p.set_output_directory(args.outdir)
+            if args.newton_tol is not None:
+                p.newton_solver_tolerance = args.newton_tol
+                p.max_newton_iterations = 40
             p.initialise()
             p.solve()
             payload["ndof_base"] = int(p.ndof())
@@ -290,7 +301,15 @@ def main():
             # at np=1, 2 and 3 -- +0.25 +- 0.968i first, then the real modes -- and slot 0 is
             # unambiguous. Same lesson as the pitchfork's aspect ratio: do not put the cut where the
             # answer is not well defined.
-            if args.case.startswith("normal_mode"):
+            if args.case.startswith("critical_wavenumber"):
+                # The codim-2 tracker takes BOTH the parameter and the wavenumber as unknowns, so
+                # the guess is seeded off the closed-form critical point in k as well as in B. The
+                # eigensolve is at that offset k, and the tracker then moves k to where the mode is
+                # exactly tangent -- which is the extra equation this family has over
+                # NormalModeBifurcationTracker.
+                p.solve_eigenproblem(4 if args.case.endswith("_osc") else 2,
+                                     normal_mode_k=1.0 if args.case.endswith("_osc") else 0.85 * p.kc)
+            elif args.case.startswith("normal_mode"):
                 # The mode is ~exp(i*k*z) with k fixed here: this tracker finds the parameter at
                 # which THAT mode is neutral, which is what distinguishes it from the codim-2
                 # CriticalWavenumberTracker.
@@ -323,6 +342,15 @@ def main():
                 elif args.case == "hopf":
                     tracker = HopfTracker(p, _PARAM[args.case], eigenvector=guess,
                                           nonlinear_length_constraint=args.nonlinear_constraint)
+                elif args.case.startswith("critical_wavenumber"):
+                    # nonlinear_length_constraint is not offered by this class (its base is
+                    # constructed with nonlinear_length_constraint=False), so the parametrisation is
+                    # ignored here rather than silently accepted.
+                    # No cartesian_k: the tracker takes the wavenumber of the eigensolve above as
+                    # its starting point, which is where the eigenvector it is handed was computed.
+                    _kw = {} if args.k_fd_step is None else {"k_fd_step": args.k_fd_step}
+                    tracker = CriticalWavenumberTracker(p, _PARAM[args.case], eigenvector=guess, **_kw)
+                    payload["k_fd_step"] = float(tracker.k_fd_step)
                 elif args.case.startswith("normal_mode"):
                     tracker = NormalModeBifurcationTracker(p, _PARAM[args.case], eigenvector=guess,
                                                            nonlinear_length_constraint=args.nonlinear_constraint)
@@ -350,6 +378,12 @@ def main():
                     payload["tracked_omega"] = float(lam0.imag)
                 else:
                     payload["critical"] = float(p.lam.value)
+                if args.case.startswith("critical_wavenumber"):
+                    # The second unknown of the codim-2 system, and the one that distinguishes this
+                    # family: the wavenumber at which the neutral curve is tangent.
+                    payload["critical_k"] = float(tracker.get_critical_wavenumber())
+                    payload["critical_omega"] = float(tracker.get_critical_omega())
+                    payload["has_imag"] = bool(tracker.has_imag)
                 # The residual history, so a test can judge the RATE and not only the answer: a stale
                 # rank-0-only scalar still converges, just linearly.
                 # Read AFTER the solve: get_last_residual_convergence() is the history oomph kept for
