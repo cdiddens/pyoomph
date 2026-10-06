@@ -49,7 +49,10 @@ import numpy
 from pyoomph import *
 from pyoomph.expressions import *
 from pyoomph.generic.mpi import get_mpi_rank, get_mpi_nproc
-from pyoomph.generic.bifurcation_tools import FoldTracker, PitchForkTracker
+
+# The continuation parameter's name per case. The Brusselator's is B; the others use lam.
+_PARAM = {"fold": "lam", "pitchfork": "lam", "hopf": "B"}
+from pyoomph.generic.bifurcation_tools import FoldTracker, HopfTracker, PitchForkTracker
 
 
 class BratuEquations(Equations):
@@ -107,6 +110,45 @@ class PitchforkProblem(Problem):
         self.setup_for_stability_analysis(analytic_hessian=True)
 
 
+class BrusselatorEquations(Equations):
+    """The Brusselator, whose uniform state (u,v) = (A, B/A) loses stability at a Hopf: a pair of
+    complex conjugate eigenvalues crosses the axis at B = 1 + A^2 plus a diffusive correction."""
+
+    def __init__(self, A, B):
+        super().__init__()
+        self.A, self.B = A, B
+
+    def define_fields(self):
+        self.define_scalar_field("u", "C2")
+        self.define_scalar_field("v", "C2")
+
+    def define_residuals(self):
+        u, ut = var_and_test("u")
+        v, vt = var_and_test("v")
+        self.add_residual(weak(partial_t(u), ut) + 0.02 * weak(grad(u), grad(ut))
+                          - weak(self.A - (self.B + 1) * u + u ** 2 * v, ut))
+        self.add_residual(weak(partial_t(v), vt) + 0.1 * weak(grad(v), grad(vt))
+                          - weak(self.B * u - u ** 2 * v, vt))
+
+
+class HopfProblem(Problem):
+    """Brusselator on a line with no-flux ends, so the uniform state is an exact solution."""
+
+    def __init__(self, N=20):
+        super().__init__()
+        self.N = N
+
+    def define_problem(self):
+        self += LineMesh(N=self.N, size=1, name="domain")
+        A = 1.0
+        self.lam = self.define_global_parameter(B=2.5)   # named lam here so one code path fits all
+        eqs = BrusselatorEquations(A, self.lam)
+        eqs += InitialCondition(u=A, v=self.lam / A)
+        eqs += IntegralObservables(usqr=var("u") ** 2 + var("v") ** 2)
+        self += eqs @ "domain"
+        self.setup_for_stability_analysis(analytic_hessian=True)
+
+
 class BratuProblem(Problem):
     def __init__(self, N=8):
         super().__init__()
@@ -131,35 +173,54 @@ def main():
     ap.add_argument("--distribute", action="store_true")
     ap.add_argument("--nonlinear-constraint", action="store_true")
     ap.add_argument("--cxx", action="store_true", help="use the C++ handler instead, for comparison")
-    ap.add_argument("--case", default="fold", choices=["fold", "pitchfork"])
+    ap.add_argument("--case", default="fold", choices=["fold", "pitchfork", "hopf"])
     args, _ = ap.parse_known_args()
 
     payload: dict = {"rank": get_mpi_rank(), "nproc": max(get_mpi_nproc(), 1),
                      "route": "cxx" if args.cxx else "python", "case": args.case}
     try:
-        problem = PitchforkProblem(args.N) if args.case == "pitchfork" else BratuProblem(args.N)
+        if args.case == "pitchfork":
+            problem = PitchforkProblem(args.N)
+        elif args.case == "hopf":
+            problem = HopfProblem(args.N if args.N != 8 else 20)
+        else:
+            problem = BratuProblem(args.N)
         with problem as p:
             p.set_output_directory(args.outdir)
             p.initialise()
             p.solve()
             payload["ndof_base"] = int(p.ndof())
 
-            # A guess for the null vector: the least stable eigenvector of the base state.
-            p.solve_eigenproblem(1)
-            payload["eigenvalue_guess"] = complex(p.get_last_eigenvalues()[0]).real
+            # A guess for the null vector: the least stable eigenvector of the base state. A Hopf
+            # needs the complex pair, so more than one.
+            # SIX for the Hopf, not four. At four the request truncated where the returned ORDER
+            # stopped being the same in every regime: np=3 put a different mode in slot 0 and the
+            # tracker converged to a second, equally real Hopf at B = 2.243 instead of 2.000, so the
+            # test was comparing two different bifurcations. At six the spectrum comes back identical
+            # at np=1, 2 and 3 -- +0.25 +- 0.968i first, then the real modes -- and slot 0 is
+            # unambiguous. Same lesson as the pitchfork's aspect ratio: do not put the cut where the
+            # answer is not well defined.
+            p.solve_eigenproblem(6 if args.case == "hopf" else 1)
+            evals = [complex(x) for x in p.get_last_eigenvalues()]
+            guess = 0
+            payload["eigenvalue_guess"] = evals[guess].real
+            payload["omega_guess"] = evals[guess].imag
 
             if args.cxx:
-                p.activate_bifurcation_tracking("lam", args.case)
+                p.activate_bifurcation_tracking(_PARAM[args.case], args.case)
                 p.solve()
                 payload["critical"] = float(p.lam.value)
                 payload["ndof_aug"] = int(p.ndof())
                 p.deactivate_bifurcation_tracking()
             else:
                 if args.case == "pitchfork":
-                    tracker = PitchForkTracker(p, "lam", eigenvector=0,
+                    tracker = PitchForkTracker(p, _PARAM[args.case], eigenvector=guess,
                                                nonlinear_length_constraint=args.nonlinear_constraint)
+                elif args.case == "hopf":
+                    tracker = HopfTracker(p, _PARAM[args.case], eigenvector=guess,
+                                          nonlinear_length_constraint=args.nonlinear_constraint)
                 else:
-                    tracker = FoldTracker(p, "lam", eigenvector=0,
+                    tracker = FoldTracker(p, _PARAM[args.case], eigenvector=guess,
                                           nonlinear_length_constraint=args.nonlinear_constraint)
                 payload["supports_mpi"] = bool(tracker.supports_mpi())
                 p.set_custom_assembler(tracker)

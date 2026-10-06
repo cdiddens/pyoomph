@@ -25,8 +25,14 @@
 #
 # ========================================================================
 
-# The PYTHON trackers of pyoomph/generic/bifurcation_tools.py under MPI: FoldTracker and
-# PitchForkTracker so far, one case per family as they are ported.
+# The PYTHON trackers of pyoomph/generic/bifurcation_tools.py under MPI: FoldTracker,
+# PitchForkTracker and HopfTracker so far, one case per family as they are ported.
+#
+# HopfTracker's LEFT-eigenvector branch is not covered, and is refused under mpirun on purpose: its
+# bordered system needs J^T and M^T as blocks, and transposing a row-distributed matrix is an
+# off-processor exchange that lands on PETSc's own ownership range rather than the base layout
+# block() requires. supports_mpi() returns False for it; the eigensolver route is what MPI uses for
+# the Hopf adjoint anyway.
 #
 # Everything the tracker stands on is tested on its own: the handoff
 # (test_mpi_custom_assembler_handoff), the dof layout (test_mpi_augmentation_layout), the assembly
@@ -132,11 +138,15 @@ def _run(nproc, tmpdir, distribute=False, cxx=False, nonlinear=False, N=8, case=
     return sorted(per_rank, key=lambda r: r["rank"])
 
 
-_GROUPS = {"fold": [False, False, True], "pitchfork": [False, False, True, True]}
-_EXTRA = {"fold": 1, "pitchfork": 2}   # augmented size is 2N + this
+_GROUPS = {"fold": [False, False, True],
+           "pitchfork": [False, False, True, True],
+           "hopf": [False, False, False, True, True]}
+# The augmented size: a fold adds [V | p], a pitchfork [V | p | slack], a Hopf [Vr | Vi | p | omega].
+_AUG = {"fold": lambda n: 2 * n + 1, "pitchfork": lambda n: 2 * n + 2, "hopf": lambda n: 3 * n + 2}
+_CASES = ["fold", "pitchfork", "hopf"]
 
 
-@pytest.mark.parametrize("case", ["fold", "pitchfork"])
+@pytest.mark.parametrize("case", _CASES)
 @pytest.mark.parametrize("nproc,distribute", [(1, False), (2, False), (3, False), (2, True), (3, True)])
 def test_the_python_tracker_finds_the_bifurcation(tmp_path, nproc, distribute, case):
     per_rank = _run(nproc, tmp_path, distribute=distribute, case=case)
@@ -145,7 +155,7 @@ def test_the_python_tracker_finds_the_bifurcation(tmp_path, nproc, distribute, c
         # The group layout the bordered system is laid out from: a fold adds [V | parameter], a
         # pitchfork also a slack unknown for the symmetry constraint.
         assert r["groups"] == _GROUPS[case]
-        assert r["ndof_aug"] == 2 * r["ndof_base"] + _EXTRA[case]
+        assert r["ndof_aug"] == _AUG[case](r["ndof_base"])
         # The augmentation must be gone again afterwards.
         assert r["ndof_after"] == r["ndof_base"]
         # The eigenvector comes back globally replicated at full length, which every consumer of
@@ -157,7 +167,7 @@ def test_the_python_tracker_finds_the_bifurcation(tmp_path, nproc, distribute, c
         assert r["eigfunc_usqr"] == pytest.approx(per_rank[0]["eigfunc_usqr"], rel=1e-12)
 
 
-@pytest.mark.parametrize("case", ["fold", "pitchfork"])
+@pytest.mark.parametrize("case", _CASES)
 @pytest.mark.parametrize("nproc,distribute", [(2, False), (3, False), (2, True), (3, True)])
 def test_mpirun_agrees_with_serial(tmp_path, nproc, distribute, case):
     serial = _run(1, tmp_path / "serial", case=case)[0]
@@ -172,7 +182,7 @@ def test_mpirun_agrees_with_serial(tmp_path, nproc, distribute, case):
     assert got["eigfunc_usqr"] == pytest.approx(serial["eigfunc_usqr"], rel=_OBS_RTOL)
 
 
-@pytest.mark.parametrize("case", ["fold", "pitchfork"])
+@pytest.mark.parametrize("case", _CASES)
 @pytest.mark.parametrize("nproc", [1, 2])
 def test_the_python_route_agrees_with_the_cxx_handler(tmp_path, nproc, case):
     """Two independent implementations of the same augmented system, on the same problem.
@@ -200,7 +210,7 @@ def test_the_nonlinear_length_constraint_also_works_under_mpirun(tmp_path):
     assert serial["critical"] == pytest.approx(plain["critical"], rel=1e-6)
 
 
-@pytest.mark.parametrize("case", ["fold", "pitchfork"])
+@pytest.mark.parametrize("case", _CASES)
 @pytest.mark.parametrize("nproc,distribute", [(1, False), (2, False), (2, True), (3, True)])
 def test_the_newton_converges_quadratically(tmp_path, nproc, distribute, case):
     """The RATE, not just the answer -- which is the only thing that catches a stale scalar.

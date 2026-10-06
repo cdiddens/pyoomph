@@ -1189,15 +1189,37 @@ class HopfTracker(CustomBifurcationTracker):
         self.nonlinear_length_constraint=nonlinear_length_constraint
         self.left_eigenvector=left_eigenvector
     
+    def supports_mpi(self)->bool:
+        # The right-eigenvector branch goes entirely through the backend. The LEFT one does not: its
+        # bordered system contains J^T and M^T as BLOCKS, and transposing a row-distributed matrix is
+        # an off-processor exchange that the scipy backend refuses outright and that PETSc returns on
+        # its own ownership range rather than the base layout block() needs. Asking the multi-assembly
+        # for the transposed products covers the Hessian terms (dJdU(..., transposed=True), already
+        # used) but not the matrices themselves. So that branch stays serial until there is a
+        # distributed transpose that lands on a given layout.
+        #
+        # It is also the branch get_hopf_lyapunov_coefficient's use_hopf_tracker_for_adjoint takes,
+        # which is independently refused under --distribute already (bifurcation_tools.py's
+        # _require_non_distributed), and the eigensolver route is preferred under MPI anyway.
+        return not self.left_eigenvector
+
     def define_augmented_dofs(self, dofs):
         dofs.add_vector(numpy.real(self.eigenvector)*self.eigenscale)
         dofs.add_vector(numpy.imag(self.eigenvector)*self.eigenscale)
         dofs.add_parameter(self.parameter)
         dofs.add_scalar(self.omega)
+
+    def after_layouts_ready(self):
+        # C is the fixed normalisation vector (the real part of the guess), needed on this rank's rows
+        # for the inner products and replicated for its border rows.
+        from .distributed_la import DistVector
+        self.C_local=DistVector.from_global(self.C,self.base_layout)
+        self.C_replicated=self.replicated(self.C)
         
     def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]: # type: ignore[override] # the base's overloads narrow the return by require_jacobian; every implementation here is the general one
-        Vr,Vi,p,omega=self.get_augmented_dofs().split(startindex=1) # Get all the augmented dofs
-        omega=omega[0] # Get the scalar value of the frequency variable (split dofs are all vectors)        
+        la,base,aug,table=self.la,self.base_layout,self.augmented_layout,self.eqn_table
+        groups=self.group_is_scalar
+        Vr,Vi,p,omega=self.split_vectors(1) # Get all the augmented dofs
         assembly=self.start_multiassembly()
         dRdP=None
         dJdP=None
@@ -1210,51 +1232,73 @@ class HopfTracker(CustomBifurcationTracker):
             assert dparameter is None, "dparameter not supported for require_jacobian=True"
             # If we need the augmented Jacobian, we also need dR/dP and dJ_ik/dU_j V_k
             print("Currently at Hopf tracking with omega=",omega)
-            R,J,M,dRdP,dJdP,dMdP,HVr,HVi,dMdUVr,dMdUVi=assembly.R().J().M().dRdp(self.parameter).dJdp(self.parameter).dMdp(self.parameter).dJdU(Vr,transposed=self.left_eigenvector).dJdU(Vi,transposed=self.left_eigenvector).dMdU(Vr,transposed=self.left_eigenvector).dMdU(Vi,transposed=self.left_eigenvector).assemble() # Assemble all quantities, will be given in the order of the requests
+            # The contraction vectors cross into C++ indexed by GLOBAL equation number.
+            Vrg,Vig=Vr.to_global(),Vi.to_global()
+            R,J,M,dRdP,dJdP,dMdP,HVr,HVi,dMdUVr,dMdUVi=assembly.R().J().M().dRdp(self.parameter).dJdp(self.parameter).dMdp(self.parameter).dJdU(Vrg,transposed=self.left_eigenvector).dJdU(Vig,transposed=self.left_eigenvector).dMdU(Vrg,transposed=self.left_eigenvector).dMdU(Vig,transposed=self.left_eigenvector).assemble() # Assemble all quantities, will be given in the order of the requests
         else:
             if dparameter is not None:
                 # This happens during arclength continuation in another parameter
-                dRdp,dJdp,dMdp=assembly.dRdp(dparameter).dJdp(dparameter).dMdp(dparameter).assemble() 
+                dRdp,dJdp,dMdp=assembly.dRdp(dparameter).dJdp(dparameter).dMdp(dparameter).assemble()
                 # leave here with the derivative of the residuals with respect to the other parameter
                 if self.left_eigenvector:
-                    return numpy.hstack([dRdp,-dJdp.transpose()@Vr+omega*dMdp.transpose()@Vi,-dJdp.transpose()@Vi-omega*dMdp.transpose()@Vr,0,0])
-                else:
-                    return numpy.hstack([dRdp,-dJdp@Vr+omega*dMdp@Vi,-dJdp@Vi-omega*dMdp@Vr,0,0])
+                    dJdp,dMdp=dJdp.transpose().tocsr(),dMdp.transpose().tocsr()
+                dJm=la.matrix(dJdp,base,base.n); dMm=la.matrix(dMdp,base,base.n)
+                return la.stack([la.vector(dRdp,base),
+                                 dJm.matvec(Vr)*(-1.0)+dMm.matvec(Vi)*omega,
+                                 dJm.matvec(Vi)*(-1.0)+dMm.matvec(Vr)*(-omega),0.0,0.0],
+                                groups,base,aug,table)
             
             R,J,M=assembly.R().J().M().assemble() # Only residuals and Jacobian are requested and required
         
         nl=self.nonlinear_length_constraint
+        # The left-eigenvector branch assembles the TRANSPOSED pencil. Transposing here is a local
+        # scipy operation only while the layout is not distributed, which is exactly what
+        # supports_mpi() guarantees for that branch.
         if self.left_eigenvector:
-            Raug=numpy.hstack([R,-J.transpose()@Vr+omega*M.transpose()@Vi,-J.transpose()@Vi-omega*M.transpose()@Vr,numpy.dot(Vr,Vr if nl else self.C)-self.eigenscale*(self.eigenscale if nl else 1),numpy.dot(Vi,Vr if nl else self.C)]) 
+            Jm=la.matrix(J.transpose().tocsr(),base,base.n)
+            Mm=la.matrix(M.transpose().tocsr(),base,base.n)
         else:
-            Raug=numpy.hstack([R,-J@Vr+omega*M@Vi,-J@Vi-omega*M@Vr,numpy.dot(Vr,Vr if nl else self.C)-self.eigenscale*(self.eigenscale if nl else 1),numpy.dot(Vi,Vr if nl else self.C)]) 
+            Jm=la.matrix(J,base,base.n)
+            Mm=la.matrix(M,base,base.n)
+        lengthR=Vr.dot(Vr if nl else self.C_local)-self.eigenscale*(self.eigenscale if nl else 1)
+        lengthI=Vi.dot(Vr if nl else self.C_local)
+        Raug=la.stack([la.vector(R,base),
+                       Jm.matvec(Vr)*(-1.0)+Mm.matvec(Vi)*omega,
+                       Jm.matvec(Vi)*(-1.0)+Mm.matvec(Vr)*(-omega),
+                       lengthR,lengthI],groups,base,aug,table)
         if require_jacobian:
             assert dRdP is not None and dJdP is not None and dMdP is not None and HVr is not None and HVi is not None and dMdUVr is not None and dMdUVi is not None
-            col=lambda C:self.as_matrix_column(C)
-            row=lambda R:self.as_matrix_row(R)
             if self.left_eigenvector:
-                #raise NotImplementedError("Left eigenvector not implemented for augmented Jacobian")
-                Jaug=scipy.sparse.block_array(
-                    [[J,None,None,col(dRdP),None],
-                    [-HVr+omega*dMdUVi,-J.transpose(),omega*M.transpose(),col(-dJdP.transpose()@Vr+omega*dMdP.transpose()@Vi),col(M.transpose()@Vi)],
-                    [-HVi-omega*dMdUVr,-omega*M.transpose(),-J.transpose(),col(-dJdP.transpose()@Vi-omega*dMdP.transpose()@Vr),col(-M.transpose()@Vr)],
-                    [None,row(2*Vr if nl else self.C),None,None,None],
-                    [None,row(Vi) if nl else None,row(Vr if nl else self.C),None,None]]).tocsr()
+                dJm=la.matrix(dJdP.transpose().tocsr(),base,base.n)
+                dMm=la.matrix(dMdP.transpose().tocsr(),base,base.n)
             else:
-                # Augmented Jacobian
-                Jaug=scipy.sparse.block_array(
-                    [[J,None,None,col(dRdP),None],
-                    [-HVr+omega*dMdUVi,-J,omega*M,col(-dJdP@Vr+omega*dMdP@Vi),col(M@Vi)],
-                    [-HVi-omega*dMdUVr,-omega*M,-J,col(-dJdP@Vi-omega*dMdP@Vr),col(-M@Vr)],
-                    [None,row(2*Vr if nl else self.C),None,None,None],
-                    [None,row(Vi) if nl else None,row(Vr if nl else self.C),None,None]]).tocsr()            
+                dJm=la.matrix(dJdP,base,base.n)
+                dMm=la.matrix(dMdP,base,base.n)
+            HVrm=la.matrix(HVr,base,base.n); HVim=la.matrix(HVi,base,base.n)
+            dMUrm=la.matrix(dMdUVr,base,base.n); dMUim=la.matrix(dMdUVi,base,base.n)
+            # Both normalisation rows need the whole vector; with the nonlinear constraint they move
+            # with V and so cost a gather per assembly, unlike the fixed C.
+            rowVr=self.replicated(Vr*2.0) if nl else self.C_replicated
+            rowVi=self.replicated(Vi) if nl else None
+            rowVr2=self.replicated(Vr) if nl else self.C_replicated
+            # Augmented Jacobian
+            Jaug=la.block(
+                [[Jm,None,None,la.col(la.vector(dRdP,base)),None],
+                 [HVrm*(-1.0)+dMUim*omega,Jm*(-1.0),Mm*omega,
+                  la.col(dJm.matvec(Vr)*(-1.0)+dMm.matvec(Vi)*omega),la.col(Mm.matvec(Vi))],
+                 [HVim*(-1.0)+dMUrm*(-omega),Mm*(-omega),Jm*(-1.0),
+                  la.col(dJm.matvec(Vi)*(-1.0)+dMm.matvec(Vr)*(-omega)),la.col(Mm.matvec(Vr)*(-1.0))],
+                 [None,la.row(rowVr),None,None,None],
+                 [None,la.row(rowVi) if rowVi is not None else None,la.row(rowVr2),None,None]],
+                groups,base,aug,table)
             return Raug,Jaug #type:ignore
         else:
             return Raug
         
     def actions_after_successful_newton_solve(self)->None:
-        Vr,Vi,p,omega=self.get_augmented_dofs().split(startindex=1)
-        self.store_eigenvector({(1j*omega[0]):(numpy.array(Vr)+numpy.array(Vi)*1j)})        
+        Vr,Vi,p,omega=self.split_vectors(1)
+        # store_eigenvector's contract is a globally replicated vector at full length.
+        self.store_eigenvector({(1j*omega):(Vr.to_global()+Vi.to_global()*1j)})
         
 
 class _NormalModeBifurcationTrackerBase(CustomBifurcationTracker):
