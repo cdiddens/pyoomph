@@ -2729,25 +2729,42 @@ class DeflationAssemblyHandler(AugmentedAssemblyHandler):
     def clear_known_solutions(self):
         self.operator.clear_known_solutions()
 
+    def supports_mpi(self)->bool:
+        # Everything here is row-local: the residual is scaled by a SCALAR (so correct on any
+        # distribution and needing no communication, which is the whole reason deflation can ride on
+        # the ordinary assembly) and the Jacobian is passed through untouched. The only reduction is
+        # inside DeflationOperator, which has been MPI-aware all along.
+        return True
+
     def get_residuals_and_jacobian(self, require_jacobian, dparameter = None):
         if dparameter is not None:
             raise NotImplementedError("dparameter is not implemented for deflation")
+        la,base=self.la,self.base_layout
         assm=self.start_multiassembly()
         M=self.operator.residual_scale()
         if require_jacobian:
             R,J=assm.R().J().assemble()
             # J is deliberately NOT deflated: the deflated Jacobian is a rank-one update of it, and
             # custom_solve_routine() applies that update's effect as a scalar rescale of the step.
-            return numpy.array(R)*M,J
+            #
+            # Returned as backend objects rather than raw arrays so that the row block is DECLARED:
+            # a raw return is read as the whole global system, which it is under a replicated mpirun
+            # but not under --distribute.
+            return la.vector(numpy.array(R)*M,base),la.matrix(J,base,base.n)
         else:
             R,=assm.R().assemble()
-            return numpy.array(R)*M
+            return la.vector(numpy.array(R)*M,base)
 
     def has_custom_solve_routine(self):
         return True
 
-    def custom_solve_routine(self, solve_Jx_b:Callable[[NPFloatArray],NPFloatArray], b:NPFloatArray) -> NPFloatArray:
-        return self.operator.rescale_newton_step(solve_Jx_b(b))
+    def custom_solve_routine(self, solve_Jx_b:Callable[[NPFloatArray],NPFloatArray], b:NPFloatArray,
+                             first_row:int=0, reduce_dot:bool=False) -> NPFloatArray:
+        # The offsets have to be passed on. rescale_newton_step() dots the deflation gradient against
+        # the increment, and under --distribute that is a reduction over a row BLOCK: with the
+        # defaults it would sum the wrong entries on every rank but the first and return a plausible
+        # wrong rescale, exactly what _postprocess_newton_step() threads them to avoid.
+        return self.operator.rescale_newton_step(solve_Jx_b(b),first_row=first_row,reduce_dot=reduce_dot)
 
 
 class NormalFormCalculator:

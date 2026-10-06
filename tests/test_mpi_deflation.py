@@ -217,3 +217,50 @@ def test_deflated_continuation(tmp_path, nproc, distribute):
     for a, b in zip(ref["final"], got["final"]):
         for k in a:
             assert abs(a[k] - b[k]) <= atol, "%s is %r, serial %r" % (k, b[k], a[k])
+
+
+@pytest.mark.parametrize("nproc,distribute", [(2, False), (2, True), (3, True)])
+def test_deflation_assembly_handler(tmp_path, nproc, distribute):
+    """DeflationAssemblyHandler -- the custom_solve_routine route -- under MPI.
+
+    This is the other deflation implementation: a CustomAssemblyBase whose has_custom_solve_routine
+    makes pyoomph hand it the Newton step for rescaling, rather than the operator riding the
+    ordinary assembly that the two tests above exercise.
+
+    The assertion that earns its keep is the RESIDUAL HISTORY, not the landing point. The handler
+    rescales the step by a scalar, and a scalar step scaling does not move the deflated residual's
+    zero set -- so dropping the reduction offsets under --distribute, which makes every rank but the
+    first reduce over the wrong rows, still converges to the same branch. Measured: the landing
+    point moves by 1e-10 (usqr 2.4396933206 -> 2.4396933210), which no useful tolerance separates
+    from a MUMPS ordering difference. The path, in contrast, is unmistakable: the second residual is
+    1.10e-01 with the offsets and 3.23e+00 without, peaking at 2.6e+01, over 12 steps instead of 14.
+    So compare the history, and only loosely the end point.
+    """
+    ref = _serial_reference(tmp_path, case="assembly_handler", size=6)
+    per_rank = _run(nproc, tmp_path, distribute, case="assembly_handler", size=6)
+    assert len(per_rank) == nproc, "reported from %d of %d ranks" % (len(per_rank), nproc)
+    got = per_rank[0]
+    assert got["distributed"] is distribute
+    for r in per_rank[1:]:
+        assert r["found"] == got["found"], \
+            "rank %d reports a different solution from rank 0" % r["rank"]
+    # The handler must have moved OFF the trivial branch it was given as the known solution; a
+    # deflated solve that merely returns where it started would satisfy every tolerance below.
+    assert abs(got["found"]["usqr"] - got["base"]["usqr"]) > 0.1, \
+        "the deflated solve stayed on the known solution (usqr %r vs %r)" % (
+            got["found"]["usqr"], got["base"]["usqr"])
+    assert len(got["newton_residuals"]) == len(ref["newton_residuals"]), \
+        "converged in %d Newton steps, serial took %d: residuals %r vs serial %r" % (
+            len(got["newton_residuals"]), len(ref["newton_residuals"]),
+            got["newton_residuals"], ref["newton_residuals"])
+    # Per-step residuals are compared in RELATIVE terms and generously: they span 2e-1 down to 1e-11,
+    # and the last steps are where a different MUMPS ordering shows most. A factor of 2 anywhere is
+    # already far inside the factor of 30 that a wrong offset produces at step 2.
+    for i, (a, b) in enumerate(zip(ref["newton_residuals"], got["newton_residuals"])):
+        assert b <= 2.0 * max(a, 1e-9), \
+            "Newton residual %d is %.3e, serial %.3e -- the step rescale took a different path" % (
+                i, b, a)
+    atol = _REPLICATED_ATOL if not distribute else _OBS_ATOL
+    for k in ref["found"]:
+        assert abs(ref["found"][k] - got["found"][k]) <= atol, \
+            "%s is %r, serial %r" % (k, got["found"][k], ref["found"][k])

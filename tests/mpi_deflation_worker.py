@@ -180,7 +180,67 @@ def deflated_continuation_case(N=6, outdir=None):
         }
 
 
-_CASES = {"solve": deflated_solve_case, "continuation": deflated_continuation_case}
+def assembly_handler_case(N=6, outdir=None):
+    """DeflationAssemblyHandler -- the shell that goes through the CUSTOM-ASSEMBLER pipeline.
+
+    Distinct from the two cases above, which use set_deflation_operator and ride the ordinary
+    assembly. This one installs a CustomAssemblyBase, so it exercises
+    custom_solve_routine(): the handler is handed the solve as a callable and rescales the increment
+    by the deflation factor itself.
+
+    That hook is the reason this case exists. rescale_newton_step() dots the deflation gradient
+    against the increment, which under --distribute is a reduction over a row BLOCK, and the hook
+    used to call it with the default offsets -- summing the wrong entries on every rank but the first
+    and returning a plausible wrong rescale. Nothing reached it before: the handler was refused under
+    mpirun outright, and the other two cases go through _postprocess_newton_step, which threads the
+    offsets correctly. So the landing point below is the only check on that path.
+    """
+    from pyoomph.generic.bifurcation_tools import DeflationAssemblyHandler
+    prob = PitchforkProblem(N=N, lam0=25.0)
+    with prob as p:
+        if outdir is not None:
+            p.set_output_directory(outdir)
+        p.quiet()
+        p.set_linear_solver("petsc_mumps")
+        p.set_eigensolver("slepc")
+        p.initialise()
+        p.solve()                       # the trivial branch u=0
+        base = _observables(p)
+        # Perturb along the UNSTABLE eigenvector, which is what the operator route's
+        # use_eigenperturbation does. A uniform perturbation is not in that mode and the deflated
+        # Newton simply diverges from it -- measured, in every regime including serial.
+        p.solve_eigenproblem(1)
+        evec = numpy.real(numpy.asarray(p.get_last_eigenvectors()[0]))
+        evec = evec / max(float(numpy.linalg.norm(evec)), 1e-300)
+        h = DeflationAssemblyHandler(alpha=0.1, p=2)
+        p.set_custom_assembler(h)
+        h.add_known_solution(p.get_current_dofs()[0])
+        # A deflated Newton from the trivial branch is a harder solve than an ordinary one -- the
+        # residual is scaled by a factor that blows up near the known solution -- so it gets more
+        # iterations than the default ten.
+        p.max_newton_iterations = 40
+        # 0.2 lands on the non-trivial branch; 0.9 and 2.0 both diverge from here, measured.
+        p.perturb_dofs(0.2 * evec)
+        p.solve()
+        found = _observables(p)
+        # The Newton residual history, not only the landing point. custom_solve_routine rescales
+        # the step by a scalar, so getting its reduction offsets wrong changes the PATH and not the
+        # root -- the deflated residual's zero set does not depend on a step scaling. Measured: the
+        # landing point moves by ~1e-10 when the offsets are dropped, which no useful tolerance
+        # catches. The per-step residuals are where a wrong scaling is actually visible.
+        history = [float(x) for x in p.get_last_residual_convergence()]
+        p.set_custom_assembler(None)
+        return {
+            "ndof": int(p.ndof()),
+            "distributed": bool(p.is_distributed()),
+            "base": base,
+            "found": found,
+            "newton_residuals": history,
+        }
+
+
+_CASES = {"solve": deflated_solve_case, "continuation": deflated_continuation_case,
+          "assembly_handler": assembly_handler_case}
 
 
 def main():

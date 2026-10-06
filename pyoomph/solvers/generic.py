@@ -286,7 +286,9 @@ class GenericLinearSystemSolver:
 		if self._custom_solve_routine_active():
 			ca=self.problem._custom_assembler #type:ignore
 			assert ca is not None
-			return ca.custom_solve_routine(solve_fn,b)
+			# first_row/reduce_dot go THROUGH the hook: an implementation that reduces over the
+			# increment needs them, and dropping them here is a wrong answer rather than an error.
+			return ca.custom_solve_routine(solve_fn,b,first_row=first_row,reduce_dot=reduce_dot)
 		return self._postprocess_newton_step(solve_fn(b),first_row=first_row,reduce_dot=reduce_dot)
 
 	def _use_symmetric_factorisation_now(self)->bool:

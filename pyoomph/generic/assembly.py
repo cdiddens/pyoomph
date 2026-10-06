@@ -74,9 +74,17 @@ class CustomAssemblyBase:
         # You can override the default solve routine for J*dU=R
         return False
     
-    def custom_solve_routine(self, solve_Jx_b:Callable[[NPFloatArray],NPFloatArray], b:NPFloatArray) -> NPFloatArray:
-        # You can override the default solve routine for J*dU=R
-        # This is only called if has_custom_solve_routine() returns True
+    def custom_solve_routine(self, solve_Jx_b:Callable[[NPFloatArray],NPFloatArray], b:NPFloatArray,
+                             first_row:int=0, reduce_dot:bool=False) -> NPFloatArray:
+        """Drive the solve of J*dU = R yourself. Only called if has_custom_solve_routine() is True.
+
+        ``first_row``/``reduce_dot`` describe WHICH ROWS ``b`` is, and come from the caller: the
+        solver's distributed entry point passes its block offset and reduce_dot=True, a serial one
+        the defaults. An implementation that reduces -- an inner product over the increment, say --
+        must thread them through, because the offsets decide which entries it is summing. They
+        cannot be inferred from len(b): on a small system rank 0 may own every row and rank 1 none,
+        so a decision taken from the local length sends the ranks into different collectives.
+        """
         raise NotImplementedError("Custom solve routine not implemented")
 
     def invalidate_cache(self)->None:
