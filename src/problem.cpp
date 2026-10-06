@@ -3406,6 +3406,15 @@ namespace pyoomph
 			// The old unconditional build(..., false) here was wrong whenever the base WAS distributed.
 			DofAugmentations *aug = this->active_augmentation;
 			this->active_augmentation = NULL;
+			// reset_assembly_handler_to_default() DELETES the current handler when it is not the
+			// default one (oomph's problem.cc), so this must not delete it as well -- that was a double
+			// free, and it surfaced as a SEGV after an otherwise perfectly converged solve. Forget the
+			// pointer, do not free it.
+			if (this->assembly_handler_pt() == this->python_augmentation_sync_handler)
+			{
+				this->reset_assembly_handler_to_default();
+				this->python_augmentation_sync_handler = NULL;
+			}
 			aug->release_distribution();
 		}
 		else
@@ -8453,6 +8462,38 @@ namespace pyoomph
 	// pointers to the augmentation's own storage, or to a global parameter's value()), remembers the
 	// original (unaugmented) dof count in n_unaugmented_dofs, finalizes aug's split_offsets so aug.split()
 	// can later decompose the augmented dof vector, and rebuilds the dof distribution to the new size.
+	// Hooks AssemblyHandler::synchronise(), which oomph calls at the end of
+	// Problem::synchronise_all_dofs -- i.e. after every Newton update -- and does nothing else: every
+	// other method is the base class's, so the assembly behaves exactly as with the default handler.
+	//
+	// It exists because of where the augmented SCALARS live. Under --distribute
+	// AugmentedDofDistributionHelper puts each scalar unknown (a tracker's parameter, Omega, Sigma) on
+	// rank 0 alone, so a Newton update writes the new value into rank 0's Dof_pt and no other rank ever
+	// learns it. The C++ trackers of src/bifurcation.cpp handle this by overriding synchronise() on
+	// their own handler; the Python DofAugmentations route leaves the DEFAULT handler installed and so
+	// had nothing to override, which is why it is this and not a one-line call somewhere.
+	//
+	// The symptom was not a crash. Every rank kept its own value of the bifurcation parameter, so each
+	// assembled a slightly different augmented system, and the Newton converged LINEARLY -- a factor of
+	// about three per step, 6.7e-5 to 2.3e-5 to 7.7e-6 -- where serial and a replicated mpirun converge
+	// quadratically in four steps. Replicated is unaffected because the scalar is pushed on every rank
+	// there and each updates its own copy identically.
+	//
+	// synchronise_all_dofs() is not virtual in oomph, so overriding it was not an option; this is the
+	// hook oomph itself offers, and using it keeps the vendored copy untouched.
+	class PythonAugmentationSyncHandler : public oomph::AssemblyHandler
+	{
+	public:
+		PythonAugmentationSyncHandler(DofAugmentations *aug) : Augmentation(aug) {}
+		void synchronise() override
+		{
+			if (Augmentation) Augmentation->synchronise_scalars();
+		}
+
+	private:
+		DofAugmentations *Augmentation; // not owned; the problem clears this handler first
+	};
+
 	// Only one augmentation may be active at a time (see reset_augmented_dof_vector_to_nonaugmented()).
 	void Problem::add_augmented_dofs(DofAugmentations &aug)
 	{
@@ -8521,6 +8562,18 @@ namespace pyoomph
 		aug.split_offsets.push_back(this->GetDofPtr().size());
 		aug.finalized=true;
 		this->active_augmentation=&aug;
+		// Only needed when the scalars are rank-0-only, i.e. when distributed; installed
+		// unconditionally anyway so that the handler in place does not depend on the regime (the
+		// structure-id key includes its type name, and a key that changed with nproc would be worse
+		// than a no-op handler).
+		// Not deleted here either: if one is somehow still installed, reset_assembly_handler_to_default()
+		// owns it (see the teardown), and if it is not installed it has already been freed.
+		if (this->python_augmentation_sync_handler && this->assembly_handler_pt() == this->python_augmentation_sync_handler)
+		{
+			this->reset_assembly_handler_to_default();
+		}
+		this->python_augmentation_sync_handler = new PythonAugmentationSyncHandler(&aug);
+		this->assembly_handler_pt() = this->python_augmentation_sync_handler;
 	}
 
 
@@ -9366,6 +9419,25 @@ namespace pyoomph
 			}
 		}
 		return res;
+	}
+
+	void DofAugmentations::collect_scalar_pointers(std::vector<double *> &out)
+	{
+		out.clear();
+		unsigned sindex = 0, pindex = 0;
+		for (unsigned ti = 0; ti < types.size(); ti++)
+		{
+			if (types[ti] == 1) out.push_back(&(augmented_scalars[sindex++]));
+			else if (types[ti] == 2) out.push_back(&this->problem->get_global_parameter(augmented_parameters[pindex++])->value());
+		}
+	}
+
+	void DofAugmentations::synchronise_scalars()
+	{
+		if (!helper || !helper->distributed()) return;
+		std::vector<double *> scalars;
+		collect_scalar_pointers(scalars);
+		helper->synchronise_scalar_pointers(scalars);
 	}
 
 	// Puts the base dof distribution back and drops the helper. Called from

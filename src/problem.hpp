@@ -262,6 +262,11 @@ namespace pyoomph
       std::vector<std::vector<double>> split(unsigned startindex,int endindex); // Splits the augmented part of the dof vector back into the individually registered pieces
       AugmentedDofDistributionHelper *dof_distribution_helper() { return helper; }
       void release_distribution(); // Restores the base dof distribution and drops the helper
+      // Every registered scalar unknown and augmented global parameter, by address. Under
+      // --distribute these live on rank 0 ALONE, so after a Newton update only rank 0 has the new
+      // value and the others must be told; see synchronise_scalars().
+      void collect_scalar_pointers(std::vector<double*> &out);
+      void synchronise_scalars(); // Broadcast those from rank 0. No-op unless distributed.
 
   };
 
@@ -1587,6 +1592,10 @@ namespace pyoomph
     // The DofAugmentations whose dofs are currently in Dof_pt, or NULL. Not owned -- the Python object
     // owns itself; this is only how the problem finds the distribution it has to put back.
     DofAugmentations *active_augmentation = NULL;
+    // Installed while a Python augmentation is active, for the sole purpose of hooking
+    // AssemblyHandler::synchronise() -- which oomph calls at the end of Problem::synchronise_all_dofs,
+    // i.e. after every Newton update. Owned. See the class comment in problem.cpp.
+    oomph::AssemblyHandler *python_augmentation_sync_handler = NULL;
     // The dof bookkeeping of whatever augmented system is installed: a C++ tracker's (through its
     // AugmentedSparsityProvider) or a Python DofAugmentations'. NULL when the problem is unaugmented.
     // BaseDofDistributionScope must ask HERE rather than only the assembly handler: a Python augmentation

@@ -124,6 +124,12 @@ def main():
                 payload["aug_layout"] = [L.n, L.first_row, L.nrow_local, L.distributed]
                 p.solve()
                 payload["critical"] = float(p.lam.value)
+                # The residual history, so a test can judge the RATE and not only the answer: a stale
+                # rank-0-only scalar still converges, just linearly.
+                # Read AFTER the solve: get_last_residual_convergence() is the history oomph kept for
+                # it, complete including the final step, which a per-step hook misses because oomph
+                # leaves the loop as soon as it has converged.
+                payload["newton_residuals"] = [float(x) for x in p.get_last_residual_convergence()]
                 p.set_custom_assembler(None)
 
             # Where the tracked eigenvector landed on the mesh. Numbering-independent, unlike the

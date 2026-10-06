@@ -37,12 +37,15 @@
 # other. Two independent implementations of the same augmented system agreeing is a stronger
 # statement than either agreeing with itself across rank counts.
 #
-# --distribute is REFUSED, and that refusal is asserted here rather than left untested. The augmented
-# system the tracker builds on a partitioned mesh matches the serial one to 1e-13 in every
-# permutation invariant (Frobenius norm, trace, nnz, sorted diagonal and row sums, residual norm),
-# but the Newton solve converges only linearly -- 6.7e-5 -> 2.3e-5 -> 7.7e-6 -- and stops at the
-# iteration cap. The fault is therefore downstream of the assembly and is not yet found, so
-# FoldTracker.supports_distributed() returns False and says so by name.
+# --distribute works too, and the reason it did not at first is worth knowing: under --distribute the
+# augmented SCALARS (here the bifurcation parameter) live on rank 0 ALONE, so a Newton update wrote
+# the new value into rank 0's Dof_pt and no other rank learnt it. Every rank then assembled a
+# slightly different augmented system and the Newton converged LINEARLY -- a factor of about three
+# per step -- rather than failing. The C++ trackers broadcast their scalars from
+# AssemblyHandler::synchronise(); the Python route had no handler to override, and now installs a
+# sync-only one. test_the_newton_converges_quadratically below is what would catch a regression,
+# because the critical parameter alone does not: with a high enough iteration cap the broken version
+# reached the same answer eventually.
 
 import json
 import os
@@ -128,9 +131,9 @@ def _run(nproc, tmpdir, distribute=False, cxx=False, nonlinear=False, N=8,
     return sorted(per_rank, key=lambda r: r["rank"])
 
 
-@pytest.mark.parametrize("nproc", [1, 2, 3])
-def test_the_python_fold_tracker_finds_the_fold(tmp_path, nproc):
-    per_rank = _run(nproc, tmp_path)
+@pytest.mark.parametrize("nproc,distribute", [(1, False), (2, False), (3, False), (2, True), (3, True)])
+def test_the_python_fold_tracker_finds_the_fold(tmp_path, nproc, distribute):
+    per_rank = _run(nproc, tmp_path, distribute=distribute)
     for r in per_rank:
         assert r["supports_mpi"] is True
         # [base | V | parameter]: the group layout the bordered system is laid out from.
@@ -147,12 +150,13 @@ def test_the_python_fold_tracker_finds_the_fold(tmp_path, nproc):
         assert r["eigfunc_usqr"] == pytest.approx(per_rank[0]["eigfunc_usqr"], rel=1e-12)
 
 
-@pytest.mark.parametrize("nproc", [2, 3])
-def test_mpirun_agrees_with_serial(tmp_path, nproc):
+@pytest.mark.parametrize("nproc,distribute", [(2, False), (3, False), (2, True), (3, True)])
+def test_mpirun_agrees_with_serial(tmp_path, nproc, distribute):
     serial = _run(1, tmp_path / "serial")[0]
-    got = _run(nproc, tmp_path / ("np%d" % nproc))[0]
+    got = _run(nproc, tmp_path / ("np%d%s" % (nproc, "d" if distribute else "")), distribute=distribute)[0]
     assert got["critical"] == pytest.approx(serial["critical"], rel=_PARAM_RTOL), (
-        "np=%d found the fold at %.17g, serial at %.17g" % (nproc, got["critical"], serial["critical"]))
+        "np=%d%s found the fold at %.17g, serial at %.17g"
+        % (nproc, " --distribute" if distribute else "", got["critical"], serial["critical"]))
     # The mesh integral of the squared eigenfunction: the one assertion that constrains WHERE on the
     # mesh the eigenvector's entries ended up, which a wrong translation would move while leaving the
     # critical parameter alone.
@@ -186,15 +190,28 @@ def test_the_nonlinear_length_constraint_also_works_under_mpirun(tmp_path):
     assert serial["critical"] == pytest.approx(plain["critical"], rel=1e-6)
 
 
-def test_distribute_is_refused_by_name(tmp_path):
-    """Not an oversight: the assembly is verified there but the solve does not converge yet.
+@pytest.mark.parametrize("nproc,distribute", [(1, False), (2, False), (2, True), (3, True)])
+def test_the_newton_converges_quadratically(tmp_path, nproc, distribute):
+    """The RATE, not just the answer -- which is the only thing that catches a stale scalar.
 
-    Asserted so that lifting supports_distributed() has to come with this test changing, rather than
-    the refusal quietly outliving the problem it describes.
+    When the augmented scalars were not broadcast from rank 0, every rank held its own value of the
+    bifurcation parameter, assembled a slightly different system, and the Newton converged linearly:
+    a factor of about three per step instead of squaring the residual. It still reached the right
+    answer given enough iterations, so a test on the critical parameter alone passed. Serial,
+    replicated and --distribute all take four steps -- 0.155, 8.1e-3, 9.1e-5, 6.3e-9 -- and a
+    quadratic rate is what this asserts.
     """
-    per_rank = _run(2, tmp_path, distribute=True, expect_failure=True)
-    assert all(not r["ok"] for r in per_rank)
-    for r in per_rank:
-        msg = str(r.get("error", ""))
-        assert "FoldTracker" in msg and "--distribute" in msg, msg
-        assert "converge" in msg, "the refusal must say what is wrong, not just that it is: " + msg
+    steps = _run(nproc, tmp_path, distribute=distribute)[0]["newton_residuals"]
+    assert 3 <= len(steps) <= 7, (
+        "the tracked solve took %d Newton steps; serial, replicated and --distribute all take four: %s"
+        % (len(steps), steps))
+    assert steps[-1] < 1e-7, "the solve did not actually converge: %s" % steps
+    # Each step should roughly square the previous residual. The first entry is the state the solve
+    # started from, so the rate is judged from the second onwards, and the slack is generous: the
+    # point is to separate squaring from a constant factor, not to pin the constant.
+    for k in range(2, len(steps)):
+        prev, cur = steps[k - 1], steps[k]
+        assert cur < prev * 0.1, (
+            "step %d only reduced the residual from %.3e to %.3e (factor %.2f); a constant factor "
+            "like that is the signature of a state the ranks disagree about: %s"
+            % (k, prev, cur, cur / prev, steps))

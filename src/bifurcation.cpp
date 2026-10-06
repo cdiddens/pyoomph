@@ -413,8 +413,13 @@ namespace pyoomph
 
   void AugmentedDofDistributionHelper::synchronise_scalars(std::initializer_list<double *> scalars) const
   {
+    synchronise_scalar_pointers(std::vector<double *>(scalars.begin(), scalars.end()));
+  }
+
+  void AugmentedDofDistributionHelper::synchronise_scalar_pointers(const std::vector<double *> &scalars) const
+  {
 #ifdef OOMPH_HAS_MPI
-    if (!Distributed) return;
+    if (!Distributed || scalars.empty()) return;
     std::vector<double> buf;
     buf.reserve(scalars.size());
     for (double *s : scalars) buf.push_back(*s);

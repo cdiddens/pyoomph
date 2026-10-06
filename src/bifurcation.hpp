@@ -211,6 +211,9 @@ namespace pyoomph
     // distributed); the handlers call this from their synchronise() override after each Newton
     // update, since only rank 0's Dof_pt holds these entries.
     void synchronise_scalars(std::initializer_list<double *> scalars) const;
+    // Same, for a list built at run time -- the Python DofAugmentations does not know its scalars
+    // until they have been registered.
+    void synchronise_scalar_pointers(const std::vector<double *> &scalars) const;
 
     // Destructor path: resize the dof vector back to the base length and restore the base
     // distribution (in-place rebuild when replicated, pointer swap-back when distributed).

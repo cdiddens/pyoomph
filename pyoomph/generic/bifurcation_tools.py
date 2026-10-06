@@ -1005,16 +1005,6 @@ class FoldTracker(CustomBifurcationTracker):
     def supports_mpi(self)->bool:
         return True
 
-    def supports_distributed(self)->bool:
-        # Not yet. The augmented system this builds under --distribute has been checked against the
-        # serial one and matches it to 1e-13 in every permutation invariant (Frobenius norm, trace,
-        # nnz, sorted diagonal and row sums, residual norm), but the Newton solve on a partitioned
-        # mesh converges only linearly -- 6.7e-5 -> 2.3e-5 -> 7.7e-6 -- and stops at the iteration
-        # cap, where replicated mpirun converges to the serial answer to 16 digits. So the remaining
-        # fault is downstream of the assembly, and this stays refused by name until it is found
-        # rather than shipped as a tracker that quietly fails to converge.
-        return False
-
     def define_augmented_dofs(self,dofs:DofAugmentationSpecifications):
         # dofs will be grouped in (U,V,p)
         dofs.add_vector(self.V0*self.eigenscale)
