@@ -662,6 +662,41 @@ class MultiAssembleRequest:
         # mpirun each rank gets its own rows, with GLOBAL column indices -- the layout oomph's
         # distributed assembly produces and the one a distributed solver wants.
         n,vectors,csrdatas,return_indices,nrow_local,first_row=self.problem._assemble_multiassembly(self._what,self._contributions,self._parameters,self._hessian_vectors,self._hessian_vector_indices)
+        # The blocks have to come out on the BASE DOF layout, because that is what the augmented
+        # layout -- and so the bordered system a tracker builds -- is constructed from. Under
+        # --distribute the assembly already targets it. Under a replicated mpirun it cannot (a
+        # non-distributed distribution names rank 0 as the owner of every row, see
+        # sparse_assemble_row_or_column_compressed_base_problem), so it assembles a uniform split and
+        # the pieces are replicated here. That costs one allgather per quantity and is the right trade
+        # in that regime: the mesh is replicated anyway, and the base dof layout really is "every rank
+        # owns every row", so a tracker there wants the whole global system.
+        base_n,base_nrow_local,base_first_row,base_distributed=self.problem._get_base_dof_distribution_info()
+        replicate=(not base_distributed) and nrow_local!=n
+        if replicate:
+            from .mpi import mpi_allgather_square_csr,mpi_allgather_vector
+            nmat=len(csrdatas)//2
+            nvec=len(vectors)-nmat
+            gathered_vectors=[]
+            for i in range(nvec):
+                gathered_vectors.append(mpi_allgather_vector(n,first_row,nrow_local,vectors[i],
+                                                             context="replicating a multi-assembly vector"))
+            gathered_csr=[]
+            for i in range(nmat):
+                mat=scipy.sparse.csr_matrix((vectors[nvec+i],csrdatas[2*i+1],csrdatas[2*i]),shape=(nrow_local,n))
+                full=mpi_allgather_square_csr(n,first_row,nrow_local,mat,
+                                              context="replicating a multi-assembly matrix").tocsr()
+                gathered_csr.append(full)
+            # Repack into the shape the unpacking below expects.
+            vectors=gathered_vectors+[m.data for m in gathered_csr]
+            csrdatas=[]
+            for m in gathered_csr:
+                csrdatas.extend([m.indptr,m.indices])
+            nrow_local,first_row=n,0
+        elif base_distributed and (nrow_local!=base_nrow_local or first_row!=base_first_row):
+            raise RuntimeError("the multi-assembly returned rows [%d,%d) but the base dof layout is "
+                               "[%d,%d); they must agree, because the augmented layout is built from "
+                               "the latter"%(first_row,first_row+nrow_local,base_first_row,
+                                             base_first_row+base_nrow_local))
         self.n=n
         self.nrow_local=nrow_local
         self.first_row=first_row

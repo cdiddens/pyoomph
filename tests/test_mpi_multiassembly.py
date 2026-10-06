@@ -128,37 +128,63 @@ def _run(nproc, tmpdir, distribute=False, N=4, timeout=900):
                        scipy.sparse.csr_matrix((z["data"], z["indices"], z["indptr"]), shape=(nrow_local, n)),
                        z["R"]))
     blocks.sort(key=lambda b: b[0])
-    J = scipy.sparse.vstack([b[1] for b in blocks], format="csr").tocsr()
-    R = numpy.concatenate([b[2] for b in blocks])
+    # The blocks come out on the BASE DOF layout. Under --distribute that is a genuine partition and
+    # they concatenate; under a replicated mpirun the base layout is non-distributed, so every rank
+    # returns the WHOLE system and concatenating would repeat it nproc times.
+    replicated = all(b[1].shape[0] == b[1].shape[1] for b in blocks) and len(blocks) > 1 \
+        and all(b[0] == 0 for b in blocks)
+    if replicated:
+        J, R = blocks[0][1].tocsr(), blocks[0][2]
+    else:
+        J = scipy.sparse.vstack([b[1] for b in blocks], format="csr").tocsr()
+        R = numpy.concatenate([b[2] for b in blocks])
     return sorted(per_rank, key=lambda r: r["rank"]), J, R
 
 
-def test_the_row_blocks_tile_and_the_matrices_are_canonical(tmp_path):
-    per_rank, J, _R = _run(2, tmp_path)
-    n = per_rank[0]["n"]
-    expect = 0
-    for r in per_rank:
-        assert r["n"] == n
-        assert r["first_row"] == expect, "the row blocks do not tile [0,%d): %s" % (
-            n, [(x["first_row"], x["nrow_local"]) for x in per_rank])
-        expect += r["nrow_local"]
-        assert r["nrow_local"] < n, "rank %d got the whole system, so this proves nothing" % r["rank"]
-        # Every returned matrix is a (nrow_local x n) block with global column indices.
-        for shape in r["shapes"]:
-            assert shape == [r["nrow_local"], n]
-        for length in r["vec_lengths"]:
-            assert length == r["nrow_local"]
-        # oomph's distributed assembly returns each row in the order it met the entries; an unsorted
-        # CSR is wrong to hand onward (PETSc's createAIJ wants ascending columns, and petsc.py's
-        # reuse digest hashes the index arrays), so MultiAssembleRequest.assemble() sorts.
-        assert r["J_sorted"], "rank %d returned an unsorted CSR" % r["rank"]
-    assert expect == n
-    assert J.has_sorted_indices
+def test_the_blocks_come_out_on_the_base_dof_layout(tmp_path):
+    """Whatever the regime, the blocks must be on the BASE DOF layout, not some other split.
+
+    That is the contract the rest of the machinery rests on: the augmented dof layout is built from
+    the base one, so a tracker's bordered system can only line up if its base blocks do. An earlier
+    version targeted a fresh uniform split of the base equations instead -- 24/25 against the dof
+    layout's 21/28 at np=2 -- which is the same "two partitions of the same rows" mistake as B2.
+    """
+    for distribute in (False, True):
+        per_rank, J, _R = _run(2, tmp_path / ("d" if distribute else "p"), distribute=distribute)
+        n = per_rank[0]["n"]
+        expect = 0
+        for r in per_rank:
+            assert r["n"] == n
+            # Every returned matrix is a (nrow_local x n) block with global column indices.
+            for shape in r["shapes"]:
+                assert shape == [r["nrow_local"], n]
+            for length in r["vec_lengths"]:
+                assert length == r["nrow_local"]
+            # oomph's distributed assembly returns each row in the order it met the entries; an
+            # unsorted CSR is wrong to hand onward (PETSc's createAIJ wants ascending columns, and
+            # petsc.py's reuse digest hashes the index arrays), so assemble() sorts.
+            assert r["J_sorted"], "rank %d returned an unsorted CSR" % r["rank"]
+            if distribute:
+                assert r["first_row"] == expect, "the row blocks do not tile [0,%d): %s" % (
+                    n, [(x["first_row"], x["nrow_local"]) for x in per_rank])
+                expect += r["nrow_local"]
+                assert r["nrow_local"] < n, "rank %d got the whole system under --distribute" % r["rank"]
+            else:
+                # Replicated: the base dof layout is non-distributed, so each rank holds all of it.
+                assert (r["first_row"], r["nrow_local"]) == (0, n)
+        if distribute:
+            assert expect == n
+        assert J.has_sorted_indices
 
 
 @pytest.mark.parametrize("nproc", [2, 3, 4])
 def test_replicated_assembly_reproduces_the_serial_system(tmp_path, nproc):
-    """Plain mpirun keeps serial's numbering, so compare the whole CSR entry by entry."""
+    """Plain mpirun keeps serial's numbering, so compare the whole CSR entry by entry.
+
+    EVERY rank holds the whole system here -- the base dof layout is non-distributed, and the
+    assembly is replicated to match it -- so this compares each rank's own copy against serial, which
+    is a stronger statement than the blocks merely concatenating to it.
+    """
     _s, Js, Rs = _run(1, tmp_path / "serial")
     _p, J, R = _run(nproc, tmp_path / ("np%d" % nproc))
 

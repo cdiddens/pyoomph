@@ -704,9 +704,34 @@ class LinearAlgebraBackend:
         if self.problem is None:
             raise RuntimeError("this backend has no problem, so it has no linear solver to solve with")
         la = self.problem.get_la_solver()
-        out = la.solve_python_built_distributed(A.layout.n, A.layout.nrow_local, A.layout.first_row,
-                                               A.local, b.local)
-        return DistVector(numpy.asarray(out, dtype=numpy.float64), A.layout)
+        n = A.layout.n
+        nproc = _nproc()
+
+        if A.layout.distributed or nproc <= 1:
+            out = la.solve_python_built_distributed(n, A.layout.nrow_local, A.layout.first_row,
+                                                   A.local, b.local)
+            return DistVector(numpy.asarray(out, dtype=numpy.float64), A.layout)
+
+        # Replicated under mpirun: every rank holds the whole system, so the blocks the solver is
+        # given have to be IMPOSED rather than taken from the layout. Handing it (nrow_local=n,
+        # first_row=0) on every rank would make PETSc read nproc*n global rows -- the row counts are
+        # supposed to tile, and n on each of nproc ranks does not -- and the solve then hangs.
+        #
+        # This is what PeriodicDrivingResponse already does with its own replicated bordered system
+        # (pyoomph/utils/periodic_driving_response.py), and the reason it was worth reading before
+        # writing this: impose a contiguous split, contribute only that slice, and replicate the
+        # answer afterwards so the caller still sees a vector on its own layout.
+        from .mpi import get_mpi_rank, mpi_allgather_vector
+        rank = int(get_mpi_rank())
+        base, rem = divmod(n, nproc)
+        nrow_local = base + (1 if rank < rem else 0)
+        first_row = rank * base + min(rank, rem)
+        local = la.solve_python_built_distributed(n, nrow_local, first_row,
+                                                  A.local[first_row:first_row + nrow_local, :].tocsr(),
+                                                  numpy.ascontiguousarray(b.local[first_row:first_row + nrow_local]))
+        full = mpi_allgather_vector(n, first_row, nrow_local, numpy.asarray(local, dtype=numpy.float64),
+                                    context="replicating the solution of a Python-built system")
+        return DistVector(numpy.asarray(full, dtype=numpy.float64), A.layout)
 
 
 class _ScipyMatrix(DistMatrix):

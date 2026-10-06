@@ -8065,6 +8065,26 @@ namespace pyoomph
 			}
 			const unsigned nbase = this->get_n_unaugmented_dofs();
 			if (nbase == 0) throw_runtime_error("This only works if you have augmented dofs");
+			// The target is the BASE DOF distribution whenever that is itself distributed, NOT a fresh
+			// uniform split of nbase. The two are different partitions of the same rows -- 21/28 against
+			// 24/25 on a 49-dof problem at np=2 -- and the augmented dof layout is built from the dof
+			// one, so blocks on a uniform split would not line up with the system the tracker has to
+			// produce. Getting this wrong is B2's mistake in another place.
+			//
+			// When the base distribution is NOT distributed (a replicated mpirun) it cannot be used as a
+			// target at all: rank_of_global_row() returns 0 for every row of a non-distributed
+			// distribution, so the exchange would pile the whole system onto rank 0 and leave the others
+			// empty. A uniform split is assembled instead and the caller replicates it, which is the
+			// right answer there anyway -- the augmented layout is non-distributed too, so the tracker
+			// wants the whole global system.
+			oomph::LinearAlgebraDistribution *base_dist = NULL;
+			AugmentedDofDistributionHelper *helper = this->augmented_dof_distribution_helper();
+			if (helper && helper->distributed()) base_dist = helper->base_dist_pt();
+			if (base_dist && base_dist->distributed())
+			{
+				this->parallel_sparse_assemble(base_dist, column_or_row_index, row_or_column_start, value, nnz, residuals);
+				return;
+			}
 			oomph::LinearAlgebraDistribution target(this->communicator_pt(), nbase, true);
 			this->parallel_sparse_assemble(&target, column_or_row_index, row_or_column_start, value, nnz, residuals);
 			return;
@@ -8538,9 +8558,22 @@ namespace pyoomph
 #ifdef OOMPH_HAS_MPI
 		if (Communicator_pt && Communicator_pt->nproc() > 1)
 		{
-			oomph::LinearAlgebraDistribution target(this->communicator_pt(), ndof, true);
-			nrow_local = target.nrow_local();
-			first_row = target.first_row();
+			// Must mirror the target chosen in sparse_assemble_row_or_column_compressed_base_problem()
+			// exactly: the base dof distribution when it is distributed, a uniform split otherwise.
+			AugmentedDofDistributionHelper *helper = this->augmented_dof_distribution_helper();
+			oomph::LinearAlgebraDistribution *base_dist =
+				(helper && helper->distributed()) ? helper->base_dist_pt() : NULL;
+			if (base_dist && base_dist->distributed())
+			{
+				nrow_local = base_dist->nrow_local();
+				first_row = base_dist->first_row();
+			}
+			else
+			{
+				oomph::LinearAlgebraDistribution target(this->communicator_pt(), ndof, true);
+				nrow_local = target.nrow_local();
+				first_row = target.first_row();
+			}
 		}
 #endif
 		data.resize(nvector+nmatrix);
