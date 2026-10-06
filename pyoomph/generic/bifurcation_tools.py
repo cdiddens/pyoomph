@@ -2890,11 +2890,44 @@ class NormalFormCalculator:
         The SINGULAR solves of the real branch-point normal form do NOT come here -- see
         :py:meth:`bordered_la_solve`.
         """
-        res= scipy.sparse.linalg.spsolve(A,rhs)# TODO: Improve here to use e.g. Pardiso (however, requires complex support)                   
+        # Stays on spsolve, and the TODO it used to carry is answered here rather than left open:
+        # this routine is COMPLEX. psi200 solves (2j*omega*M - L), so routing it through
+        # LinearAlgebraBackend.solve -- i.e. solve_python_built_distributed -- is not possible, that
+        # contract being real-valued throughout (it returns float64 and PETSc would need a complex
+        # build to do otherwise). bordered_la_solve below IS real and does go through the backend.
+        res= scipy.sparse.linalg.spsolve(A,rhs)
         if numpy.isnan(numpy.sum(res)): #type:ignore
             print("Matrix rank warning. Going for a least squares solution")
             res=scipy.sparse.linalg.lsqr(A,rhs,atol=1e-13,btol=1e-13)[0] #type:ignore
         return res
+
+      def _solve_bordered_real(self,A,b):
+        """Factorise the bordered normal-form system through the configured linear solver.
+
+        Through :py:meth:`LinearAlgebraBackend.solve` on a SERIAL layout, not through spsolve. The
+        system itself is replicated by design -- ``pencil()`` allgathers to square and every rank
+        then runs identical algebra, which is what the correctness argument in bordered_la_solve
+        rests on -- so a serial layout is the honest description of it and the backend does the
+        right thing with it in every regime (under mpirun it imposes a split, contributes a slice
+        and replicates the answer). What this buys is that the solve goes through whatever the
+        problem is configured with, MUMPS included; spsolve meant SuperLU unconditionally, and this
+        is the one matrix on the normal-form path whose conditioning is the point rather than an
+        afterthought.
+
+        Real only, and asserted rather than assumed: the border rows and L are real at a real
+        branch point, and the backend's contract is real throughout. The complex solves on this
+        path go through :py:meth:`la_solve`.
+        """
+        A=A.tocsr()
+        if numpy.iscomplexobj(A.data) or numpy.iscomplexobj(b):
+            raise RuntimeError("the bordered normal-form solve was handed a complex system; it is "
+                               "real by construction at a real branch point, and the backend's "
+                               "contract is real-valued (see la_solve for the complex route)")
+        from .distributed_la import RowLayout, get_la_backend
+        la=get_la_backend(self.problem)
+        layout=RowLayout.serial(A.shape[0])
+        return numpy.asarray(la.solve(la.matrix(A,layout,A.shape[0]),
+                                      la.vector(numpy.ascontiguousarray(numpy.real(b)),layout)).local)
 
       def bordered_la_solve(self,L,rhs,zeta,zeta_star,tol:float=1e-8):
         """Solve ``L psi = rhs`` for the zeta_star-orthogonal component, through a BORDERED system.
@@ -2933,7 +2966,7 @@ class NormalFormCalculator:
         A=scipy.sparse.bmat([[L,scipy.sparse.csr_matrix(zeta)],
                              [scipy.sparse.csr_matrix(zs),None]],format="csc")
         b=numpy.concatenate([rhs,[0.0]])
-        x=cast(NPAnyArray,scipy.sparse.linalg.spsolve(A,b)) #type:ignore
+        x=self._solve_bordered_real(A,b)
         if numpy.isnan(numpy.sum(x)): #type:ignore
             raise RuntimeError("The bordered solve of the normal form is singular. That needs "
                                "<zeta,zeta_star> != 0 AND a simple singularity of L; a second "
