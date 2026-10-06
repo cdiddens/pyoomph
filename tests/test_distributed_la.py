@@ -199,6 +199,19 @@ def test_a_distributed_transpose_is_refused_with_the_alternative_named():
         M.transpose()
 
 
+def test_transpose_onto_a_serial_layout_is_the_plain_transpose():
+    """The in-process half of transpose_onto. Its distributed half needs mpirun, and is covered by
+    tests/test_mpi_distributed_la.py -- but the serial path is the one every non-MPI run takes, and
+    it has to be the ordinary transpose exactly, not merely close to it."""
+    rng = numpy.random.default_rng(11)
+    A = scipy.sparse.csr_matrix(rng.random((7, 7)) * (rng.random((7, 7)) < 0.4))
+    got = ScipyBackend().transpose_onto(A, RowLayout.serial(7))
+    assert (got != A.transpose().tocsr()).nnz == 0
+    # Canonical, because PETSc's createAIJ wants ascending column indices per row and petsc.py's
+    # reuse digest hashes the index arrays.
+    assert got.has_sorted_indices
+
+
 # ----------------------------------------------------------------------------------------------
 # the bordered system: block() and stack()
 # ----------------------------------------------------------------------------------------------

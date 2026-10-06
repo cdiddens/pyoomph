@@ -276,6 +276,16 @@ def run(args):
         problem.timestepper.make_steady()
         ga, dlam, al, qR, qI = get_hopf_lyapunov_coefficient(problem, param, omega=omega, q=q)
         res.update({"omega": float(omega), "ga": float(ga), "dlam": int(dlam), "al": float(al)})
+        if args.adjoint_by_tracker:
+            # The OTHER route to the adjoint eigenvector: a HopfTracker with left_eigenvector=True,
+            # i.e. the transposed pencil as a bordered system, instead of an eigensolve at the
+            # complex target -i*omega. It is the branch that needs
+            # LinearAlgebraBackend.transpose_onto, and the coefficient is the same quantity either
+            # way -- which is the point of computing both here.
+            ga2, dlam2, al2, _, _ = get_hopf_lyapunov_coefficient(
+                problem, param, omega=omega, q=q, use_hopf_tracker_for_adjoint=True)
+            res.update({"ga_tracker": float(ga2), "dlam_tracker": int(dlam2),
+                        "al_tracker": float(al2)})
         return res
 
 
@@ -292,6 +302,8 @@ def main():
     p.add_argument("--NT", type=int, default=48)
     p.add_argument("--nsample", type=int, default=32)
     p.add_argument("--N", type=int, default=20)
+    p.add_argument("--adjoint-by-tracker", dest="adjoint_by_tracker", action="store_true",
+                   help="also compute the coefficient with the HopfTracker adjoint route")
     # parse_known_args, not parse_args: pyoomph reads its own flags (--distribute) off sys.argv.
     args, _ = p.parse_known_args()
     try:

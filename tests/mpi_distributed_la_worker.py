@@ -118,6 +118,19 @@ def main():
         payload["ATx_dot_y"] = ATx.dot(DistVector.from_global(y, MT.layout))
         payload["x_dot_Ay"] = vx.dot(M.matvec(vy))
 
+        # transpose_onto, which is the one a bordered system can use: it must land on THIS layout,
+        # not on whichever split a transpose naturally produces, so unlike M.transpose() above it CAN
+        # be compared block by block against the global transpose. That is the whole point of it --
+        # landing on the wrong partition gives a plausible matrix rather than an error.
+        AT_local = B.transpose_onto(A[layout.local_slice, :].tocsr(), layout)
+        ref = A.transpose().tocsr()[layout.local_slice, :].tocsr()
+        payload["transpose_onto_shape"] = list(AT_local.shape)
+        payload["transpose_onto_shape_ref"] = list(ref.shape)
+        payload["transpose_onto_max_err"] = float(abs(AT_local - ref).max()) if ref.nnz else 0.0
+        payload["transpose_onto_nnz"] = int(AT_local.nnz)
+        payload["transpose_onto_nnz_ref"] = int(ref.nnz)
+        payload["transpose_onto_sorted"] = bool(AT_local.has_sorted_indices)
+
         payload["ok"] = True
     except Exception as e:
         payload["ok"] = False

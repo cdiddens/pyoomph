@@ -147,3 +147,29 @@ def test_the_petsc_matrix_multiplies_and_transposes(tmp_path, nproc):
         # transposed matrix need not land on the same split.
         assert r["ATx_dot_y"] == pytest.approx(r["x_dot_Ay"], abs=_ATOL), (
             "rank %d: <A^T x, y> = %.17g but <x, A y> = %.17g" % (r["rank"], r["ATx_dot_y"], r["x_dot_Ay"]))
+
+
+@pytest.mark.parametrize("nproc", [2, 3, 4])
+def test_transpose_onto_lands_on_the_given_layout(tmp_path, nproc):
+    """Block-by-block against the global transpose, which M.transpose() cannot be compared to.
+
+    transpose_onto exists because a bordered system needs J^T on the SAME row layout as its other
+    blocks. PETSc's own transpose returns its ownership range -- a different partition of the same
+    rows -- and putting that into block() would place every entry correctly by index and wrongly by
+    owner, which is the B2 class of mistake: a plausible matrix, not an error. So this compares the
+    actual entries, not an invariant.
+    """
+    per_rank = _run(nproc, tmp_path)
+    for r in per_rank:
+        assert r["transpose_onto_shape"] == r["transpose_onto_shape_ref"], (
+            "rank %d got shape %r, the global transpose's block is %r"
+            % (r["rank"], r["transpose_onto_shape"], r["transpose_onto_shape_ref"]))
+        assert r["transpose_onto_nnz"] == r["transpose_onto_nnz_ref"], (
+            "rank %d got %d nonzeros, expected %d"
+            % (r["rank"], r["transpose_onto_nnz"], r["transpose_onto_nnz_ref"]))
+        assert r["transpose_onto_max_err"] < 1e-14, (
+            "rank %d: largest entry difference from the global transpose is %.3e"
+            % (r["rank"], r["transpose_onto_max_err"]))
+        # Canonical column order, because PETSc's createAIJ requires it and petsc.py's reuse digest
+        # hashes the index arrays.
+        assert r["transpose_onto_sorted"] is True, "rank %d returned an unsorted CSR" % r["rank"]

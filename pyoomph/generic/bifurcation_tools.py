@@ -289,25 +289,15 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
         esolv_kwargs["target"]=-1j*omega0
         evalT,evectT,_,_=problem.get_eigen_solver().solve(1,custom_J_and_M=(AT,MT),**esolv_kwargs,shift=-(1j+omega_epsilon)*omega0,v0=numpy.conjugate(q_resolved),sort=False,quiet=False)   # TODO: Is MT right here?                  #type:ignore
     else:
-        # Refused under mpirun, and the reason is no longer the one this comment used to give. The
-        # multi-assembly does NOT throw for nproc>1 any more -- that was B1, and it now goes through
-        # oomph's parallel_sparse_assemble -- and the HopfTracker itself runs in every regime. What is
-        # not ported is precisely the branch this route needs: left_eigenvector=True, which assembles
-        # -J^T, M^T and dJdP^T @ Vr, and a distributed transpose landing on a GIVEN layout is the one
-        # backend primitive still missing (_PETScMatrix.transpose() returns PETSc's own ownership
-        # range, and the scipy backend refuses it). So HopfTracker.supports_mpi() answers False while
-        # left_eigenvector is set, and set_custom_assembler below would refuse this on its own.
+        # No longer refused under mpirun. The two reasons this used to give were both wrong or
+        # outdated: the multi-assembly does not throw for nproc>1 any more (that was B1, now going
+        # through oomph's parallel_sparse_assemble), and the branch this needs -- HopfTracker with
+        # left_eigenvector=True -- works in every regime now that the backend can transpose onto a
+        # given layout (LinearAlgebraBackend.transpose_onto).
         #
-        # The refusal is kept here anyway, and widened to any nproc>1 rather than --distribute alone,
-        # because this is where the ALTERNATIVE can be named: a complex-target eigensolver takes the
-        # branch above and needs none of this.
-        from .mpi import get_mpi_nproc
-        if get_mpi_nproc()>1:
-            raise RuntimeError(
-                "Computing the Hopf adjoint through the Python HopfTracker needs its "
-                "left-eigenvector branch, which does not yet work under MPI (it needs a distributed "
-                "transpose on a given row layout). Use an eigensolver that supports a complex "
-                "target, e.g. SLEPc, which takes the direct route and needs no tracker at all.")
+        # It is still the slower of the two routes under MPI, because that transpose replicates: the
+        # eigensolver branch above is taken whenever the solver supports a complex target, and
+        # should be preferred. That is a performance note, not a refusal.
         problem.deactivate_bifurcation_tracking()        
         problem.set_custom_assembler(HopfTracker(problem,param.get_name(),numpy.conjugate(q_resolved),omega=-omega0,left_eigenvector=True,eigenscale=1))
         problem.solve()
@@ -1204,18 +1194,16 @@ class HopfTracker(CustomBifurcationTracker):
         self.left_eigenvector=left_eigenvector
     
     def supports_mpi(self)->bool:
-        # The right-eigenvector branch goes entirely through the backend. The LEFT one does not: its
-        # bordered system contains J^T and M^T as BLOCKS, and transposing a row-distributed matrix is
-        # an off-processor exchange that the scipy backend refuses outright and that PETSc returns on
-        # its own ownership range rather than the base layout block() needs. Asking the multi-assembly
-        # for the transposed products covers the Hessian terms (dJdU(..., transposed=True), already
-        # used) but not the matrices themselves. So that branch stays serial until there is a
-        # distributed transpose that lands on a given layout.
-        #
-        # It is also the branch get_hopf_lyapunov_coefficient's use_hopf_tracker_for_adjoint takes,
-        # which refuses any nproc>1 of its own accord and names the eigensolver alternative there,
-        # and that route is preferred under MPI anyway.
-        return not self.left_eigenvector
+        """Both branches, now that the backend can transpose onto a given layout.
+
+        The left-eigenvector branch needs J^T and M^T as BLOCKS of the bordered system, not as
+        products, so the multi-assembly's transposed requests (dJdU(..., transposed=True), used
+        below for the Hessian terms) do not cover it. LinearAlgebraBackend.transpose_onto does, and
+        its docstring is honest that it replicates: O(nnz) per rank, where the rest of this module is
+        O(nnz/nproc). That is acceptable here and nowhere else, because this branch has one consumer
+        -- the Hopf adjoint -- which prefers the eigensolver route under MPI anyway.
+        """
+        return True
 
     def define_augmented_dofs(self, dofs):
         dofs.add_vector(numpy.real(self.eigenvector)*self.eigenscale)
@@ -1255,7 +1243,7 @@ class HopfTracker(CustomBifurcationTracker):
                 dRdp,dJdp,dMdp=assembly.dRdp(dparameter).dJdp(dparameter).dMdp(dparameter).assemble()
                 # leave here with the derivative of the residuals with respect to the other parameter
                 if self.left_eigenvector:
-                    dJdp,dMdp=dJdp.transpose().tocsr(),dMdp.transpose().tocsr()
+                    dJdp=la.transpose_onto(dJdp,base); dMdp=la.transpose_onto(dMdp,base)
                 dJm=la.matrix(dJdp,base,base.n); dMm=la.matrix(dMdp,base,base.n)
                 return la.stack([la.vector(dRdp,base),
                                  dJm.matvec(Vr)*(-1.0)+dMm.matvec(Vi)*omega,
@@ -1265,12 +1253,12 @@ class HopfTracker(CustomBifurcationTracker):
             R,J,M=assembly.R().J().M().assemble() # Only residuals and Jacobian are requested and required
         
         nl=self.nonlinear_length_constraint
-        # The left-eigenvector branch assembles the TRANSPOSED pencil. Transposing here is a local
-        # scipy operation only while the layout is not distributed, which is exactly what
-        # supports_mpi() guarantees for that branch.
+        # The left-eigenvector branch assembles the TRANSPOSED pencil. transpose_onto lands it on the
+        # base layout rather than on whichever partition a transpose would naturally produce, which
+        # is what lets these go into block() beside the untransposed blocks.
         if self.left_eigenvector:
-            Jm=la.matrix(J.transpose().tocsr(),base,base.n)
-            Mm=la.matrix(M.transpose().tocsr(),base,base.n)
+            Jm=la.matrix(la.transpose_onto(J,base),base,base.n)
+            Mm=la.matrix(la.transpose_onto(M,base),base,base.n)
         else:
             Jm=la.matrix(J,base,base.n)
             Mm=la.matrix(M,base,base.n)
@@ -1283,8 +1271,8 @@ class HopfTracker(CustomBifurcationTracker):
         if require_jacobian:
             assert dRdP is not None and dJdP is not None and dMdP is not None and HVr is not None and HVi is not None and dMdUVr is not None and dMdUVi is not None
             if self.left_eigenvector:
-                dJm=la.matrix(dJdP.transpose().tocsr(),base,base.n)
-                dMm=la.matrix(dMdP.transpose().tocsr(),base,base.n)
+                dJm=la.matrix(la.transpose_onto(dJdP,base),base,base.n)
+                dMm=la.matrix(la.transpose_onto(dMdP,base),base,base.n)
             else:
                 dJm=la.matrix(dJdP,base,base.n)
                 dMm=la.matrix(dMdP,base,base.n)

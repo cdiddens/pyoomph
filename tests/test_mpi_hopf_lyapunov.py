@@ -94,10 +94,12 @@ _SKIP = _skip_reason()
 pytestmark = [pytest.mark.skipif(_SKIP is not None, reason=str(_SKIP)), pytest.mark.slow]
 
 
-def _run(tmpdir, nproc, distribute, what, timeout=1800):
+def _run(tmpdir, nproc, distribute, what, timeout=1800, adjoint_by_tracker=False):
     os.makedirs(str(tmpdir), exist_ok=True)
     cmd = [sys.executable, _WORKER, "--outdir", str(tmpdir), "--case", "pde",
            "--what", what, "--N", str(_N)]
+    if adjoint_by_tracker:
+        cmd.append("--adjoint-by-tracker")
     if nproc > 1:
         cmd = ["mpirun", "-n", str(nproc)] + cmd
     if distribute:
@@ -122,6 +124,45 @@ def coeff_runs(tmp_path_factory):
     return (_run(base / "serial", 1, False, "coeff"),
             _run(base / "replicated", _NPROC, False, "coeff"),
             _run(base / "distributed", _NPROC, True, "coeff"))
+
+
+@pytest.fixture(scope="module")
+def adjoint_runs(tmp_path_factory):
+    base = tmp_path_factory.mktemp("mpi_hopf_adjoint")
+    return (_run(base / "serial", 1, False, "coeff", adjoint_by_tracker=True),
+            _run(base / "replicated", _NPROC, False, "coeff", adjoint_by_tracker=True),
+            _run(base / "distributed", _NPROC, True, "coeff", adjoint_by_tracker=True))
+
+
+@pytest.mark.parametrize("which", [0, 1, 2], ids=["serial", "replicated", "distributed"])
+def test_the_two_adjoint_routes_agree(adjoint_runs, which):
+    """The HopfTracker adjoint route against the eigensolver one, in every regime.
+
+    There are two ways to the adjoint eigenvector at a Hopf. One asks the eigensolver for the mode at
+    the complex target -i*omega; the other -- use_hopf_tracker_for_adjoint -- solves a bordered
+    system built from the TRANSPOSED pencil, i.e. J^T and M^T as blocks. The Lyapunov coefficient is
+    the same quantity either way, so the two must agree, and that is the only end-to-end check on
+    the transposed branch: it had no test at all before, and was refused under mpirun outright.
+
+    What it exercises that nothing else does is LinearAlgebraBackend.transpose_onto, which has to put
+    J^T on the BASE dof layout rather than on whichever partition a transpose naturally produces.
+    Getting that wrong gives a plausible wrong matrix, not an error -- it is the same class of
+    mistake as B2 -- and the coefficient would then be quietly off.
+
+    Measured: ga agrees to 15-16 digits in all three regimes, al to 8 (al involves the
+    finite-difference second derivative, which is why it is looser).
+    """
+    r = adjoint_runs[which]
+    assert "ga_tracker" in r, "the worker did not run the tracker route: %r" % (r,)
+    assert r["dlam_tracker"] == r["dlam"], (
+        "the two routes disagree on the sign of dlambda/dparameter: %d vs %d"
+        % (r["dlam_tracker"], r["dlam"]))
+    assert abs(r["ga_tracker"] - r["ga"]) < 1e-12 * abs(r["ga"]), (
+        "ga is %.17g via the tracker adjoint and %.17g via the eigensolver"
+        % (r["ga_tracker"], r["ga"]))
+    assert abs(r["al_tracker"] - r["al"]) < 1e-6 * abs(r["al"]), (
+        "al is %.17g via the tracker adjoint and %.17g via the eigensolver"
+        % (r["al_tracker"], r["al"]))
 
 
 @pytest.fixture(scope="module")

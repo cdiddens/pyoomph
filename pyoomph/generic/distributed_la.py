@@ -734,6 +734,42 @@ class LinearAlgebraBackend:
         return DistVector(numpy.asarray(full, dtype=numpy.float64), A.layout)
 
 
+    def transpose_onto(self, local: Any, layout: RowLayout) -> Any:
+        """``A^T`` as THIS rank's rows of ``layout``, given ``A`` as this rank's rows of it. Collective.
+
+        Returns a raw local CSR block with global column indices, the same shape of thing the
+        multi-assembly hands back, so a caller can wrap it with :py:meth:`matrix` exactly as it wraps
+        an untransposed block.
+
+        Why a separate method and not ``DistMatrix.transpose()``: a transpose has to land on a
+        LAYOUT, and the one the caller needs is not the one a transpose naturally produces. Row i of
+        ``A^T`` is column i of ``A``, whose entries are spread over every rank's row block, so
+        nothing about this is local. ``_PETScMatrix.transpose()`` returns PETSc's own ownership range,
+        which is a different partition of the same rows and therefore not interchangeable with the
+        base dof layout a bordered system is assembled on -- the same trap as B2 in
+        ``dev_docs/mpi_augmented_systems.md``.
+
+        REPLICATING, and deliberately so for now: the global matrix is gathered (sparsely, through
+        mpi_allgather_square_csr, which is the same machinery the Floquet and normal-form routes use),
+        transposed, and sliced back to the owned rows. That is O(nnz) communication and memory per
+        rank, so it does not scale the way the rest of this module does. It is implemented this way
+        because its one consumer -- HopfTracker's left-eigenvector branch, i.e. the adjoint at a Hopf
+        -- needs J^T and M^T as BLOCKS of the bordered system rather than as products, and because
+        that route has an eigensolver alternative that is preferred under MPI anyway
+        (get_hopf_lyapunov_coefficient takes the direct branch whenever the eigensolver supports a
+        complex target). A genuine all-to-all exchange of the COO triples would remove the O(nnz)
+        term and is the obvious next step if this ever becomes the bottleneck.
+        """
+        if not layout.distributed or _nproc() <= 1:
+            return local.transpose().tocsr()
+        from .mpi import mpi_allgather_square_csr
+        full = mpi_allgather_square_csr(layout.n, layout.first_row, layout.nrow_local, local,
+                                        context="replicating a matrix in order to transpose it onto "
+                                                "a given row layout").tocsr()
+        out = full.transpose().tocsr()[layout.local_slice, :].tocsr()
+        out.sort_indices()
+        return out
+
     def solve_many(self, A: DistMatrix, bs: Sequence[DistVector]) -> "list[DistVector]":
         """Solve ``A x = b`` for several right-hand sides against ONE factorisation of A. Collective.
 
