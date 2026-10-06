@@ -319,6 +319,16 @@ class TracerParticles(Equations):
             is what caps the accuracy on a moving mesh.
         history_time: length of the rolling position history kept for trail plots. ``None`` keeps none.
         history_capacity: maximum number of history samples per particle.
+        history_substeps: store a sample at every accepted sub-step rather than once per timestep.
+            A trail drawn from per-timestep samples is a chord through each step, i.e. a polygon,
+            which is what it visibly looks like whenever the trail is only a few steps long. The
+            sub-step positions are visited by the integrator and otherwise thrown away, so this
+            stores what already exists. Raise ``history_capacity`` with it: a step may take many
+            sub-steps, and the window is capped by the capacity as well as by the time.
+        history_min_interval: with ``history_substeps``, the smallest time between two stored
+            samples. ``0`` stores every accepted sub-step, which is a density chosen by the error
+            controller rather than by the picture - set this to roughly ``history_time`` over the
+            number of samples a trail should have.
         payloads: scalars integrated along each particle's path, as ``{name: source expression}``.
             Each source must be **dimensionless**, and is integrated over nondimensional time, so
             ``{"residence": 1}`` accumulates the time a particle has spent in the domain in units of
@@ -346,6 +356,8 @@ class TracerParticles(Equations):
                  time_interpolation_order: int | Literal["auto"] = "auto",
                  history_time: ExpressionOrNum | None = None,
                  history_capacity: int = 64,
+                 history_substeps: bool = False,
+                 history_min_interval: ExpressionOrNum = 0,
                  payloads: dict[str, ExpressionOrNum] | None = None,
                  statistics: bool = False,
                  fixed_substeps: int = 0,
@@ -365,6 +377,8 @@ class TracerParticles(Equations):
         self.time_interpolation_order = time_interpolation_order
         self.history_time = history_time
         self.history_capacity = history_capacity
+        self.history_substeps = history_substeps
+        self.history_min_interval = history_min_interval
         self.payloads = dict(payloads) if payloads else {}
         self.statistics = statistics
         self.fixed_substeps = fixed_substeps
@@ -416,12 +430,15 @@ class TracerParticles(Equations):
         coll.rtol = self.rtol
         coll.atol = self.atol
         coll.history_capacity = self.history_capacity
+        coll.history_substeps = self.history_substeps
         coll.time_interpolation_order = (-1 if self.time_interpolation_order == "auto"
                                          else int(self.time_interpolation_order))
         coll.fixed_substeps = self.fixed_substeps
         coll.max_substeps = self.max_substeps
         coll.max_migration_rounds = self.max_migration_rounds
         coll.max_periodic_wraps = self.max_periodic_wraps
+        coll.history_min_interval = float(self.history_min_interval
+                                          / mesh.get_problem().get_scaling("temporal"))
         if self.history_time is not None:
             coll.history_window = float(self.history_time / mesh.get_problem().get_scaling("temporal"))
         return coll

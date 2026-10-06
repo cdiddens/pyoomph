@@ -567,6 +567,43 @@ namespace pyoomph
   }
 
   // Unwrap one particle's ring into chronological (t, x...) samples, oldest first.
+  void TracerCollection::append_history(TracerParticle *p, double t, const double *pos, bool force)
+  {
+    if (history_window <= 0.0 || !history_capacity)
+      return;
+    const unsigned stride = 1 + nodal_dim;
+    if (!force && history_min_interval > 0.0 && p->hist_n)
+    {
+      const unsigned newest = (p->hist_head + history_capacity - 1) % history_capacity;
+      if (t - p->hist[(size_t)newest * stride] < history_min_interval)
+        return;
+    }
+    if (p->hist.size() != (size_t)history_capacity * stride)
+    {
+      // Re-ring rather than reset: this fires when a restored state meets an equation asking for a
+      // different capacity, and simply reassigning the buffer left hist_n and hist_head pointing
+      // into it as if the old samples were still there.
+      const std::vector<double> old = history_of(p);
+      set_history(p, old.data(), (unsigned)(old.size() / stride));
+      if (!history_capacity)
+        return;
+    }
+    p->hist[p->hist_head * stride] = t;
+    for (unsigned i = 0; i < nodal_dim; i++)
+      p->hist[p->hist_head * stride + 1 + i] = pos[i];
+    p->hist_head = (p->hist_head + 1) % history_capacity;
+    if (p->hist_n < history_capacity)
+      p->hist_n++;
+    // Drop samples that have fallen out of [t - history_window, t].
+    while (p->hist_n > 1)
+    {
+      const unsigned oldest = (p->hist_head + history_capacity - p->hist_n) % history_capacity;
+      if (t - p->hist[oldest * stride] <= history_window)
+        break;
+      p->hist_n--;
+    }
+  }
+
   std::vector<double> TracerCollection::history_of(const TracerParticle *p) const
   {
     const unsigned stride = 1 + nodal_dim;
@@ -1684,6 +1721,12 @@ namespace pyoomph
             y[i] = yproj[i];
       }
 
+      // The sub-step position, which is the whole reason this option exists: it is visited here
+      // and, without this, discarded. t(1) + tau*dt, written as t(0) - (1-tau)*dt so that the
+      // sample at tau = 1 is exactly t(0) and coincides with what the per-timestep path records.
+      if (history_window > 0.0 && history_substeps)
+        append_history(p, cfg.t_current - (1.0 - tau) * cfg.dt, y, tau >= 1.0 - 1e-15);
+
       for (unsigned i = 0; i < nd; i++)
         k1[i] = k4[i];
       pk1 = pk4;
@@ -1843,36 +1886,13 @@ namespace pyoomph
     // Outside the history_window guard on purpose: a window that has just been switched off still
     // has to let the trails it created finish fading rather than stranding them forever.
     prune_dead(tnow);
-    if (history_window > 0.0)
+    // With history_substeps the last accepted sub-step already stamped tau = 1, i.e. this very
+    // position at this very time, so appending here too would put a duplicate sample at the head of
+    // every trail on every step.
+    if (history_window > 0.0 && !history_substeps)
     {
-      const unsigned stride = 1 + nodal_dim;
       for (auto *p : tracers)
-      {
-        if (p->hist.size() != (size_t)history_capacity * stride)
-        {
-          // Re-ring rather than reset: this fires when a restored state meets an equation asking
-          // for a different capacity, and simply reassigning the buffer left hist_n and hist_head
-          // pointing into it as if the old samples were still there.
-          const std::vector<double> old = history_of(p);
-          set_history(p, old.data(), (unsigned)(old.size() / stride));
-          if (!history_capacity)
-            continue;
-        }
-        p->hist[p->hist_head * stride] = tnow;
-        for (unsigned i = 0; i < nodal_dim; i++)
-          p->hist[p->hist_head * stride + 1 + i] = p->x[i];
-        p->hist_head = (p->hist_head + 1) % history_capacity;
-        if (p->hist_n < history_capacity)
-          p->hist_n++;
-        // Drop samples that have fallen out of [t - history_window, t].
-        while (p->hist_n > 1)
-        {
-          const unsigned oldest = (p->hist_head + history_capacity - p->hist_n) % history_capacity;
-          if (tnow - p->hist[oldest * stride] <= history_window)
-            break;
-          p->hist_n--;
-        }
-      }
+        append_history(p, tnow, p->x.data());
     }
   }
 

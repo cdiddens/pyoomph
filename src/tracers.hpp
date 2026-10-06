@@ -307,6 +307,10 @@ namespace pyoomph
 
     // The two directions of the rolling history ring: unwrap it into chronological (t, x...)
     // samples, and rebuild it from such samples, keeping the newest ones that fit the capacity.
+    // Appends one (t, pos) sample to p's rolling history and drops whatever has aged out of
+    // history_window. `pos` is passed rather than read from p->x because the sub-step caller has
+    // its working position in a local array and has not written it back to the particle yet.
+    void append_history(TracerParticle *p, double t, const double *pos, bool force = false);
     std::vector<double> history_of(const TracerParticle *p) const;
     void set_history(TracerParticle *p, const double *samples, unsigned count);
 
@@ -322,6 +326,22 @@ namespace pyoomph
     double atol = 1e-10;
     double history_window = 0.0;      // 0 disables the position history entirely
     unsigned history_capacity = 64;
+    // Record a history sample at every accepted SUB-step rather than once per timestep. The
+    // sub-step positions are computed anyway - the integrator visits them and then throws them
+    // away - so this costs one ring-buffer write each and buys the only thing that makes a trail a
+    // trajectory rather than a polygon: samples between the timestep endpoints. Without it a trail
+    // is a chord through each step, which at a trail length of a few steps is visibly a polyline.
+    // Note that the sub-steps are adaptive, so the samples are NOT equally spaced in time - they
+    // are dense exactly where the particle is turning, which is where a polyline is worst.
+    bool history_substeps = false;
+    // Smallest time between two stored samples. 0 stores every accepted sub-step, which is rarely
+    // what is wanted: the controller chooses its sub-step for the integration error, not for a
+    // picture, and at a tight rtol that is well over a hundred samples per timestep - enough to
+    // exhaust history_capacity within a single step and to put more line segments in a frame than
+    // matplotlib will draw in reasonable time. This thins them to a density chosen for the trail.
+    // The sample that closes a timestep is kept regardless, so the head of a trail is always the
+    // particle's current position.
+    double history_min_interval = 0.0;
     int time_interpolation_order = -1; // -1 = as good as the stored history allows
     int fixed_substeps = 0;            // > 0 forces uniform sub-steps, for order-of-convergence tests
     unsigned long max_substeps = 1000000;

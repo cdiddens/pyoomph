@@ -2392,6 +2392,16 @@ class MatplotLibTracers(MatplotLibPart):
         from matplotlib.collections import LineCollection
         segments:list[Any]=[]
         alphas:list[float]=[]
+        # A particle on a periodic domain is re-injected at its image, so two consecutive history
+        # samples can sit at opposite ends of the mesh. Joining those draws a line straight across
+        # the picture - and on a domain with a mean flow, where every particle wraps, the frame
+        # fills with them. The jump is not guessed at: it equals one of the shifts the collection
+        # was given, so a step within a tolerance of any registered wrap breaks the trail instead of
+        # being drawn. Done in UNTRANSFORMED coordinates, before tiling or mirroring, because that
+        # is the frame the shifts are stated in.
+        wraps=[numpy.asarray(w,dtype=float) for w in col.get_periodic_wraps()]
+        wrap_tol=0.25*min((float(numpy.linalg.norm(w)) for w in wraps if numpy.linalg.norm(w)>0),
+                          default=0.0)
         # Dead particles as well: one that has left the domain keeps its trail until the trail has
         # aged out of the history window, so that it fades away instead of blinking out along with
         # its marker. It is only the marker that is gone - see add_to_plot below, which draws the
@@ -2400,11 +2410,17 @@ class MatplotLibTracers(MatplotLibPart):
             hist=col.get_history(int(tid))
             if hist is None or len(hist)<2:
                 continue
-            pts=self._to_plot_coords(numpy.asarray(hist[:,1:],dtype=float),scale)
+            raw=numpy.asarray(hist[:,1:],dtype=float)
+            pts=self._to_plot_coords(raw,scale)
             if pts.shape[1]!=2:
                 return  # a trail is only meaningful in the plane we are drawing
             n=len(pts)-1
             for k in range(n):
+                if wraps:
+                    step=raw[k+1]-raw[k]
+                    if any(numpy.linalg.norm(step+w)<wrap_tol or
+                           numpy.linalg.norm(step-w)<wrap_tol for w in wraps):
+                        continue
                 segments.append([pts[k],pts[k+1]])
                 # Fade with age, so the head of the trail reads as "now" without a legend.
                 alphas.append(self.trail_min_alpha+(1.0-self.trail_min_alpha)*((k+1)/n))

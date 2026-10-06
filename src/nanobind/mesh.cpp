@@ -2124,6 +2124,10 @@ void PyReg_Mesh(nb::module_ &m)
 				"Length of the rolling position history kept for trails, in nondimensional time; 0 disables it")
 		.def_rw("history_capacity", &pyoomph::TracerCollection::history_capacity,
 				"Maximum number of history samples per particle; the window is additionally limited by this")
+		.def_rw("history_min_interval", &pyoomph::TracerCollection::history_min_interval,
+				"Smallest time between two stored history samples; 0 stores every accepted sub-step. Only relevant with history_substeps, where the sub-step density is chosen by the error controller and is typically far higher than a trail needs - over a hundred samples per timestep at a tight rtol. The sample that closes a timestep is always kept, so the head of a trail is the particle's current position")
+		.def_rw("history_substeps", &pyoomph::TracerCollection::history_substeps,
+				"Record a history sample at every accepted adaptive sub-step instead of once per timestep. The sub-step positions are computed by the integrator anyway, so this only stores what would otherwise be discarded, and it is what turns a trail from a polyline through the timestep endpoints into a resolved trajectory. The samples are not equally spaced in time: the adaptive controller takes short sub-steps exactly where the path curves most, which is where a polyline is worst. Costs one ring-buffer write per sub-step and fills history_capacity faster, so raise that alongside it")
 		.def_rw("time_interpolation_order", &pyoomph::TracerCollection::time_interpolation_order,
 				"Order of the in-step Lagrange interpolation of the nodal positions: 1 uses two history levels, 2 uses three, -1 takes the best the stored history allows")
 		.def_rw("fixed_substeps", &pyoomph::TracerCollection::fixed_substeps,
