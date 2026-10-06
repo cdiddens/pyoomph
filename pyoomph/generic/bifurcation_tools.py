@@ -289,11 +289,25 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
         esolv_kwargs["target"]=-1j*omega0
         evalT,evectT,_,_=problem.get_eigen_solver().solve(1,custom_J_and_M=(AT,MT),**esolv_kwargs,shift=-(1j+omega_epsilon)*omega0,v0=numpy.conjugate(q_resolved),sort=False,quiet=False)   # TODO: Is MT right here?                  #type:ignore
     else:
-        # The Python custom assembler, which throws from
-        # sparse_assemble_row_or_column_compressed_base_problem the moment there is more than one rank
-        # (dev_docs/mpi_augmented_systems.md Part II). Say so here rather than there.
-        problem._require_non_distributed("Computing the Hopf adjoint through the Python HopfTracker "
-                                         "(the eigensolver route needs a solver supporting a target, e.g. SLEPc)")
+        # Refused under mpirun, and the reason is no longer the one this comment used to give. The
+        # multi-assembly does NOT throw for nproc>1 any more -- that was B1, and it now goes through
+        # oomph's parallel_sparse_assemble -- and the HopfTracker itself runs in every regime. What is
+        # not ported is precisely the branch this route needs: left_eigenvector=True, which assembles
+        # -J^T, M^T and dJdP^T @ Vr, and a distributed transpose landing on a GIVEN layout is the one
+        # backend primitive still missing (_PETScMatrix.transpose() returns PETSc's own ownership
+        # range, and the scipy backend refuses it). So HopfTracker.supports_mpi() answers False while
+        # left_eigenvector is set, and set_custom_assembler below would refuse this on its own.
+        #
+        # The refusal is kept here anyway, and widened to any nproc>1 rather than --distribute alone,
+        # because this is where the ALTERNATIVE can be named: a complex-target eigensolver takes the
+        # branch above and needs none of this.
+        from .mpi import get_mpi_nproc
+        if get_mpi_nproc()>1:
+            raise RuntimeError(
+                "Computing the Hopf adjoint through the Python HopfTracker needs its "
+                "left-eigenvector branch, which does not yet work under MPI (it needs a distributed "
+                "transpose on a given row layout). Use an eigensolver that supports a complex "
+                "target, e.g. SLEPc, which takes the direct route and needs no tracker at all.")
         problem.deactivate_bifurcation_tracking()        
         problem.set_custom_assembler(HopfTracker(problem,param.get_name(),numpy.conjugate(q_resolved),omega=-omega0,left_eigenvector=True,eigenscale=1))
         problem.solve()
@@ -1199,8 +1213,8 @@ class HopfTracker(CustomBifurcationTracker):
         # distributed transpose that lands on a given layout.
         #
         # It is also the branch get_hopf_lyapunov_coefficient's use_hopf_tracker_for_adjoint takes,
-        # which is independently refused under --distribute already (bifurcation_tools.py's
-        # _require_non_distributed), and the eigensolver route is preferred under MPI anyway.
+        # which refuses any nproc>1 of its own accord and names the eigensolver alternative there,
+        # and that route is preferred under MPI anyway.
         return not self.left_eigenvector
 
     def define_augmented_dofs(self, dofs):

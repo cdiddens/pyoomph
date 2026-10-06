@@ -61,6 +61,20 @@ the start. Over the whole orbit the algebraic directions therefore come out at e
 sitting exactly where a period-doubling bifurcation would. This is a property of the time
 discretization, not of the condensation (the ``"eigenproblem"`` method produces the same value, just
 less accurately); an even number of intervals moves it to ``+1``, next to the trivial multiplier.
+
+**Replicated by design, and not a candidate for the distributed LA backend.** Every
+``DefaultMatrixType`` in this module is the GATHERED, globally indexed orbit Jacobian -- it arrives
+via ``Problem.assemble_jacobian(global_csr=True)``, and ``_to_time_major`` then permutes it with a
+global permutation, which is only meaningful on the whole matrix. Passing a
+:py:class:`~pyoomph.generic.distributed_la.DistMatrix` row block to anything here would produce a
+plausible wrong answer rather than an error, so the annotations say ``DefaultMatrixType`` and mean it.
+
+This is not an omission from the MPI work but the right shape for the problem: the monodromy matrix
+is ``nbase x nbase`` and DENSE, so its memory is ``O(nbase**2)`` on one rank whatever the backend
+does, and the dense eigendecomposition at the end already runs on rank 0 and broadcasts. Distributing
+the condensation would move the row blocks around and change nothing about the one object that
+actually costs. The module is correct under both a replicated ``mpirun`` and ``--distribute`` today,
+which ``tests/test_mpi_floquet.py`` covers; it is correct because it gathers, not in spite of it.
 """
 
 from ..typings import *
