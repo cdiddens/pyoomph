@@ -25,7 +25,7 @@
 #
 # ========================================================================
 
-# Worker for test_mpi_python_fold.py: the PYTHON FoldTracker (pyoomph/generic/bifurcation_tools.py)
+# Worker for test_mpi_python_trackers.py: the PYTHON FoldTracker (pyoomph/generic/bifurcation_tools.py)
 # tracking a fold under MPI. The first of the custom-assembler family to run there at all.
 #
 # Same problem as tests/mpi_bifurcation_worker.py uses for the C++ MyFoldHandler -- 2D Bratu, whose
@@ -49,7 +49,7 @@ import numpy
 from pyoomph import *
 from pyoomph.expressions import *
 from pyoomph.generic.mpi import get_mpi_rank, get_mpi_nproc
-from pyoomph.generic.bifurcation_tools import FoldTracker
+from pyoomph.generic.bifurcation_tools import FoldTracker, PitchForkTracker
 
 
 class BratuEquations(Equations):
@@ -66,6 +66,45 @@ class BratuEquations(Equations):
     def define_residuals(self):
         u, v = var_and_test("u")
         self.add_residual(weak(partial_t(u), v) + weak(grad(u), grad(v)) - weak(self.lam * exp(u), v))
+
+
+class ReactionDiffusionEquations(Equations):
+    """laplace(u) + lam*u - u^3 = 0: the symmetry u -> -u of u=0 breaks in a pitchfork."""
+
+    def __init__(self, lam):
+        super().__init__()
+        self.lam = lam
+
+    def define_fields(self):
+        self.define_scalar_field("u", "C2")
+
+    def define_residuals(self):
+        u, v = var_and_test("u")
+        self.add_residual(weak(partial_t(u), v) + weak(grad(u), grad(v)) - weak(self.lam * u - u ** 3, v))
+
+
+class PitchforkProblem(Problem):
+    """A 1 x 1.05 rectangle, NOT the unit square, for the reason mpi_bifurcation_worker.py documents:
+    on the square the (1,2) and (2,1) Dirichlet modes are degenerate and an eigenvalue request can cut
+    inside the degenerate pair, where which copy comes back is the Krylov solver's own business. The
+    aspect ratio splits them and the bifurcation is unchanged -- still the symmetry breaking of u=0 in
+    the first mode, at lam = pi^2*(1 + 1/1.05^2)."""
+
+    ASPECT = 1.05
+
+    def __init__(self, N=8):
+        super().__init__()
+        self.N = N
+
+    def define_problem(self):
+        self += RectangularQuadMesh(N=self.N, size=[1.0, self.ASPECT], name="domain")
+        self.lam = self.define_global_parameter(lam=1.0)
+        eqs = ReactionDiffusionEquations(self.lam)
+        for b in ["left", "right", "top", "bottom"]:
+            eqs += DirichletBC(u=0) @ b
+        eqs += IntegralObservables(usqr=var("u") ** 2)
+        self += eqs @ "domain"
+        self.setup_for_stability_analysis(analytic_hessian=True)
 
 
 class BratuProblem(Problem):
@@ -91,13 +130,15 @@ def main():
     ap.add_argument("--N", type=int, default=8)
     ap.add_argument("--distribute", action="store_true")
     ap.add_argument("--nonlinear-constraint", action="store_true")
-    ap.add_argument("--cxx", action="store_true", help="use the C++ MyFoldHandler instead, for comparison")
+    ap.add_argument("--cxx", action="store_true", help="use the C++ handler instead, for comparison")
+    ap.add_argument("--case", default="fold", choices=["fold", "pitchfork"])
     args, _ = ap.parse_known_args()
 
     payload: dict = {"rank": get_mpi_rank(), "nproc": max(get_mpi_nproc(), 1),
-                     "route": "cxx" if args.cxx else "python"}
+                     "route": "cxx" if args.cxx else "python", "case": args.case}
     try:
-        with BratuProblem(args.N) as p:
+        problem = PitchforkProblem(args.N) if args.case == "pitchfork" else BratuProblem(args.N)
+        with problem as p:
             p.set_output_directory(args.outdir)
             p.initialise()
             p.solve()
@@ -108,14 +149,18 @@ def main():
             payload["eigenvalue_guess"] = complex(p.get_last_eigenvalues()[0]).real
 
             if args.cxx:
-                p.activate_bifurcation_tracking("lam", "fold")
+                p.activate_bifurcation_tracking("lam", args.case)
                 p.solve()
                 payload["critical"] = float(p.lam.value)
                 payload["ndof_aug"] = int(p.ndof())
                 p.deactivate_bifurcation_tracking()
             else:
-                tracker = FoldTracker(p, "lam", eigenvector=0,
-                                      nonlinear_length_constraint=args.nonlinear_constraint)
+                if args.case == "pitchfork":
+                    tracker = PitchForkTracker(p, "lam", eigenvector=0,
+                                               nonlinear_length_constraint=args.nonlinear_constraint)
+                else:
+                    tracker = FoldTracker(p, "lam", eigenvector=0,
+                                          nonlinear_length_constraint=args.nonlinear_constraint)
                 payload["supports_mpi"] = bool(tracker.supports_mpi())
                 p.set_custom_assembler(tracker)
                 payload["ndof_aug"] = int(p.ndof())

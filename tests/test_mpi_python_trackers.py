@@ -25,7 +25,8 @@
 #
 # ========================================================================
 
-# The PYTHON FoldTracker under mpirun -- the first of the custom-assembler family to run there.
+# The PYTHON trackers of pyoomph/generic/bifurcation_tools.py under MPI: FoldTracker and
+# PitchForkTracker so far, one case per family as they are ported.
 #
 # Everything the tracker stands on is tested on its own: the handoff
 # (test_mpi_custom_assembler_handoff), the dof layout (test_mpi_augmentation_layout), the assembly
@@ -56,7 +57,7 @@ import sys
 import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_WORKER = os.path.join(_HERE, "mpi_python_fold_worker.py")
+_WORKER = os.path.join(_HERE, "mpi_python_tracker_worker.py")
 
 
 def _mpi_reason():
@@ -94,14 +95,14 @@ _PARAM_RTOL = 1e-9
 _OBS_RTOL = 1e-8
 
 
-def _run(nproc, tmpdir, distribute=False, cxx=False, nonlinear=False, N=8,
+def _run(nproc, tmpdir, distribute=False, cxx=False, nonlinear=False, N=8, case="fold",
          expect_failure=False, timeout=900):
     outdir = os.path.join(str(tmpdir), "out")
     os.makedirs(outdir, exist_ok=True)
     cmd = []
     if nproc > 1:
         cmd += ["mpirun", "-n", str(nproc)]
-    cmd += [sys.executable, _WORKER, "--outdir", outdir, "--N", str(N)]
+    cmd += [sys.executable, _WORKER, "--outdir", outdir, "--N", str(N), "--case", case]
     if distribute:
         cmd += ["--distribute"]
     if cxx:
@@ -131,14 +132,20 @@ def _run(nproc, tmpdir, distribute=False, cxx=False, nonlinear=False, N=8,
     return sorted(per_rank, key=lambda r: r["rank"])
 
 
+_GROUPS = {"fold": [False, False, True], "pitchfork": [False, False, True, True]}
+_EXTRA = {"fold": 1, "pitchfork": 2}   # augmented size is 2N + this
+
+
+@pytest.mark.parametrize("case", ["fold", "pitchfork"])
 @pytest.mark.parametrize("nproc,distribute", [(1, False), (2, False), (3, False), (2, True), (3, True)])
-def test_the_python_fold_tracker_finds_the_fold(tmp_path, nproc, distribute):
-    per_rank = _run(nproc, tmp_path, distribute=distribute)
+def test_the_python_tracker_finds_the_bifurcation(tmp_path, nproc, distribute, case):
+    per_rank = _run(nproc, tmp_path, distribute=distribute, case=case)
     for r in per_rank:
         assert r["supports_mpi"] is True
-        # [base | V | parameter]: the group layout the bordered system is laid out from.
-        assert r["groups"] == [False, False, True]
-        assert r["ndof_aug"] == 2 * r["ndof_base"] + 1
+        # The group layout the bordered system is laid out from: a fold adds [V | parameter], a
+        # pitchfork also a slack unknown for the symmetry constraint.
+        assert r["groups"] == _GROUPS[case]
+        assert r["ndof_aug"] == 2 * r["ndof_base"] + _EXTRA[case]
         # The augmentation must be gone again afterwards.
         assert r["ndof_after"] == r["ndof_base"]
         # The eigenvector comes back globally replicated at full length, which every consumer of
@@ -150,10 +157,12 @@ def test_the_python_fold_tracker_finds_the_fold(tmp_path, nproc, distribute):
         assert r["eigfunc_usqr"] == pytest.approx(per_rank[0]["eigfunc_usqr"], rel=1e-12)
 
 
+@pytest.mark.parametrize("case", ["fold", "pitchfork"])
 @pytest.mark.parametrize("nproc,distribute", [(2, False), (3, False), (2, True), (3, True)])
-def test_mpirun_agrees_with_serial(tmp_path, nproc, distribute):
-    serial = _run(1, tmp_path / "serial")[0]
-    got = _run(nproc, tmp_path / ("np%d%s" % (nproc, "d" if distribute else "")), distribute=distribute)[0]
+def test_mpirun_agrees_with_serial(tmp_path, nproc, distribute, case):
+    serial = _run(1, tmp_path / "serial", case=case)[0]
+    got = _run(nproc, tmp_path / ("np%d%s" % (nproc, "d" if distribute else "")),
+               distribute=distribute, case=case)[0]
     assert got["critical"] == pytest.approx(serial["critical"], rel=_PARAM_RTOL), (
         "np=%d%s found the fold at %.17g, serial at %.17g"
         % (nproc, " --distribute" if distribute else "", got["critical"], serial["critical"]))
@@ -163,15 +172,16 @@ def test_mpirun_agrees_with_serial(tmp_path, nproc, distribute):
     assert got["eigfunc_usqr"] == pytest.approx(serial["eigfunc_usqr"], rel=_OBS_RTOL)
 
 
+@pytest.mark.parametrize("case", ["fold", "pitchfork"])
 @pytest.mark.parametrize("nproc", [1, 2])
-def test_the_python_route_agrees_with_the_cxx_handler(tmp_path, nproc):
+def test_the_python_route_agrees_with_the_cxx_handler(tmp_path, nproc, case):
     """Two independent implementations of the same augmented system, on the same problem.
 
     The C++ MyFoldHandler has been correct under MPI for a while, so this is the strongest check
     available on the Python one -- stronger than it agreeing with itself across rank counts.
     """
-    py = _run(nproc, tmp_path / "py")[0]
-    cxx = _run(nproc, tmp_path / "cxx", cxx=True)[0]
+    py = _run(nproc, tmp_path / "py", case=case)[0]
+    cxx = _run(nproc, tmp_path / "cxx", cxx=True, case=case)[0]
     assert py["ndof_aug"] == cxx["ndof_aug"], "the two routes build different-sized augmented systems"
     assert py["critical"] == pytest.approx(cxx["critical"], rel=_PARAM_RTOL), (
         "the Python tracker found the fold at %.17g, the C++ handler at %.17g"
@@ -190,8 +200,9 @@ def test_the_nonlinear_length_constraint_also_works_under_mpirun(tmp_path):
     assert serial["critical"] == pytest.approx(plain["critical"], rel=1e-6)
 
 
+@pytest.mark.parametrize("case", ["fold", "pitchfork"])
 @pytest.mark.parametrize("nproc,distribute", [(1, False), (2, False), (2, True), (3, True)])
-def test_the_newton_converges_quadratically(tmp_path, nproc, distribute):
+def test_the_newton_converges_quadratically(tmp_path, nproc, distribute, case):
     """The RATE, not just the answer -- which is the only thing that catches a stale scalar.
 
     When the augmented scalars were not broadcast from rank 0, every rank held its own value of the
@@ -201,9 +212,11 @@ def test_the_newton_converges_quadratically(tmp_path, nproc, distribute):
     replicated and --distribute all take four steps -- 0.155, 8.1e-3, 9.1e-5, 6.3e-9 -- and a
     quadratic rate is what this asserts.
     """
-    steps = _run(nproc, tmp_path, distribute=distribute)[0]["newton_residuals"]
-    assert 3 <= len(steps) <= 7, (
-        "the tracked solve took %d Newton steps; serial, replicated and --distribute all take four: %s"
+    steps = _run(nproc, tmp_path, distribute=distribute, case=case)[0]["newton_residuals"]
+    # A fold from this guess takes four steps, a pitchfork two; what is being excluded is a long
+    # crawl, not a particular count.
+    assert 2 <= len(steps) <= 7, (
+        "the tracked solve took %d Newton steps, which is not quadratic convergence: %s"
         % (len(steps), steps))
     assert steps[-1] < 1e-7, "the solve did not actually converge: %s" % steps
     # Each step should roughly square the previous residual. The first entry is the state the solve
@@ -215,3 +228,6 @@ def test_the_newton_converges_quadratically(tmp_path, nproc, distribute):
             "step %d only reduced the residual from %.3e to %.3e (factor %.2f); a constant factor "
             "like that is the signature of a state the ranks disagree about: %s"
             % (k, prev, cur, cur / prev, steps))
+    # And the last step must be a big one, which a linear crawl never is.
+    assert steps[-1] < steps[-2] * 0.1, (
+        "the final step only gained a factor %.2f: %s" % (steps[-1] / steps[-2], steps))

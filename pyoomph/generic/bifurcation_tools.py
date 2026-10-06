@@ -1097,14 +1097,27 @@ class PitchForkTracker(CustomBifurcationTracker):
         self.eigenscale=eigenscale    
         self.nonlinear_length_constraint=nonlinear_length_constraint
         
+    def supports_mpi(self)->bool:
+        return True
+
     def define_augmented_dofs(self, dofs):
         dofs.add_vector(self.V0*self.eigenscale)                
         dofs.add_parameter(self.parameter)
         dofs.add_scalar(0) # slack variable
-        
-    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]: # type: ignore[override] # the base's overloads narrow the return by require_jacobian; every implementation here is the general one
-        U,V,p,eps=self.get_augmented_dofs().split(startindex=0) # Get the eigenvector solution and the slack variable
-        eps=eps[0] # Get the scalar value of the slack variable (split dofs are all vectors)
+
+    def after_layouts_ready(self):
+        # V0 and the symmetry vector S are both needed on this rank's rows (for the inner products
+        # and for R+eps*S, all row-local) and replicated (for their border rows). Fixed, so built once.
+        from .distributed_la import DistVector
+        self.V0_local=DistVector.from_global(self.V0,self.base_layout)
+        self.V0_replicated=self.replicated(self.V0)
+        self.S_local=DistVector.from_global(self.S,self.base_layout)
+        self.S_replicated=self.replicated(self.S)
+
+    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None): # type: ignore[override] # the base's overloads narrow the return by require_jacobian; every implementation here is the general one
+        la,base,aug,table=self.la,self.base_layout,self.augmented_layout,self.eqn_table
+        groups=self.group_is_scalar
+        U,V,p,eps=self.split_vectors(0) # Get the eigenvector solution and the slack variable
         # Request the residuals and Jacobian of the non-augmented system
         assembly=self.start_multiassembly()
         dRdP=None
@@ -1112,36 +1125,40 @@ class PitchForkTracker(CustomBifurcationTracker):
         HV=None
         if require_jacobian:
             assert dparameter is None, "dparameter not supported for require_jacobian=True"
-            R,J,dRdP,dJdP,HV=assembly.R().J().dRdp(self.parameter).dJdp(self.parameter).dJdU(V).assemble() # Assemble all quantities, will be given in the order of the requests
+            # The Hessian contraction vector crosses into C++ indexed by GLOBAL equation number.
+            R,J,dRdP,dJdP,HV=assembly.R().J().dRdp(self.parameter).dJdp(self.parameter).dJdU(V.to_global()).assemble() # Assemble all quantities, will be given in the order of the requests
         else:
             if dparameter is not None:
                 # This happens during arclength continuation in another parameter
                 dRdp,dJdp=assembly.dRdp(dparameter).dJdp(dparameter).assemble()
                 # leave here with the derivative of the residuals with respect to the other parameter
-                return numpy.hstack([dRdp,dJdp@V,0,0])
+                return la.stack([la.vector(dRdp,base),la.matrix(dJdp,base,base.n).matvec(V),0.0,0.0],
+                                groups,base,aug,table)
 
             R,J=assembly.R().J().assemble() # Only residuals and Jacobian are requested and required
 
+        Jm=la.matrix(J,base,base.n)
         nl=self.nonlinear_length_constraint
-        Raug=numpy.hstack([R+eps*self.S,J@V,numpy.dot(V,(V if nl else self.V0))-self.eigenscale*(self.eigenscale if nl else 1),numpy.dot(U,self.S)])
+        length=V.dot(V if nl else self.V0_local)-self.eigenscale*(self.eigenscale if nl else 1)
+        Raug=la.stack([la.vector(R,base)+self.S_local*eps,Jm.matvec(V),length,U.dot(self.S_local)],
+                      groups,base,aug,table)
         if require_jacobian:
             assert dRdP is not None and dJdP is not None and HV is not None
-            col=lambda C:self.as_matrix_column(C)
-            row=lambda R:self.as_matrix_row(R)
+            rowvec=self.replicated(V*2.0) if nl else self.V0_replicated
             # Augmented Jacobian
-            Jaug=scipy.sparse.block_array(
-                [[J,None,col(dRdP),col(self.S)],
-                 [HV,J,col(dJdP@V),None],
-                 [None,row(2*V if nl else self.V0),None,None],
-                 [row(self.S),None,None,None]]).tocsr()            
+            Jaug=la.block(
+                [[Jm,None,la.col(la.vector(dRdP,base)),la.col(self.S_local)],
+                 [la.matrix(HV,base,base.n),Jm,la.col(la.matrix(dJdP,base,base.n).matvec(V)),None],
+                 [None,la.row(rowvec),None,None],
+                 [la.row(self.S_replicated),None,None,None]],groups,base,aug,table)
             return Raug,Jaug #type:ignore
         else:
             return Raug
 
     def actions_after_successful_newton_solve(self)->None:
-        V,=self.get_augmented_dofs().split(startindex=1,endindex=2)
-        V=V/numpy.linalg.norm(V)
-        self.store_eigenvector({0:V})        
+        V,=self.split_vectors(1,2)
+        V=V.normalised()
+        self.store_eigenvector({0:numpy.array(V.to_global())})        
         
 
 class HopfTracker(CustomBifurcationTracker):
