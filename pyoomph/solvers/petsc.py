@@ -927,7 +927,23 @@ class PETSCSolver(GenericLinearSystemSolver):
         self._aux_digest=None
 
     def solve_python_built_distributed(self,ntot:int,nrow_local:int,first_row:int,mat_local:Any,b_local:NPFloatArray)->NPFloatArray:
-        """Factorise a Python-assembled, row-distributed system on COMM_WORLD. See the base class.
+        """Factorise a Python-assembled, row-distributed system on COMM_WORLD. See the base class."""
+        self._aux_prepare(ntot,nrow_local,mat_local)
+        return self._aux_backsolve(b_local)
+
+    def solve_python_built_distributed_many(self,ntot:int,nrow_local:int,first_row:int,mat_local:Any,b_locals:"Sequence[NPFloatArray]")->"List[NPFloatArray]":
+        """Several right-hand sides against one factorisation. See the base class.
+
+        The operator is set up ONCE and then back-substituted against, so MUMPS does one numeric
+        factorisation rather than one per right-hand side. The base class's digest-based reuse would
+        keep the SYMBOLIC analysis across a loop of single solves but not the numeric factors: every
+        single solve re-assembles the Mat, which marks it changed and makes the KSP refactorise.
+        """
+        self._aux_prepare(ntot,nrow_local,mat_local)
+        return [self._aux_backsolve(b) for b in b_locals]
+
+    def _aux_prepare(self,ntot:int,nrow_local:int,mat_local:Any)->None:
+        """Put the auxiliary Mat/KSP in place for this system, reusing the pattern when it has not moved.
 
         The Mat, KSP and vectors live in slots of their OWN (``_aux_*``), never in self.petsc_mat /
         self.ksp. Those hold the Newton solve's factorisation, and a caller that interleaves the two --
@@ -1008,6 +1024,9 @@ class PETSCSolver(GenericLinearSystemSolver):
                               str(e)+"). A bordered system with an empty scalar diagonal may be solved "
                               "inaccurately; a Newton solve on it would converge slowly rather than fail.")
             self._aux_digest=digest
+
+    def _aux_backsolve(self,b_local:NPFloatArray)->NPFloatArray:
+        """One back-substitution against whatever _aux_prepare() last set up."""
         self._aux_b.getArray()[:]=numpy.asarray(b_local,dtype=numpy.float64) #type:ignore
         self._aux_ksp.solve(self._aux_b,self._aux_x) #type:ignore
         reason=int(self._aux_ksp.getConvergedReason()) #type:ignore

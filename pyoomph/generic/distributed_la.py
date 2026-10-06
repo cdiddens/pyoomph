@@ -734,6 +734,57 @@ class LinearAlgebraBackend:
         return DistVector(numpy.asarray(full, dtype=numpy.float64), A.layout)
 
 
+    def solve_many(self, A: DistMatrix, bs: Sequence[DistVector]) -> "list[DistVector]":
+        """Solve ``A x = b`` for several right-hand sides against ONE factorisation of A. Collective.
+
+        Every rank must pass the same number of right-hand sides in the same order, because the
+        collectives below are per right-hand side. Returns one DistVector per input, on A's layout.
+
+        This is not a convenience wrapper around :py:meth:`solve`: the factorisation is what costs,
+        and a loop of single solves pays for it once per right-hand side on every backend -- the
+        gathering ones refactorise outright, and PETSc re-assembles its Mat and so loses the numeric
+        factors even though it keeps the symbolic analysis. A Lyapunov spectrum asks for k
+        right-hand sides against one matrix, which is the case this exists for.
+        """
+        bs = list(bs)
+        for b in bs:
+            if A.layout != b.layout:
+                raise ValueError("the matrix and a right-hand side are on different layouts")
+        if A.ncol != A.layout.n:
+            raise ValueError("cannot solve a non-square system (%d x %d)" % (A.layout.n, A.ncol))
+        if self.problem is None:
+            raise RuntimeError("this backend has no problem, so it has no linear solver to solve with")
+        if not bs:
+            return []
+        la = self.problem.get_la_solver()
+        n = A.layout.n
+        nproc = _nproc()
+
+        if A.layout.distributed or nproc <= 1:
+            outs = la.solve_python_built_distributed_many(n, A.layout.nrow_local, A.layout.first_row,
+                                                          A.local, [b.local for b in bs])
+            return [DistVector(numpy.asarray(o, dtype=numpy.float64), A.layout) for o in outs]
+
+        # Replicated under mpirun: impose a split, as solve() does and for the same reason -- handing
+        # the solver (nrow_local=n, first_row=0) from every rank makes it read nproc*n rows and hang.
+        from .mpi import get_mpi_rank, mpi_allgather_vector
+        rank = int(get_mpi_rank())
+        base, rem = divmod(n, nproc)
+        nrow_local = base + (1 if rank < rem else 0)
+        first_row = rank * base + min(rank, rem)
+        sl = slice(first_row, first_row + nrow_local)
+        locals_out = la.solve_python_built_distributed_many(
+            n, nrow_local, first_row, A.local[sl, :].tocsr(),
+            [numpy.ascontiguousarray(b.local[sl]) for b in bs])
+        out = []
+        for loc in locals_out:
+            full = mpi_allgather_vector(n, first_row, nrow_local,
+                                        numpy.asarray(loc, dtype=numpy.float64),
+                                        context="replicating the solution of a Python-built system")
+            out.append(DistVector(numpy.asarray(full, dtype=numpy.float64), A.layout))
+        return out
+
+
 class _ScipyMatrix(DistMatrix):
     """A DistMatrix whose products go through scipy, replicating the operand when distributed."""
 

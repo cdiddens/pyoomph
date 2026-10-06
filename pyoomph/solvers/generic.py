@@ -631,6 +631,43 @@ class GenericLinearSystemSolver:
 		self.solve_serial(2,ntot,mat_g.nnz,1,mat_g.data,mat_g.indices,mat_g.indptr,sol,0,1)
 		return numpy.ascontiguousarray(sol[first_row:first_row+nrow_local])
 
+	def solve_python_built_distributed_many(self,ntot:int,nrow_local:int,first_row:int,mat_local:"Any",b_locals:"Sequence[NPFloatArray]")->"List[NPFloatArray]":
+		"""Solve ``A x = b`` for SEVERAL right-hand sides against ONE factorisation of the same A.
+
+		Same contract as :py:meth:`solve_python_built_distributed` per right-hand side, and collective
+		in the same way: every rank calls it with the same ``ntot`` and the same NUMBER of right-hand
+		sides, in the same order.
+
+		This exists because the replicating default below is the one place where calling the
+		single-right-hand-side entry point in a loop is not merely slower but asymptotically wrong
+		about what the caller asked for: it would gather and refactorise the same matrix once per
+		right-hand side. A Lyapunov spectrum asks for k of them against one matrix, and that used to
+		be a hand-rolled ``solve_serial(1,...)`` followed by k times ``solve_serial(2,...)``, which is
+		the cost this keeps. A backend whose single solve already reuses its factorisation across
+		calls -- PETSc, via the pattern digest on its auxiliary slot -- overrides this with a loop.
+		"""
+		from ..generic.mpi import get_mpi_nproc,mpi_allgather_square_csr,mpi_allgather_vector
+		b_locals=list(b_locals)
+		mat_g=mpi_allgather_square_csr(ntot,first_row,nrow_local,mat_local,
+									   context="replicating a Python-built system on every rank").tocsr()
+		if get_mpi_nproc()>1:
+			self._report_replicated_python_solve_once(ntot)
+		self._note_external_serial_solve()
+		out:"List[NPFloatArray]"=[]
+		factorised=False
+		for b_local in b_locals:
+			b_g=mpi_allgather_vector(ntot,first_row,nrow_local,b_local,
+									 context="replicating a Python-built right-hand side on every rank")
+			sol=numpy.array(b_g,dtype=numpy.float64,copy=True)
+			if not factorised:
+				# op_flag 1 ONCE. The gather of each right-hand side still has to happen per solve --
+				# it is a different vector -- but the factorisation does not.
+				self.solve_serial(1,ntot,mat_g.nnz,1,mat_g.data,mat_g.indices,mat_g.indptr,sol,0,1)
+				factorised=True
+			self.solve_serial(2,ntot,mat_g.nnz,1,mat_g.data,mat_g.indices,mat_g.indptr,sol,0,1)
+			out.append(numpy.ascontiguousarray(sol[first_row:first_row+nrow_local]))
+		return out
+
 	_replicated_python_solve_reported:bool=False
 
 	def _report_replicated_python_solve_once(self,n:int)->None:

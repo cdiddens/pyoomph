@@ -32,6 +32,7 @@ from ..expressions import ExpressionNumOrNone
 from ..typings import NPFloatArray
 from collections import deque
 from ..generic.mpi import get_mpi_rank
+from ..generic.distributed_la import RowLayout, DistVector, get_la_backend
 
 class LyapunovExponentCalculator(GenericProblemHooks):
     """
@@ -47,10 +48,14 @@ class LyapunovExponentCalculator(GenericProblemHooks):
         filename: The name of the output file. Defaults to "lyapunov.txt".
         relative_to_output: Whether to save the output file relative to the problem's output directory. Defaults to True.
         store_as_eigenvectors: Whether to store the perturbation vectors as eigenvectors. Defaults to False.
+        random_seed: Seed for the initial random perturbation basis. The SAME value must be used on
+            every rank -- it is a constructor argument, so it is -- because the basis is drawn
+            identically everywhere and then sliced to each rank's rows. See ``_draw_initial_basis``.
     """
-    def __init__(self,k: int = 1,waiting_time:ExpressionNumOrNone=None, prerelaxation_time:ExpressionNumOrNone=None,use_crank_nicholson_integration:bool=False, filename="lyapunov.txt",relative_to_output=True,store_as_eigenvectors:bool=False,gram_schmidt_dt:ExpressionNumOrNone=None):
+    def __init__(self,k: int = 1,waiting_time:ExpressionNumOrNone=None, prerelaxation_time:ExpressionNumOrNone=None,use_crank_nicholson_integration:bool=False, filename="lyapunov.txt",relative_to_output=True,store_as_eigenvectors:bool=False,gram_schmidt_dt:ExpressionNumOrNone=None,random_seed:int=0):
         super().__init__()
         self.k = k
+        self.random_seed = int(random_seed)
         if self.k <= 0:
             raise ValueError("k must be a positive integer")
         self.waiting_time = waiting_time
@@ -68,11 +73,44 @@ class LyapunovExponentCalculator(GenericProblemHooks):
         self.gram_schmidt_dt=gram_schmidt_dt
         self._gram_schmidt_dt=0
         self._t_last_gram_schmidt=0
+        self._layout:"RowLayout | None"=None
+
+    def _row_layout(self,problem,nrow_from_assembly:int,n:int)->"RowLayout":
+        """The row layout of the assembled J and M, validated rather than inferred.
+
+        No augmentation is installed here, so the eigenproblem matrices come back on the problem's
+        base dof layout. That is asked for by name and then CHECKED against the row count the
+        assembly actually returned, because the two disagreeing is precisely the class of bug B2 in
+        ``dev_docs/mpi_augmented_systems.md`` -- and silently taking the shorter of the two produces
+        a plausible matrix rather than an error.
+        """
+        layout=RowLayout.base(problem) if problem.is_distributed() else RowLayout.serial(n)
+        if layout.n!=n or layout.nrow_local!=nrow_from_assembly:
+            raise RuntimeError("Lyapunov: the assembled matrices have %d of %d rows on this rank, but "
+                               "the dof layout says %d of %d. Refusing to guess which is right."
+                               %(nrow_from_assembly,n,layout.nrow_local,layout.n))
+        return layout.validate()
+
+    def _draw_initial_basis(self,layout:"RowLayout")->NPFloatArray:
+        """An orthonormal random basis of k perturbations, as this rank's (nrow_local, k) block.
+
+        Drawn GLOBALLY from a seeded generator and then sliced, not drawn per rank. Two reasons, and
+        the second is the one that matters: the ranks must agree (an unseeded ``numpy.random.rand``
+        made them perturb differently, take different branches and deadlock at the next collective --
+        B6 in ``dev_docs/mpi_augmented_systems.md``), and drawing the global vector means serial,
+        replicated ``mpirun`` and ``--distribute`` all start from the BIT-IDENTICAL basis, so their
+        exponents are comparable to round-off instead of only statistically. The cost is an O(n*k)
+        draw on every rank, once.
+        """
+        rng=numpy.random.default_rng(self.random_seed)
+        full=rng.random((layout.n,self.k))
+        return numpy.ascontiguousarray(full[layout.local_slice,:])
+
+    def _as_vec(self,col:int,layout:"RowLayout")->DistVector:
+        return DistVector(self.B[:,col],layout)
 
     def actions_after_initialise(self):
         problem=self.get_problem()
-        if problem.is_distributed():
-            raise RuntimeError("Lyapunov exponent calculation is not supported for distributed problems")
         T0=problem.get_current_time(dimensional=True,as_float=True)
         TS=problem.get_scaling("temporal")
         if self.waiting_time is not None:
@@ -101,20 +139,6 @@ class LyapunovExponentCalculator(GenericProblemHooks):
             return
         Tdiff = t - self._Tstart2
 
-        # --- Initialization ---
-        if self.B.shape[1] != self.k:
-            if self.k > problem.ndof():
-                raise ValueError("number of Lyapunov exponents k must be less or equal to the number of degrees of freedom in the problem")
-            self.B = numpy.random.rand(problem.ndof(), self.k)            
-            # Prepare orthonormal random basis
-            for i in range(self.k):
-                self.B[:, i] /= numpy.linalg.norm(self.B[:, i])
-                for j in range(i + 1, self.k):
-                    self.B[:, j] -= numpy.dot(self.B[:, i], self.B[:, j]) * self.B[:, i]            
-            self.Lambdas = numpy.zeros((self.k,))
-        if self.B.shape[0] != problem.ndof():
-            print(self.B.shape)
-            raise ValueError("Internal error: wrong size of perturbation vectors. Probably, you adapted or remeshed the problem during the Lyapunov calculation, which is not supported.")
 
         # --- BDF weights ---
         ts = problem.timestepper
@@ -128,19 +152,42 @@ class LyapunovExponentCalculator(GenericProblemHooks):
                 
 
         # --- Matrices ---
-        problem._require_non_distributed("Lyapunov exponent calculation")
         was_steady=[problem.time_stepper_pt(i).is_steady() for i in range(problem.ntime_stepper())]
         for i in range(problem.ntime_stepper()):
             problem.time_stepper_pt(i).make_steady()
         n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = problem.assemble_eigenproblem_matrices(0.0) #type:ignore # Mass and zero Jacobian
-        matJ=csr_matrix((J_val, J_ci, J_rs), shape=(n, n)).copy()	#type:ignore        
-        matM=csr_matrix((M_val, M_ci, M_rs), shape=(n, n)).copy()	#type:ignore        
+        # shape=(M_nr, n), not (n, n): M_nr is this rank's LOCAL row count and the column indices are
+        # global, so under --distribute the block is rectangular. Passing (n,n) with a short indptr is
+        # the same mistake as B2 in dev_docs/mpi_augmented_systems.md and dies inside scipy with an
+        # "index pointer size" complaint several frames from anything the user wrote.
+        matJ=csr_matrix((J_val, J_ci, J_rs), shape=(J_nr, n)).copy()	#type:ignore        
+        matM=csr_matrix((M_val, M_ci, M_rs), shape=(M_nr, n)).copy()	#type:ignore        
         for i,ws in enumerate(was_steady):
             if not ws:
                 problem.time_stepper_pt(i).undo_make_steady()
         matM.eliminate_zeros() #type:ignore
 
-        la = problem.get_la_solver()
+        layout=self._row_layout(problem,int(M_nr),int(n))
+        self._layout=layout
+        la_backend=get_la_backend(problem)
+
+        # --- Initialization ---
+        # Deferred until the layout is known: the perturbations are row blocks of it, and before the
+        # first assembly there is nothing that says which rows this rank owns.
+        if self.B.shape[1] != self.k:
+            if self.k > n:
+                raise ValueError("number of Lyapunov exponents k must be less or equal to the number of degrees of freedom in the problem")
+            self.B = self._draw_initial_basis(layout)
+            # Prepare orthonormal random basis. The dots and norms are allreduces when distributed.
+            for i in range(self.k):
+                self.B[:, i] /= self._as_vec(i,layout).norm()
+                for j in range(i + 1, self.k):
+                    self.B[:, j] -= self._as_vec(i,layout).dot(self._as_vec(j,layout)) * self.B[:, i]
+            self.Lambdas = numpy.zeros((self.k,))
+        if self.B.shape[0] != layout.nrow_local:
+            raise ValueError("Internal error: wrong size of perturbation vectors (%d rows, the layout "
+                             "owns %d). Probably, you adapted or remeshed the problem during the "
+                             "Lyapunov calculation, which is not supported."%(self.B.shape[0],layout.nrow_local))
         
         
         if not self.use_crank_nicholson_integration or self._oldJ is None: # Just implicit Euler
@@ -154,32 +201,34 @@ class LyapunovExponentCalculator(GenericProblemHooks):
 
         matM.eliminate_zeros() #type:ignore
         matM.sort_indices()
+        matJ.sort_indices()
         # --- Solve for the new perturbations ---
-        la = problem.get_la_solver()
-        # Tell the solver its factorisation slot is being reused for a system pyoomph built here, not
-        # for the one solve_distributed() gathered. Under mpirun the gathered Newton solve keeps
-        # rank 0's factors in that same slot, and a back-substitution landing on these ones instead
-        # would be silently wrong on every rank at once.
-        la._note_external_serial_solve()
-        la.solve_serial(1,n,matJ.nnz,1,matJ.data,matJ.indices,matJ.indptr,numpy.zeros(n),0,1)
-
-        for i in range(self.k):
-            pert = self.B[:,i].copy()
-            rhs = -matM @ (w1 * pert)  # No second history perturbation for Lyapunov calculation
-            la.solve_serial(2,n,matJ.nnz,1,matJ.data,matJ.indices,matJ.indptr,rhs,0,1)
-            self.B[:,i] = rhs[:]
+        # Through the backend rather than solve_serial: matM is this rank's row block with GLOBAL
+        # column indices, so "matM @ pert" is only meaningful once the operand is whole, which is
+        # what DistMatrix.matvec is for (a replicating allgather for scipy, Mat.mult for PETSc).
+        matJd=la_backend.matrix(matJ,layout,int(n))
+        matMd=la_backend.matrix(matM,layout,int(n))
+        # One factorisation, k right-hand sides -- what the old solve_serial(1,...) followed by k
+        # times solve_serial(2,...) did, kept explicitly rather than by luck. No
+        # _note_external_serial_solve() here: the backend's distributed entry point owns its own
+        # factorisation slot (PETSc's _aux_*), separate from the gathered Newton solve's.
+        rhss=[matMd.matvec(self._as_vec(i,layout))*(-w1) for i in range(self.k)]  # No second history perturbation for Lyapunov calculation
+        for i,sol in enumerate(la_backend.solve_many(matJd,rhss)):
+            self.B[:,i]=sol.local
 
         if t-self._t_last_gram_schmidt>self._gram_schmidt_dt:
-            # --- QR orthonormalization ---            
+            # --- QR orthonormalization ---
+            # Every norm and projection below is an allreduce when distributed, so the whole
+            # factorisation R is identical on every rank and the exponents cannot drift apart.
             for i in range(self.k):
-                norm=numpy.linalg.norm(self.B[:,i])
+                norm=self._as_vec(i,layout).norm()
                 if Tdiff>0:
                     #print("R_ii",i,norm)
                     self.Lambdas[i]+=numpy.log(norm)
                 self.B[:,i]/=norm                                                
                 # Gram-Schmidt
                 for j in range(i+1,self.k):
-                    proj=numpy.dot(self.B[:,i],self.B[:,j])
+                    proj=self._as_vec(i,layout).dot(self._as_vec(j,layout))
                     #print("R_ij",i,j,proj)
                     self.B[:,j]-=proj*self.B[:,i]
                     
@@ -205,9 +254,15 @@ class LyapunovExponentCalculator(GenericProblemHooks):
                     # Problem._last_eigenvectors is declared as a 2d complex ndarray (rows=eigenvectors), not a list:
                     # other code (e.g. Problem.calculate_eigenvalues, periodic_driving_response.py) indexes it as
                     # _last_eigenvectors[i,:] or _last_eigenvectors[0,dofidx], which fails with a TypeError on a plain list.
-                    eigenvecs = numpy.array([self.B[:, i].copy() for i in range(self.k)], dtype=numpy.complex128)
+                    # Replicated at full GLOBAL length: an eigenvector is indexed by global equation
+                    # number everywhere it is consumed (set_eigenfunction_as_dofs, the mesh data
+                    # cache, the VTK output), so the perturbations are gathered here rather than
+                    # handed over as row blocks. See dev_docs/mpi_eigenproblems.md section 3.
+                    norms=[self._as_vec(i,layout).norm() for i in range(self.k)]
+                    eigenvecs = numpy.array([self._as_vec(i,layout).to_global() for i in range(self.k)],
+                                            dtype=numpy.complex128)
                     for i in range(eigenvecs.shape[0]):
-                        eigenvecs[i] = eigenvecs[i] / numpy.linalg.norm(eigenvecs[i])
+                        eigenvecs[i] = eigenvecs[i] / norms[i]
                     problem._last_eigenvectors = eigenvecs
                     problem.invalidate_cached_mesh_data(only_eigens=True)
                     
@@ -228,9 +283,13 @@ class LyapunovExponentCalculatorBDF2(GenericProblemHooks):
         filename: The name of the output file. Defaults to "lyapunov.txt".
         relative_to_output: Whether to save the output file relative to the problem's output directory. Defaults to True.
         store_as_eigenvectors: Whether to store the perturbation vectors as eigenvectors. Defaults to False.
+        random_seed: Seed for the initial random perturbations. The same value on every rank -- it is
+            a constructor argument, so it is -- which is what keeps the ranks from diverging under
+            ``mpirun``.
     """    
-    def __init__(self,average_time:ExpressionNumOrNone=None,N:int=1,filename:str="lyapunov.txt",relative_to_output:bool=True,store_as_eigenvectors:bool=False):
+    def __init__(self,average_time:ExpressionNumOrNone=None,N:int=1,filename:str="lyapunov.txt",relative_to_output:bool=True,store_as_eigenvectors:bool=False,random_seed:int=0):
         super().__init__()
+        self.random_seed=int(random_seed)
         self.filename=filename
         self.relative_to_output=relative_to_output
         self.store_as_eigenvectors=store_as_eigenvectors
@@ -264,8 +323,15 @@ class LyapunovExponentCalculatorBDF2(GenericProblemHooks):
             # Placeholder vectors of size 0 (mismatching problem.ndof()) so the size check below triggers proper (re-)initialization
             self.perturbation=[numpy.zeros(0) for i in range(self.N)]
         if len(self.perturbation[0])!=problem.ndof():
+            # Seeded, and drawn once for all N vectors from ONE generator: numpy.random.rand is not
+            # identically seeded across ranks, so under mpirun the ranks perturbed differently,
+            # converged differently and deadlocked at the next collective -- B6 in
+            # dev_docs/mpi_augmented_systems.md. This class runs replicated (see the refusal below),
+            # so every rank must draw the identical numbers, not merely reproducible ones.
+            rng=numpy.random.default_rng(self.random_seed)
+            draws=rng.random((self.N,problem.ndof()))*2-1
             for i in range(self.N):
-                self.perturbation[i]=(numpy.random.rand(problem.ndof())*2-1)
+                self.perturbation[i]=numpy.ascontiguousarray(draws[i])
                 if self.old_perturbation is None:
                     self.old_perturbation=[None for _ in range(self.N)]
                 self.old_perturbation[i]=None
@@ -293,7 +359,14 @@ class LyapunovExponentCalculatorBDF2(GenericProblemHooks):
         
 
         # Get the mass matrix and the Jacobian
-        problem._require_non_distributed("Lyapunov exponent calculation")
+        # Still refused under --distribute, and for a reason specific to THIS class rather than to
+        # Lyapunov exponents: it does not factorise anything of its own. It back-substitutes against
+        # the factorisation the Newton solve just made, via solve_serial(op_flag=2), which needs no
+        # matrix at all. There is no layout-agnostic form of that: the distributed analogue,
+        # solve_distributed(op_flag=2), routes through _solve_newton_step and would apply Newton-step
+        # post-processing to a Lyapunov right-hand side. LyapunovExponentCalculator (above) works
+        # under --distribute because it builds and factorises its own BDF1/Crank-Nicolson operator.
+        problem._require_non_distributed("Lyapunov exponent calculation with BDF2 perturbations")
         matM,matJ=None,None
         custom_assm=problem.get_custom_assembler()
         if custom_assm is not None:
@@ -301,7 +374,10 @@ class LyapunovExponentCalculatorBDF2(GenericProblemHooks):
         
         if matM is None or matJ is None:
             n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = problem.assemble_eigenproblem_matrices(0.0) #type:ignore # Mass and zero Jacobian
-            matM=csr_matrix((M_val, M_ci, M_rs), shape=(n, n)).copy()	#type:ignore        
+            # shape=(M_nr, n): M_nr is the local row count. Non-distributed here by the refusal
+            # above, so the two agree today -- written correctly anyway, because a (n,n) with a short
+            # indptr is exactly the B2 shape of mistake and it would be found the hard way.
+            matM=csr_matrix((M_val, M_ci, M_rs), shape=(M_nr, n)).copy()	#type:ignore        
             matM.eliminate_zeros() #type:ignore
         else:
             n, J_nzz, J_val, J_rs, J_ci = problem.ndof(), len(matJ.data), matJ.data, matJ.indptr, matJ.indices
