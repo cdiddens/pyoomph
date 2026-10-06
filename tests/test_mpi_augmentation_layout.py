@@ -45,6 +45,7 @@ import shutil
 import subprocess
 import sys
 
+import numpy
 import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -200,3 +201,61 @@ def test_the_base_state_is_untouched_by_an_augmentation(tmp_path, nproc, distrib
         assert r["usqr_after"] == pytest.approx(r["usqr"], rel=1e-14), "the augmentation moved the base state"
         assert r["usqr_resolved"] == pytest.approx(r["usqr"], rel=1e-10), "re-solving after teardown gave a different answer"
         assert r["usqr"] == pytest.approx(ref, rel=1e-12), "the ranks disagree about the base state"
+
+
+def _eqn_tables(tmpdir, nproc):
+    """Run and return (nbase, naug, per-rank base blocks, per-rank tables)."""
+    per_rank = _run(nproc, tmpdir, distribute=True)
+    outdir = str(tmpdir)
+    tables, bases = [], []
+    for rank in range(nproc):
+        z = numpy.load(os.path.join(outdir, "eqntable_rank%d.npz" % rank))
+        tables.append(z["table"])
+        bases.append((int(z["base_first"][0]), int(z["base_nloc"][0])))
+    return int(z["base_n"][0]), int(z["aug_n"][0]), bases, tables, per_rank
+
+
+@pytest.mark.parametrize("nproc", [2, 3])
+def test_the_augmented_equation_table_is_the_documented_layout(tmp_path, nproc):
+    """_get_augmented_eqn_table() maps the naive numbering onto the real one.
+
+    A tracker writes its blocks in the naive order -- the base dofs, then each vector block (base row
+    g of block k at k*nbase+g), then the scalars -- and needs to know the real global column of each
+    entry. The table is rebuilt here from the per-rank base layouts alone and compared entry by entry,
+    because an off-by-one in it does not crash: it produces a plausible matrix with its border in the
+    wrong column.
+    """
+    nbase, naug, bases, tables, _per = _eqn_tables(tmp_path, nproc)
+    assert naug == 2 * nbase + 1
+
+    # One vector block then one scalar, so the naive layout is [base | block | scalar].
+    naive_block_start = nbase
+    naive_scalar = 2 * nbase
+
+    expect = numpy.full(naug, -1, dtype=numpy.int64)
+    counter = 0
+    for d, (first_row, nrow_local) in enumerate(sorted(bases)):
+        for i in range(nrow_local):  # this rank's base rows
+            expect[first_row + i] = counter; counter += 1
+        for i in range(nrow_local):  # then its rows of the vector block
+            expect[naive_block_start + first_row + i] = counter; counter += 1
+        if d == 0:                   # the scalar, on rank 0 alone
+            expect[naive_scalar] = counter; counter += 1
+    assert counter == naug and not (expect < 0).any(), "the reference layout is incomplete"
+
+    for rank, table in enumerate(tables):
+        assert len(table) == naug, "rank %d's table has %d entries, expected %d" % (rank, len(table), naug)
+        assert sorted(table.tolist()) == list(range(naug)), "rank %d's table is not a permutation" % rank
+        assert numpy.array_equal(table, expect), "rank %d's table is not the documented layout" % rank
+    for rank in range(1, len(tables)):
+        assert numpy.array_equal(tables[rank], tables[0]), (
+            "the ranks disagree about the table; it is replicated data and branching on it would split them")
+
+
+def test_the_equation_table_is_empty_when_replicated(tmp_path):
+    """Not distributed means the naive numbering IS the real one, reported as an empty table."""
+    per_rank = _run(2, tmp_path, distribute=False)
+    for r in per_rank:
+        assert r["table_len"] == 0, (
+            "rank %d reported a %d-entry translation table for a replicated layout; empty means identity"
+            % (r["rank"], r["table_len"]))

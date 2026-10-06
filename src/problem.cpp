@@ -1497,6 +1497,13 @@ namespace pyoomph
 		return NULL;
 	}
 
+	std::vector<unsigned long> Problem::get_augmented_eqn_table()
+	{
+		AugmentedDofDistributionHelper *h = this->augmented_dof_distribution_helper();
+		if (!h) return std::vector<unsigned long>();
+		return h->global_eqn_table();
+	}
+
 	Problem::BaseDofDistributionScope::BaseDofDistributionScope(Problem *problem)
 	{
 		Helper = problem->augmented_dof_distribution_helper();
@@ -1605,12 +1612,34 @@ namespace pyoomph
 	// The old code copied src.size() entries with residuals[i], which indexes LOCAL rows: under
 	// mpirun that ran off the end of the local storage with nothing to catch it. The symptom was not
 	// a crash at the write but a wrong answer or a corrupted neighbour later.
-	void Problem::copy_custom_residuals_into(const std::vector<double> &src, oomph::DoubleVector &dest)
+	void Problem::copy_custom_residuals_into(const std::vector<double> &src, oomph::DoubleVector &dest, const CustomResJacInformation &info)
 	{
 		if (!dest.built())
 		{
-			oomph::LinearAlgebraDistribution dist(this->communicator_pt(), src.size(), false);
+			const unsigned n_global = info.has_declared_rows() ? info.declared_nrow_global() : src.size();
+			oomph::LinearAlgebraDistribution dist(this->communicator_pt(), n_global, false);
 			dest.build(&dist, 0.0);
+		}
+		const unsigned nrow_local = dest.nrow_local();
+		const unsigned first_row = dest.first_row();
+		double *v = dest.values_pt();
+		if (info.has_declared_rows())
+		{
+			// The assembler says which rows it built. Check, do not adapt: if it handed back a
+			// different block than the solver asked for, copying some overlap would produce a
+			// plausible wrong answer, and under MPI the mismatch is likely to differ per rank.
+			if (info.declared_nrow_global() != dest.nrow() || info.declared_first_row() != first_row ||
+				info.declared_nrow_local() != nrow_local || src.size() != nrow_local)
+			{
+				throw_runtime_error("The custom assembler built rows [" + std::to_string(info.declared_first_row()) +
+									"," + std::to_string(info.declared_first_row() + info.declared_nrow_local()) +
+									") of " + std::to_string(info.declared_nrow_global()) + " (" + std::to_string(src.size()) +
+									" values), but the vector it has to fill holds rows [" + std::to_string(first_row) + "," +
+									std::to_string(first_row + nrow_local) + ") of " + std::to_string(dest.nrow()) +
+									". The assembler and the linear solver disagree about the row distribution.");
+			}
+			for (unsigned i = 0; i < nrow_local; i++) v[i] = src[i];
+			return;
 		}
 		if (dest.nrow() != src.size())
 		{
@@ -1618,9 +1647,6 @@ namespace pyoomph
 								" residuals, but the vector it has to fill has " + std::to_string(dest.nrow()) +
 								" global rows. The assembler and the problem disagree about ndof.");
 		}
-		const unsigned nrow_local = dest.nrow_local();
-		const unsigned first_row = dest.first_row();
-		double *v = dest.values_pt();
 		for (unsigned i = 0; i < nrow_local; i++)
 			v[i] = src[first_row + i];
 	}
@@ -1630,7 +1656,7 @@ namespace pyoomph
 	// layout oomph's own distributed assembly produces and the one PETSc's MPIAIJ wants.
 	void Problem::build_custom_jacobian(CustomResJacInformation &info, oomph::CRDoubleMatrix &jacobian)
 	{
-		const unsigned n_global = info.residuals.size();
+		const unsigned n_global = info.has_declared_rows() ? info.declared_nrow_global() : info.residuals.size();
 		// The distribution has to exist before build(ncol,...): that overload writes nrow_local() rows
 		// and takes the count from the distribution, so an unbuilt one makes it write a full row_start
 		// array into a zero-row matrix. Every call out of a Newton solve hands in a matrix oomph has
@@ -1641,6 +1667,27 @@ namespace pyoomph
 			oomph::LinearAlgebraDistribution dist(this->communicator_pt(), n_global, false);
 			jacobian.build(&dist);
 		}
+		const unsigned nrow_local = jacobian.nrow_local();
+		const unsigned first_row = jacobian.first_row();
+		if (info.has_declared_rows())
+		{
+			// Already this rank's block, with global column indices and row starts rebased to it --
+			// exactly what build(ncol,...) wants. Validated, not adapted, for the same reason as the
+			// residual: a block that is not the one the solver asked for must say so.
+			if (info.declared_nrow_global() != jacobian.nrow() || info.declared_first_row() != first_row ||
+				info.declared_nrow_local() != nrow_local || info.Jrow_start.size() != nrow_local + 1)
+			{
+				throw_runtime_error("The custom assembler built Jacobian rows [" + std::to_string(info.declared_first_row()) +
+									"," + std::to_string(info.declared_first_row() + info.declared_nrow_local()) + ") of " +
+									std::to_string(info.declared_nrow_global()) + " with a row-start array of " +
+									std::to_string(info.Jrow_start.size()) + " entries, but the matrix it has to fill holds rows [" +
+									std::to_string(first_row) + "," + std::to_string(first_row + nrow_local) + ") of " +
+									std::to_string(jacobian.nrow()) + ". The assembler and the linear solver disagree about "
+									"the row distribution.");
+			}
+			jacobian.build(n_global, info.Jvals, info.Jcolumn_index, info.Jrow_start);
+			return;
+		}
 		if (info.Jrow_start.size() != n_global + 1)
 		{
 			throw_runtime_error("The custom assembler returned a CSR row-start array of " +
@@ -1648,8 +1695,6 @@ namespace pyoomph
 								std::to_string(n_global) + " residuals; " + std::to_string(n_global + 1) +
 								" were expected. The Jacobian and the residual describe different systems.");
 		}
-		const unsigned nrow_local = jacobian.nrow_local();
-		const unsigned first_row = jacobian.first_row();
 		if (first_row + nrow_local > n_global)
 		{
 			throw_runtime_error("The linear solver asked for rows " + std::to_string(first_row) + ".." +
@@ -2308,7 +2353,7 @@ namespace pyoomph
 			{
 				throw_runtime_error("TODO: Cannot use custom residuals when dirichlet conditions are not removed from the dof vector, since the user-provided residual vector would still contain contributions from the dirichlet dofs, which would be wrong");
 			}
-			copy_custom_residuals_into(info.residuals, residuals);
+			copy_custom_residuals_into(info.residuals, residuals, info);
 		}
 	}
 
@@ -2339,7 +2384,7 @@ namespace pyoomph
 			{
 				 throw_runtime_error("TODO: Cannot remove dirichlet dofs from the derivative by a global parameter by matrix manipulation yet.");
 			}
-			copy_custom_residuals_into(info.residuals, result);
+			copy_custom_residuals_into(info.residuals, result, info);
 		}
 
 	}
@@ -2380,7 +2425,7 @@ namespace pyoomph
 		{
 			CustomResJacInformation info(true,"");
 			get_custom_residuals_jacobian(&info);
-			copy_custom_residuals_into(info.residuals, residuals);
+			copy_custom_residuals_into(info.residuals, residuals, info);
 			build_custom_jacobian(info, jacobian);
 			if (!this->dirichlets_by_removing_from_dof_vector)
 			{

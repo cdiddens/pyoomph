@@ -201,6 +201,12 @@ namespace pyoomph
       return Global_eqn_number.empty() ? naive : Global_eqn_number[naive];
     }
 
+    // The whole naive->augmented table, for a caller that has to place many entries rather than ask
+    // one at a time -- a Python tracker assembling its border blocks, which needs the global column
+    // of every (block, base row) pair. EMPTY unless distributed, which the caller reads as the
+    // identity, the same convention global_eqn() above uses.
+    const std::vector<unsigned long> &global_eqn_table() const { return Global_eqn_number; }
+
     // Broadcast the values of the rank-0-owned scalar unknowns to all ranks (no-op unless
     // distributed); the handlers call this from their synchronise() override after each Newton
     // update, since only rank 0's Dof_pt holds these entries.

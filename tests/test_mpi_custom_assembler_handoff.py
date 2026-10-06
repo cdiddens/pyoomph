@@ -91,12 +91,12 @@ pytestmark = [pytest.mark.skipif(_SKIP_REASON is not None, reason=str(_SKIP_REAS
 _OBS_RTOL = 1e-12
 
 
-def _run(nproc, tmpdir, distribute=False, timeout=900):
+def _run(nproc, tmpdir, distribute=False, timeout=900, declare_rows="none", expect_failure=False):
     """Launch the worker (under mpirun when nproc>1) and return the per-rank result dicts."""
     cmd = []
     if nproc > 1:
         cmd += ["mpirun", "-n", str(nproc)]
-    cmd += [sys.executable, _WORKER, "--outdir", str(tmpdir)]
+    cmd += [sys.executable, _WORKER, "--outdir", str(tmpdir), "--declare-rows", declare_rows]
     if distribute:
         cmd += ["--distribute"]
     # Importing pyoomph calls MPI_Init, so THIS pytest process is already a singleton MPI job owning
@@ -121,8 +121,9 @@ def _run(nproc, tmpdir, distribute=False, timeout=900):
     assert len(per_rank) == nproc, (
         "reported from %d of %d ranks (exit %d)\n--- stdout tail ---\n%s\n--- stderr tail ---\n%s"
         % (len(per_rank), nproc, proc.returncode, proc.stdout[-3000:], proc.stderr[-3000:]))
-    for r in per_rank:
-        assert r.get("ok"), "rank %s failed: %s\n%s" % (r.get("rank"), r.get("error"), r.get("traceback", ""))
+    if not expect_failure:
+        for r in per_rank:
+            assert r.get("ok"), "rank %s failed: %s\n%s" % (r.get("rank"), r.get("error"), r.get("traceback", ""))
     return per_rank
 
 
@@ -180,3 +181,51 @@ def test_fresh_matrix_survives_the_custom_path(tmp_path):
     assert r["fresh_shape"] == [r["ndof"], r["ndof"]]
     assert r["fresh_res_len"] == r["ndof"]
     assert r["fresh_nnz"] > r["ndof"], "a Jacobian with no off-diagonal entries is not this problem's"
+
+
+# --- the declared row block (CustomResJacInfo.set_row_distribution) -------------------------------
+#
+# An assembler may say which rows of the global system it built, instead of returning all of them.
+# That is the shape a distributed tracker produces, and the contract the linear-algebra backend will
+# use. What is testable before the backend exists is the contract itself: declaring the whole system
+# must be indistinguishable from not declaring, and declaring anything else than what the solver
+# asked for must be refused rather than reconciled.
+
+
+def test_declaring_the_whole_system_changes_nothing(tmp_path):
+    """first_row=0, nrow_local=n is what a serial assembler produces either way."""
+    plain = _run(1, tmp_path / "plain")[0]
+    declared = _run(1, tmp_path / "declared", declare_rows="global")[0]
+    assert declared["usqr"] == pytest.approx(plain["usqr"], rel=_OBS_RTOL)
+    assert declared["usqr"] == pytest.approx(declared["usqr_ordinary"], rel=_OBS_RTOL)
+
+
+def test_a_block_that_is_not_the_solvers_is_refused(tmp_path):
+    """Serial: one row short of the whole system, which no distribution ever asks for."""
+    r = _run(1, tmp_path, declare_rows="wrong")[0]
+    assert r["wrong_block_refused"], "a short row block was accepted"
+    assert "disagree about the row distribution" in r["refusal"], r["refusal"]
+    # The message has to name both blocks, or it cannot be acted on.
+    assert "built rows [0,120) of 121" in r["refusal"], r["refusal"]
+    assert "holds rows [0,121) of 121" in r["refusal"], r["refusal"]
+
+
+def test_declaring_the_whole_system_is_refused_under_mpirun(tmp_path):
+    """And this is the point of the check: under mpirun the solver asks for a BLOCK.
+
+    An assembler that declares the whole system there has not produced what the solver wants, and
+    silently copying the overlap would give a plausible wrong answer that differs per rank. Each
+    rank's message names the block it was actually asked for, which is how a tracker learns what to
+    build.
+    """
+    per_rank = _run(2, tmp_path, declare_rows="global", expect_failure=True)
+    assert all(not r["ok"] for r in per_rank), "declaring the global system was accepted under mpirun"
+    seen = set()
+    for r in per_rank:
+        msg = str(r.get("error", ""))
+        assert "disagree about the row distribution" in msg, msg
+        assert "built rows [0,121) of 121" in msg, msg
+        # "holds rows [a,b)" differs per rank -- that is the uniform split the solver imposed.
+        start = msg.index("holds rows ")
+        seen.add(msg[start:start + 30])
+    assert len(seen) == 2, "both ranks reported the same block, so the message is not per-rank: %s" % seen

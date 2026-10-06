@@ -131,6 +131,9 @@ class HandoffProblem(Problem):
         self.N = N
         self.custom = False
         self.n_handoffs = 0
+        # None: hand back the whole global system, as a serial assembler does. Otherwise a
+        # (first_row, nrow_local, nrow_global) triple declared through CustomResJacInfo.
+        self.declare_rows = None
 
     def define_problem(self):
         self += RectangularQuadMesh(N=self.N, size=[1, 1], name="domain")
@@ -163,6 +166,15 @@ class HandoffProblem(Problem):
             self.use_custom_residual_jacobian = True
         self.n_handoffs += 1
         R = numpy.ascontiguousarray(numpy.asarray(R, dtype=numpy.float64))
+        if self.declare_rows is not None:
+            # Hand back a row BLOCK instead of the whole system: slice the rows, keep the column
+            # indices global, rebase the row starts. This is the shape a distributed tracker will
+            # produce; here it is sliced out of the global system so the two are comparable.
+            first_row, nrow_local, nrow_global = self.declare_rows
+            info.set_row_distribution(first_row, nrow_local, nrow_global)
+            R = numpy.ascontiguousarray(R[first_row:first_row + nrow_local])
+            if J is not None:
+                J = J.tocsr()[first_row:first_row + nrow_local, :].tocsr()
         info.set_custom_residuals(R)
         if J is not None:
             J = J.tocsr()
@@ -182,6 +194,9 @@ def main():
     ap.add_argument("--outdir", required=True)
     ap.add_argument("--N", type=int, default=6)
     ap.add_argument("--distribute", action="store_true")
+    # "global": declare the whole system explicitly, which must behave exactly like not declaring.
+    # "wrong": declare a block that is not the one the solver asks for, which must be refused.
+    ap.add_argument("--declare-rows", default="none", choices=["none", "global", "wrong"])
     args, _ = ap.parse_known_args()
 
     payload: dict = {"rank": get_mpi_rank(), "nproc": max(get_mpi_nproc(), 1)}
@@ -204,6 +219,28 @@ def main():
             # (b) the same solve again, driven through the custom handoff, from the same state
             p.set_current_dofs(numpy.zeros(p.ndof()))
             p.set_custom_handoff(True)
+            if args.declare_rows == "global":
+                p.declare_rows = (0, p.ndof(), p.ndof())
+            elif args.declare_rows == "wrong":
+                # One row short: a block that cannot be what any distribution asked for.
+                p.declare_rows = (0, p.ndof() - 1, p.ndof())
+            payload["declare_rows"] = args.declare_rows
+            if args.declare_rows == "wrong":
+                try:
+                    p.solve()
+                    payload["wrong_block_refused"] = False
+                except Exception as e:
+                    payload["wrong_block_refused"] = True
+                    payload["refusal"] = str(e)[:400]
+                payload["usqr"] = payload["usqr_ordinary"]
+                payload["n_handoffs"] = int(p.n_handoffs)
+                payload["fresh_matrix_ok"] = True
+                payload["solver_row_blocks"] = sorted(set(probe.seen))
+                payload["ok"] = True
+                out = sys.__stdout__ or sys.stdout
+                out.write("PYOOMPH_MPI_RESULT " + json.dumps(payload) + "\n")
+                out.flush()
+                return
             p.solve()
             payload["usqr"] = _usqr(p)
             payload["n_handoffs"] = int(p.n_handoffs)

@@ -52,6 +52,7 @@
 
 import argparse
 import json
+import os
 import sys
 import traceback
 
@@ -117,6 +118,17 @@ def main():
             payload["aug_base"] = [int(b_n), int(b_loc), int(b_first), bool(b_dist)]
             payload["aug_local_total"] = int(a_loc)
             payload["ndof"] = int(p.ndof())
+
+            # The naive->augmented translation table. Written to a file rather than into the result
+            # line: it is one entry per augmented dof and a long line does not arrive atomically on
+            # the shared stdout pipe.
+            table = p._get_augmented_eqn_table()
+            numpy.savez(os.path.join(args.outdir, "eqntable_rank%d.npz" % get_mpi_rank()),
+                        table=numpy.asarray(table, dtype=numpy.int64),
+                        base_first=numpy.array([b_first]), base_nloc=numpy.array([b_loc]),
+                        base_n=numpy.array([b_n]), aug_n=numpy.array([a_n]),
+                        aug_first=numpy.array([a_first]), aug_nloc=numpy.array([a_loc]))
+            payload["table_len"] = int(len(table))
 
             blocks = aug.split(startindex=1)
             payload["split_lengths"] = [len(b) for b in blocks]

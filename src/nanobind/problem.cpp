@@ -470,7 +470,15 @@ void PyReg_Problem(nb::module_ &m)
 			},
 			nb::arg("values"), nb::arg("column_index"), nb::arg("row_start"),
 			"Set the custom Jacobian matrix in compressed sparse row (CSR) format: ``values`` are the non-zero entries, "
-			"``column_index`` their column indices and ``row_start`` the row offsets into ``values``/``column_index`` (length ndof()+1).");
+			"``column_index`` their column indices and ``row_start`` the row offsets into ``values``/``column_index`` (length ndof()+1, "
+			"or nrow_local+1 once set_row_distribution() has been called).")
+		.def("set_row_distribution", &pyoomph::CustomResJacInformation::set_row_distribution,
+			 nb::arg("first_row"), nb::arg("nrow_local"), nb::arg("nrow_global"),
+			 "Declare that the residual and Jacobian passed in describe only rows [first_row, first_row+nrow_local) of a "
+			 "system with nrow_global rows, rather than the whole thing. Column indices stay GLOBAL and the CSR row starts "
+			 "must be rebased to the block. Without this call the arrays are taken to be the complete global system, which "
+			 "is what a serial assembler returns. The declared block is checked against the distribution the linear solver "
+			 "asked for and a mismatch raises, rather than being silently reconciled.");
 
 	nb::class_<oomph::AssemblyHandler>(
 		m, "AssemblyHandler",
@@ -1596,6 +1604,20 @@ void PyReg_Problem(nb::module_ &m)
 			"This is the distribution the eigenproblem matrices are assembled on -- also while a bifurcation "
 			"tracker is installed, where the problem's own dof distribution is the larger augmented one -- so it "
 			"gives the ownership range needed to hand their local CSR blocks to a distributed linear algebra backend.")
+		.def(
+			"_get_augmented_eqn_table", [](pyoomph::Problem *self)
+			{
+				std::vector<unsigned long> table = self->get_augmented_eqn_table();
+				std::vector<int64_t> out(table.begin(), table.end());
+				return vector_to_ndarray(out);
+			},
+			"Translation from the NAIVE augmented equation numbering to the actual one, as an int64 array.\n\n"
+			"The naive numbering is the historical one a tracker writes its blocks in: the base dofs first, then "
+			"each augmented vector block in registration order (base row g of block k at k*nbase+g), then the "
+			"scalars. Under --distribute the real numbering interleaves these per rank -- rank d owns its base "
+			"rows, then its rows of each block, with the scalars on rank 0 -- and this array maps one to the "
+			"other, so a caller placing border entries knows their global column.\n\n"
+			"EMPTY when no augmentation is installed or the layout is not distributed; read that as the identity.")
 		.def(
 			"_redistribute_local_to_global_double_vector", [](pyoomph::Problem *self, const nb::ndarray<nb::numpy, double> &local_v)
 			{

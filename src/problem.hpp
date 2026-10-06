@@ -205,10 +205,24 @@ namespace pyoomph
       std::vector<double> residuals;
       oomph::Vector<double> Jvals;
       oomph::Vector<int> Jcolumn_index,Jrow_start;
+      // Which rows of the global system the arrays above describe. Unset (Nrow_local==0 with
+      // Declared_rows false) means "the whole thing, indexed 0..n-1", which is what a Python
+      // assembler written before the distributed path returns and what every serial one returns.
+      // Declared, it is this rank's block, and the copy into oomph's vector/matrix then VALIDATES it
+      // against the caller's distribution rather than slicing: a block that does not match is a
+      // mistake worth a message, not something to paper over.
+      bool Declared_rows=false;
+      unsigned First_row=0,Nrow_local=0,Nrow_global=0;
    public:
       bool require_jacobian() const {return Require_jacobian;}
       void set_custom_residuals(const std::vector<double> & r) {residuals=r;}
       void set_custom_jacobian(const std::vector<double> & Jv, const std::vector<int> & col_index,const std::vector<int> & row_start);
+      void set_row_distribution(unsigned first_row,unsigned nrow_local,unsigned nrow_global)
+        {Declared_rows=true;First_row=first_row;Nrow_local=nrow_local;Nrow_global=nrow_global;}
+      bool has_declared_rows() const {return Declared_rows;}
+      unsigned declared_first_row() const {return First_row;}
+      unsigned declared_nrow_local() const {return Nrow_local;}
+      unsigned declared_nrow_global() const {return Nrow_global;}
       std::string get_parameter_name() const {return dparameter;}
       CustomResJacInformation(bool req_J,std::string parameter_name) : Require_jacobian(req_J), dparameter(parameter_name) {}
   };
@@ -1534,7 +1548,7 @@ namespace pyoomph
     // linear solver's distribution - which under mpirun is a row block, and not even the same
     // partition as the dof distribution. These copy only the caller's rows; serially the block is
     // everything, so nothing changes there. See dev_docs/mpi_augmented_systems.md B2.
-    void copy_custom_residuals_into(const std::vector<double> &src, oomph::DoubleVector &dest);
+    void copy_custom_residuals_into(const std::vector<double> &src, oomph::DoubleVector &dest, const CustomResJacInformation &info);
     void build_custom_jacobian(CustomResJacInformation &info, oomph::CRDoubleMatrix &jacobian);
     std::vector<double> get_local_dof_values(); // This rank's block of the dof vector (the values Dof_pt points at); NOT gathered, unlike get_current_dofs()
     #ifdef OOMPH_HAS_MPI
@@ -1579,6 +1593,11 @@ namespace pyoomph
     // leaves the DEFAULT handler installed, so a handler-only lookup reports "no helper" and
     // get_base_dof_distribution_info() then describes the AUGMENTED layout.
     AugmentedDofDistributionHelper *augmented_dof_distribution_helper();
+    // The installed augmentation's naive->augmented equation table, or empty when there is none or it
+    // is not distributed (which the caller reads as the identity). The naive numbering is the
+    // historical [base | block | block | scalar] one, i.e. base row g of block k is naive
+    // k*nbase + g, with the scalars after the blocks.
+    std::vector<unsigned long> get_augmented_eqn_table();
     void start_orbit_tracking(const std::vector<std::vector<double>> &history, const double &T,int bspline_order,int gl_order,std::vector<double> knots,unsigned T_constraint_mode); // Sets up periodic-orbit tracking from an initial guessed history (time series of dof snapshots) with period T, represented via B-splines
     void after_bifurcation_tracking_step(); // Post-processing hook called after each continuation step while bifurcation tracking is active (e.g. to renormalize the eigenvector)
     double &global_parameter(const std::string &n); // Reference to the value() of the named global parameter (creating it if necessary)
