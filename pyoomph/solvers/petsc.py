@@ -977,6 +977,36 @@ class PETSCSolver(GenericLinearSystemSolver):
                     pc.setFactorSolverType(pkg) #type:ignore
                 elif hasattr(pc,"setFactorSolverPackage"):
                     pc.setFactorSolverPackage(pkg) #type:ignore
+            if pkg=="mumps":
+                # ICNTL(24)=1, null-pivot detection, set DIRECTLY on the factor rather than through
+                # the options database: skipping setFromOptions() above (deliberately, see the comment
+                # there) also skips use_mumps()'s mat_mumps_icntl_24, so a system solved on THIS path
+                # never got it. A bordered system's scalar rows have no diagonal entry by construction
+                # -- a fold's normalisation row and parameter column meet at a structural hole,
+                # dev_docs/mpi_augmented_systems.md section 5 -- which is exactly the shape
+                # use_mumps() sets the flag for: MUMPS plans its elimination from the structure, meets
+                # a zero pivot, and with detection off divides by it and returns a silently wrong
+                # answer. ICNTL(6)=5 is the scaling use_mumps() asks for alongside.
+                #
+                # Honest about what is measured: this was added while chasing the Python FoldTracker's
+                # slow convergence under --distribute and did NOT change it (identical residuals, to
+                # every digit), so that is a different defect. It is kept because the gap it closes is
+                # real and independent -- this path demonstrably did not see use_mumps()'s settings --
+                # and because tests/test_mpi_bordered_solve.py exercises it. No case is known in which
+                # it currently changes an answer.
+                pc.setUp() #type:ignore
+                try:
+                    F=pc.getFactorMatrix() #type:ignore
+                    F.setMumpsIcntl(6,5) #type:ignore
+                    F.setMumpsIcntl(24,1) #type:ignore
+                except Exception as e:
+                    # Not fatal: an older petsc4py without setMumpsIcntl still solves, just without
+                    # null-pivot detection, so say so once rather than failing the solve.
+                    if not getattr(PETSCSolver,"_aux_icntl_warned",False):
+                        PETSCSolver._aux_icntl_warned=True
+                        print("pyoomph: could not set MUMPS ICNTL(24) on the auxiliary factorisation ("+
+                              str(e)+"). A bordered system with an empty scalar diagonal may be solved "
+                              "inaccurately; a Newton solve on it would converge slowly rather than fail.")
             self._aux_digest=digest
         self._aux_b.getArray()[:]=numpy.asarray(b_local,dtype=numpy.float64) #type:ignore
         self._aux_ksp.solve(self._aux_b,self._aux_x) #type:ignore

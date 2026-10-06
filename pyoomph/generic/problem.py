@@ -3426,6 +3426,41 @@ class Problem(_pyoomph.Problem):
             #eqs.get_current_code_generator().set_remove_underived_modes(self._cartesian_normal_mode_stability.real_contribution_name,set([1]))
             #eqs.get_current_code_generator().set_remove_underived_modes(self._cartesian_normal_mode_stability.imag_contribution_name,set([1]))
 
+    def _require_mpi_capable_assembler(self,assm:"CustomAssemblyBase")->None:
+        """Refuse a custom assembler that is not written against a row layout, under mpirun.
+
+        Replaces a blanket nproc>1 refusal with a per-assembler one. Three reasons it is a question
+        asked of the assembler rather than of the pipeline: the handlers are being ported one family
+        at a time, so an all-or-nothing flip would be wrong for most of that time; a user's own
+        CustomAssemblyBase subclass -- the whole point of that class -- cannot have been ported and
+        must still be refused by name; and FixedMeshMaxQuadraticNonlinearAssembly sits behind the
+        same door with its own global algebra.
+
+        The default is False (CustomAssemblyBase.supports_mpi), so anything not explicitly ported is
+        refused, which is the safe direction: a handler given row blocks it treats as global vectors
+        does not fail, it gives a wrong answer.
+        """
+        from .mpi import get_mpi_nproc
+        if get_mpi_nproc()<=1:
+            return
+        if getattr(assm,"supports_mpi",None) is not None and assm.supports_mpi():
+            if self.is_distributed() and not assm.supports_distributed():
+                raise RuntimeError(
+                    "The custom assembler ("+type(assm).__name__+") works under mpirun but not yet "
+                    "with --distribute. Its algebra goes through the row-distributed backend and the "
+                    "augmented system it builds has been checked against the serial one, but a Newton "
+                    "solve on a PARTITIONED mesh does not yet converge: the assembled system matches "
+                    "serial in every permutation invariant while the solve converges only linearly, so "
+                    "the remaining fault is downstream of the assembly. Run it under plain mpirun "
+                    "(without --distribute), or serially.")
+            return
+        raise RuntimeError("The custom assembler ("+type(assm).__name__+") does not support MPI: its "
+                           "algebra is written on global vectors, so under mpirun it would be handed "
+                           "row blocks and silently treat them as whole vectors. Run it without "
+                           "mpirun, or port it to the row-distributed backend "
+                           "(pyoomph/generic/distributed_la.py) and have it return True from "
+                           "supports_mpi(); see dev_docs/mpi_augmented_systems.md Part II.")
+
     def _require_single_rank(self,what:str)->None:
         """Stop with a clear message if ``what`` is being attempted on more than one MPI process.
 
@@ -3445,11 +3480,7 @@ class Problem(_pyoomph.Problem):
 
     def set_custom_assembler(self,assm:"CustomAssemblyBase | None") -> None:
         if assm is not None:
-            # Stage 0 of dev_docs/mpi_augmented_systems.md section 10, finally possible: the normal
-            # form left this pipeline the way deflation did, so the only things still on it are the
-            # CustomBifurcationTracker family and DeflationAssemblyHandler, none of which has ever
-            # worked under MPI.
-            self._require_single_rank("The custom assembler ("+type(assm).__name__+")")
+            self._require_mpi_capable_assembler(assm)
         if self._custom_assembler:
             self._custom_assembler.finalize()
             
@@ -3519,15 +3550,38 @@ class Problem(_pyoomph.Problem):
         return self._deflation_operator.residual_scale()
     
 
+    def _unwrap_custom_residuals(self,info:_pyoomph.CustomResJacInfo,res:Any)->"NPFloatArray":
+        """Accept either a plain global array or a DistVector, and declare the block for the latter.
+
+        A handler that works on row layouts returns a DistVector. Its rows are declared to the C++
+        side ONLY when the layout is actually distributed: under a replicated mpirun the handler
+        builds the whole global system (the augmented dof layout is non-distributed there), the
+        solver asks for a uniform block of it, and the handoff slices -- declaring "all of it" would
+        be refused, correctly, as not the block the solver wanted.
+        """
+        from .distributed_la import DistVector
+        if isinstance(res,DistVector):
+            if res.layout.distributed:
+                info.set_row_distribution(res.layout.first_row,res.layout.nrow_local,res.layout.n)
+            arr=res.local
+        else:
+            arr=res
+        arr=numpy.ascontiguousarray(numpy.asarray(arr,dtype=numpy.float64))
+        return arr
+
     def get_custom_residuals_jacobian(self, info:_pyoomph.CustomResJacInfo) -> None:
         if self._custom_assembler is None:
             raise RuntimeError("If you set use_custom_residual_jacobian=True, you must specify a custom assembler or override get_custom_residuals_jacobian yourself")
+        from .distributed_la import DistMatrix
         if info.require_jacobian():
             if info.get_parameter_name()!="":
                 raise RuntimeError("Cannot derive custom Jacobian with respect to a parameter yet")
             res,J=self._custom_assembler.get_residuals_and_jacobian(True)
-            assert res.dtype==numpy.float64, "Expected float residuals, but got "+str(res.dtype) #type:ignore
-            info.set_custom_residuals(res)
+            # The row distribution is declared from the RESIDUAL, before the Jacobian is unpacked, so
+            # that both describe the same block (the C++ side validates them against the same one).
+            info.set_custom_residuals(self._unwrap_custom_residuals(info,res))
+            if isinstance(J,DistMatrix):
+                J=J.local
             assert J.indptr.dtype==numpy.int32 and J.indices.dtype==numpy.int32 and J.data.dtype==numpy.float64 #type:ignore
             info.set_custom_jacobian(J.data,J.indices,J.indptr) #type:ignore
         else:
@@ -3535,8 +3589,7 @@ class Problem(_pyoomph.Problem):
             if paramname=="":
                 paramname=None
             res=self._custom_assembler.get_residuals_and_jacobian(False,paramname)
-            assert res.dtype==numpy.float64 #type:ignore
-            info.set_custom_residuals(res)
+            info.set_custom_residuals(self._unwrap_custom_residuals(info,res))
 
     @overload
     def set_c_compiler(self,compiler_or_name:Literal["tcc"])->_pyoomph.CCompiler: ...

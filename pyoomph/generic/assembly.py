@@ -47,6 +47,29 @@ class CustomAssemblyBase:
         return self.problem
 
 
+    def supports_mpi(self)->bool:
+        """Whether this assembler's algebra is written against a row layout rather than global ones.
+
+        False here on purpose, and the reason the refusal in
+        Problem._require_mpi_capable_assembler() is safe: under mpirun an assembler is handed row
+        BLOCKS, and one that treats them as whole vectors does not fail -- it returns a wrong answer.
+        Override to True only once every vector and matrix the assembler touches goes through
+        pyoomph/generic/distributed_la.py.
+        """
+        return False
+
+    def supports_distributed(self)->bool:
+        """Whether this assembler also works with a PARTITIONED mesh (``--distribute``), not just a
+        replicated ``mpirun``.
+
+        Separate from :py:meth:`supports_mpi` because the two regimes fail differently and are
+        reached in that order. Replicated, the dof layout is non-distributed, so an assembler that
+        went through the row-layout backend produces the whole global system and the handoff slices
+        it. Distributed, the layout is a genuine partition and every placement has to be right.
+        Defaults to ``supports_mpi()``; override to False to accept one and refuse the other.
+        """
+        return self.supports_mpi()
+
     def has_custom_solve_routine(self)->bool:
         # You can override the default solve routine for J*dU=R
         return False

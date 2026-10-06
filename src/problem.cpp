@@ -1616,9 +1616,23 @@ namespace pyoomph
 	{
 		if (!dest.built())
 		{
-			const unsigned n_global = info.has_declared_rows() ? info.declared_nrow_global() : src.size();
-			oomph::LinearAlgebraDistribution dist(this->communicator_pt(), n_global, false);
-			dest.build(&dist, 0.0);
+			// Build it on the distribution the assembler DECLARED, when it declared one. Building
+			// non-distributed here and then validating would refuse every distributed assembler whose
+			// caller handed in an unbuilt vector -- which is what a Newton solve on an augmented
+			// system does -- with a message blaming the assembler for the destination's layout.
+			if (info.has_declared_rows() &&
+				info.declared_nrow_local() != info.declared_nrow_global())
+			{
+				oomph::LinearAlgebraDistribution dist(this->communicator_pt(), info.declared_first_row(),
+													  info.declared_nrow_local(), info.declared_nrow_global());
+				dest.build(&dist, 0.0);
+			}
+			else
+			{
+				const unsigned n_global = info.has_declared_rows() ? info.declared_nrow_global() : src.size();
+				oomph::LinearAlgebraDistribution dist(this->communicator_pt(), n_global, false);
+				dest.build(&dist, 0.0);
+			}
 		}
 		const unsigned nrow_local = dest.nrow_local();
 		const unsigned first_row = dest.first_row();
@@ -1664,8 +1678,19 @@ namespace pyoomph
 		// passes a fresh CRDoubleMatrix and used to segfault here with a Python assembler installed.
 		if (!jacobian.distribution_built())
 		{
-			oomph::LinearAlgebraDistribution dist(this->communicator_pt(), n_global, false);
-			jacobian.build(&dist);
+			// As for the residual above: honour a declared row block instead of imposing a
+			// non-distributed layout and then refusing the assembler for not matching it.
+			if (info.has_declared_rows() && info.declared_nrow_local() != info.declared_nrow_global())
+			{
+				oomph::LinearAlgebraDistribution dist(this->communicator_pt(), info.declared_first_row(),
+													  info.declared_nrow_local(), info.declared_nrow_global());
+				jacobian.build(&dist);
+			}
+			else
+			{
+				oomph::LinearAlgebraDistribution dist(this->communicator_pt(), n_global, false);
+				jacobian.build(&dist);
+			}
 		}
 		const unsigned nrow_local = jacobian.nrow_local();
 		const unsigned first_row = jacobian.first_row();

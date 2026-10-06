@@ -724,20 +724,122 @@ class MultiAssembleRequest:
                 res.append(matrices[-(r+1)])        
         return res
 
+class _RecordingAugmentation:
+    """Passes every registration through to the real DofAugmentations and remembers its KIND.
+
+    The group structure -- which of the registered entries is a single unknown and which is a
+    base-sized vector -- is what block() and stack() need to lay a bordered system out, and the C++
+    DofAugmentations keeps its type tags to itself. Recording them as they are declared is cheaper
+    than a binding for them and cannot drift out of step with the registration order.
+    """
+
+    def __init__(self,spec:DofAugmentationSpecifications):
+        self._spec=spec
+        self.is_scalar:list[bool]=[]
+
+    def add_vector(self,values):
+        self.is_scalar.append(False)
+        return self._spec.add_vector(values)
+
+    def add_scalar(self,value):
+        self.is_scalar.append(True)
+        return self._spec.add_scalar(value)
+
+    def add_parameter(self,parameter_name):
+        self.is_scalar.append(True)
+        return self._spec.add_parameter(parameter_name)
+
+    def split(self,*args,**kwargs):
+        return self._spec.split(*args,**kwargs)
+
+
 class AugmentedAssemblyHandler(CustomAssemblyBase):
     def __init__(self):
         super().__init__()
         self._augdof_spec=None
-        
+        self._group_is_scalar:list[bool]=[]
+        self.la=None           # the linear-algebra backend, set once the layouts are known
+        self.base_layout=None  # the BASE dof layout: what the multi-assembly returns blocks on
+        self.augmented_layout=None # what the bordered system is built on
+        self.eqn_table=None    # naive -> real augmented equation numbers; empty means the identity
+
+    def supports_mpi(self)->bool:
+        """Whether this handler's algebra is written against a row layout rather than a global one.
+
+        False by default, so a handler written before any of this -- including a user's own
+        CustomAssemblyBase subclass, which is the whole point of that class -- is still refused at
+        the door under mpirun rather than quietly given row blocks it will treat as global vectors.
+        A handler says True once every vector and matrix it touches goes through the backend.
+        """
+        return False
+
     def initialize(self):
-        #self._augdof_spec._in_specification=True
-        #self._augdof_spec._problem=self.problem
-        self._augdof_spec=self.get_problem()._create_dof_augmentation()
-        self.define_augmented_dofs(self.get_augmented_dofs())
+        recorder=_RecordingAugmentation(self.get_problem()._create_dof_augmentation())
+        self._augdof_spec=recorder._spec
+        self.define_augmented_dofs(recorder) #type:ignore[arg-type] # a recording stand-in, same API
+        # Group 0 is the base block; the rest are the entries just registered, in order.
+        self._group_is_scalar=[False]+recorder.is_scalar
         self.get_problem()._add_augmented_dofs(self._augdof_spec)
-        print("Dofs after augmentation",self.get_problem().ndof())
-        
-        
+        self._refresh_layouts()
+        self.after_layouts_ready()
+
+    def _refresh_layouts(self):
+        """(Re)read the layouts and the translation table from the problem.
+
+        Must be called after the augmentation is installed and after anything that renumbers --
+        hence also from actions_after_equation_numbering(). The table is read, never recomputed: two
+        tables that disagree is a silently wrong matrix.
+        """
+        from .distributed_la import RowLayout,get_la_backend
+        problem=self.get_problem()
+        self.la=get_la_backend(problem)
+        self.base_layout=RowLayout.base(problem)
+        self.augmented_layout=RowLayout.augmented(problem)
+        self.eqn_table=problem._get_augmented_eqn_table()
+
+    def after_layouts_ready(self):
+        """Hook for whatever a handler has to build once the layouts exist (its guess vectors, say).
+
+        Separate from __init__ because the layouts do not exist until the augmentation is installed,
+        and separate from initialize() so that a subclass does not have to remember to chain.
+        """
+        pass
+
+    def actions_after_equation_numbering(self)->None:
+        if self._augdof_spec is not None:
+            self._refresh_layouts()
+
+    @property
+    def group_is_scalar(self)->list[bool]:
+        return self._group_is_scalar
+
+    def split_vectors(self,startindex:int=1,endindex:int=-1):
+        """:py:meth:`DofAugmentationSpecifications.split`, as DistVectors on the right layouts.
+
+        A base-sized block comes back on the base layout; a scalar comes back as a plain float, which
+        is what every caller does with it.
+        """
+        from .distributed_la import DistVector,RowLayout
+        raw=self.get_augmented_dofs().split(startindex=startindex,endindex=endindex)
+        out=[]
+        for k,piece in enumerate(raw):
+            group=startindex+k
+            if group>0 and self._group_is_scalar[group]:
+                out.append(float(piece[0]))
+            else:
+                out.append(DistVector(numpy.array(piece),self.base_layout))
+        return out
+
+    def replicated(self,values)->"Any":
+        """A DistVector on a non-distributed layout, i.e. the whole vector, for a border row.
+
+        Takes a global numpy array (a guess, an eigenvector) or a DistVector to gather. The gather is
+        here, once, rather than inside block() on every assembly -- see LinearAlgebraBackend.row().
+        """
+        from .distributed_la import DistVector,RowLayout
+        arr=values.to_global() if isinstance(values,DistVector) else numpy.asarray(values)
+        return DistVector(numpy.ascontiguousarray(arr),RowLayout.serial(self.base_layout.n))
+
     def finalize(self):
         self.get_problem()._reset_augmented_dof_vector_to_nonaugmented()
         
@@ -900,13 +1002,36 @@ class FoldTracker(CustomBifurcationTracker):
         
         
         
+    def supports_mpi(self)->bool:
+        return True
+
+    def supports_distributed(self)->bool:
+        # Not yet. The augmented system this builds under --distribute has been checked against the
+        # serial one and matches it to 1e-13 in every permutation invariant (Frobenius norm, trace,
+        # nnz, sorted diagonal and row sums, residual norm), but the Newton solve on a partitioned
+        # mesh converges only linearly -- 6.7e-5 -> 2.3e-5 -> 7.7e-6 -- and stops at the iteration
+        # cap, where replicated mpirun converges to the serial answer to 16 digits. So the remaining
+        # fault is downstream of the assembly, and this stays refused by name until it is found
+        # rather than shipped as a tracker that quietly fails to converge.
+        return False
+
     def define_augmented_dofs(self,dofs:DofAugmentationSpecifications):
         # dofs will be grouped in (U,V,p)
         dofs.add_vector(self.V0*self.eigenscale)
         dofs.add_parameter(self.parameter)
 
-    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]: # type: ignore[override] # the base's overloads narrow the return by require_jacobian; every implementation here is the general one
-        V,=self.get_augmented_dofs().split(startindex=1,endindex=2) # Get the eigenvector solution
+    def after_layouts_ready(self):
+        # V0 is needed twice and on two layouts: as this rank's rows, for the inner product in the
+        # length constraint, and replicated, for the border row (one rank keeps that row and needs
+        # every entry). Both are built once here rather than per assembly -- V0 is fixed.
+        from .distributed_la import DistVector
+        self.V0_local=DistVector.from_global(self.V0,self.base_layout)
+        self.V0_replicated=self.replicated(self.V0)
+
+    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None): # type: ignore[override] # the base's overloads narrow the return by require_jacobian; every implementation here is the general one
+        la,base,aug,table=self.la,self.base_layout,self.augmented_layout,self.eqn_table
+        groups=self.group_is_scalar
+        V,=self.split_vectors(1,2) # Get the eigenvector solution, on the base layout
         # Request the residuals and Jacobian of the non-augmented system
         assembly=self.start_multiassembly()
         dRdP=None
@@ -914,35 +1039,45 @@ class FoldTracker(CustomBifurcationTracker):
         HV=None
         if require_jacobian:
             assert dparameter is None, "dparameter not supported for require_jacobian=True"
-            # If we need the augmented Jacobian, we also need dR/dP and dJ_ik/dU_j V_k
-            R,J,dRdP,dJdP,HV=assembly.R().J().dRdp(self.parameter).dJdp(self.parameter).dJdU(V).assemble()
+            # If we need the augmented Jacobian, we also need dR/dP and dJ_ik/dU_j V_k. The Hessian
+            # contraction vector crosses into C++ indexed by GLOBAL equation number, so it goes over
+            # replicated (src/bifurcation.cpp, get_all_vectors_and_matrices).
+            R,J,dRdP,dJdP,HV=assembly.R().J().dRdp(self.parameter).dJdp(self.parameter).dJdU(V.to_global()).assemble()
         else:
             if dparameter:
                 # This happens during arclength continuation in another parameter
                 dRdp,dJdp=assembly.dRdp(dparameter).dJdp(dparameter).assemble()
-                return numpy.hstack([dRdp,dJdp@V,0]) # leave here with the derivative of the residuals with respect to the other parameter
+                # leave here with the derivative of the residuals with respect to the other parameter
+                return la.stack([la.vector(dRdp,base),la.matrix(dJdp,base,base.n).matvec(V),0.0],
+                                groups,base,aug,table)
 
             R,J=assembly.R().J().assemble() # Only residuals and Jacobian are requested and required
 
+        Jm=la.matrix(J,base,base.n)
         nl=self.nonlinear_length_constraint
-        Raug=numpy.hstack([R,J@V,numpy.dot(V,(V if nl else self.V0))-self.eigenscale*(self.eigenscale if nl else 1)]) # Augmented dof vector
+        # <V,V> or <V,V0>: a collective inner product when distributed, a numpy dot otherwise.
+        length=V.dot(V if nl else self.V0_local)-self.eigenscale*(self.eigenscale if nl else 1)
+        Raug=la.stack([la.vector(R,base),Jm.matvec(V),length],groups,base,aug,table) # Augmented dof vector
         if require_jacobian:
             assert dRdP is not None and dJdP is not None and HV is not None
-            col=lambda C:self.as_matrix_column(C)
-            row=lambda R:self.as_matrix_row(R)
+            # The normalisation row has to be replicated; with the nonlinear constraint it is 2V,
+            # which therefore costs one gather per assembly, unlike the fixed V0.
+            rowvec=self.replicated(V*2.0) if nl else self.V0_replicated
             # Augmented Jacobian
-            Jaug=scipy.sparse.block_array(
-                [[J,None,col(dRdP)],
-                 [HV,J,col(dJdP@V)],
-                 [None,row(2*V if nl else self.V0),None]]).tocsr()
+            Jaug=la.block(
+                [[Jm,None,la.col(la.vector(dRdP,base))],
+                 [la.matrix(HV,base,base.n),Jm,la.col(la.matrix(dJdP,base,base.n).matvec(V))],
+                 [None,la.row(rowvec),None]],groups,base,aug,table)
             return Raug,Jaug #type:ignore
         else:
             return Raug
 
     def actions_after_successful_newton_solve(self)->None:
-        V,=self.get_augmented_dofs().split(startindex=1,endindex=2)
-        V=V/numpy.linalg.norm(V)
-        self.store_eigenvector({0:numpy.array(V)})
+        V,=self.split_vectors(1,2)
+        V=V.normalised()
+        # store_eigenvector's contract is a globally replicated vector at full length: every consumer
+        # indexes an eigenvector by global equation number (dev_docs/mpi_eigenproblems.md).
+        self.store_eigenvector({0:numpy.array(V.to_global())})
           
 
 
