@@ -5311,7 +5311,20 @@ namespace pyoomph
 		// mutually exclusive (Problem.set_deflation_operator refuses the combination), so they cannot
 		// both claim this.
 		const bool for_deflation = residual_scale_hook_active;
-		if (!for_condensation && !for_deflation && dof_ordering_blocks.empty()) return;
+		// A Python dof augmentation (DofAugmentations, i.e. the CustomBifurcationTracker family) wants
+		// the same thing deflation does, and for the same reason: the tracker builds its bordered
+		// system on the AUGMENTED DOF layout -- that is where its eigenvector block and its scalar
+		// unknowns live -- and hands it to the solver, which otherwise splits those rows uniformly
+		// instead. Two different partitions of the same rows means the handoff in get_jacobian() has to
+		// redistribute, and a Newton increment coming back is then not comparable to the dof vector
+		// entry by entry.
+		//
+		// This tests n_unaugmented_dofs, which is set ONLY by Problem::add_augmented_dofs(), i.e. only
+		// by the Python route. The C++ trackers of src/bifurcation.cpp enlarge the system through an
+		// oomph AssemblyHandler and never touch it (see get_proven_matrix_symmetry() below), so their
+		// row split is deliberately left exactly as it was.
+		const bool for_augmentation = (n_unaugmented_dofs != 0);
+		if (!for_condensation && !for_deflation && !for_augmentation && dof_ordering_blocks.empty()) return;
 
 		if (Problem_has_been_distributed)
 		{
@@ -5321,11 +5334,15 @@ namespace pyoomph
 			// Unconditionally, NOT gated on Dist_problem_matrix_distribution: oomph's own default for that
 			// enum is Uniform_matrix_distribution (problem.cc, the constructor), not the "Default"
 			// heuristic, so consulting it would simply mean never asking for the dof distribution at all.
-			if (!for_condensation && !for_deflation) return; // a layout has nothing to add here; leave oomph's choice alone
+			if (!for_condensation && !for_deflation && !for_augmentation) return; // a layout has nothing to add here; leave oomph's choice alone
 			dist_pt = new oomph::LinearAlgebraDistribution(this->dof_distribution_pt());
 			return;
 		}
-		// Replicated: deflation alone has no preference (see above), so it must not drag the row split
+		// Replicated: deflation alone has no preference (see above), and neither does an augmentation.
+		// The dof distribution is non-distributed here -- first_row 0 and nrow_local == ndof on every
+		// rank -- so naming it would tell the solver that every rank owns every row, which is not a
+		// claim this hook is for. The tracker produces the whole global system anyway and the handoff
+		// in get_jacobian() slices it to whatever the solver chose. Neither must drag the row split
 		// away from oomph's uniform one just by being switched on.
 		if (!for_condensation && dof_ordering_blocks.empty()) return;
 		const unsigned nproc = Communicator_pt->nproc(), my_rank = Communicator_pt->my_rank();
