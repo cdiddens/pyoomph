@@ -51,8 +51,11 @@ from pyoomph.expressions import *
 from pyoomph.generic.mpi import get_mpi_rank, get_mpi_nproc
 
 # The continuation parameter's name per case. The Brusselator's is B; the others use lam.
-_PARAM = {"fold": "lam", "pitchfork": "lam", "hopf": "B"}
-from pyoomph.generic.bifurcation_tools import FoldTracker, HopfTracker, PitchForkTracker
+_PARAM = {"fold": "lam", "pitchfork": "lam", "hopf": "B",
+          "eigenbranch_real": "lam", "eigenbranch_complex": "B"}
+from pyoomph.generic.bifurcation_tools import (ComplexEigenbranchTracker, FoldTracker,
+                                                HopfTracker, PitchForkTracker,
+                                                RealEigenbranchTracker)
 
 
 class BratuEquations(Equations):
@@ -173,7 +176,8 @@ def main():
     ap.add_argument("--distribute", action="store_true")
     ap.add_argument("--nonlinear-constraint", action="store_true")
     ap.add_argument("--cxx", action="store_true", help="use the C++ handler instead, for comparison")
-    ap.add_argument("--case", default="fold", choices=["fold", "pitchfork", "hopf"])
+    ap.add_argument("--case", default="fold",
+                    choices=["fold", "pitchfork", "hopf", "eigenbranch_real", "eigenbranch_complex"])
     args, _ = ap.parse_known_args()
 
     payload: dict = {"rank": get_mpi_rank(), "nproc": max(get_mpi_nproc(), 1),
@@ -181,7 +185,7 @@ def main():
     try:
         if args.case == "pitchfork":
             problem = PitchforkProblem(args.N)
-        elif args.case == "hopf":
+        elif args.case in ("hopf", "eigenbranch_complex"):
             problem = HopfProblem(args.N if args.N != 8 else 20)
         else:
             problem = BratuProblem(args.N)
@@ -200,7 +204,7 @@ def main():
             # at np=1, 2 and 3 -- +0.25 +- 0.968i first, then the real modes -- and slot 0 is
             # unambiguous. Same lesson as the pitchfork's aspect ratio: do not put the cut where the
             # answer is not well defined.
-            p.solve_eigenproblem(6 if args.case == "hopf" else 1)
+            p.solve_eigenproblem(6 if args.case in ("hopf", "eigenbranch_complex") else 1)
             evals = [complex(x) for x in p.get_last_eigenvalues()]
             guess = 0
             payload["eigenvalue_guess"] = evals[guess].real
@@ -209,7 +213,14 @@ def main():
             if args.cxx:
                 p.activate_bifurcation_tracking(_PARAM[args.case], args.case)
                 p.solve()
-                payload["critical"] = float(p.lam.value)
+                if args.case.startswith("eigenbranch"):
+                    # No parameter is driven here: what the solve pins is the eigenvalue, so that is
+                    # the number to compare across regimes.
+                    lam0 = complex(p.get_last_eigenvalues()[0])
+                    payload["critical"] = float(lam0.real)
+                    payload["tracked_omega"] = float(lam0.imag)
+                else:
+                    payload["critical"] = float(p.lam.value)
                 payload["ndof_aug"] = int(p.ndof())
                 p.deactivate_bifurcation_tracking()
             else:
@@ -219,6 +230,12 @@ def main():
                 elif args.case == "hopf":
                     tracker = HopfTracker(p, _PARAM[args.case], eigenvector=guess,
                                           nonlinear_length_constraint=args.nonlinear_constraint)
+                elif args.case == "eigenbranch_real":
+                    # Follows an eigenvalue along the branch rather than pinning a bifurcation, so
+                    # there is no parameter unknown: the eigenvalue itself is the extra scalar.
+                    tracker = RealEigenbranchTracker(p, guess, nonlinear_length_constraint=args.nonlinear_constraint)
+                elif args.case == "eigenbranch_complex":
+                    tracker = ComplexEigenbranchTracker(p, guess, nonlinear_length_constraint=args.nonlinear_constraint)
                 else:
                     tracker = FoldTracker(p, _PARAM[args.case], eigenvector=guess,
                                           nonlinear_length_constraint=args.nonlinear_constraint)
@@ -229,7 +246,14 @@ def main():
                 L = tracker.augmented_layout
                 payload["aug_layout"] = [L.n, L.first_row, L.nrow_local, L.distributed]
                 p.solve()
-                payload["critical"] = float(p.lam.value)
+                if args.case.startswith("eigenbranch"):
+                    # No parameter is driven here: what the solve pins is the eigenvalue, so that is
+                    # the number to compare across regimes.
+                    lam0 = complex(p.get_last_eigenvalues()[0])
+                    payload["critical"] = float(lam0.real)
+                    payload["tracked_omega"] = float(lam0.imag)
+                else:
+                    payload["critical"] = float(p.lam.value)
                 # The residual history, so a test can judge the RATE and not only the answer: a stale
                 # rank-0-only scalar still converges, just linearly.
                 # Read AFTER the solve: get_last_residual_convergence() is the history oomph kept for

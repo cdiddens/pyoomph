@@ -2053,43 +2053,57 @@ class RealEigenbranchTracker(CustomBifurcationTracker):
         self.nonlinear_length_constraint=nonlinear_length_constraint
         self.V0=self.eigenvector/numpy.linalg.norm(self.eigenvector)
     
+    def supports_mpi(self)->bool:
+        return True
+
     def define_augmented_dofs(self, dofs):
         dofs.add_vector(self.eigenvector*self.eigenscale)
         dofs.add_scalar(self.lambda_Re0)
-        
-    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]: # type: ignore[override] # the base's overloads narrow the return by require_jacobian; every implementation here is the general one
-        V,lam=self.get_augmented_dofs().split(startindex=1)
-        lam=lam[0]
+
+    def after_layouts_ready(self):
+        from .distributed_la import DistVector
+        self.V0_local=DistVector.from_global(self.V0,self.base_layout)
+        self.V0_replicated=self.replicated(self.V0)
+
+    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None): # type: ignore[override] # the base's overloads narrow the return by require_jacobian; every implementation here is the general one
+        la,base,aug,table=self.la,self.base_layout,self.augmented_layout,self.eqn_table
+        groups=self.group_is_scalar
+        V,lam=self.split_vectors(1)
         assembly=self.start_multiassembly()
         HJV=None
         HMV=None
         if require_jacobian:
             assert dparameter is None, "dparameter not supported for require_jacobian=True"
-            R,J,M,HJV,HMV=assembly.R().J().M().dJdU(V).dMdU(V).assemble()
+            Vg=V.to_global() # the contraction vector crosses into C++ by GLOBAL equation number
+            R,J,M,HJV,HMV=assembly.R().J().M().dJdU(Vg).dMdU(Vg).assemble()
         else:
             if dparameter is not None:
                 dRdp,dJdp,dMdp=assembly.dRdp(dparameter).dJdp(dparameter).dMdp(dparameter).assemble()
-                return numpy.hstack([dRdp,lam*dMdp@V+dJdp@V,0])
+                dJm=la.matrix(dJdp,base,base.n); dMm=la.matrix(dMdp,base,base.n)
+                return la.stack([la.vector(dRdp,base),dMm.matvec(V)*lam+dJm.matvec(V),0.0],
+                                groups,base,aug,table)
 
             R,J,M=assembly.R().J().M().assemble()
 
+        Jm=la.matrix(J,base,base.n); Mm=la.matrix(M,base,base.n)
         nl=self.nonlinear_length_constraint
-        Raug=numpy.hstack([R,lam*M@V+J@V,numpy.dot(V,V if nl else self.V0)-self.eigenscale*(self.eigenscale if nl else 1)])
+        length=V.dot(V if nl else self.V0_local)-self.eigenscale*(self.eigenscale if nl else 1)
+        Raug=la.stack([la.vector(R,base),Mm.matvec(V)*lam+Jm.matvec(V),length],groups,base,aug,table)
         if require_jacobian:
             assert HJV is not None and HMV is not None
-            col=lambda C:self.as_matrix_column(C)
-            row=lambda R:self.as_matrix_row(R)
-            Jaug=scipy.sparse.block_array(
-                [[J,None,None],
-                 [lam*HMV+HJV,lam*M+J,col(M@V)],
-                 [None,row(2*V if nl else self.V0),None]]).tocsr()            
+            HJVm=la.matrix(HJV,base,base.n); HMVm=la.matrix(HMV,base,base.n)
+            rowvec=self.replicated(V*2.0) if nl else self.V0_replicated
+            Jaug=la.block(
+                [[Jm,None,None],
+                 [HMVm*lam+HJVm,Mm*lam+Jm,la.col(Mm.matvec(V))],
+                 [None,la.row(rowvec),None]],groups,base,aug,table)
             return Raug,Jaug #type:ignore
         else:
             return Raug
 
     def actions_after_successful_newton_solve(self)->None:
-        Vr,lam=self.get_augmented_dofs().split(startindex=1)
-        self.store_eigenvector({lam[0]:numpy.array(Vr)})        
+        Vr,lam=self.split_vectors(1)
+        self.store_eigenvector({lam:numpy.array(Vr.to_global())})        
 
 
 
@@ -2106,15 +2120,24 @@ class ComplexEigenbranchTracker(CustomBifurcationTracker):
         self.nonlinear_length_constraint=nonlinear_length_constraint
         self.V0=numpy.real(self.eigenvector)/numpy.linalg.norm(numpy.real(self.eigenvector))
     
+    def supports_mpi(self)->bool:
+        return True
+
     def define_augmented_dofs(self, dofs):
         dofs.add_vector(numpy.real(self.eigenvector)*self.eigenscale)
         dofs.add_vector(numpy.imag(self.eigenvector)*self.eigenscale)
         dofs.add_scalar(self.lambda_Re0)
         dofs.add_scalar(self.omega0)
-        
-    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]: # type: ignore[override] # the base's overloads narrow the return by require_jacobian; every implementation here is the general one
-        Vr,Vi,lam,omega=self.get_augmented_dofs().split(startindex=1)
-        lam,omega=lam[0],omega[0]
+
+    def after_layouts_ready(self):
+        from .distributed_la import DistVector
+        self.V0_local=DistVector.from_global(self.V0,self.base_layout)
+        self.V0_replicated=self.replicated(self.V0)
+
+    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None): # type: ignore[override] # the base's overloads narrow the return by require_jacobian; every implementation here is the general one
+        la,base,aug,table=self.la,self.base_layout,self.augmented_layout,self.eqn_table
+        groups=self.group_is_scalar
+        Vr,Vi,lam,omega=self.split_vectors(1)
         assembly=self.start_multiassembly()
         HJVr=None
         HJVi=None
@@ -2122,33 +2145,50 @@ class ComplexEigenbranchTracker(CustomBifurcationTracker):
         HMVi=None
         if require_jacobian:
             assert dparameter is None, "dparameter not supported for require_jacobian=True"
-            R,J,M,HJVr,HJVi,HMVr,HMVi=assembly.R().J().M().dJdU(Vr).dJdU(Vi).dMdU(Vr).dMdU(Vi).assemble()
+            Vrg,Vig=Vr.to_global(),Vi.to_global() # contraction vectors are indexed globally in C++
+            R,J,M,HJVr,HJVi,HMVr,HMVi=assembly.R().J().M().dJdU(Vrg).dJdU(Vig).dMdU(Vrg).dMdU(Vig).assemble()
         else:
             if dparameter is not None:
                 dRdp,dJdp,dMdp=assembly.dRdp(dparameter).dJdp(dparameter).dMdp(dparameter).assemble()
-                return numpy.hstack([dRdp,dMdp@(lam*Vr-omega*Vi)+dJdp@Vr,dMdp@(lam*Vi+omega*Vr)+dJdp@Vi, 0,0])
+                dJm=la.matrix(dJdp,base,base.n); dMm=la.matrix(dMdp,base,base.n)
+                return la.stack([la.vector(dRdp,base),
+                                 dMm.matvec(Vr*lam-Vi*omega)+dJm.matvec(Vr),
+                                 dMm.matvec(Vi*lam+Vr*omega)+dJm.matvec(Vi),0.0,0.0],
+                                groups,base,aug,table)
 
             R,J,M=assembly.R().J().M().assemble()
 
+        Jm=la.matrix(J,base,base.n); Mm=la.matrix(M,base,base.n)
         nl=self.nonlinear_length_constraint
-        Raug=numpy.hstack([R,M@(lam*Vr-omega*Vi)+J@Vr,M@(lam*Vi+omega*Vr)+J@Vi, numpy.dot(Vr,Vr if nl else self.V0)-self.eigenscale*(self.eigenscale if nl else 1),numpy.dot(Vi,Vr if nl else self.V0)])
+        lengthR=Vr.dot(Vr if nl else self.V0_local)-self.eigenscale*(self.eigenscale if nl else 1)
+        lengthI=Vi.dot(Vr if nl else self.V0_local)
+        Raug=la.stack([la.vector(R,base),
+                       Mm.matvec(Vr*lam-Vi*omega)+Jm.matvec(Vr),
+                       Mm.matvec(Vi*lam+Vr*omega)+Jm.matvec(Vi),
+                       lengthR,lengthI],groups,base,aug,table)
         if require_jacobian:
             assert HJVr is not None and HJVi is not None and HMVr is not None and HMVi is not None
-            col=lambda C:self.as_matrix_column(C)
-            row=lambda R:self.as_matrix_row(R)
-            Jaug=scipy.sparse.block_array(
-                [[J,None,None,None,None],
-                 [lam*HMVr-omega*HMVi+HJVr,lam*M+J,-omega*M, col(M@Vr),col(-M@Vi)],
-                 [lam*HMVi+omega*HMVr+HJVi,omega*M,lam*M+J, col(M@Vi),col(M@Vr)],
-                 [None,row(2*Vr if nl else self.V0),None,None,None],
-                 [None,row(Vi) if nl else None,row(Vr if nl else self.V0),None,None]]).tocsr()            
+            HJrm=la.matrix(HJVr,base,base.n); HJim=la.matrix(HJVi,base,base.n)
+            HMrm=la.matrix(HMVr,base,base.n); HMim=la.matrix(HMVi,base,base.n)
+            rowVr=self.replicated(Vr*2.0) if nl else self.V0_replicated
+            rowVi=self.replicated(Vi) if nl else None
+            rowVr2=self.replicated(Vr) if nl else self.V0_replicated
+            Jaug=la.block(
+                [[Jm,None,None,None,None],
+                 [HMrm*lam+HMim*(-omega)+HJrm,Mm*lam+Jm,Mm*(-omega),
+                  la.col(Mm.matvec(Vr)),la.col(Mm.matvec(Vi)*(-1.0))],
+                 [HMim*lam+HMrm*omega+HJim,Mm*omega,Mm*lam+Jm,
+                  la.col(Mm.matvec(Vi)),la.col(Mm.matvec(Vr))],
+                 [None,la.row(rowVr),None,None,None],
+                 [None,la.row(rowVi) if rowVi is not None else None,la.row(rowVr2),None,None]],
+                groups,base,aug,table)
             return Raug,Jaug #type:ignore
         else:
             return Raug
 
     def actions_after_successful_newton_solve(self)->None:
-        Vr,Vi,lam,omg=self.get_augmented_dofs().split(startindex=1)
-        self.store_eigenvector({lam[0]+1j*omg[0]:numpy.array(Vr)+numpy.array(Vi)*1j})
+        Vr,Vi,lam,omg=self.split_vectors(1)
+        self.store_eigenvector({lam+1j*omg:Vr.to_global()+Vi.to_global()*1j})
         
 
 

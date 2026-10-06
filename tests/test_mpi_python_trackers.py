@@ -140,10 +140,15 @@ def _run(nproc, tmpdir, distribute=False, cxx=False, nonlinear=False, N=8, case=
 
 _GROUPS = {"fold": [False, False, True],
            "pitchfork": [False, False, True, True],
-           "hopf": [False, False, False, True, True]}
+           "hopf": [False, False, False, True, True],
+           # An eigenbranch tracker drives no parameter: the eigenvalue itself is the extra scalar,
+           # so the layouts coincide with the fold's and the Hopf's.
+           "eigenbranch_real": [False, False, True],
+           "eigenbranch_complex": [False, False, False, True, True]}
 # The augmented size: a fold adds [V | p], a pitchfork [V | p | slack], a Hopf [Vr | Vi | p | omega].
-_AUG = {"fold": lambda n: 2 * n + 1, "pitchfork": lambda n: 2 * n + 2, "hopf": lambda n: 3 * n + 2}
-_CASES = ["fold", "pitchfork", "hopf"]
+_AUG = {"fold": lambda n: 2 * n + 1, "pitchfork": lambda n: 2 * n + 2, "hopf": lambda n: 3 * n + 2,
+        "eigenbranch_real": lambda n: 2 * n + 1, "eigenbranch_complex": lambda n: 3 * n + 2}
+_CASES = ["fold", "pitchfork", "hopf", "eigenbranch_real", "eigenbranch_complex"]
 
 
 @pytest.mark.parametrize("case", _CASES)
@@ -180,9 +185,16 @@ def test_mpirun_agrees_with_serial(tmp_path, nproc, distribute, case):
     # mesh the eigenvector's entries ended up, which a wrong translation would move while leaving the
     # critical parameter alone.
     assert got["eigfunc_usqr"] == pytest.approx(serial["eigfunc_usqr"], rel=_OBS_RTOL)
+    if "tracked_omega" in serial:
+        # ABSOLUTE value: a complex eigenbranch may converge onto either member of the conjugate
+        # pair, and it does -- +0.968 serially against -0.968 under --distribute. Both are the same
+        # branch, the same invariance as an eigenvector's sign.
+        assert abs(got["tracked_omega"]) == pytest.approx(abs(serial["tracked_omega"]), rel=_OBS_RTOL)
 
 
-@pytest.mark.parametrize("case", _CASES)
+# The C++ handlers cover fold, pitchfork, hopf and the azimuthal case; eigenbranch tracking has no
+# C++ counterpart to compare against (activate_bifurcation_tracking has no such mode).
+@pytest.mark.parametrize("case", ["fold", "pitchfork", "hopf"])
 @pytest.mark.parametrize("nproc", [1, 2])
 def test_the_python_route_agrees_with_the_cxx_handler(tmp_path, nproc, case):
     """Two independent implementations of the same augmented system, on the same problem.
@@ -223,6 +235,12 @@ def test_the_newton_converges_quadratically(tmp_path, nproc, distribute, case):
     quadratic rate is what this asserts.
     """
     steps = _run(nproc, tmp_path, distribute=distribute, case=case)[0]["newton_residuals"]
+    if steps and steps[0] < 1e-10:
+        # Nothing to converge: an eigenbranch tracker is handed the eigenvalue the eigensolve just
+        # found, so its augmented residual can start at round-off already. There is no rate to judge;
+        # what matters is that it STAYS there rather than being pushed off by a bad step.
+        assert max(steps) < 1e-8, "a solve that started converged did not stay converged: %s" % steps
+        return
     # A fold from this guess takes four steps, a pitchfork two; what is being excluded is a long
     # crawl, not a particular count.
     assert 2 <= len(steps) <= 7, (
