@@ -31,6 +31,21 @@ from ..generic.bifurcation_tools import MultiAssembleRequest
 import numpy
 
 class HalleySolver:
+    """Halley's method -- cubically convergent -- in place of Newton, for a stationary solve.
+
+    Replicated, not distributed. Everything here works on GLOBAL vectors: ``get_residuals()`` and
+    ``set_current_dofs()`` take the whole dof vector, and the two factorisations go through
+    ``solve_serial`` with the whole Jacobian. Under a replicated ``mpirun`` that is correct (every
+    rank holds all of it, and every rank does the same work); under ``--distribute`` it is not, and
+    the refusal in :py:meth:`solve` says so rather than letting it return a plausible wrong answer.
+
+    Making it distributed is not a retyping job: ``MultiAssembleRequest.assemble()`` hands back this
+    rank's ``(nrow_local, n)`` row block with global column indices, so ``J - dJdU/2`` and both
+    solves would have to move onto the LA backend -- which is mechanical -- but the method itself has
+    no caller, no tutorial and no test anywhere in the tree, so there would be nothing to verify the
+    migration against. The guard and a serial test are the honest state.
+    """
+
     def __init__(self,problem:Problem):
         super().__init__()
         self.problem=problem
@@ -41,6 +56,10 @@ class HalleySolver:
         # Currently, only stationary solves supported
         if not self.problem.is_initialised():
             self.problem.initialise()
+        # See the class docstring: global dof vectors and solve_serial throughout. Without this the
+        # method runs under --distribute and converges to something, because each rank would treat
+        # its own row block as the whole system.
+        self.problem._require_non_distributed("Halley's method")
 
         if max_iterations is None:
             max_iterations=self.problem.max_newton_iterations
