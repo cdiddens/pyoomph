@@ -52,7 +52,8 @@ from pyoomph.generic.mpi import get_mpi_rank, get_mpi_nproc
 
 # The continuation parameter's name per case. The Brusselator's is B; the others use lam.
 _PARAM = {"fold": "lam", "pitchfork": "lam", "hopf": "B",
-          "eigenbranch_real": "lam", "eigenbranch_complex": "B", "normal_mode": "B"}
+          "eigenbranch_real": "lam", "eigenbranch_complex": "B", "normal_mode": "B",
+          "normal_mode_osc": "B"}
 from pyoomph.generic.bifurcation_tools import (ComplexEigenbranchTracker, FoldTracker,
                                                 HopfTracker, NormalModeBifurcationTracker,
                                                 PitchForkTracker, RealEigenbranchTracker)
@@ -174,6 +175,27 @@ class TuringEquations(Equations):
         self.add_weak(partial_t(v) - g, vt).add_weak(self.d * grad(v), grad(vt))
 
 
+class AdvectedTuringEquations(TuringEquations):
+    """The same system plus advection ALONG the normal-mode direction, which is what makes the mode
+    OSCILLATORY and gives the problem an imaginary normal-mode contribution.
+
+    grad()'s last component is the derivative with respect to the extra coordinate (the coordinate
+    system appends diff(arg, xadd)), and a field carries exp(+ikz) while a test function carries
+    exp(-ikz). A diffusive term pairs them -- grad().grad() -> k^2 -- so it is real, and a purely
+    diffusive problem therefore has no imaginary contribution to assemble at all. ONE derivative
+    along z contributes i*k, so this single term is what makes has_imag reachable.
+    """
+
+    def __init__(self, A, B, d, w):
+        super().__init__(A, B, d)
+        self.w = w
+
+    def define_residuals(self):
+        super().define_residuals()
+        u, ut = var_and_test("u")
+        self.add_weak(self.w * grad(u)[1], ut)
+
+
 class NormalModeProblem(Problem):
     """The Turing system on a LINE -- not the point mesh test_critical_wavenumber_tracker.py uses,
     because a single point cannot be partitioned. The uniform state is exact, so the base solve is
@@ -183,20 +205,25 @@ class NormalModeProblem(Problem):
     k = sqrt(A)/d^(1/4); the tracker is started off it in B so that it has something to do.
     """
 
-    def __init__(self, N=12, A=2.0, d=8.0, offset=0.15):
+    def __init__(self, N=12, A=2.0, d=8.0, offset=0.15, advection=0.0):
         super().__init__()
         self.N = N
         self.A_val, self.d_val = A, d
         self.Bc = (1 + A / numpy.sqrt(d)) ** 2
         self.kc = numpy.sqrt(A) / d ** 0.25
         self.offset = offset
+        self.advection = advection
 
     def define_problem(self):
         self += LineMesh(N=self.N, size=1, name="domain")
         self.A = self.define_global_parameter(A=self.A_val)
         self.lam = self.define_global_parameter(B=self.Bc - self.offset)
         self.d = self.define_global_parameter(d=self.d_val)
-        eqs = TuringEquations(self.A, self.lam, self.d)
+        if self.advection:
+            self.w = self.define_global_parameter(w=self.advection)
+            eqs = AdvectedTuringEquations(self.A, self.lam, self.d, self.w)
+        else:
+            eqs = TuringEquations(self.A, self.lam, self.d)
         eqs += InitialCondition(u=self.A, v=self.lam / self.A)
         eqs += IntegralObservables(usqr=var("u") ** 2 + var("v") ** 2)
         self += eqs @ "domain"
@@ -229,7 +256,7 @@ def main():
     ap.add_argument("--cxx", action="store_true", help="use the C++ handler instead, for comparison")
     ap.add_argument("--case", default="fold",
                     choices=["fold", "pitchfork", "hopf", "eigenbranch_real", "eigenbranch_complex",
-                             "normal_mode"])
+                             "normal_mode", "normal_mode_osc"])
     args, _ = ap.parse_known_args()
 
     payload: dict = {"rank": get_mpi_rank(), "nproc": max(get_mpi_nproc(), 1),
@@ -241,6 +268,11 @@ def main():
             problem = HopfProblem(args.N if args.N != 8 else 20)
         elif args.case == "normal_mode":
             problem = NormalModeProblem(args.N if args.N != 8 else 12)
+        elif args.case == "normal_mode_osc":
+            # A = 1 and equal diffusion puts the uniform state in the Hopf regime, and the advection
+            # makes the normal mode oscillatory, so the tracker takes its has_imag branch.
+            problem = NormalModeProblem(args.N if args.N != 8 else 12, A=1.0, d=1.0, offset=0.0,
+                                        advection=0.6)
         else:
             problem = BratuProblem(args.N)
         with problem as p:
@@ -258,11 +290,12 @@ def main():
             # at np=1, 2 and 3 -- +0.25 +- 0.968i first, then the real modes -- and slot 0 is
             # unambiguous. Same lesson as the pitchfork's aspect ratio: do not put the cut where the
             # answer is not well defined.
-            if args.case == "normal_mode":
+            if args.case.startswith("normal_mode"):
                 # The mode is ~exp(i*k*z) with k fixed here: this tracker finds the parameter at
                 # which THAT mode is neutral, which is what distinguishes it from the codim-2
                 # CriticalWavenumberTracker.
-                p.solve_eigenproblem(2, normal_mode_k=0.8 * p.kc)
+                p.solve_eigenproblem(4 if args.case == "normal_mode_osc" else 2,
+                                     normal_mode_k=1.0 if args.case == "normal_mode_osc" else 0.8 * p.kc)
             else:
                 p.solve_eigenproblem(6 if args.case in ("hopf", "eigenbranch_complex") else 1)
             evals = [complex(x) for x in p.get_last_eigenvalues()]
@@ -290,7 +323,7 @@ def main():
                 elif args.case == "hopf":
                     tracker = HopfTracker(p, _PARAM[args.case], eigenvector=guess,
                                           nonlinear_length_constraint=args.nonlinear_constraint)
-                elif args.case == "normal_mode":
+                elif args.case.startswith("normal_mode"):
                     tracker = NormalModeBifurcationTracker(p, _PARAM[args.case], eigenvector=guess,
                                                            nonlinear_length_constraint=args.nonlinear_constraint)
                 elif args.case == "eigenbranch_real":

@@ -1457,6 +1457,17 @@ class NormalModeBifurcationTracker(_NormalModeBifurcationTrackerBase):
 
                 
     def supports_mpi(self)->bool:
+        # Both branches: the stationary one (has_imag False) on a Turing mode, and the oscillatory
+        # one on an advected mode. See the "normal_mode" and "normal_mode_osc" cases of
+        # tests/test_mpi_python_trackers.py.
+        #
+        # What distinguishes the two is which powers of k the residual carries. A purely diffusive
+        # scalar problem only ever has even ones -- the field's exp(+ikz) meets the test function's
+        # exp(-ikz) through grad().grad(), giving k^2 -- so its normal-mode Jacobian is real and
+        # there is no imaginary contribution to assemble at all. ONE derivative along the mode
+        # direction, i.e. advection, contributes i*k, and the imaginary contribution then exists. So
+        # the oscillatory branch is reachable with a scalar field after all, which is what the
+        # advected Brusselator in the worker uses.
         return True
 
     def after_layouts_ready(self):

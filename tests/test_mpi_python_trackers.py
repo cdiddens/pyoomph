@@ -29,9 +29,9 @@
 # PitchForkTracker, HopfTracker, both eigenbranch trackers and NormalModeBifurcationTracker, one
 # case per family as they are ported.
 #
-# What is NOT covered here: the normal-mode trackers' has_imag branch (an OSCILLATORY normal mode,
-# which needs an azimuthal problem with real and imaginary contributions), and
-# CriticalWavenumberTracker. Both are still refused under mpirun by supports_mpi().
+# BOTH branches of NormalModeBifurcationTracker are covered: the stationary one on a Turing mode and
+# the oscillatory (has_imag) one on an advected mode. What is NOT covered is
+# CriticalWavenumberTracker, which supports_mpi() still refuses.
 #
 # HopfTracker's LEFT-eigenvector branch is not covered, and is refused under mpirun on purpose: its
 # bordered system needs J^T and M^T as blocks, and transposing a row-distributed matrix is an
@@ -154,12 +154,19 @@ _GROUPS = {"fold": [False, False, True],
            # one eigenvector block and the parameter, no omega. That is the branch whose header
            # comment records four bugs that could not surface until a problem reached it, so it is
            # worth having under MPI as well.
-           "normal_mode": [False, False, True]}
+           "normal_mode": [False, False, True],
+           # The OSCILLATORY normal mode takes the has_imag branch: five groups, like a Hopf. What
+           # makes the mode oscillatory is advection ALONG the mode direction -- one derivative in z
+           # contributes i*k, where a diffusive term pairs exp(+ikz) with exp(-ikz) and gives k^2.
+           # A purely diffusive problem has no imaginary contribution to assemble at all, which is
+           # why the stationary case above cannot reach this branch.
+           "normal_mode_osc": [False, False, False, True, True]}
 # The augmented size: a fold adds [V | p], a pitchfork [V | p | slack], a Hopf [Vr | Vi | p | omega].
 _AUG = {"fold": lambda n: 2 * n + 1, "pitchfork": lambda n: 2 * n + 2, "hopf": lambda n: 3 * n + 2,
         "eigenbranch_real": lambda n: 2 * n + 1, "eigenbranch_complex": lambda n: 3 * n + 2,
-        "normal_mode": lambda n: 2 * n + 1}
-_CASES = ["fold", "pitchfork", "hopf", "eigenbranch_real", "eigenbranch_complex", "normal_mode"]
+        "normal_mode": lambda n: 2 * n + 1, "normal_mode_osc": lambda n: 3 * n + 2}
+_CASES = ["fold", "pitchfork", "hopf", "eigenbranch_real", "eigenbranch_complex",
+          "normal_mode", "normal_mode_osc"]
 
 
 @pytest.mark.parametrize("case", _CASES)
