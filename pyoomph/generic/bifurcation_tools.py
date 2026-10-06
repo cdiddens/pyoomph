@@ -657,13 +657,30 @@ class MultiAssembleRequest:
         
         
     def assemble(self):
-        n,vectors,csrdatas,return_indices=self.problem._assemble_multiassembly(self._what,self._contributions,self._parameters,self._hessian_vectors,self._hessian_vector_indices)
+        # n is the GLOBAL number of base equations; nrow_local/first_row say which block of them came
+        # back. On one process that is all of them and this is the previous behaviour verbatim. Under
+        # mpirun each rank gets its own rows, with GLOBAL column indices -- the layout oomph's
+        # distributed assembly produces and the one a distributed solver wants.
+        n,vectors,csrdatas,return_indices,nrow_local,first_row=self.problem._assemble_multiassembly(self._what,self._contributions,self._parameters,self._hessian_vectors,self._hessian_vector_indices)
+        self.n=n
+        self.nrow_local=nrow_local
+        self.first_row=first_row
         nmatrix=len(csrdatas)//2
         nvectors=len(vectors)-nmatrix
         matrices=[]
         #print("RETURN INDICES",return_indices)
         for i in range(nmatrix):
-            matrices.append(scipy.sparse.csr_matrix((vectors[nvectors+i],csrdatas[2*i+1],csrdatas[2*i]),shape=(n,n)))
+            mat=scipy.sparse.csr_matrix((vectors[nvectors+i],csrdatas[2*i+1],csrdatas[2*i]),shape=(nrow_local,n))
+            # oomph's distributed assembly hands back each row's entries in the order it met them,
+            # not in column order, where the serial path sorts. Measured: at np=2 on a 25-dof problem
+            # 15 of 25 rows came back unsorted, with no duplicates and no out-of-range column. The
+            # values are right either way -- scipy copes and the matrices compare equal -- but an
+            # unsorted CSR is the wrong thing to hand onward: PETSc's createAIJ(csr=...) wants column
+            # indices ascending per row, and petsc.py's structure-reuse digest hashes the index arrays,
+            # so an order that varies between assemblies of the same pattern would defeat the reuse it
+            # is there to enable. Canonical in, canonical out.
+            mat.sort_indices()
+            matrices.append(mat)
         res=[]
         for r in return_indices:
             if r>=0:

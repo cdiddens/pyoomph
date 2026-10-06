@@ -7990,13 +7990,40 @@ namespace pyoomph
     	unsigned long el_lo = 0;
     	unsigned long el_hi = n_elements - 1;
 
-#ifdef OOMPH_HAS_MPI    
-		if (!Problem_has_been_distributed)
+#ifdef OOMPH_HAS_MPI
+		if (Communicator_pt && Communicator_pt->nproc() > 1)
 		{
-		if (Communicator_pt->nproc() > 1) throw_runtime_error("This likely does not work in parallel");
-		el_lo = First_el_for_assembly[Communicator_pt->my_rank()];
-		el_hi = Last_el_plus_one_for_assembly[Communicator_pt->my_rank()] - 1;
-		} else throw_runtime_error("This likely does not work in distributed parallel");
+			// MPI, either regime: hand the whole thing to oomph's own distributed assembly rather than
+			// reducing the map-based accumulation below by hand. The reduction is NOT a sum of disjoint
+			// slices -- a base equation on a partition boundary collects contributions from non-halo
+			// elements on SEVERAL ranks, so it needs an off-processor row exchange keyed on who owns
+			// the row. parallel_sparse_assemble() is that, it was made protected and virtual FOR
+			// PYOOMPH for exactly this kind of substitution (src/thirdparty/oomph-lib/include/problem.h),
+			// it already honours sparsity_mask_for_element(), and it already splits the element loop the
+			// right way in both regimes: this rank's First_el_for_assembly slice when replicated, its
+			// own (halo-skipping) elements when distributed.
+			//
+			// The target distribution is over the BASE equations, because that is what this routine
+			// assembles: the installed handler is CustomMultiAssembleHandler, whose eqn_number() returns
+			// the element's own (base) equation number, so nothing it reports can exceed nbase.
+			// parallel_sparse_assemble() takes row ownership from target_dist_pt alone and never reads
+			// the problem's dof distribution, so the augmented one being installed does not matter here.
+			//
+			// Unlike the serial path below, the output is this rank's ROW BLOCK: nnz local, row starts
+			// rebased to it, column indices global. assemble_multiassembly() reports first_row and
+			// nrow_local alongside the data so the caller knows which rows it got.
+			if (!compressed_row_flag)
+			{
+				throw_runtime_error("The base-problem assembly can only be distributed in compressed-ROW "
+									"form; oomph's parallel_sparse_assemble() builds nothing else. Every "
+									"in-tree caller asks for compressed rows.");
+			}
+			const unsigned nbase = this->get_n_unaugmented_dofs();
+			if (nbase == 0) throw_runtime_error("This only works if you have augmented dofs");
+			oomph::LinearAlgebraDistribution target(this->communicator_pt(), nbase, true);
+			this->parallel_sparse_assemble(&target, column_or_row_index, row_or_column_start, value, nnz, residuals);
+			return;
+		}
 #endif
 
 		unsigned ndof = this->get_n_unaugmented_dofs();
@@ -8415,7 +8442,7 @@ namespace pyoomph
 	// runs sparse_assemble_row_or_column_compressed_base_problem(), then unpacks the resulting raw
 	// buffers into plain std::vectors (data/csrdata) for return to the caller (e.g. the Python binding),
 	// freeing the raw buffers as it goes. Always operates on the unaugmented dof count.
-	void Problem::assemble_multiassembly(std::vector<std::string> what,std::vector<std::string> contributions,std::vector<std::string> params,std::vector<std::vector<double>> & hessian_vectors,std::vector<unsigned> & hessian_vector_indices,std::vector<std::vector<double>> & data,std::vector<std::vector<int>> &csrdata,unsigned & ndof,std::vector<int> & return_indices)
+	void Problem::assemble_multiassembly(std::vector<std::string> what,std::vector<std::string> contributions,std::vector<std::string> params,std::vector<std::vector<double>> & hessian_vectors,std::vector<unsigned> & hessian_vector_indices,std::vector<std::vector<double>> & data,std::vector<std::vector<int>> &csrdata,unsigned & ndof,std::vector<int> & return_indices,unsigned & nrow_local,unsigned & first_row)
 	{
 		if (what.size()!=contributions.size()) throw_runtime_error("Number of what and contributions must match");
 		oomph::Vector<int*> column_or_row_index,row_or_column_start;		
@@ -8457,12 +8484,26 @@ namespace pyoomph
 		nnz.resize(nmatrix);
 		residuals.resize(nvector);
 		this->sparse_assemble_row_or_column_compressed_base_problem(column_or_row_index,row_or_column_start,value,nnz,residuals,true);
+		// How many rows came back. Serially, and whenever the assembly above took its own (global)
+		// path, that is all of them; under mpirun it is this rank's block of the base equations, and
+		// the caller needs first_row to know which block. Taken from the same distribution the
+		// assembly was given rather than recomputed, so the two cannot drift apart.
+		nrow_local = ndof;
+		first_row = 0;
+#ifdef OOMPH_HAS_MPI
+		if (Communicator_pt && Communicator_pt->nproc() > 1)
+		{
+			oomph::LinearAlgebraDistribution target(this->communicator_pt(), ndof, true);
+			nrow_local = target.nrow_local();
+			first_row = target.first_row();
+		}
+#endif
 		data.resize(nvector+nmatrix);
 		csrdata.resize(2*nmatrix);
 		for (unsigned int i=0;i<nvector;i++) 
 		{
-			data[i].resize(ndof);
-			for (unsigned int j=0;j<ndof;j++) data[i][j]=residuals[i][j];
+			data[i].resize(nrow_local);
+			for (unsigned int j=0;j<nrow_local;j++) data[i][j]=residuals[i][j];
 			delete [] residuals[i];
 		}
 		for (unsigned int i=0;i<nmatrix;i++) 
@@ -8470,8 +8511,8 @@ namespace pyoomph
 			data[nvector+i].resize(nnz[i]);
 			
 			for (unsigned int j=0;j<nnz[i];j++) data[nvector+i][j]=value[i][j];
-			csrdata[2*i].resize(ndof+1);
-			for (unsigned int j=0;j<ndof+1;j++) csrdata[2*i][j]=row_or_column_start[i][j];
+			csrdata[2*i].resize(nrow_local+1);
+			for (unsigned int j=0;j<nrow_local+1;j++) csrdata[2*i][j]=row_or_column_start[i][j];
 			csrdata[2*i+1].resize(nnz[i]);
 			for (unsigned int j=0;j<nnz[i];j++) csrdata[2*i+1][j]=column_or_row_index[i][j];
 			delete [] value[i];

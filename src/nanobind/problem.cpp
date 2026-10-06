@@ -1518,8 +1518,8 @@ void PyReg_Problem(nb::module_ &m)
 				std::vector<std::vector<double>> data;
 				std::vector<std::vector<int>> csrdata;
 				std::vector<int> return_indices;
-				unsigned ndof;
-				p->assemble_multiassembly(what, contributions, params, hessian_vectors, hessian_vector_indices, data, csrdata, ndof, return_indices);
+				unsigned ndof, nrow_local, first_row;
+				p->assemble_multiassembly(what, contributions, params, hessian_vectors, hessian_vector_indices, data, csrdata, ndof, return_indices, nrow_local, first_row);
 				// data/csrdata are ragged (rows have different lengths, e.g. a dense
 				// residual vector vs. a sparse matrix's CSR arrays), so each row is
 				// individually wrapped as its own numpy array rather than nesting into
@@ -1532,14 +1532,16 @@ void PyReg_Problem(nb::module_ &m)
 				csrdata_arrs.reserve(csrdata.size());
 				for (auto &row : csrdata)
 					csrdata_arrs.push_back(vector_to_ndarray(row));
-				return std::make_tuple(ndof, data_arrs, csrdata_arrs, return_indices);
+				return std::make_tuple(ndof, data_arrs, csrdata_arrs, return_indices, nrow_local, first_row);
 			},
 			nb::arg("what"), nb::arg("contributions"), nb::arg("params"), nb::arg("hessian_vectors"), nb::arg("hessian_vector_indices"),
 			"Assemble several residual vectors and/or Jacobian-like matrices (and, if requested, Hessian-vector products) in a single sweep over the elements. "
 			"``what``/``contributions`` are parallel lists selecting what to assemble (e.g. \"residual\"/\"jacobian\") and with respect to which named residual "
 			"combination; ``params`` optionally selects a parameter derivative for each entry; ``hessian_vectors``/``hessian_vector_indices`` request additional "
-			"directional Hessian-vector products. Returns (ndof, data, csrdata, return_indices), where ``data``/``csrdata`` hold the assembled vectors and the CSR "
-			"data (values, row_start, column_index pairs) of the assembled matrices.")
+			"directional Hessian-vector products. Returns (ndof, data, csrdata, return_indices, nrow_local, first_row), where ``data``/``csrdata`` hold the assembled "
+			"vectors and the CSR data (values, row_start, column_index pairs) of the assembled matrices. ``ndof`` is the GLOBAL number of base equations, while "
+			"``nrow_local``/``first_row`` say which block of them the returned data covers -- everything when run on one process, this rank's row block under mpirun. "
+			"Matrix column indices are global in both cases, and the row starts are rebased to the block.")
 		.def("_assemble_defined_field_list", &pyoomph::Problem::assemble_defined_field_list,
 			 "(Re-)build the internal list of all fields defined anywhere in the problem and their contributions to each residual/Jacobian combination; "
 			 "must be called after the set of equations/fields changes, before assign_eqn_numbers().")

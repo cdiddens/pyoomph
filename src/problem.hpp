@@ -1774,7 +1774,9 @@ namespace pyoomph
     // contributions/parameters in a single elemental loop, to avoid redundant element traversals when
     // multiple quantities are needed at once (e.g. by the Python-side continuation/bifurcation code).
     // Results are returned via the output parameters (data/csrdata for dense/sparse pieces, ndof, return_indices).
-    void assemble_multiassembly(std::vector<std::string> what,std::vector<std::string> contributions,std::vector<std::string> params,std::vector<std::vector<double>> & hessian_vectors,std::vector<unsigned> & hessian_vector_indices,std::vector<std::vector<double>> & data,std::vector<std::vector<int>> &csrdata,unsigned & ndof,std::vector<int> & return_indices);
+    // ndof is the GLOBAL number of base equations; nrow_local/first_row describe which block of them
+    // the returned data covers (everything, serially). Column indices are global in both cases.
+    void assemble_multiassembly(std::vector<std::string> what,std::vector<std::string> contributions,std::vector<std::string> params,std::vector<std::vector<double>> & hessian_vectors,std::vector<unsigned> & hessian_vector_indices,std::vector<std::vector<double>> & data,std::vector<std::vector<int>> &csrdata,unsigned & ndof,std::vector<int> & return_indices,unsigned & nrow_local,unsigned & first_row);
 
   };
 
