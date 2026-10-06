@@ -1369,13 +1369,28 @@ class _NormalModeBifurcationTrackerBase(CustomBifurcationTracker):
             
         self.base_zero_dofs,self.eigen_zero_dofs=self.get_forced_to_zero_dofs()
 
+    # The forced-zero dof sets are GLOBAL equation numbers, reported identically on every rank: the
+    # axis conditions of a normal mode are a property of the equations, not of a partition. So both
+    # helpers below have to act on this rank's rows of that set and leave the rest to whoever owns
+    # them -- which is what first_row/local_rows_of does. Serially first_row is 0 and the whole set
+    # is local, so this is the previous behaviour unchanged.
+    #
+    # Note the consumers (the normal-mode trackers) are still refused under mpirun by
+    # supports_mpi(); this is correct here so that migrating them does not also have to find it.
+    def _patch_first_row(self)->int:
+        return self.base_layout.first_row if self.base_layout is not None else 0
+
     def patch_residuals(self,eigen:bool,R:list[NPFloatArray] | NPFloatArray):
         if not isinstance(R,list):
             R=[R]
+        zero_rows=numpy.array(sorted(self.eigen_zero_dofs if eigen else self.base_zero_dofs),dtype=numpy.int64)
+        first_row=self._patch_first_row()
         res=[]
         for r in R:
-            r=numpy.array(r)            
-            r[numpy.array(list(self.eigen_zero_dofs if eigen else self.base_zero_dofs),dtype="int64")]=0.0
+            r=numpy.array(r)
+            local=zero_rows-first_row
+            local=local[(local>=0)&(local<len(r))]
+            r[local]=0.0
             res.append(r)
         return res
     
@@ -1389,11 +1404,12 @@ class _NormalModeBifurcationTrackerBase(CustomBifurcationTracker):
         # to whoever owns it while a sparse-sparse product is not. Bitwise identical to the previous
         # form, pattern included -- see zero_csr_rows() on why the pruning is part of that.
         zero_rows=numpy.array(sorted(self.eigen_zero_dofs if eigen else self.base_zero_dofs),dtype=numpy.int64)
+        first_row=self._patch_first_row()
         res=[]
         for Jmat in J:
-            res.append(csr_rows_to_identity(Jmat,zero_rows))
+            res.append(csr_rows_to_identity(Jmat,zero_rows,first_row=first_row))
         for Mmat in M:
-            res.append(zero_csr_rows(Mmat,zero_rows))
+            res.append(zero_csr_rows(Mmat,zero_rows,first_row=first_row))
         return tuple(res)
 
     def get_forced_to_zero_dofs(self):
