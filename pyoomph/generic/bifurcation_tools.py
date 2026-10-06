@@ -1437,13 +1437,14 @@ class _NormalModeBifurcationTrackerBase(CustomBifurcationTracker):
 
     def actions_after_successful_newton_solve(self):
         if self.has_imag:
-            Vr,Vi,lam,omega=self.get_augmented_dofs().split(startindex=1)            
-            lam=lam[0] if self.parameter is None else 0
-            self.store_eigenvector({(lam+1j*omega[0]):(numpy.array(Vr)+numpy.array(Vi)*1j)})
+            Vr,Vi,lam,omega=self.split_vectors(1)
+            lam=lam if self.parameter is None else 0
+            # store_eigenvector's contract is a globally replicated vector at full length.
+            self.store_eigenvector({(lam+1j*omega):(Vr.to_global()+Vi.to_global()*1j)})
         else:
-            Vr,lam=self.get_augmented_dofs().split(startindex=1)
-            lam=lam[0] if self.parameter is None else 0
-            self.store_eigenvector({lam:numpy.array(Vr)})            
+            Vr,lam=self.split_vectors(1)
+            lam=lam if self.parameter is None else 0
+            self.store_eigenvector({lam:numpy.array(Vr.to_global())})
             
             
 class NormalModeBifurcationTracker(_NormalModeBifurcationTrackerBase):
@@ -1455,21 +1456,39 @@ class NormalModeBifurcationTracker(_NormalModeBifurcationTrackerBase):
         
 
                 
-    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]: # type: ignore[override] # see the other implementations
+    def supports_mpi(self)->bool:
+        return True
+
+    def after_layouts_ready(self):
+        from .distributed_la import DistVector
+        self.V0_local=DistVector.from_global(self.V0,self.base_layout)
+        self.V0_replicated=self.replicated(self.V0)
+
+    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None): # type: ignore[override] # see the other implementations
         nl=self.nonlinear_length_constraint
+        la,base,aug,table=self.la,self.base_layout,self.augmented_layout,self.eqn_table
+        groups=self.group_is_scalar
+        # The patched matrices are this rank's rows with GLOBAL column indices, so "matrix @ global
+        # vector" already yields a local block and every expression below survives unchanged. What
+        # does change is the inner products (collective) and the block/stack boundary. The gather of
+        # Vr/Vi costs O(n) per rank per assembly, which the Hessian contraction vectors pay anyway.
+        M_ = lambda m: la.matrix(m,base,base.n)
+        V_ = lambda v: la.vector(v,base)
         if not self.has_imag:
-            Vr,p=self.get_augmented_dofs().split(startindex=1)
+            Vr,p=self.split_vectors(1)
+            Vr_g=Vr.to_global()
             if not require_jacobian:
                 if dparameter is not None:
                     dRdp,dJRdp=self.start_multiassembly().dRdp(dparameter).dJdp(dparameter,self.real_contribution).assemble()
                     dJRdp,=self.patch_matrices(eigen=True,J=dJRdp)
                     dRdp,=self.patch_residuals(eigen=False,R=[dRdp])
-                    return numpy.hstack([dRdp,dJRdp@Vr,0.0])                                
+                    return la.stack([V_(dRdp),V_(dJRdp@Vr_g),0.0],groups,base,aug,table)
                 else:
                     R,JR=self.start_multiassembly().R().J(self.real_contribution).assemble()
                     JR,=self.patch_matrices(eigen=True,J=JR)
                     R,=self.patch_residuals(eigen=False,R=[R])
-                    return numpy.hstack([R,JR@Vr,numpy.dot(Vr,Vr if self.nonlinear_length_constraint else self.V0)-self.eigenscale*(self.eigenscale if self.nonlinear_length_constraint else 1)])                                
+                    length=Vr.dot(Vr if nl else self.V0_local)-self.eigenscale*(self.eigenscale if nl else 1)
+                    return la.stack([V_(R),V_(JR@Vr_g),length],groups,base,aug,table)
             else:
                 assert dparameter is None, "dparameter not supported for require_jacobian=True"
                 # Four things were wrong here, and none of them could show up until a problem reached
@@ -1486,76 +1505,77 @@ class NormalModeBifurcationTracker(_NormalModeBifurcationTrackerBase):
                 #  - dJ_real/dp was patched like a Jacobian, which puts a 1 on the diagonal of every
                 #    forced-zero eigen row. That row is the equation V_j=0, whose parameter
                 #    derivative is zero, so the derivative goes through the M slot instead.
-                R,J,dRdp,JR,HJVr,dJRdP=self.start_multiassembly().R().J().dRdp(self.parameter).J(self.real_contribution).dJdU(Vr,self.real_contribution).dJdp(self.parameter,self.real_contribution).assemble()
+                R,J,dRdp,JR,HJVr,dJRdP=self.start_multiassembly().R().J().dRdp(self.parameter).J(self.real_contribution).dJdU(Vr_g,self.real_contribution).dJdp(self.parameter,self.real_contribution).assemble()
                 J,=self.patch_matrices(eigen=False,J=J)
                 R,dRdp=self.patch_residuals(eigen=False,R=[R,dRdp])
                 JR,dJRdP=self.patch_matrices(eigen=True,J=[JR],M=[dJRdP])
-                col=lambda C:self.as_matrix_column(C)
-                row=lambda R:self.as_matrix_row(R)
-                Raug=numpy.hstack([R,JR@Vr,numpy.dot(Vr,Vr if self.nonlinear_length_constraint else self.V0)-self.eigenscale*(self.eigenscale if self.nonlinear_length_constraint else 1)])                                 #type:ignore
-                Jaug=scipy.sparse.block_array(
-                    [[J,None,col(dRdp)],
-                     [HJVr,JR,col(dJRdP@Vr)],
-                     [None,row(2*Vr if nl else self.V0),None]]).tocsr()
+                length=Vr.dot(Vr if nl else self.V0_local)-self.eigenscale*(self.eigenscale if nl else 1)
+                Raug=la.stack([V_(R),V_(JR@Vr_g),length],groups,base,aug,table)
+                rowvec=self.replicated(Vr*2.0) if nl else self.V0_replicated
+                Jaug=la.block(
+                    [[M_(J),None,la.col(V_(dRdp))],
+                     [M_(HJVr),M_(JR),la.col(V_(dJRdP@Vr_g))],
+                     [None,la.row(rowvec),None]],groups,base,aug,table)
                 return Raug,Jaug #type:ignore
         else:
-            Vr,Vi,p,omega=self.get_augmented_dofs().split(startindex=1)
-            omega=omega[0]
+            Vr,Vi,p,omega=self.split_vectors(1)
+            Vr_g,Vi_g=Vr.to_global(),Vi.to_global()
             if not require_jacobian:
                 if dparameter is not None:
                     assm=self.start_multiassembly().dRdp(dparameter).dJdp(dparameter,self.real_contribution).dJdp(dparameter,self.imag_contribution)
                     assm.dMdp(dparameter,self.real_contribution).dMdp(dparameter,self.imag_contribution)
                     dRdp,dJRdp,dJIdp,dMRdp,dMIdp=assm.assemble()
                     dJRdp,dJIdp,dMRdp,dMIdp=self.patch_matrices(eigen=True,J=[dJRdp,dJIdp],M=[dMRdp,dMIdp])                    
-                    d_eq_V_re_dp=-dJIdp*Vi + dJRdp*Vr +  omega*(-dMIdp*Vr - dMRdp*Vi)
-                    d_eq_V_im_dp=dJIdp*Vr + dJRdp*Vi + omega*(-dMIdp*Vi + dMRdp*Vr)                    
-                    return numpy.hstack([dRdp,d_eq_V_re_dp,d_eq_V_im_dp,0,0])                                
+                    d_eq_V_re_dp=-dJIdp*Vi_g + dJRdp*Vr_g +  omega*(-dMIdp*Vr_g - dMRdp*Vi_g)
+                    d_eq_V_im_dp=dJIdp*Vr_g + dJRdp*Vi_g + omega*(-dMIdp*Vi_g + dMRdp*Vr_g)                    
+                    return la.stack([V_(dRdp),V_(d_eq_V_re_dp),V_(d_eq_V_im_dp),0.0,0.0],groups,base,aug,table)
                 else:
                     R,JR,JI,MR,MI=self.start_multiassembly().R().J(self.real_contribution).J(self.imag_contribution).M(self.real_contribution).M(self.imag_contribution).assemble()
                     R,=self.patch_residuals(eigen=False,R=[R])
                     JR,JI,MR,MI=self.patch_matrices(eigen=True,J=[JR,JI],M=[MR,MI])                    
-                    eq_V_re=-JI*Vi + JR*Vr +  omega*(-MI*Vr - MR*Vi)
-                    eq_V_im=JI*Vr + JR*Vi  + omega*(-MI*Vi + MR*Vr)
-                    norm_constr=numpy.dot(Vr,Vr if self.nonlinear_length_constraint else self.V0)-self.eigenscale*(self.eigenscale if self.nonlinear_length_constraint else 1)
-                    rot_constr=numpy.dot(Vi,Vr if self.nonlinear_length_constraint else self.V0)
+                    eq_V_re=-JI*Vi_g + JR*Vr_g +  omega*(-MI*Vr_g - MR*Vi_g)
+                    eq_V_im=JI*Vr_g + JR*Vi_g  + omega*(-MI*Vi_g + MR*Vr_g)
+                    norm_constr=Vr.dot(Vr if nl else self.V0_local)-self.eigenscale*(self.eigenscale if nl else 1)
+                    rot_constr=Vi.dot(Vr if nl else self.V0_local)
                     eq_V_re,eq_V_im=self.patch_residuals(eigen=True,R=[eq_V_re,eq_V_im])
                     #print("MAX RES IN R",numpy.max(numpy.abs(R)))
                     #print("MAX RES IN eq_V_re",numpy.max(numpy.abs(eq_V_re)))
                     #print("MAX RES IN eq_V_im",numpy.max(numpy.abs(eq_V_im)))
                     #print("MAX RES IN norm_constr",numpy.max(numpy.abs(norm_constr)))
                     #print("MAX RES IN rot_constr",numpy.max(numpy.abs(rot_constr)))
-                    return numpy.hstack([R,eq_V_re,eq_V_im,norm_constr,rot_constr])                                
+                    return la.stack([V_(R),V_(eq_V_re),V_(eq_V_im),norm_constr,rot_constr],groups,base,aug,table)
             else:                
                 assm=self.start_multiassembly().R().dRdp(self.parameter).J().J(self.real_contribution).J(self.imag_contribution).M(self.real_contribution).M(self.imag_contribution)
-                assm.dJdU(Vr,self.real_contribution).dJdU(Vi,self.real_contribution).dJdU(Vr,self.imag_contribution).dJdU(Vi,self.imag_contribution)
-                assm.dMdU(Vr,self.real_contribution).dMdU(Vi,self.real_contribution).dMdU(Vr,self.imag_contribution).dMdU(Vi,self.imag_contribution)
+                assm.dJdU(Vr_g,self.real_contribution).dJdU(Vi_g,self.real_contribution).dJdU(Vr_g,self.imag_contribution).dJdU(Vi_g,self.imag_contribution)
+                assm.dMdU(Vr_g,self.real_contribution).dMdU(Vi_g,self.real_contribution).dMdU(Vr_g,self.imag_contribution).dMdU(Vi_g,self.imag_contribution)
                 assm.dJdp(self.parameter,self.real_contribution).dJdp(self.parameter,self.imag_contribution).dMdp(self.parameter,self.real_contribution).dMdp(self.parameter,self.imag_contribution)
                 R,dRdp,J,JR,JI,MR,MI, HJRVR,HJRVI,HJIVR,HJIVI, HMRVR,HMRVI,HMIVR,HMIVI,dJRdp,dJIdp,dMRdp,dMIdp=assm.assemble()
                 J,=self.patch_matrices(eigen=False,J=J)
                 JR,JI,dJRdp,dJIdp,MR,MI,dMRdp,dMIdp=self.patch_matrices(eigen=True,J=[JR,JI,dJRdp,dJIdp],M=[MR,MI,dMRdp,dMIdp])                                    
                 #HJRVR,HJRVI,HJIVR,HJIVI, HMRVR,HMRVI,HMIVR,HMIVI=self.patch_matrices(eigen=True,J=[HJRVR,HJRVI,HJIVR,HJIVI],M=[HMRVR,HMRVI,HMIVR,HMIVI])
-                eq_V_re=JR@Vr -JI@Vi  - omega*(MI@Vr + MR@Vi)
+                eq_V_re=JR@Vr_g -JI@Vi_g  - omega*(MI@Vr_g + MR@Vi_g)
                 d_eq_V_re_dU=HJRVR - HJIVI - omega*(HMIVR + HMRVI)
                 d_eq_V_re_dVr=JR  - omega*MI
                 d_eq_V_re_dVi=-JI  - omega*MR
-                d_eq_V_re_dp=dJRdp@Vr -dJIdp@Vi  - omega*(dMIdp@Vr + dMRdp@Vi)
-                eq_V_im=JI@Vr + JR@Vi  + omega*(MR@Vr-MI@Vi)
+                d_eq_V_re_dp=dJRdp@Vr_g -dJIdp@Vi_g  - omega*(dMIdp@Vr_g + dMRdp@Vi_g)
+                eq_V_im=JI@Vr_g + JR@Vi_g  + omega*(MR@Vr_g-MI@Vi_g)
                 d_eq_V_im_dU=HJIVR + HJRVI  + omega*(HMRVR-HMIVI)
                 d_eq_V_im_dVr=JI  + omega*MR
                 d_eq_V_im_dVi=JR  - omega*MI
-                d_eq_V_im_dp=dJIdp@Vr + dJRdp@Vi  + omega*(dMRdp@Vr-dMIdp@Vi)
-                norm_constr=numpy.dot(Vr,Vr if self.nonlinear_length_constraint else self.V0)-self.eigenscale*(self.eigenscale if self.nonlinear_length_constraint else 1)
-                rot_constr=numpy.dot(Vi,Vr if self.nonlinear_length_constraint else self.V0)
-                Raug=numpy.hstack([R,eq_V_re,eq_V_im,norm_constr,rot_constr])                                
-                col=lambda C:self.as_matrix_column(C)
-                row=lambda R:self.as_matrix_row(R)                
-                Jaug=scipy.sparse.block_array([
-                    [J,None,None,col(dRdp),None],
-                    [d_eq_V_re_dU,d_eq_V_re_dVr,d_eq_V_re_dVi,col(d_eq_V_re_dp),col(-(MI*Vr + MR*Vi))],
-                    [d_eq_V_im_dU,d_eq_V_im_dVr,d_eq_V_im_dVi,col(d_eq_V_im_dp),col(MR*Vr-MI*Vi)],
-                    [None,row(2*Vr if nl else self.V0),None,None,None],
-                    [None,row(Vi) if nl else None,row(Vr if nl else self.V0),None,None]
-                ]).tocsr()
+                d_eq_V_im_dp=dJIdp@Vr_g + dJRdp@Vi_g  + omega*(dMRdp@Vr_g-dMIdp@Vi_g)
+                norm_constr=Vr.dot(Vr if nl else self.V0_local)-self.eigenscale*(self.eigenscale if nl else 1)
+                rot_constr=Vi.dot(Vr if nl else self.V0_local)
+                Raug=la.stack([V_(R),V_(eq_V_re),V_(eq_V_im),norm_constr,rot_constr],groups,base,aug,table)
+                rowVr=self.replicated(Vr*2.0) if nl else self.V0_replicated
+                rowVi=self.replicated(Vi) if nl else None
+                rowVr2=self.replicated(Vr) if nl else self.V0_replicated
+                Jaug=la.block([
+                    [M_(J),None,None,la.col(V_(dRdp)),None],
+                    [M_(d_eq_V_re_dU),M_(d_eq_V_re_dVr),M_(d_eq_V_re_dVi),la.col(V_(d_eq_V_re_dp)),la.col(V_(-(MI*Vr_g + MR*Vi_g)))],
+                    [M_(d_eq_V_im_dU),M_(d_eq_V_im_dVr),M_(d_eq_V_im_dVi),la.col(V_(d_eq_V_im_dp)),la.col(V_(MR*Vr_g-MI*Vi_g))],
+                    [None,la.row(rowVr),None,None,None],
+                    [None,la.row(rowVi) if rowVi is not None else None,la.row(rowVr2),None,None]
+                ],groups,base,aug,table)
                 return Raug,Jaug         #type:ignore
 
 

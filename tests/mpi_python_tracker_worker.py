@@ -52,10 +52,10 @@ from pyoomph.generic.mpi import get_mpi_rank, get_mpi_nproc
 
 # The continuation parameter's name per case. The Brusselator's is B; the others use lam.
 _PARAM = {"fold": "lam", "pitchfork": "lam", "hopf": "B",
-          "eigenbranch_real": "lam", "eigenbranch_complex": "B"}
+          "eigenbranch_real": "lam", "eigenbranch_complex": "B", "normal_mode": "B"}
 from pyoomph.generic.bifurcation_tools import (ComplexEigenbranchTracker, FoldTracker,
-                                                HopfTracker, PitchForkTracker,
-                                                RealEigenbranchTracker)
+                                                HopfTracker, NormalModeBifurcationTracker,
+                                                PitchForkTracker, RealEigenbranchTracker)
 
 
 class BratuEquations(Equations):
@@ -152,6 +152,57 @@ class HopfProblem(Problem):
         self.setup_for_stability_analysis(analytic_hessian=True)
 
 
+class TuringEquations(Equations):
+    """Brusselator with unequal diffusion: a Turing instability, i.e. a STATIONARY neutral mode at a
+    finite wavenumber. With additional_cartesian_mode the mode is ~exp(i*k*z) transverse to the mesh,
+    which is what the normal-mode trackers are written for."""
+
+    def __init__(self, A, B, d):
+        super().__init__()
+        self.A, self.B, self.d = A, B, d
+
+    def define_fields(self):
+        self.define_scalar_field("u", "C2")
+        self.define_scalar_field("v", "C2")
+
+    def define_residuals(self):
+        u, ut = var_and_test("u")
+        v, vt = var_and_test("v")
+        f = self.A - (self.B + 1) * u + u ** 2 * v
+        g = self.B * u - u ** 2 * v
+        self.add_weak(partial_t(u) - f, ut).add_weak(grad(u), grad(ut))
+        self.add_weak(partial_t(v) - g, vt).add_weak(self.d * grad(v), grad(vt))
+
+
+class NormalModeProblem(Problem):
+    """The Turing system on a LINE -- not the point mesh test_critical_wavenumber_tracker.py uses,
+    because a single point cannot be partitioned. The uniform state is exact, so the base solve is
+    trivial and what is under test is the normal-mode augmented system.
+
+    The closed-form critical point of the uniform Turing system is B = (1 + A/sqrt(d))^2 at
+    k = sqrt(A)/d^(1/4); the tracker is started off it in B so that it has something to do.
+    """
+
+    def __init__(self, N=12, A=2.0, d=8.0, offset=0.15):
+        super().__init__()
+        self.N = N
+        self.A_val, self.d_val = A, d
+        self.Bc = (1 + A / numpy.sqrt(d)) ** 2
+        self.kc = numpy.sqrt(A) / d ** 0.25
+        self.offset = offset
+
+    def define_problem(self):
+        self += LineMesh(N=self.N, size=1, name="domain")
+        self.A = self.define_global_parameter(A=self.A_val)
+        self.lam = self.define_global_parameter(B=self.Bc - self.offset)
+        self.d = self.define_global_parameter(d=self.d_val)
+        eqs = TuringEquations(self.A, self.lam, self.d)
+        eqs += InitialCondition(u=self.A, v=self.lam / self.A)
+        eqs += IntegralObservables(usqr=var("u") ** 2 + var("v") ** 2)
+        self += eqs @ "domain"
+        self.setup_for_stability_analysis(additional_cartesian_mode=True, analytic_hessian=True)
+
+
 class BratuProblem(Problem):
     def __init__(self, N=8):
         super().__init__()
@@ -177,7 +228,8 @@ def main():
     ap.add_argument("--nonlinear-constraint", action="store_true")
     ap.add_argument("--cxx", action="store_true", help="use the C++ handler instead, for comparison")
     ap.add_argument("--case", default="fold",
-                    choices=["fold", "pitchfork", "hopf", "eigenbranch_real", "eigenbranch_complex"])
+                    choices=["fold", "pitchfork", "hopf", "eigenbranch_real", "eigenbranch_complex",
+                             "normal_mode"])
     args, _ = ap.parse_known_args()
 
     payload: dict = {"rank": get_mpi_rank(), "nproc": max(get_mpi_nproc(), 1),
@@ -187,6 +239,8 @@ def main():
             problem = PitchforkProblem(args.N)
         elif args.case in ("hopf", "eigenbranch_complex"):
             problem = HopfProblem(args.N if args.N != 8 else 20)
+        elif args.case == "normal_mode":
+            problem = NormalModeProblem(args.N if args.N != 8 else 12)
         else:
             problem = BratuProblem(args.N)
         with problem as p:
@@ -204,7 +258,13 @@ def main():
             # at np=1, 2 and 3 -- +0.25 +- 0.968i first, then the real modes -- and slot 0 is
             # unambiguous. Same lesson as the pitchfork's aspect ratio: do not put the cut where the
             # answer is not well defined.
-            p.solve_eigenproblem(6 if args.case in ("hopf", "eigenbranch_complex") else 1)
+            if args.case == "normal_mode":
+                # The mode is ~exp(i*k*z) with k fixed here: this tracker finds the parameter at
+                # which THAT mode is neutral, which is what distinguishes it from the codim-2
+                # CriticalWavenumberTracker.
+                p.solve_eigenproblem(2, normal_mode_k=0.8 * p.kc)
+            else:
+                p.solve_eigenproblem(6 if args.case in ("hopf", "eigenbranch_complex") else 1)
             evals = [complex(x) for x in p.get_last_eigenvalues()]
             guess = 0
             payload["eigenvalue_guess"] = evals[guess].real
@@ -230,6 +290,9 @@ def main():
                 elif args.case == "hopf":
                     tracker = HopfTracker(p, _PARAM[args.case], eigenvector=guess,
                                           nonlinear_length_constraint=args.nonlinear_constraint)
+                elif args.case == "normal_mode":
+                    tracker = NormalModeBifurcationTracker(p, _PARAM[args.case], eigenvector=guess,
+                                                           nonlinear_length_constraint=args.nonlinear_constraint)
                 elif args.case == "eigenbranch_real":
                     # Follows an eigenvalue along the branch rather than pinning a bifurcation, so
                     # there is no parameter unknown: the eigenvalue itself is the extra scalar.
