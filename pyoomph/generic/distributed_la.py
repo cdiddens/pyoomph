@@ -616,10 +616,11 @@ class LinearAlgebraBackend:
                             raise ValueError("a border row must sit in a scalar group, not (%d,%d)" % (gr, gc))
                         full = cell.vector.local  # replicated by contract; see row()
                         if i_own_scalar(gr):
+                            # STRUCTURALLY DENSE: every column of the group gets an entry, including
+                            # the ones whose value is zero. See the note on the border column below.
                             cols = numpy.arange(nbase, dtype=numpy.int64)
-                            keep = full != 0.0
-                            emit(numpy.full(int(keep.sum()), naive_start[gr], dtype=numpy.int64),
-                                 naive_start[gc] + cols[keep], full[keep])
+                            emit(numpy.full(nbase, naive_start[gr], dtype=numpy.int64),
+                                 naive_start[gc] + cols, full)
                     else:
                         # One global column, an entry in each of this rank's rows of group gr.
                         if group_is_scalar[gc] is False:
@@ -628,8 +629,24 @@ class LinearAlgebraBackend:
                             raise ValueError("a border column cannot span a scalar group (%d,%d)" % (gr, gc))
                         vals = cell.vector.local
                         rws = naive_start[gr] + base.first_row + numpy.arange(len(vals), dtype=numpy.int64)
-                        keep = vals != 0.0
-                        emit(rws[keep], numpy.full(int(keep.sum()), naive_start[gc], dtype=numpy.int64), vals[keep])
+                        # STRUCTURALLY DENSE, unconditionally: one stored entry per row of the group
+                        # even where the value is zero.
+                        #
+                        # This is not a minor choice. Filtering by value -- which the scipy original
+                        # did implicitly, because csr_matrix(dense.reshape(-1,1)) drops zeros -- makes
+                        # the bordered matrix's SPARSITY PATTERN depend on dR/dparameter's VALUES, so
+                        # it moves between Newton steps as the parameter column fills in or empties
+                        # out. dev_docs/structural_assembly.md section 6.5 names that as the trap on
+                        # this side. With PETSc's digest-based reuse of the auxiliary factorisation
+                        # (petsc.py) a pattern that moves is either a refactorisation on every step,
+                        # losing the symbolic analysis the digest exists to keep, or -- with
+                        # NEW_NONZERO_ALLOCATION_ERR disabled -- a stale-value bug.
+                        #
+                        # The cost is one stored zero per empty row of a border block, which for a
+                        # bordered system is at most a few columns of n: far less than the stored
+                        # zeros a frozen Jacobian pattern already carries (6 % across the tutorial
+                        # suite, same document section 7).
+                        emit(rws, numpy.full(len(vals), naive_start[gc], dtype=numpy.int64), vals)
                 else:
                     # A scalar entry, which only exists where both groups are scalars.
                     if not (group_is_scalar[gr] and group_is_scalar[gc]):

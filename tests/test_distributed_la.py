@@ -350,3 +350,42 @@ def test_a_border_row_must_be_replicated():
 
 def test_the_backend_choice_is_scipy_on_one_process():
     assert isinstance(get_la_backend(None), ScipyBackend)
+
+
+@pytest.mark.parametrize("cuts", [[(0, 6)], [(0, 3), (3, 3)], [(0, 1), (1, 4), (5, 1)]])
+def test_the_border_blocks_are_structurally_dense(cuts):
+    """The bordered pattern must not depend on the border's VALUES.
+
+    This is the trap dev_docs/structural_assembly.md section 6.5 names. The scipy original built its
+    border column as csr_matrix(dense.reshape(-1,1)), which DROPS ZEROS, so the augmented matrix's
+    sparsity pattern moved as dR/dparameter filled in or emptied out between Newton steps. With
+    PETSc's digest-based reuse of the auxiliary factorisation that is either a refactorisation on
+    every step -- losing the symbolic analysis the digest exists to keep -- or, with
+    NEW_NONZERO_ALLOCATION_ERR disabled, a stale-value bug.
+
+    So: build the same bordered system twice, once with a border that is nowhere zero and once with
+    half of it exactly zero, and require the PATTERNS to be identical. The values are not compared;
+    the structure is the whole point.
+    """
+    nbase = sum(k for _first, k in cuts)
+    J, HV, _dRdP, _dJdPV, V0 = _fold_pieces(nbase, seed=99)
+    table, aug_blocks, n_aug = _naive_table(nbase, cuts, _GROUPS)
+    B = ScipyBackend()
+    rng = numpy.random.default_rng(5)
+    dense = rng.random(nbase) + 1.0            # nothing zero
+    holey = dense.copy()
+    holey[: nbase // 2] = 0.0                  # half of it exactly zero
+
+    def pattern(border):
+        pats = []
+        for (first, nloc), (aug_first, aug_nloc) in zip(cuts, aug_blocks):
+            base = RowLayout.block(nbase, first, nloc)
+            aug = RowLayout.block(n_aug, aug_first, aug_nloc)
+            loc = _build(B, J, HV, border, border, V0, base, aug, table).local.tocsr()
+            loc.sort_indices()
+            pats.append((loc.indptr.tolist(), loc.indices.tolist()))
+        return pats
+
+    assert pattern(dense) == pattern(holey), (
+        "the bordered pattern changed when half the border column went to zero, so it depends on "
+        "the border's values")
