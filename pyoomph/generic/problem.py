@@ -1704,6 +1704,13 @@ class Problem(_pyoomph.Problem):
         # Break it explicitly instead of relying on cyclic gc, same rationale as above.
         self._residual_mapping_functions = []
         self.invalidate_cached_mesh_data()
+        # Drop any pending "reactivate the tracker after the adaptation" request BEFORE
+        # invalidate_eigendata(), which would otherwise honour it: installing a C++ bifurcation
+        # handler on a Problem that is being torn down. On a run where the adaptation's own solve had
+        # failed, that reactivation raised a SECOND exception from inside __exit__ -- the
+        # warn_about_unused_global_parameters check, on a problem whose parameters were no longer
+        # reachable -- which masked the real failure and was followed by a SEGV.
+        self._bifurcation_reactivation_after_adaptation=None
         self.invalidate_eigendata()
         self.flush_sub_meshes()
         # Stamp the end/elapsed time into the log file before closing it.
@@ -3066,6 +3073,23 @@ class Problem(_pyoomph.Problem):
         if messed_around_in_history:
             self.assign_initial_values_impulsive() # We messed around. So me must reassign the initial values
         self._adapt_eigenindex=None
+        # Reinstall the tracker HERE, which is what the comment at the top of this method always said
+        # ("we will reactivate it at the end of the function if it was active at the beginning") and
+        # what the code did not do: it left the reactivation to actions_after_newton_solve.
+        #
+        # oomph calls that only after a Newton solve has CONVERGED, and the Newton solve that follows
+        # an adaptation inside steady_newton_solve(max_adapt) is the one sitting on the bifurcation
+        # with no tracker installed -- i.e. a plain solve at a singular Jacobian. Measured on a Bratu
+        # fold: it converges linearly at exactly the 1/4 residual ratio Newton gives at a quadratic
+        # fold (0.0345, 0.00749, 0.00184, ... ) and dies on the 10-iteration cap, so the reactivation
+        # that was waiting behind it never ran. A bare adapt() was worse: nothing called
+        # actions_after_newton_solve at all, and the next solve() cleared the pending request, which
+        # dropped the tracker silently.
+        #
+        # After assign_initial_values_impulsive(), because installing a tracker makes the dof vector
+        # the augmented one and that call writes the base vector.
+        if self._bifurcation_reactivation_after_adaptation is not None:
+            self._reactivate_bifurcation_tracking_after_adaption()
         return nref,nuref
 
     def _desired_ndof_meshes(self) -> list[tuple[str,"AnySpatialMesh"]]:
@@ -7114,7 +7138,13 @@ class Problem(_pyoomph.Problem):
             float: The new step size for the continuation.
         """
         if spatial_adapt>0 and self.get_bifurcation_tracking_mode()!="":
-            raise RuntimeError("Cannot perform spatial adaptation during arclength continuation when bifurcation tracking is active. You can do the arclength step with spatial_adapt=0 followed by a solve(spatial_adapt="+str(spatial_adapt)+") to achieve a similar effect.")
+            # Kept, and measured rather than assumed: adapting INSIDE an arclength step changes ndof
+            # halfway through it, so the arclength constraint the step is solving against stops
+            # meaning anything. oomph then rejects the step and halves Ds for ever -- 40+ rejections
+            # down to Ds=1e-13 on a Bratu fold locus -- rather than failing outright. The workaround
+            # named below is a genuine one now that the tracker survives an adaptation; before the
+            # reactivation fix in _adapt_with_interfacial_errors it was broken too.
+            raise RuntimeError("Cannot perform spatial adaptation during arclength continuation when bifurcation tracking is active. Do the arclength step with spatial_adapt=0 followed by a solve(spatial_adapt="+str(spatial_adapt)+"), which adapts and keeps the bifurcation tracked.")
         self._activate_solver_callback()        
         self.invalidate_cached_mesh_data()
         if not self.is_initialised():
@@ -7141,9 +7171,9 @@ class Problem(_pyoomph.Problem):
         
         if self.warn_about_unused_global_parameters and not self._is_global_parameter_used(parameter):
             if self.warn_about_unused_global_parameters=="error":
-                raise RuntimeError("Arclength continuation in the global parameter '" + parameter + "', which is used in the problem. This may lead to unexpected behaviour. Have you defined it with define_global_parameter? Or have you overridden it by e.g. '" + parameter + "=<value>' instead of '" + parameter + ".value=<value>'? Have you defined it via define_global_parameter? Or have you overridden it by e.g. '" + parameter + "=<value>' instead of '" + parameter + ".value=<value>'?  Set <Problem>.warn_about_unused_global_parameters to False to suppress this error.")
+                raise RuntimeError("Arclength continuation in the global parameter '" + parameter + "', which is NOT used in the problem. This may lead to unexpected behaviour. Have you defined it with define_global_parameter? Or have you overridden it by e.g. '" + parameter + "=<value>' instead of '" + parameter + ".value=<value>'? Have you defined it via define_global_parameter? Or have you overridden it by e.g. '" + parameter + "=<value>' instead of '" + parameter + ".value=<value>'?  Set <Problem>.warn_about_unused_global_parameters to False to suppress this error.")
             else:
-                print("WARNING: Arclength continuation in the global parameter '" + parameter + "', which is used in the problem. This may lead to unexpected behaviour. Set <Problem>.warn_about_unused_global_parameters to False to suppress this warning.")
+                print("WARNING: Arclength continuation in the global parameter '" + parameter + "', which is NOT used in the problem. This may lead to unexpected behaviour. Set <Problem>.warn_about_unused_global_parameters to False to suppress this warning.")
                 
         if self._bifurcation_tracking_parameter_name is not None:
             if parameter == self._bifurcation_tracking_parameter_name:
@@ -8202,9 +8232,9 @@ class Problem(_pyoomph.Problem):
             
             if self.warn_about_unused_global_parameters and not self._is_global_parameter_used(parameter):
                 if self.warn_about_unused_global_parameters=="error":
-                    raise RuntimeError("Bifurcation tracking in the global parameter '" + parameter + "', which is used in the problem. This may lead to unexpected behaviour. Set <Problem>.warn_about_unused_global_parameters to False to suppress this error.")
+                    raise RuntimeError("Bifurcation tracking in the global parameter '" + parameter + "', which is NOT used in the problem. This may lead to unexpected behaviour. Set <Problem>.warn_about_unused_global_parameters to False to suppress this error.")
                 else:
-                    print("WARNING: Bifurcation tracking in the global parameter '" + parameter + "', which is used in the problem. This may lead to unexpected behaviour. Set <Problem>.warn_about_unused_global_parameters to False to suppress this warning.")
+                    print("WARNING: Bifurcation tracking in the global parameter '" + parameter + "', which is NOT used in the problem. This may lead to unexpected behaviour. Set <Problem>.warn_about_unused_global_parameters to False to suppress this warning.")
             if not self.is_quiet():
                 print("Bifurcation tracking activated for "+parameter)
         if self.is_distributed():
