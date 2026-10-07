@@ -105,11 +105,11 @@ if __name__=="__main__":
         for m in [0,1,2,3]:
             problem.Gamma.value=0.5 # Start at some aspect ratio
             # Find a good guess for the critical Ra by eigenvalue bisection.
-            # The start must be stable for every m, otherwise find_bifurcation_via_eigenvalues
-            # bails out with "Starting already with an unstable solution". At Gamma=0.5 the lowest
-            # onset is the one of m=1 at Ra=3773, so 3000 is a valid lower bound for all modes
-            # here, and starting right below the first onset spares the eigensolves that a far
-            # smaller guess would spend in the stable regime.
+            # At Gamma=0.5 the lowest onset is the one of m=1 at Ra=3773, so 3000 is below every
+            # mode's onset here, and starting right below the first one spares the eigensolves that
+            # a far smaller guess would spend in the stable regime. find_bifurcation_via_eigenvalues
+            # no longer REQUIRES a stable start -- it searches from either side of the axis -- so
+            # this is now a choice about how much work the march does, not a constraint.
             problem.Ra.value=3000
             # We increase by steps of 200, but we don't have to solve the system, since the stationary solution is independent of Ra
             # we also pass the mode we want to solve for

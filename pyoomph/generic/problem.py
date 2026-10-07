@@ -7480,7 +7480,119 @@ class Problem(_pyoomph.Problem):
         self._last_eigenvalues_k=None
 
     # Warning: This must be used with "for parameter, eigenvalue in find_bifurcation_via_eigenvalues(...):"
-    def find_bifurcation_via_eigenvalues(self, parameter:str | _pyoomph.GiNaC_GlobalParam, initstep:float, shift:None | float | complex=0, neigen:int=6, spatial_adapt:int=0, epsilon:float=1e-8, reset_arclength:bool=False, max_ds:float | Callable[[float], float] | None=None, stay_stable_file:str | None=None, before_eigensolving:Callable[[float], None] | None=None, do_solve:bool=True, azimuthal_m:int | list[int] | None=None, normal_mode_k:ExpressionNumOrNone=None, eigenindex:int=0):
+    @staticmethod
+    def eigenvector_overlap(a:"NPComplexArray | NPFloatArray",b:"NPComplexArray | NPFloatArray")->float:
+        """How much two eigenvectors are the same mode, on a 0..1 scale, ignoring scale and phase.
+
+        An eigenvector is only defined up to a complex factor, so a comparison has to be invariant
+        under one. ``|<a,b>| / (|a| |b|)`` with the HERMITIAN inner product is: replacing a by alpha*a
+        and b by beta*b multiplies the numerator by |alpha||beta| and the denominator by the same.
+        Taking the modulus is what removes the phase; the real part alone would not, and would report
+        two copies of one mode differing by a phase of pi as perfectly anti-correlated.
+
+        A complex pair is a second ambiguity on top of that, and a separate one: a solver may return
+        either member, and conj(v) is NOT a rescaling of v. So the comparison is also taken against
+        the conjugate and the better of the two is reported -- lambda and conj(lambda) are the same
+        physical mode, which is the same reading as mpi_augmented_systems.md section 11's "compare
+        |omega|". For a real eigenvector the two coincide.
+
+        Takes real arrays as well as complex ones, and not only for convenience: a real eigenvector
+        is the ordinary case for a fold or a pitchfork, and the two branches below then coincide.
+
+        Returns 0.0 if either vector is zero or they have different lengths, i.e. "tells us nothing"
+        rather than raising: the caller has to handle a changed mesh anyway.
+        """
+        a=numpy.asarray(a,dtype=numpy.complex128).ravel()
+        b=numpy.asarray(b,dtype=numpy.complex128).ravel()
+        if len(a)==0 or len(a)!=len(b):
+            return 0.0
+        na=float(numpy.linalg.norm(a)); nb=float(numpy.linalg.norm(b))
+        if not (na>0.0 and nb>0.0) or not numpy.isfinite(na) or not numpy.isfinite(nb):
+            return 0.0
+        direct=abs(complex(numpy.vdot(a,b)))
+        conjug=abs(complex(numpy.vdot(a,numpy.conjugate(b))))
+        return float(min(1.0,max(direct,conjug)/(na*nb)))
+
+    def _match_tracked_eigenvector(self,tracked:NPComplexArray,tolerance:float,neigen:int,
+                                   shift:"None | float | complex")->tuple[int,float]:
+        """Which of the eigenvectors just returned is the one being followed, and how sure we are.
+
+        Returns ``(index, overlap)``. The eigenvectors come back GLOBAL and identical on every rank
+        (measured: length == global ndof, same norm at 1, 2 and 3 ranks), so the inner products need
+        no reduction and every rank reaches the same answer by construction.
+
+        Raises when nothing in the returned set resembles the tracked mode, because that is exactly
+        the case the caller cannot paper over: a scan that keeps comparing a fixed INDEX across
+        eigensolves is then comparing two different modes and will report no crossing rather than a
+        missed one. Shift-invert returns the neigen eigenvalues nearest the shift, so a mode can
+        genuinely leave that window as the branch moves -- this does not say the mode stopped
+        existing, only that this scan can no longer see it, which is why the message says so.
+        """
+        current=self.get_last_eigenvectors()
+        if len(current)==0:
+            raise RuntimeError("Eigenvector tracking is on, but the eigensolve returned no eigenvectors to match against.")
+        overlaps=[self.eigenvector_overlap(tracked,v) for v in current]
+        best=int(numpy.argmax(overlaps))
+        if overlaps[best]<tolerance:
+            raise RuntimeError(
+                "Eigenvector tracking lost the mode it was following: the best overlap among the "
+                +str(len(current))+" returned eigenvectors is "+("%.3g"%overlaps[best])
+                +", below the tolerance "+("%.3g"%tolerance)+". Shift-invert returns only the "
+                +str(neigen)+" eigenvalues nearest the shift ("+str(shift)+"), so the mode has most "
+                "likely left that window rather than ceased to exist -- a scan that carried on here "
+                "would be comparing the real parts of two DIFFERENT modes and would report no "
+                "crossing. Raise neigen, move the shift towards the mode (a complex shift near "
+                "i*omega for a high-frequency Hopf), or lower eigenvector_overlap_tolerance if the "
+                "mode is genuinely deforming this fast.")
+        return best,float(overlaps[best])
+
+    def _bifurcation_bracket_target(self,bracket:"list[float]",retained:"list[int]")->float:
+        """The next parameter value to try, from a bracket that straddles the root.
+
+        ``bracket`` is ``[p_lo, f_lo, p_hi, f_hi]`` with ``f_lo*f_hi < 0``; ``retained`` is a
+        one-element list counting how many times in a row the SAME end survived, which is what turns
+        plain false position into the Illinois variant.
+
+        False position rather than bisection because the real part of an eigenvalue is close to
+        linear in the parameter near a crossing, so the secant lands near the root in one step. The
+        Illinois damping is not optional decoration: plain regula falsi retains the same end
+        repeatedly when the function is convex over the bracket, the retained end's ordinate never
+        updates, and the iteration creeps towards the root from one side with a shrinking step -- it
+        converges to a point that is NOT the root. That is precisely the failure this replaced:
+        measured on a Brusselator Hopf, the old code settled at B = 2.39063 with Re = +1.38e-3 and
+        stopped moving, against a root at 2.3875. Halving the stale ordinate forces the other end to
+        be taken and restores bracketing.
+        """
+        p_lo,f_lo,p_hi,f_hi=bracket
+        denom=f_hi-f_lo
+        if denom==0.0 or not numpy.isfinite(denom):
+            return 0.5*(p_lo+p_hi)
+        t=p_hi-f_hi*(p_hi-p_lo)/denom
+        # Keep the target strictly inside the bracket: a secant on noisy eigenvalues can land
+        # outside it, and a target outside a valid bracket throws the bracket away.
+        lo,hi=min(p_lo,p_hi),max(p_lo,p_hi)
+        margin=0.01*(hi-lo)
+        if not numpy.isfinite(t) or t<=lo+margin or t>=hi-margin:
+            t=0.5*(p_lo+p_hi)
+        return float(t)
+
+    def _bifurcation_update_bracket(self,bracket:"list[float]",retained:"list[int]",
+                                    p_new:float,f_new:float)->None:
+        """Put (p_new,f_new) into the bracket, keeping the end whose sign it does not share."""
+        p_lo,f_lo,p_hi,f_hi=bracket
+        if f_new*f_lo<0.0:
+            # the root is between lo and the new point: hi is replaced
+            bracket[2],bracket[3]=p_new,f_new
+            retained[0]=retained[0]+1 if retained[0]>0 else 1
+            if retained[0]>=2:
+                bracket[1]=f_lo*0.5     # Illinois: the stale end's ordinate is halved
+        else:
+            bracket[0],bracket[1]=p_new,f_new
+            retained[0]=retained[0]-1 if retained[0]<0 else -1
+            if retained[0]<=-2:
+                bracket[3]=f_hi*0.5
+
+    def find_bifurcation_via_eigenvalues(self, parameter:str | _pyoomph.GiNaC_GlobalParam, initstep:float, shift:None | float | complex=0, neigen:int=6, spatial_adapt:int=0, epsilon:float=1e-8, reset_arclength:bool=False, max_ds:float | Callable[[float], float] | None=None, stay_stable_file:str | None=None, before_eigensolving:Callable[[float], None] | None=None, do_solve:bool=True, azimuthal_m:int | list[int] | None=None, normal_mode_k:ExpressionNumOrNone=None, eigenindex:int=0, track_eigenvector:bool=False, eigenvector_overlap_tolerance:float=0.5):
         """
         Approximates a bifurcation point by bisecting on the basis of the eigenvalues.
         Must be called as a generator, e.g.
@@ -7505,6 +7617,8 @@ class Problem(_pyoomph.Problem):
 				azimuthal_m (Optional[Union[int,List[int]]]): The azimuthal mode number if you want to find azimuthal perturbations.
                 normal_mode_k: The wave number(s) for an additional direction in Cartesian coordinates. Defaults to None, i.e. the base mode.
 				eigenindex (int): The index of the eigenvalue to track. Defaults to 0, i.e. the one with the largest real part.
+				track_eigenvector (bool): Follow the MODE rather than the index. Off by default. Without it the scan compares ``evals[eigenindex]`` across eigensolves, and that index is a position in whatever the solver returned, not an identity: shift-invert returns the ``neigen`` eigenvalues nearest the shift, so as the branch moves the set itself changes and the same index can be a different mode. The scan then compares the real parts of two different modes and reports NO crossing, which looks like a correct negative. With this on, the eigenvector found at the start is matched against each new set by scale- and phase-invariant overlap (see :py:meth:`eigenvector_overlap`), the matched index is used instead of ``eigenindex``, and the scan STOPS with a message if nothing in the window resembles the tracked mode any more. It cannot make a negative result trustworthy -- a Hopf at large |omega| is outside a real shift's window whatever the bookkeeping -- it only stops a lost mode from being silently swapped for another.
+				eigenvector_overlap_tolerance (float): The overlap below which ``track_eigenvector`` declares the mode lost. Defaults to 0.5, i.e. the match must be better than an arbitrary direction.
 
         Yields:
 				param(float): The current parameter value.
@@ -7550,33 +7664,92 @@ class Problem(_pyoomph.Problem):
                 evals0, _ = self._solve_normal_mode_eigenproblem(neigen, azimuthal_m, shift=shift)
         self.invalidate_cached_mesh_data()
         param0 = parameter.value
-        sign0 = evals0[eigenindex].real
-        if evals0[eigenindex].real > epsilon:
-            raise RuntimeError("Starting already with an unstable solution")
-        elif evals0[eigenindex].real >= -epsilon:
-            yield param0, evals0[eigenindex]
+        # The index of the mode being followed, in the set that produced evals0. Constant when
+        # track_eigenvector is off, re-matched every step when it is on.
+        idx0 = eigenindex
+        tracked_eigenvector:NPComplexArray | None = None
+        if track_eigenvector:
+            _ev0 = self.get_last_eigenvectors()
+            if len(_ev0) <= eigenindex:
+                raise RuntimeError("track_eigenvector needs the eigensolve to return eigenvectors; got "
+                                   +str(len(_ev0))+" for eigenindex "+str(eigenindex))
+            tracked_eigenvector = numpy.array(_ev0[eigenindex],dtype=numpy.complex128)
+        sign0 = evals0[idx0].real
+        if abs(evals0[idx0].real) < epsilon:
+            # Already there.
+            yield param0, evals0[idx0]
             return
+        if evals0[idx0].real > epsilon:
+            # Starting UNSTABLE used to be refused outright. Nothing in the search needs the start to
+            # be stable -- it needs the sign to CHANGE, and a sign change is as detectable from above
+            # the axis as from below, so a user who has walked past a bifurcation can march back to
+            # it instead of having to re-approach it from the stable side.
+            #
+            # stay_stable_file is the one thing that genuinely does need it: its contract is "save the
+            # state whenever this mode is stable, reload it when it goes unstable", and there is no
+            # stable state to save yet.
+            if stay_stable_file is not None:
+                raise RuntimeError(
+                    "find_bifurcation_via_eigenvalues was given stay_stable_file but the starting "
+                    "solution is already unstable (Re = "+str(evals0[idx0].real)+"), so there is no "
+                    "stable state to keep. Drop stay_stable_file to search from the unstable side.")
+            if not self.is_quiet():
+                print("Starting from an UNSTABLE solution (Re = "+str(evals0[idx0].real)
+                      +"); marching until the sign changes.")
         if stay_stable_file is not None:
             self.save_state(stay_stable_file,relative_to_output=True)
         ds = initstep
         firstSignChange = False
+        # [p_lo,f_lo,p_hi,f_hi] once a sign change has been seen, with f_lo*f_hi<0, plus the
+        # Illinois retention counter. Before that there is nothing to bracket and the loop marches.
+        bracket:"list[float] | None" = None
+        retained:"list[int]" = [0]
         if reset_arclength:
             self.reset_arc_length_parameters()
         while True:
             ds0 = ds
+            if bracket is not None:
+                # Bracketed: aim at a PARAMETER value, not at an arclength increment. The two are
+                # not interchangeable -- the parameter moves by (dparameter/ds)*ds -- and treating
+                # ds as a parameter step is the second half of what was wrong here: halving ds did
+                # not halve the parameter step, and the sign of ds does not by itself decide which
+                # way along the branch the step goes (Continuation_direction does).
+                target = self._bifurcation_bracket_target(bracket,retained)
+                dp = target - parameter.value
+                if do_solve:
+                    dpds = self.get_arc_length_parameter_derivative()
+                    if abs(dpds) > 1e-12 and numpy.isfinite(dpds):
+                        ds = dp/dpds
+                    else:
+                        # dparameter/ds has collapsed: the branch is turning in this parameter, so no
+                        # arclength step can be aimed at a parameter value. Fall back to halving.
+                        ds = 0.5*ds0
+                else:
+                    ds = dp
             if do_solve:
                 if callable(max_ds_func):
-                    max_ds=max_ds_func(parameter.value)
-                    max_ds=abs(max_ds)
+                    # float() is not cosmetic: callable() narrowing over a
+                    # float | Callable | None union leaves pyright with "object | float" for the
+                    # call's result, and the two blocks cannot be hoisted into one because they
+                    # evaluate max_ds_func at DIFFERENT parameter values -- before the arclength
+                    # step here, after the parameter has already moved in the branch below.
+                    max_ds=abs(float(max_ds_func(parameter.value)))
                     print("MAX DS SET TO",max_ds)
                 assert not callable(max_ds)
-                ds = self.arclength_continuation(parameter, ds,max_ds=max_ds)
+                # max_ds must not clip a bracketed step: it is there to stop the MARCH overshooting,
+                # and inside the bracket the step is already as small as the bracket.
+                ds = self.arclength_continuation(parameter, ds,
+                                                 max_ds=None if bracket is not None else max_ds)
                 self.invalidate_cached_mesh_data()
             else:
                 parameter.value=parameter.value+ds
                 if callable(max_ds_func):
-                    max_ds=max_ds_func(parameter.value)
-                    max_ds=abs(max_ds)
+                    # float() is not cosmetic: callable() narrowing over a
+                    # float | Callable | None union leaves pyright with "object | float" for the
+                    # call's result, and the two blocks cannot be hoisted into one because they
+                    # evaluate max_ds_func at DIFFERENT parameter values -- before the arclength
+                    # step here, after the parameter has already moved in the branch below.
+                    max_ds=abs(float(max_ds_func(parameter.value)))
                     print("MAX DS SET TO",max_ds)
                 assert not callable(max_ds)
                 # Enlarge the step while marching towards the first sign change. This used to be
@@ -7584,7 +7757,7 @@ class Problem(_pyoomph.Problem):
                 # the initial step all the way to the bifurcation -- 89 steps of 200 for the m=3
                 # mode of the Rayleigh-Benard tutorial. Once the sign has changed we are bisecting
                 # the bracket and must not grow anymore, otherwise the halving below is undone.
-                if not firstSignChange:
+                if not firstSignChange and bracket is None:
                     dsnew=abs(1.5*ds)
                     if max_ds is not None:
                         dsnew=min(dsnew,max_ds)
@@ -7610,36 +7783,55 @@ class Problem(_pyoomph.Problem):
                     evals1,_=self._solve_normal_mode_eigenproblem(neigen, azimuthal_m, shift=shift)
             self.invalidate_cached_mesh_data()
             param1 = parameter.value
-            if abs(evals1[eigenindex].real) < epsilon:
-                yield param1, evals1[eigenindex]
+            idx1 = eigenindex
+            if track_eigenvector:
+                assert tracked_eigenvector is not None
+                newvecs = self.get_last_eigenvectors()
+                if len(newvecs) and len(newvecs[0]) != len(tracked_eigenvector):
+                    # The mesh changed under us (spatial_adapt>0), so the two vectors do not live in
+                    # the same space and the overlap would be meaningless. Re-seed from eigenindex
+                    # rather than guess; one step of the old behaviour is the honest cost.
+                    if not self.is_quiet():
+                        print("track_eigenvector: ndof changed from "+str(len(tracked_eigenvector))+" to "
+                              +str(len(newvecs[0]))+", re-seeding the tracked mode from eigenindex "
+                              +str(eigenindex)+" for this step")
+                    idx1 = eigenindex
+                else:
+                    idx1,_overlap = self._match_tracked_eigenvector(
+                        tracked_eigenvector, eigenvector_overlap_tolerance, neigen, shift)
+                tracked_eigenvector = numpy.array(self.get_last_eigenvectors()[idx1],dtype=numpy.complex128)
+            if abs(evals1[idx1].real) < epsilon:
+                yield param1, evals1[idx1]
                 return
-            sign = evals1[eigenindex].real
+            sign = evals1[idx1].real
             if sign * sign0 < 0:
-                if (stay_stable_file is not None) and evals1[eigenindex].real > epsilon:
+                if (stay_stable_file is not None) and evals1[idx1].real > epsilon:
                     self.load_state(stay_stable_file, relative_to_output=True)
                     self.invalidate_cached_mesh_data()
                     self.reset_arc_length_parameters()
                     # find the intersection with zero by linear approximation
                     # eigenval=(evals1[0].real-evals0[0].real)/(param1-param0)*(p-param0)+evals0[0].real
-                    ds=-evals0[eigenindex].real*(param1-param0)/(evals1[eigenindex].real-evals0[eigenindex].real)
+                    ds=-evals0[idx0].real*(param1-param0)/(evals1[idx1].real-evals0[idx0].real)
                     continue
 
                 firstSignChange = True
-                # Bisect the bracket [param0,param1], which is |ds0| wide. ds itself must not be
-                # used here: it has already been enlarged for the next march step, so stepping
-                # back by half of it would overshoot backwards past param0.
-                dsmagn = abs(ds0)
-                ds = -0.5 * dsmagn * (-1 if ds < 0 else 1)
+            if bracket is None:
+                if sign * sign0 < 0:
+                    # First straddle: [param0,param1] contains the root. From here the search is a
+                    # bracketed root-find on the parameter, which is what the old code only
+                    # approximated -- it kept no bracket at all, just the last sign and a ds it
+                    # rescaled, so it converged to a fixed point of its own recursion rather than to
+                    # the root.
+                    bracket = [param0, evals0[idx0].real, param1, sign]
+                    retained = [0]
             else:
-                if firstSignChange:
-                    dsmagn = max(abs(ds), abs(ds0))
-                    ds = dsmagn * (-1 if ds < 0 else 1)
-                    ds = ds0 - 0.5 * ds
-            yield param1, evals1[eigenindex]
-            if (stay_stable_file is not None) and evals1[eigenindex].real<epsilon:
+                self._bifurcation_update_bracket(bracket, retained, param1, sign)
+            yield param1, evals1[idx1]
+            if (stay_stable_file is not None) and evals1[idx1].real<epsilon:
                 self.save_state(stay_stable_file, relative_to_output=True)
             sign0 = sign
             evals0=evals1
+            idx0=idx1
             param0=param1
 
     def set_max_refinement_level(self,level:int,do_adapt:bool=True):
