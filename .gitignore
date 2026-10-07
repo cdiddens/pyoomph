@@ -96,3 +96,6 @@ pyoomph/NO_MPI
 citools/pyoomph_tutorial_scripts/
 /valgrind.*
 Scratchpad/
+
+# Claude Code session resume state
+claude.resume
