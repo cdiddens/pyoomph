@@ -52,6 +52,7 @@ import shutil
 import subprocess
 import sys
 
+import numpy
 import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -97,17 +98,18 @@ _RANK_RTOL = 1e-12
 
 
 def _run(nproc, tmpdir, distribute, case, adapt_levels=1, reverse=False, inner_product=None,
-         timeout=900):
+         adapt_at=-1, timeout=1800):
     """Launch the worker under mpirun (or in-process for nproc=1) and return per-rank results."""
     outdir = os.path.join(str(tmpdir), "%s_n%d_%s_a%d%s_%s" % (
         case, nproc, "dist" if distribute else "repl", adapt_levels, "_rev" if reverse else "",
-        inner_product or "none"))
+        inner_product or "none")) + ("_at%d" % adapt_at if adapt_at >= 0 else "")
     cmd = ["mpirun", "-n", str(nproc)]
     # No --oversubscribe: this project's machines have the cores these ranks need, and an
     # oversubscribed run trades a deadlock for a machine that stops responding.
     cmd += [sys.executable, _WORKER, "--case", case, "--outdir", outdir,
             "--adapt-levels", str(adapt_levels)] + (["--reverse"] if reverse else []) + (
-            ["--inner-product", inner_product] if inner_product else []) + [
+            ["--inner-product", inner_product] if inner_product else []) + (
+            ["--adapt-at", str(adapt_at)] if adapt_at >= 0 else []) + [
             # Without this only rank 0 reaches stdout (the default MPI output mode is "condensed"),
             # and a per-rank comparison would silently compare one rank with itself.
             "--mpi-output=all"]
@@ -148,18 +150,18 @@ def _run(nproc, tmpdir, distribute, case, adapt_levels=1, reverse=False, inner_p
 _SERIAL_CACHE = {}
 
 
-def _serial(tmpdir, case, adapt_levels=1, reverse=False, inner_product=None):
+def _serial(tmpdir, case, adapt_levels=1, reverse=False, inner_product=None, adapt_at=-1):
     """The serial reference, run as its own process and cached per case.
 
     Its own process rather than in-process: installing a C++ bifurcation handler and then adapting
     leaves enough state behind that sharing the pytest process between cases would make one case's
     result depend on which ran before it.
     """
-    key = (case, adapt_levels, reverse, inner_product)
+    key = (case, adapt_levels, reverse, inner_product, adapt_at)
     if key in _SERIAL_CACHE:
         return _SERIAL_CACHE[key]
     res = _run(1, tmpdir, False, case, adapt_levels=adapt_levels, reverse=reverse,
-               inner_product=inner_product)[0]
+               inner_product=inner_product, adapt_at=adapt_at)[0]
     _SERIAL_CACHE[key] = res
     return res
 
@@ -464,3 +466,136 @@ def test_arclength_metric_survives_a_tracked_adaptation(tmp_path, inner_product)
         # and by a comparable amount, without being pinned to an exact formula.
         ratio = res["theta_sqr_end"]/res["theta_sqr_before_adapt"]
         assert 0.1 < ratio < 1.0, "the l2 metric moved implausibly across the adaptation: %.4g" % ratio
+
+
+def _steps(res):
+    """The locus points of a turning_locus/hopf_locus result, with the adapt marker dropped."""
+    return [r for r in res["rows"] if not r.get("adapt")]
+
+
+def _adapt_marker(res):
+    for r in res["rows"]:
+        if r.get("adapt"):
+            return r
+    return None
+
+
+# ---------------------------------------------------------------------------------------------
+# The two cases dev_docs/mpi_augmented_systems.md section 14 recorded as not covered.
+# ---------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("adapt_at", [2, 3, 4],
+                         ids=["before_the_turn", "at_the_turn", "after_the_turn"])
+def test_fold_locus_turning_in_the_continuation_parameter(tmp_path, adapt_at):
+    """Adapt while the locus is turning in the parameter being continued.
+
+    Everywhere else in this suite the recomputed tangent's sign is fixed by the sign of ds, because
+    the continuation parameter moves monotonically. At a turn it is not: d(lam)/ds passes through
+    zero, so the step after the adaptation has to pick the direction from the restored
+    Continuation_direction and the recomputed tangent rather than from where lam is heading.
+
+    Step 3 is the turn (lam bottoms out at 3.5139 as b crosses zero), so the three parameters cover
+    adapting just before it, exactly on it, and just after.
+    """
+    res = _serial(tmp_path, "turning_locus", adapt_at=adapt_at)
+    ref = _serial(tmp_path, "turning_locus", adapt_at=-1)
+    assert res["mode_at_end"] == "fold", "the tracker did not survive the adaptation at the turn"
+    mark = _adapt_marker(res)
+    assert mark is not None and mark["ndof"] > ref["rows"][0]["ndof"], "nothing was refined"
+
+    rows, refrows = _steps(res), _steps(ref)
+
+    # The locus really does turn, or this test is testing nothing: lam has an interior minimum.
+    lams_ref = [r["lam"] for r in refrows]
+    imin = lams_ref.index(min(lams_ref))
+    assert 0 < imin < len(lams_ref)-1, \
+        "the reference locus does not turn in lam: %s" % ["%.6f" % v for v in lams_ref]
+
+    # b is the parameter that keeps moving THROUGH the turn, so it is the direction witness: it must
+    # decrease at every step and change sign. A continuation that turned back on itself after the
+    # adaptation would show as b increasing again.
+    bs = [r["b"] for r in rows]
+    for earlier, later in zip(bs, bs[1:]):
+        assert later < earlier, \
+            "the locus reversed after adapting at step %d: b went %s" % (
+                adapt_at, ["%.6f" % v for v in bs])
+    assert bs[0] > 0 > bs[-1], "the locus did not cross b = 0: %s" % ["%.6f" % v for v in bs]
+
+    # And lam must turn in the adapted run too, not just the reference.
+    lams = [r["lam"] for r in rows]
+    jmin = lams.index(min(lams))
+    assert 0 < jmin < len(lams)-1, \
+        "the adapted run did not turn in lam: %s" % ["%.6f" % v for v in lams]
+
+    # ds must not have been rejected on the way round: oomph halves it on a rejected step, and this
+    # is the configuration where a bad predictor would be punished.
+    assert all(abs(r["ds"]) >= 0.059 for r in rows), \
+        "ds collapsed around the turn: %s" % ["%.5f" % r["ds"] for r in rows]
+
+    # Same curve as the reference. Compared at the LAST step rather than pointwise, because the
+    # refined mesh's own fold sits slightly elsewhere and the steps therefore land at slightly
+    # different b; 1e-3 is far inside that and far outside anything structural.
+    assert rows[-1]["b"] == pytest.approx(refrows[-1]["b"], rel=1e-3)
+    assert rows[-1]["lam"] == pytest.approx(refrows[-1]["lam"], rel=1e-3)
+
+
+def test_hopf_locus_across_an_adaptation(tmp_path):
+    """A Hopf locus, whose augmented tangent carries omega as well as the eigenvector.
+
+    No fold case exercises omega at all. The assertion that matters is that it comes through the
+    adaptation intact: it is part of the augmented unknown vector, so a reactivation that rebuilt the
+    tracker from a stale or rescaled eigenpair would move it.
+    """
+    res = _serial(tmp_path, "hopf_locus", adapt_at=2)
+    ref = _serial(tmp_path, "hopf_locus", adapt_at=-1)
+    assert res["mode_after_tracking"] == "hopf"
+    assert res["mode_at_end"] == "hopf", "the Hopf tracker did not survive the adaptation"
+
+    mark = _adapt_marker(res)
+    assert mark is not None
+    assert mark["ndof"] > ref["rows"][0]["ndof"], "nothing was refined"
+
+    rows, refrows = _steps(res), _steps(ref)
+    # omega straight after the adaptation against the step before it: the adaptation refines the mesh
+    # and must not move the frequency by more than the discretisation does.
+    omega_before = rows[1]["omega"]
+    assert mark["omega"] == pytest.approx(omega_before, rel=1e-6), \
+        "omega moved across the adaptation: %.9g -> %.9g" % (omega_before, mark["omega"])
+
+    # A real Hopf, and a locus that goes somewhere: omega stays bounded away from zero (a Hopf with
+    # omega -> 0 is degenerating towards a double-zero point) and both parameters advance.
+    assert all(r["omega"] > 0.5 for r in rows), [r["omega"] for r in rows]
+    for a, b in zip(rows, rows[1:]):
+        assert b["A0"] > a["A0"] and b["B"] > a["B"] and b["omega"] > a["omega"]
+
+    # And the adapted run sits on the reference locus. B_c(A0) is smooth and monotone here, so the
+    # reference is interpolated linearly to the adapted run's A0 rather than compared index by index
+    # -- the adapted steps are slightly shorter, so the indices do not line up.
+    a_ref = [r["A0"] for r in refrows]
+    b_ref = [r["B"] for r in refrows]
+    for r in rows[2:]:
+        assert a_ref[0] <= r["A0"] <= a_ref[-1], "outside the reference range, cannot interpolate"
+        predicted = float(numpy.interp(r["A0"], a_ref, b_ref))
+        assert r["B"] == pytest.approx(predicted, rel=1e-4), \
+            "off the Hopf locus at A0=%.6f: B_c=%.8f, reference says %.8f" % (
+                r["A0"], r["B"], predicted)
+
+
+@pytest.mark.parametrize("case", ["turning_locus", "hopf_locus"])
+@pytest.mark.parametrize("nproc", [2, 3])
+def test_uncovered_cases_match_serial_distributed(tmp_path, case, nproc):
+    """Both of them under --distribute, against serial.
+
+    The tangent is recomputed from the assembled augmented system in each case, so these are
+    equalities for the same reason the fold locus is -- including the Hopf, whose omega row is part
+    of that system.
+    """
+    per_rank = _run(nproc, tmp_path, True, case, adapt_at=2)
+    ref = _serial(tmp_path, case, adapt_at=2)
+    for r in per_rank:
+        assert r["mode_at_end"] == ref["mode_at_end"]
+        for got, want in zip(_steps(r), _steps(ref)):
+            for key in ("lam", "b", "A0", "B", "omega"):
+                if key in want:
+                    assert got[key] == pytest.approx(want[key], rel=_CROSS_RTOL), \
+                        "rank %d: %s = %.12g, serial %.12g" % (r["rank"], key, got[key], want[key])

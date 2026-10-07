@@ -82,7 +82,7 @@ import traceback
 import numpy
 
 from pyoomph import Problem, Equations, InitialCondition, DirichletBC
-from pyoomph.expressions import var_and_test, grad, exp, partial_t
+from pyoomph.expressions import var_and_test, var, grad, exp, partial_t
 from pyoomph.equations.generic import SpatialErrorEstimator
 from pyoomph.meshes.simplemeshes import LineMesh
 from pyoomph.generic.mpi import get_mpi_rank, get_mpi_nproc
@@ -140,6 +140,93 @@ def _find_fold(problem):
     return float(lam.value)
 
 
+class SymmetricBratu(Equations):
+    """u'' + lam*exp(u) - b^2*u = 0: the same Bratu with the second parameter entering SQUARED.
+
+    The physics then depends on b only through b^2, so the fold locus is symmetric in b: above the
+    b = 0 fold there are two critical values +-b_c(lam) and they meet at b_c = 0. Tracking the fold
+    in b and continuing in lam therefore walks a locus whose CONTINUATION parameter has an extremum
+    where the branches join -- d(lam)/ds passes through zero -- while the fold in u stays regular
+    there. That is a turning point in the continuation parameter without a codim-2 degeneracy, which
+    is what makes it a usable test rather than a cusp the tracker cannot sit on.
+    """
+
+    def __init__(self, lam, b):
+        super().__init__()
+        self.lam, self.b = lam, b
+
+    def define_fields(self):
+        self.define_scalar_field("u", "C2")
+
+    def define_residuals(self):
+        u, v = var_and_test("u")
+        self.add_weak(partial_t(u), v)
+        self.add_weak(grad(u), grad(v))
+        self.add_weak(-self.lam*exp(u) + self.b**2*u, v)
+
+
+class SymmetricBratuProblem(Problem):
+    def __init__(self, N=20):
+        super().__init__()
+        self.N = N
+
+    def define_problem(self):
+        self.add_mesh(LineMesh(N=self.N))
+        eqs = SymmetricBratu(self.get_global_parameter("lam"), self.get_global_parameter("b"))
+        eqs += InitialCondition(u=0)
+        eqs += DirichletBC(u=0) @ "left"
+        eqs += DirichletBC(u=0) @ "right"
+        eqs += SpatialErrorEstimator(u=1)
+        self += eqs @ "domain"
+
+
+class Brusselator(Equations):
+    """u_t = Du u'' + A(x) - (B+1)u + u^2 v,  v_t = Dv v'' + B u - u^2 v.
+
+    For the Hopf half of the uncovered cases: the augmented tangent then carries omega as well as
+    the eigenvector, which no fold case exercises.
+
+    The feed is ramped in x (A = A0*(1+ramp*x)) on purpose. With a uniform A the steady state is
+    uniform, has no spatial error, and an adaptation would refine nothing -- so the case would report
+    success while testing none of the machinery. Zero-flux ends, so no Dirichlet value has to be kept
+    consistent with parameters that are moving.
+    """
+
+    def __init__(self, A0, B, Du=0.004, Dv=0.008, ramp=0.6):
+        super().__init__()
+        self.A0, self.B, self.Du, self.Dv, self.ramp = A0, B, Du, Dv, ramp
+
+    def define_fields(self):
+        self.define_scalar_field("u", "C2")
+        self.define_scalar_field("v", "C2")
+
+    def define_residuals(self):
+        u, ut = var_and_test("u")
+        v, vt = var_and_test("v")
+        A = self.A0*(1 + self.ramp*var("coordinate_x"))
+        self.add_weak(partial_t(u), ut)
+        self.add_weak(self.Du*grad(u), grad(ut))
+        self.add_weak(-(A - (self.B + 1)*u + u**2*v), ut)
+        self.add_weak(partial_t(v), vt)
+        self.add_weak(self.Dv*grad(v), grad(vt))
+        self.add_weak(-(self.B*u - u**2*v), vt)
+
+
+class BrusselatorProblem(Problem):
+    def __init__(self, N=24):
+        super().__init__()
+        self.N = N
+
+    def define_problem(self):
+        self.add_mesh(LineMesh(N=self.N))
+        A0 = self.get_global_parameter("A0")
+        B = self.get_global_parameter("B")
+        eqs = Brusselator(A0, B)
+        eqs += InitialCondition(u=A0, v=B/A0)
+        eqs += SpatialErrorEstimator(u=1, v=1)
+        self += eqs @ "domain"
+
+
 def _arclength_invariant_error(problem):
     """|(dparameter/ds)^2 + theta^2*|dU/ds|^2 - 1|, or None when there is no tangent at all.
 
@@ -154,8 +241,150 @@ def _arclength_invariant_error(problem):
     return abs(dp * dp + theta * float(numpy.dot(v, v)) - 1.0)
 
 
+def _run_turning_locus(outdir, adapt_at, steps=8, max_refinement_level=3):
+    """A fold locus with a turning point in the CONTINUATION parameter, adapted across the turn.
+
+    Tracks the fold in b and continues in lam on SymmetricBratu, so lam has a minimum where the two
+    +-b_c branches join. Reported as a table of (lam, b) so the driver can check that the locus keeps
+    going the same way round the turn: b decreases monotonically THROUGH zero while lam bottoms out
+    and rises again.
+    """
+    res = {}
+    with SymmetricBratuProblem() as p:
+        p.set_output_directory(outdir)
+        p.set_linear_solver("petsc_mumps")
+        p.max_refinement_level = max_refinement_level
+        p.max_permitted_error, p.min_permitted_error = 1e-7, 1e-9
+        p.set_arc_length_parameter(scale_arc_length=False)
+        p.quiet()
+        p.get_global_parameter("b").value = 1.2       # start off the symmetry axis
+        p.get_global_parameter("lam").value = 1.0
+        p.solve()
+        ds, last = 0.1, None
+        for _ in range(40):
+            ds = p.arclength_continuation("lam", ds)
+            p.solve_eigenproblem(2)
+            ev = p.get_last_eigenvalues()
+            if last is not None and numpy.real(ev[0])*numpy.real(last) < 0:
+                break
+            last = ev[0]
+        else:
+            raise RuntimeError("no fold bracketed in lam")
+        p.activate_bifurcation_tracking("b", "fold")
+        p.solve()
+        res["mode_after_tracking"] = p.get_bifurcation_tracking_mode()
+
+        ds = -0.02    # towards smaller lam, where the two branches meet
+        rows = []
+        for i in range(steps):
+            if i == adapt_at:
+                p.solve(spatial_adapt=1)
+                rows.append({"step": i, "adapt": True, "ndof": p.ndof()})
+            ds = p.arclength_continuation("lam", ds, max_ds=0.06)
+            rows.append({"step": i, "lam": float(p.get_global_parameter("lam").value),
+                         "b": float(p.get_global_parameter("b").value), "ds": float(ds),
+                         "ndof": p.ndof()})
+        res["rows"] = rows
+        res["mode_at_end"] = p.get_bifurcation_tracking_mode()
+    return res
+
+
+def _run_hopf_locus(outdir, adapt_at, steps=5, max_refinement_level=3):
+    """A HOPF locus across an adaptation: the augmented tangent carries omega too.
+
+    Tracks the Hopf in B and continues in A0 on the ramped Brusselator. omega is reported at every
+    point, including straight after the adaptation, because it is the part of the augmented state no
+    fold case has.
+    """
+    res = {}
+    with BrusselatorProblem() as p:
+        p.set_output_directory(outdir)
+        p.set_linear_solver("petsc_mumps")
+        p.max_refinement_level = max_refinement_level
+        p.max_permitted_error, p.min_permitted_error = 1e-6, 1e-8
+        p.set_arc_length_parameter(scale_arc_length=False)
+        p.quiet()
+        # A Hopf's omega is a component of the augmented unknown, so it is only as accurate as the
+        # Newton solve that produced it. At pyoomph's default 1e-8 the serial and --distribute
+        # answers agreed to 2.5e-9 relative -- tolerance-level, not structural, but enough to make a
+        # cross-partition equality a measurement of the tolerance. mpi_augmented_systems.md section
+        # 11 is explicit about the order to try things in: tighten the tolerance before loosening the
+        # comparison.
+        p.newton_solver_tolerance = 1e-11
+        p.get_global_parameter("A0").value = 1.0
+        B = p.get_global_parameter("B")
+        B.value = 1.5
+        p.solve()
+
+        # nev=8 and a plain parameter sweep, both for the reason mpi_augmented_systems.md section 11
+        # records: the returned eigenvalue SET changes with nev and along the branch, so "the leading
+        # complex eigenvalue" is only well defined if enough of the spectrum comes back to contain it
+        # at every step. At nev=6 the set shed its oscillatory pair partway up and the crossing was
+        # missed entirely.
+        def leading_complex():
+            p.solve_eigenproblem(8)
+            cx = [z for z in p.get_last_eigenvalues() if abs(numpy.imag(z)) > 1e-8]
+            return max(cx, key=lambda z: numpy.real(z)) if cx else None
+
+        hopf, last, bv = None, None, 1.5
+        while bv < 3.2:
+            B.value = bv
+            p.solve()
+            lead = leading_complex()
+            if lead is not None and last is not None and numpy.real(lead)*numpy.real(last[1]) < 0:
+                # Bisect, so the tracker starts near the crossing: a Hopf tracker handed a far guess
+                # converges onto whichever pair is nearest, which is the other hazard section 11
+                # names.
+                lo, hi = last[0], bv
+                for _ in range(8):
+                    mid = 0.5*(lo + hi)
+                    B.value = mid
+                    p.solve()
+                    m = leading_complex()
+                    if m is None:
+                        break
+                    if numpy.real(m)*numpy.real(last[1]) < 0:
+                        hi = mid
+                    else:
+                        lo, last = mid, (mid, m)
+                B.value = hi
+                p.solve()
+                hopf = leading_complex()
+                break
+            if lead is not None:
+                last = (bv, lead)
+            bv += 0.1
+        if hopf is None:
+            raise RuntimeError("no Hopf bracketed in B")
+
+        p.activate_bifurcation_tracking("B", "hopf")
+        p.solve()
+        res["mode_after_tracking"] = p.get_bifurcation_tracking_mode()
+        res["B_c"] = float(B.value)
+        res["omega_at_start"] = abs(float(p._get_bifurcation_omega()))
+
+        ds = 0.05
+        rows = []
+        for i in range(steps):
+            if i == adapt_at:
+                p.solve(spatial_adapt=1)
+                rows.append({"step": i, "adapt": True, "ndof": p.ndof(),
+                             "omega": abs(float(p._get_bifurcation_omega()))})
+            ds = p.arclength_continuation("A0", ds, max_ds=0.1)
+            rows.append({"step": i, "A0": float(p.get_global_parameter("A0").value),
+                         "B": float(B.value), "omega": abs(float(p._get_bifurcation_omega())),
+                         "ds": float(ds), "ndof": p.ndof()})
+        res["rows"] = rows
+        res["mode_at_end"] = p.get_bifurcation_tracking_mode()
+    return res
+
+
 def run_case(case, outdir, N=20, max_refinement_level=3, adapt_levels=1, reverse=False,
-             inner_product=None):
+             inner_product=None, adapt_at=-1):
+    if case == "turning_locus":
+        return _run_turning_locus(outdir, adapt_at, max_refinement_level=max_refinement_level)
+    if case == "hopf_locus":
+        return _run_hopf_locus(outdir, adapt_at, max_refinement_level=max_refinement_level)
     res = {}
     with BratuProblem(N=N) as problem:
         problem.set_output_directory(outdir)
@@ -273,20 +502,22 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--case", required=True,
                     choices=["adapt", "solve_adapt", "arclength", "arclength_adapt",
-                             "locus_then_adapt"])
+                             "locus_then_adapt", "turning_locus", "hopf_locus"])
     ap.add_argument("--outdir", required=True)
     ap.add_argument("--size", type=int, default=20)
     ap.add_argument("--adapt-levels", type=int, default=1)
     ap.add_argument("--reverse", action="store_true")
     ap.add_argument("--inner-product", default=None, choices=["ndof", "l2"])
+    ap.add_argument("--adapt-at", type=int, default=-1,
+                    help="locus step to adapt before (turning_locus / hopf_locus); -1 = never")
     args, _ = ap.parse_known_args()
     payload = {"rank": get_mpi_rank(), "nproc": get_mpi_nproc(), "case": args.case,
                "adapt_levels": args.adapt_levels, "reverse": args.reverse,
-               "inner_product": args.inner_product}
+               "inner_product": args.inner_product, "adapt_at": args.adapt_at}
     try:
         payload.update(run_case(args.case, args.outdir, N=args.size,
                                 adapt_levels=args.adapt_levels, reverse=args.reverse,
-                                inner_product=args.inner_product))
+                                inner_product=args.inner_product, adapt_at=args.adapt_at))
     except Exception as e:
         payload["error"] = type(e).__name__ + ": " + str(e)
         payload["traceback"] = traceback.format_exc()[-3000:]
