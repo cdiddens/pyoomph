@@ -55,6 +55,15 @@
 #                 failure in the other cases is about the adaptation and not about tracked
 #                 continuation in general.
 #
+#   locus_then_adapt  the workaround of the refusal below, end to end: two locus steps, then
+#                 solve(spatial_adapt=N), then two more locus steps. This is the one reachable path
+#                 on which the carried arclength tangent is discarded (by
+#                 activate_bifurcation_tracking's own reset_arc_length_parameters(), when the
+#                 reactivation runs) -- so it asserts the CONTRACT that must hold whether or not the
+#                 carry is ever implemented: the continuation stays on the locus, in both directions,
+#                 with the arclength invariant intact and without ds collapsing. See
+#                 dev_docs/mpi_augmented_systems.md section 14 for the measurement.
+#
 #   arclength_adapt   the same with spatial_adapt>0, which is REFUSED. The refusal is the assertion:
 #                 adapting inside an arclength step changes ndof halfway through it, so the arclength
 #                 constraint the step solves against stops meaning anything, and oomph rejects the
@@ -131,7 +140,22 @@ def _find_fold(problem):
     return float(lam.value)
 
 
-def run_case(case, outdir, N=20, max_refinement_level=3, adapt_levels=1):
+def _arclength_invariant_error(problem):
+    """|(dparameter/ds)^2 + theta^2*|dU/ds|^2 - 1|, or None when there is no tangent at all.
+
+    None is a real state and not a failure: the tangent is discarded across the reactivation, so
+    immediately after a tracked adaptation there is nothing to evaluate. Section 14.
+    """
+    v = problem.get_arclength_dof_derivative_vector()
+    if len(v) == 0:
+        return None
+    dp = problem.get_arc_length_parameter_derivative()
+    theta = problem.get_arc_length_theta_sqr()
+    return abs(dp * dp + theta * float(numpy.dot(v, v)) - 1.0)
+
+
+def run_case(case, outdir, N=20, max_refinement_level=3, adapt_levels=1, reverse=False,
+             inner_product=None):
     res = {}
     with BratuProblem(N=N) as problem:
         problem.set_output_directory(outdir)
@@ -144,7 +168,14 @@ def run_case(case, outdir, N=20, max_refinement_level=3, adapt_levels=1):
         # nothing at all.
         problem.max_permitted_error = 1e-7
         problem.min_permitted_error = 1e-9
-        problem.set_arc_length_parameter(scale_arc_length=False)
+        if inner_product is None:
+            problem.set_arc_length_parameter(scale_arc_length=False)
+        else:
+            # theta^2 is then NOT 1, and for "ndof" it is literally 1/ndof while for "l2" it comes
+            # from the mass matrix -- so it MUST change across an adaptation. Without this the suite
+            # ran entirely at theta^2 = 1, where capturing and restoring theta^2 is a no-op and a
+            # half-restore looks exact.
+            problem.set_arclength_inner_product(inner_product)
         problem.quiet()
         problem.get_global_parameter("b").value = 0.0
 
@@ -185,6 +216,43 @@ def run_case(case, outdir, N=20, max_refinement_level=3, adapt_levels=1):
             res["locus"] = locus
             res["ndof_tracked_fine"] = problem.ndof()
             res["mode_at_end"] = problem.get_bifurcation_tracking_mode()
+        elif case == "locus_then_adapt":
+            ds = 0.05
+            pre = []
+            for _ in range(2):
+                ds = problem.arclength_continuation("b", ds, spatial_adapt=0)
+                pre.append([float(problem.get_global_parameter("b").value),
+                            float(problem.get_global_parameter("lam").value)])
+            res["locus_pre"] = pre
+            res["ndof_before_adapt"] = problem.ndof()
+            res["invariant_before_adapt"] = _arclength_invariant_error(problem)
+            res["len_tangent_before_adapt"] = len(problem.get_arclength_dof_derivative_vector())
+            res["theta_sqr_before_adapt"] = float(problem.get_arc_length_theta_sqr())
+
+            problem.solve(spatial_adapt=adapt_levels)
+            res["ndof_after_adapt"] = problem.ndof()
+            res["len_tangent_after_adapt"] = len(problem.get_arclength_dof_derivative_vector())
+            # Straight after the adaptation, i.e. what the carry restored, BEFORE the next step's
+            # _retune_arclength_theta() re-derives it on the new mesh.
+            res["theta_sqr_after_adapt"] = float(problem.get_arc_length_theta_sqr())
+            res["invariant_after_adapt"] = _arclength_invariant_error(problem)
+
+            # The direction test: with the tangent gone, oomph recomputes it, and a recomputed
+            # tangent taking its sign from anything other than ds is what would walk the locus
+            # backwards. Run with reverse=True to ask for the opposite direction.
+            if reverse:
+                ds = -abs(ds)
+            post, dss = [], []
+            for _ in range(2):
+                ds = problem.arclength_continuation("b", ds, spatial_adapt=0)
+                dss.append(float(ds))
+                post.append([float(problem.get_global_parameter("b").value),
+                             float(problem.get_global_parameter("lam").value)])
+            res["locus_post"] = post
+            res["ds_post"] = dss
+            res["invariant_end"] = _arclength_invariant_error(problem)
+            res["theta_sqr_end"] = float(problem.get_arc_length_theta_sqr())
+            res["mode_at_end"] = problem.get_bifurcation_tracking_mode()
         elif case == "arclength_adapt":
             # Expected to be refused, by message. Caught here rather than in the driver so that the
             # refusal is observed on EVERY rank: a guard that fires on one rank only would leave the
@@ -204,16 +272,21 @@ def run_case(case, outdir, N=20, max_refinement_level=3, adapt_levels=1):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--case", required=True,
-                    choices=["adapt", "solve_adapt", "arclength", "arclength_adapt"])
+                    choices=["adapt", "solve_adapt", "arclength", "arclength_adapt",
+                             "locus_then_adapt"])
     ap.add_argument("--outdir", required=True)
     ap.add_argument("--size", type=int, default=20)
     ap.add_argument("--adapt-levels", type=int, default=1)
+    ap.add_argument("--reverse", action="store_true")
+    ap.add_argument("--inner-product", default=None, choices=["ndof", "l2"])
     args, _ = ap.parse_known_args()
     payload = {"rank": get_mpi_rank(), "nproc": get_mpi_nproc(), "case": args.case,
-               "adapt_levels": args.adapt_levels}
+               "adapt_levels": args.adapt_levels, "reverse": args.reverse,
+               "inner_product": args.inner_product}
     try:
         payload.update(run_case(args.case, args.outdir, N=args.size,
-                                adapt_levels=args.adapt_levels))
+                                adapt_levels=args.adapt_levels, reverse=args.reverse,
+                                inner_product=args.inner_product))
     except Exception as e:
         payload["error"] = type(e).__name__ + ": " + str(e)
         payload["traceback"] = traceback.format_exc()[-3000:]

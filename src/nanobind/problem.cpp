@@ -1233,6 +1233,12 @@ void PyReg_Problem(nb::module_ &m)
 			 "Update the internally stored continuation parameter derivative and reference value used by arclength continuation.")
 		.def("get_arc_length_theta_sqr", &pyoomph::Problem::get_arc_length_theta_sqr,
 			 "Return theta^2, the weighting parameter that controls the proportion of the arclength taken up by the continuation parameter.")
+		.def("_get_arclength_state", &pyoomph::Problem::get_arclength_state,
+			 "Snapshot of everything reset_arc_length_parameters() discards except the dof vectors: "
+			 "[theta^2, sign_of_jacobian, continuation_direction, parameter_derivative, "
+			 "first_jacobian_sign_change, arc_length_step_taken]. Restore with _set_arclength_state.")
+		.def("_set_arclength_state", &pyoomph::Problem::set_arclength_state, nb::arg("state"),
+			 "Put back a snapshot taken by _get_arclength_state.")
 		.def("_set_arc_length_theta_sqr", &pyoomph::Problem::set_arc_length_theta_sqr, nb::arg("theta_sqr"),
 			 "Set theta^2, the weighting parameter that controls the proportion of the arclength taken up by the continuation parameter.")
 		.def("_set_arclength_parameter", &pyoomph::Problem::set_arclength_parameter, nb::arg("name"), nb::arg("value"),

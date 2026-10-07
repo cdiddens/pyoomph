@@ -1578,6 +1578,40 @@ namespace pyoomph
     void set_arc_length_parameter_derivative(double dp) { Parameter_derivative=dp; }
     void set_arc_length_theta_sqr(double thetasqr) {Theta_squared=thetasqr;}
     double get_arc_length_theta_sqr() {return Theta_squared;}
+    // The WHOLE of what oomph's reset_arc_length_parameters() throws away, as one snapshot, so that
+    // a caller which has to reset (activate_bifurcation_tracking does, unconditionally) can put the
+    // continuation state back afterwards instead of losing it.
+    //
+    // Fixed order, and one vector rather than six accessors, because the point is that these six
+    // travel TOGETHER: restoring the tangent without Theta_squared leaves a tangent that does not
+    // satisfy the arclength constraint in the metric now in force (measured 3.7e-5 off under an l2
+    // inner product), and restoring it without Continuation_direction can send the next step back
+    // down the branch it just came up. Dof_derivative/Dof_current are NOT here -- they are already
+    // carried by get/update_dof_vectors_for_continuation, which has to handle the distributed
+    // gather/scatter.
+    //
+    // All six are protected members of oomph::Problem, reachable here because this class derives
+    // from it; no oomph patch is involved.
+    std::vector<double> get_arclength_state()
+    {
+      return {Theta_squared,
+              static_cast<double>(Sign_of_jacobian),
+              Continuation_direction,
+              Parameter_derivative,
+              First_jacobian_sign_change ? 1.0 : 0.0,
+              Arc_length_step_taken ? 1.0 : 0.0};
+    }
+    void set_arclength_state(const std::vector<double> &st)
+    {
+      if (st.size() != 6)
+        throw_runtime_error("An arclength state snapshot has 6 entries, got " + std::to_string(st.size()));
+      Theta_squared = st[0];
+      Sign_of_jacobian = static_cast<int>(st[1]);
+      Continuation_direction = st[2];
+      Parameter_derivative = st[3];
+      First_jacobian_sign_change = (st[4] != 0.0);
+      Arc_length_step_taken = (st[5] != 0.0);
+    }
     // Sets up the augmented (bordered) system for tracking a bifurcation of the given typus ("fold","pitchfork","hopf","azimuthal",...)
     // in parameter param, starting from the eigenvector(s) eigenv1/eigenv2 (real/imaginary parts) and, for
     // Hopf-like bifurcations, angular frequency omega.

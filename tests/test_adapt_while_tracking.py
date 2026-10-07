@@ -96,15 +96,18 @@ _CROSS_RTOL = 1e-9
 _RANK_RTOL = 1e-12
 
 
-def _run(nproc, tmpdir, distribute, case, adapt_levels=1, timeout=900):
+def _run(nproc, tmpdir, distribute, case, adapt_levels=1, reverse=False, inner_product=None,
+         timeout=900):
     """Launch the worker under mpirun (or in-process for nproc=1) and return per-rank results."""
-    outdir = os.path.join(str(tmpdir), "%s_n%d_%s_a%d" % (
-        case, nproc, "dist" if distribute else "repl", adapt_levels))
+    outdir = os.path.join(str(tmpdir), "%s_n%d_%s_a%d%s_%s" % (
+        case, nproc, "dist" if distribute else "repl", adapt_levels, "_rev" if reverse else "",
+        inner_product or "none"))
     cmd = ["mpirun", "-n", str(nproc)]
     # No --oversubscribe: this project's machines have the cores these ranks need, and an
     # oversubscribed run trades a deadlock for a machine that stops responding.
     cmd += [sys.executable, _WORKER, "--case", case, "--outdir", outdir,
-            "--adapt-levels", str(adapt_levels),
+            "--adapt-levels", str(adapt_levels)] + (["--reverse"] if reverse else []) + (
+            ["--inner-product", inner_product] if inner_product else []) + [
             # Without this only rank 0 reaches stdout (the default MPI output mode is "condensed"),
             # and a per-rank comparison would silently compare one rank with itself.
             "--mpi-output=all"]
@@ -145,17 +148,18 @@ def _run(nproc, tmpdir, distribute, case, adapt_levels=1, timeout=900):
 _SERIAL_CACHE = {}
 
 
-def _serial(tmpdir, case, adapt_levels=1):
+def _serial(tmpdir, case, adapt_levels=1, reverse=False, inner_product=None):
     """The serial reference, run as its own process and cached per case.
 
     Its own process rather than in-process: installing a C++ bifurcation handler and then adapting
     leaves enough state behind that sharing the pytest process between cases would make one case's
     result depend on which ran before it.
     """
-    key = (case, adapt_levels)
+    key = (case, adapt_levels, reverse, inner_product)
     if key in _SERIAL_CACHE:
         return _SERIAL_CACHE[key]
-    res = _run(1, tmpdir, False, case, adapt_levels=adapt_levels)[0]
+    res = _run(1, tmpdir, False, case, adapt_levels=adapt_levels, reverse=reverse,
+               inner_product=inner_product)[0]
     _SERIAL_CACHE[key] = res
     return res
 
@@ -305,3 +309,158 @@ def test_multi_level_adaptation_while_tracking(tmp_path, nproc, distribute):
                 one_level["lam_c_coarse"], one_level["lam_c_fine"], r["lam_c_fine"])
         assert abs(d3) < abs(d1), "the refinement is not converging: |d3|=%.3g >= |d1|=%.3g" % (
             abs(d3), abs(d1))
+
+
+@pytest.mark.parametrize("reverse", [False, True], ids=["forward", "reverse"])
+def test_locus_survives_the_recommended_workaround(tmp_path, reverse):
+    """Two locus steps, an adapting solve, two more: the path the arclength refusal recommends.
+
+    This is the one reachable path on which the carried arclength tangent is discarded -- not by the
+    dead "strip the tracker part" branch, but by activate_bifurcation_tracking's own
+    reset_arc_length_parameters() when the reactivation runs. Measured, that loss costs nothing
+    (dev_docs/mpi_augmented_systems.md section 14), so what is asserted here is the CONTRACT that has
+    to hold either way, rather than the current behaviour: if someone implements the carry, this
+    suite should keep passing.
+
+    Both directions, because a lost tangent's classic failure is a continuation that walks the wrong
+    way: the recomputed tangent must take its sign from ds and nothing else.
+    """
+    res = _serial(tmp_path, "locus_then_adapt", reverse=reverse)
+
+    assert res["mode_at_end"] == "fold", "the tracker did not survive the adapting solve"
+    assert res["ndof_after_adapt"] > res["ndof_before_adapt"], "nothing was refined"
+    # The tangent going in is a proper one; this is the baseline the carry would have to preserve.
+    assert res["invariant_before_adapt"] == pytest.approx(0.0, abs=1e-12)
+
+    pre, post = res["locus_pre"], res["locus_post"]
+    sign = -1.0 if reverse else 1.0
+    # The pre-adapt steps always run forward -- ds is only flipped AFTER the adaptation -- so they
+    # are checked unsigned, and the signed check starts at the junction: pre's last point is where
+    # the post-adapt direction is taken from.
+    pre_bs = [p[0] for p in pre]
+    for earlier, later in zip(pre_bs, pre_bs[1:]):
+        assert later > earlier, "the locus did not advance before the adaptation: %s" % pre_bs
+    post_bs = [pre_bs[-1]] + [p[0] for p in post]
+    for earlier, later in zip(post_bs, post_bs[1:]):
+        assert sign * (later - earlier) > 0, \
+            "the continuation went the wrong way after the adaptation (reverse=%s): b went %s" % (
+                reverse, post_bs)
+    # And it is still the fold locus: lam_c(b) rises with b on this problem, so lam must move with b.
+    post_lams = [pre[-1][1]] + [p[1] for p in post]
+    for earlier, later in zip(post_lams, post_lams[1:]):
+        assert sign * (later - earlier) > 0, \
+            "the continuation left the locus (reverse=%s): lam_c went %s" % (reverse, post_lams)
+
+    # ds must not have been restarted or collapsed by the adaptation: oomph halves it on a rejected
+    # step, so a shrinking sequence here is the signal that the step after the adapt went badly.
+    assert all(abs(b) > abs(a) for a, b in zip(res["ds_post"], res["ds_post"][1:])), \
+        "ds stopped growing after the adaptation: " + str(res["ds_post"])
+    # Whatever the tangent's provenance, the one in force at the end must satisfy the constraint.
+    assert res["invariant_end"] == pytest.approx(0.0, abs=1e-12)
+
+
+# Serial vs --distribute on the carried-tangent path. This is _CROSS_RTOL and not something looser
+# BECAUSE the tracker block is recomputed rather than carried: compute_arclength_tangent solves the
+# assembled augmented system, which is partition-independent.
+#
+# It did not start that way. While the tangent was carried whole -- base block interpolated, tracker
+# block zero -- this comparison needed 1e-3: the INTERPOLATED tangent inherits oomph-lib's
+# distributed Z2 recovery, which neglects the flux contributions of patches assembled only from
+# vertex nodes owned by another process, so |dU/ds| differed by 4.1e-7 serial vs --distribute and the
+# arclength constraint amplified that to ~2.4e-5 in where the next step landed. Recomputing the
+# tangent removed it: measured 4e-12 at 2 and 3 ranks. Kept as a comment because a future change that
+# goes back to carrying the tracker block will have to loosen this again, and should know why.
+
+
+@pytest.mark.parametrize("nproc,distribute", [(2, True), (3, True)],
+                         ids=["distributed_n2", "distributed_n3"])
+def test_locus_workaround_matches_serial_distributed(tmp_path, nproc, distribute):
+    """The same path under --distribute: the locus is physics, so it cannot depend on the partition.
+
+    Two separate claims, with deliberately different tolerances:
+
+      * the ranks of ONE run agree EXACTLY. Everything reported is global, so a disagreement here
+        would mean the restored tangent was assembled differently depending on who owns which row --
+        which is what the zero-padding could plausibly get wrong, since it assumes the tracker
+        unknowns are the last global indices. Measured bit-identical at 2 and 3 ranks.
+
+      * the run agrees with serial on the LOCUS, to _CROSS_RTOL -- an equality in practice, because
+        the tracker block is recomputed from the assembled system rather than interpolated. See the
+        comment above this test for what it took to get there.
+    """
+    per_rank = _run(nproc, tmp_path, distribute, "locus_then_adapt")
+    ref = _serial(tmp_path, "locus_then_adapt")
+
+    for r in per_rank:
+        assert r["mode_at_end"] == ref["mode_at_end"]
+        assert r["ndof_after_adapt"] == ref["ndof_after_adapt"]
+        # The carry must have happened: a tangent of length 0 here means the restore silently did
+        # nothing on this partition, which is exactly the regression this path is about.
+        assert r["len_tangent_after_adapt"] == r["ndof_after_adapt"], \
+            "the carried tangent was not restored at %d ranks: length %d, ndof %d" % (
+                nproc, r["len_tangent_after_adapt"], r["ndof_after_adapt"])
+        assert r["invariant_end"] == pytest.approx(0.0, abs=1e-12)
+        for (b, lam), (bref, lamref) in zip(r["locus_post"], ref["locus_post"]):
+            assert b == pytest.approx(bref, rel=_CROSS_RTOL)
+            assert lam == pytest.approx(lamref, rel=_CROSS_RTOL)
+
+    # Rank against rank, exactly.
+    first = per_rank[0]
+    for r in per_rank[1:]:
+        for (b, lam), (b0, lam0) in zip(r["locus_post"], first["locus_post"]):
+            assert b == pytest.approx(b0, rel=_RANK_RTOL)
+            assert lam == pytest.approx(lam0, rel=_RANK_RTOL)
+
+
+@pytest.mark.parametrize("inner_product", ["ndof", "l2"])
+def test_arclength_metric_survives_a_tracked_adaptation(tmp_path, inner_product):
+    """theta^2 across a tracked adaptation, with a configured inner product.
+
+    The rest of this suite runs at theta^2 = 1 (set_arc_length_parameter(scale_arc_length=False)),
+    where capturing and restoring theta^2 is a no-op -- which is exactly why a restore that put the
+    tangent back WITHOUT theta^2 looked exact here and was 3.7e-5 off the arclength constraint under
+    an l2 inner product. Hence this case.
+
+    Two things have to hold, and they pull in opposite directions:
+
+      * the theta^2 restored with the tangent is the OLD mesh's, because that is the value the
+        carried tangent is normalised against -- so the pair is coherent the moment it goes back and
+        the invariant is satisfied immediately.
+
+      * theta^2 must then CHANGE, because it is ndof-dependent for "ndof" and mass-matrix-dependent
+        for "l2", and the adaptation changed both. _retune_arclength_theta() at the top of the next
+        arclength step does that and renormalises the tangent with it.
+
+    Serial only: _retune_arclength_theta refuses a distributed problem with a configured inner
+    product outright, because the norms would be taken over each rank's local dofs.
+    """
+    res = _serial(tmp_path, "locus_then_adapt", inner_product=inner_product)
+
+    assert res["mode_at_end"] == "fold"
+    assert res["ndof_after_adapt"] > res["ndof_before_adapt"]
+    assert res["len_tangent_after_adapt"] == res["ndof_after_adapt"], "the tangent was not restored"
+
+    # theta^2 is genuinely not 1, or this case is testing nothing.
+    assert res["theta_sqr_before_adapt"] != pytest.approx(1.0), \
+        "theta^2 is 1, so this case cannot see a theta^2 that was reset to 1"
+
+    # Restored coherently with the tangent. This is the assertion that fails on a tangent-only
+    # restore: measured 3.7e-5 under l2.
+    assert res["theta_sqr_after_adapt"] == pytest.approx(res["theta_sqr_before_adapt"], rel=1e-12)
+    assert res["invariant_after_adapt"] == pytest.approx(0.0, abs=1e-12), \
+        "the restored tangent does not satisfy the arclength constraint in the metric now in force"
+
+    # And then re-derived for the new mesh by the next step, not left at the old value.
+    assert res["theta_sqr_end"] != pytest.approx(res["theta_sqr_after_adapt"], rel=1e-6), \
+        "theta^2 was not re-derived after the mesh changed: still %.12g" % res["theta_sqr_end"]
+    assert res["invariant_end"] == pytest.approx(0.0, abs=1e-12)
+
+    if inner_product == "ndof":
+        # The mechanism, exactly: this metric IS 1/ndof, so the refinement has to halve it.
+        assert res["theta_sqr_before_adapt"] == pytest.approx(1.0/res["ndof_before_adapt"], rel=1e-12)
+        assert res["theta_sqr_end"] == pytest.approx(1.0/res["ndof_after_adapt"], rel=1e-12)
+    else:
+        # The l2 metric is a mean square over the refined mesh; it must move in the same direction
+        # and by a comparable amount, without being pinned to an exact formula.
+        ratio = res["theta_sqr_end"]/res["theta_sqr_before_adapt"]
+        assert 0.1 < ratio < 1.0, "the l2 metric moved implausibly across the adaptation: %.4g" % ratio
