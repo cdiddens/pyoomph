@@ -7811,6 +7811,26 @@ class Problem(_pyoomph.Problem):
                     self.reset_arc_length_parameters()
                     # find the intersection with zero by linear approximation
                     # eigenval=(evals1[0].real-evals0[0].real)/(param1-param0)*(p-param0)+evals0[0].real
+                    #
+                    # This is a PARAMETER delta, and the loop hands it to arclength_continuation as
+                    # ds, which is an ARCLENGTH. They are the same number only while dparameter/ds is
+                    # 1 at that handover, and what guarantees it is the reset_arc_length_parameters()
+                    # immediately above: Parameter_derivative goes to 1 and Dof_derivative is
+                    # emptied, so the step afterwards moves the parameter by exactly ds (measured on
+                    # a Brusselator Hopf: dB/ds = 1 to every digit).
+                    #
+                    # Whether that reset is doing anything depends on continuation_data_in_states:
+                    #   False (default) -- load_state restores no tangent, dparameter/ds is already 1
+                    #                      when the reload returns, and the reset is redundant;
+                    #   True            -- load_state restores the real tangent (0.7071 on that
+                    #                      problem) and the reset is the ONLY thing putting it back.
+                    #
+                    # So the reset cannot be dropped as dead code on the strength of the default
+                    # configuration, and the delta must not be "converted" with the post-reload
+                    # dparameter/ds either: ds = dp/0.7071 with the parameter then moving by ds
+                    # overshoots the target by 41%. tests/test_bifurcation_scan.py asserts
+                    # dparameter/ds at the handover in BOTH configurations, because a test of the
+                    # default alone passes with the reset deleted.
                     ds=-evals0[idx0].real*(param1-param0)/(evals1[idx1].real-evals0[idx0].real)
                     continue
 

@@ -94,8 +94,9 @@ pytestmark = [pytest.mark.skipif(_SKIP is not None, reason=str(_SKIP)), pytest.m
 _CACHE = {}
 
 
-def _scan(tmpdir, *, start_B=1.5, initstep=0.08, epsilon=1e-7, neigen=6, track=False):
-    key = (start_B, initstep, epsilon, neigen, track)
+def _scan(tmpdir, *, start_B=1.5, initstep=0.08, epsilon=1e-7, neigen=6, track=False,
+          stay_stable=False, continuation_data_in_states=False):
+    key = (start_B, initstep, epsilon, neigen, track, stay_stable, continuation_data_in_states)
     if key in _CACHE:
         return _CACHE[key]
     outdir = os.path.join(str(tmpdir), "scan_%s" % abs(hash(key)))
@@ -104,6 +105,10 @@ def _scan(tmpdir, *, start_B=1.5, initstep=0.08, epsilon=1e-7, neigen=6, track=F
            "--epsilon", repr(epsilon), "--neigen", str(neigen)]
     if track:
         cmd.append("--track")
+    if stay_stable:
+        cmd.append("--stay-stable")
+    if continuation_data_in_states:
+        cmd.append("--continuation-data-in-states")
     proc = subprocess.run(cmd, cwd=_HERE, capture_output=True, text=True, timeout=1800)
     got = None
     for line in proc.stdout.splitlines():
@@ -232,3 +237,84 @@ def test_eigenvector_tracking_does_not_change_a_healthy_search(tmp_path):
     assert on["steps"] == off["steps"]
     assert on["B"] == pytest.approx(off["B"], rel=1e-12)
     assert on["real_part"] == pytest.approx(off["real_part"], abs=1e-14)
+
+
+# ---------------------------------------------------------------------------------------------
+# stay_stable_file: never leave the stable side.
+# ---------------------------------------------------------------------------------------------
+
+def test_stay_stable_file_never_leaves_the_stable_side(tmp_path):
+    """A step that lands unstable is discarded and retried, so the caller never solves past onset.
+
+    No in-tree caller passes stay_stable_file, but external scripts do, and it had no coverage at
+    all -- so this pins the behaviour rather than describing it.
+
+    What it must do: save the state at every stable point, and when a step crosses the axis, reload
+    that state and retry with a secant prediction instead of accepting the unstable point. The
+    search therefore approaches the bifurcation from below and every yielded point is stable.
+    """
+    res = _scan(tmp_path, stay_stable=True)
+    assert res["outcome"] == "converged", res.get("error", res["outcome"])
+    assert res["reloads"] > 0, "the retry path was never taken, so this test proves nothing"
+    assert res["stay_stable_dump_exists"] is True, "no state was saved"
+
+    # Every point handed to the caller is on the stable side -- that is the whole contract. The
+    # unstable probes are discarded before the yield.
+    for b, re_part in res["yielded"]:
+        assert re_part < res["epsilon"], \
+            "yielded an unstable point: B=%.9g Re=%+.3g" % (b, re_part)
+
+    # And it still lands on the bifurcation, approaching it from below.
+    assert res["B"] == pytest.approx(_B_C, rel=1e-4)
+    assert abs(res["real_part"]) < res["epsilon"]
+
+
+@pytest.mark.parametrize("continuation_data_in_states", [False, True],
+                         ids=["no_continuation_data", "with_continuation_data"])
+def test_stay_stable_secant_relies_on_the_arclength_reset(tmp_path, continuation_data_in_states):
+    """The retry's secant is a PARAMETER delta handed over as an ARCLENGTH, and that is correct here.
+
+    Only while dparameter/ds is 1 at the moment of the handover, which is what the
+    reset_arc_length_parameters() immediately before it guarantees: the parameter then moves by
+    exactly ds (measured dB/ds = 1 to every digit).
+
+    BOTH parametrisations are needed, and the reason is the useful part. With
+    continuation_data_in_states False -- the default -- load_state restores no tangent, so
+    dparameter/ds is already 1 when the reload returns and the reset is redundant: deleting it
+    changes nothing and a test running only this case passes anyway (checked, by deleting it). With
+    the setting True, load_state restores the real tangent -- 0.7071 on this problem -- and the reset
+    is the only thing that puts it back to 1. So the first case pins the arithmetic and the second
+    pins the reset.
+
+    What a tidy-up would cost: converting the delta with the post-reload dparameter/ds instead of
+    relying on the reset gives ds = dp/0.7071, and since the parameter then moves by ds, that
+    overshoots the target by 41%.
+    """
+    res = _scan(tmp_path, stay_stable=True,
+                continuation_data_in_states=continuation_data_in_states)
+    assert res["reloads"] > 0
+    assert len(res["dparam_ds_at_handover"]) == res["reloads"]
+
+    # The invariant, in both configurations.
+    for value in res["dparam_ds_at_handover"]:
+        assert value == pytest.approx(1.0, abs=1e-12), \
+            ("dparameter/ds is %.12g at the secant handover, not 1: the parameter delta is being "
+             "scaled by it, so the retry no longer aims where the secant predicted" % value)
+    # And its consequence, measured rather than assumed: ds IS the parameter increment.
+    for value in res["dB_over_ds"]:
+        assert value == pytest.approx(1.0, rel=1e-9), \
+            "the secant step moved the parameter by %.9g x ds, not 1 x ds" % value
+
+    if continuation_data_in_states:
+        # This is the case that makes the reset load-bearing: without it the handover would see
+        # whatever load_state restored.
+        for value in res["dparam_ds_after_reload"]:
+            assert value != pytest.approx(1.0, abs=1e-6), \
+                ("load_state did not restore a tangent even with continuation_data_in_states=True, "
+                 "so this parametrisation is no longer testing the reset")
+    else:
+        for value in res["dparam_ds_after_reload"]:
+            assert value == pytest.approx(1.0, abs=1e-12)
+
+    # Either way it still lands on the bifurcation.
+    assert res["B"] == pytest.approx(_B_C, rel=1e-4)
