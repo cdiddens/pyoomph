@@ -1371,6 +1371,116 @@ def test_tracers_keep_advecting_correctly_after_a_remeshing_event():
     assert numpy.max(numpy.abs(r1 - r0)) < 1e-8, "the remesh disturbed the trajectory"
 
 
+class _SweptBox(GmshTemplate):
+    """Unit square, rebuilt from its current boundary nodes by Remesher2d."""
+
+    def define_geometry(self):
+        self.default_resolution = 0.2
+        self.create_lines((0, 0), "bottom", (1, 0), "right", (1, 1), "top", (0, 1), "left")
+        self.plane_surface("bottom", "right", "top", "left", name="domain")
+
+
+class _RemeshOnStep(Equations):
+    """Marks the domain for remeshing from inside the solve, exactly as RemeshWhen does.
+
+    Going through ``_domains_to_remesh`` rather than calling ``force_remesh()`` from the test is the
+    whole point of it: a Problem step performs the pending remesh BEFORE
+    ``actions_after_transient_solve()``, so the remesh lands between the solve and the tracer
+    advection - with the mesh already at the end of the step and the particles still at the start of
+    it. A remesh triggered by hand between steps cannot reproduce that ordering, which is why the
+    test above it passed throughout.
+    """
+
+    def __init__(self, on_steps):
+        super().__init__()
+        self.on_steps = set(on_steps)
+        self.nsolves = 0
+
+    def after_newton_solve(self):
+        self.nsolves += 1
+        if self.nsolves in self.on_steps:
+            mesh = self.get_my_domain()._mesh
+            self.get_current_code_generator().get_problem()._domains_to_remesh.add(mesh._templatemesh)
+
+
+_SWEPT_SEEDS = [[0.5, 0.1], [0.5, 0.5], [0.5, 0.9]]
+
+
+class _SweptProblem(Problem):
+    """A box translating in +y, with the advection field equal to its own velocity.
+
+    The relative velocity is zero and the field is constant, so every particle must co-move with the
+    box exactly: dy = U*T to round-off, dx = 0. The seed at y = 0.1 sits closer to the bottom edge
+    than that edge travels in one step, so the edge sweeps past it within the step the remesh
+    happens in.
+    """
+
+    def __init__(self, U=1.0, remesh_on=(2,)):
+        super().__init__()
+        self.U = U
+        self.remesh_on = remesh_on
+        self._t_last = 0.0
+
+    def define_problem(self):
+        from pyoomph.meshes.remesher import Remesher2d
+        m = _SweptBox()
+        m.remesher = Remesher2d(m)
+        self.add_mesh(m)
+        eqs = PoissonEquation(source=1) + DirichletBC(u=0) @ "bottom"
+        eqs += TracerParticles(vector(0, self.U), seed=TracerSeedPoints(_SWEPT_SEEDS),
+                               rtol=1e-11, atol=1e-13)
+        if self.remesh_on:
+            eqs += _RemeshOnStep(self.remesh_on)
+        self += eqs @ "domain"
+
+    def actions_before_newton_solve(self):
+        super().actions_before_newton_solve()
+        # Moved by hand, incrementally: an absolute x(t) would need a reference configuration, and
+        # the remesh replaces the node set that would be keyed on. By this point the clock is
+        # already at the end of the step, as it is for every other prescribed motion in this file.
+        t = float(self.get_current_time(as_float=True, dimensional=False))
+        if t <= self._t_last + 1e-14:
+            return
+        dy = self.U * (t - self._t_last)
+        self._t_last = t
+        for n in self.get_mesh("domain").nodes():
+            n.set_x(1, n.x(1) + dy)
+
+
+@pytest.mark.parametrize("remesh_on", [(), (2,), (2, 4)], ids=["none", "once", "twice"])
+def test_a_remesh_inside_a_step_neither_loses_tracers_nor_skips_their_advection(remesh_on):
+    """The two things a remesh between the solve and the advection used to do.
+
+    The hook ran ``relocate_all(0)``, i.e. it placed the particles - still at their START-of-step
+    positions - in the END-of-step configuration. A boundary that had swept past one of them during
+    the step therefore left it outside the mesh, and it was retired although nothing was wrong with
+    it but that it had not been moved yet. The hook then stamped ``_last_advected_time`` with the
+    current time, which made ``after_transient_solve()`` skip the advection for that step
+    altogether, so every surviving particle silently lost one step of displacement per remesh.
+
+    Both show up here as a pure translation that the particles must follow exactly.
+    """
+    p = _SweptProblem(remesh_on=remesh_on)
+    p.set_output_directory("_tracer_swept_%s" % (len(remesh_on),))
+    p.quiet()
+    p.initialise()
+    tr = p.get_mesh("domain").get_tracers()
+    start = tr.get_positions().copy()
+    t0 = float(p.get_current_time(as_float=True, dimensional=False))
+    for _ in range(5):
+        p.solve(timestep=0.2)
+        tr = p.get_mesh("domain").get_tracers()
+    T = float(p.get_current_time(as_float=True, dimensional=False)) - t0
+
+    assert tr.nlocal() == len(_SWEPT_SEEDS), \
+        "%d of %d particles were lost" % (len(_SWEPT_SEEDS) - tr.nlocal(), len(_SWEPT_SEEDS))
+    end = tr.get_positions()
+    assert numpy.max(numpy.abs(end[:, 0] - start[:, 0])) < 1e-12
+    # One skipped step would show up as a deficit of U*0.2 = 0.2 per remesh.
+    assert numpy.max(numpy.abs(end[:, 1] - start[:, 1] - p.U * T)) < 1e-10, \
+        "displacement %s instead of %g" % (end[:, 1] - start[:, 1], p.U * T)
+
+
 def test_a_state_file_reloads_into_a_problem_whose_mesh_comes_from_the_template(tmp_path):
     """Restarting a tracer run from its own dump, which is what a state file is for.
 

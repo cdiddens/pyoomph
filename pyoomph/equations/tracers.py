@@ -457,6 +457,12 @@ class TracerParticles(Equations):
         if self.seed is not None and coll.nlocal() == 0:
             self._seed_particles(mesh, coll)
         coll._relocate_all(0)
+        # The particles are now where the end of the (not yet taken) step 0 leaves them, which is
+        # what after_remeshing() needs in order to tell a remesh with an advection still pending
+        # for the current step from one without. Leaving this at None would make the first step the
+        # one case that cannot be told apart.
+        self._last_advected_time = float(mesh.get_problem().get_current_time(as_float=True,
+                                                                            dimensional=False))
 
     def _seed_particles(self, mesh: "AnySpatialMesh", coll: _pyoomph.TracerCollection):
         assert self.seed is not None
@@ -500,23 +506,54 @@ class TracerParticles(Equations):
     def after_remeshing(self, eqtree: "EquationTree"):
         # Remeshing replaces the mesh object, so self._mesh is stale by now and the collection still
         # points at the mesh that was thrown away. Re-bind to whatever the equation tree is holding -
-        # by this point it has its elements, which _set_mesh needs - and then re-locate every
-        # particle from its stored position, since the new mesh discretises the domain differently
-        # and shares no elements with the old one.
+        # by this point it has its elements, which _set_mesh needs.
         mesh = eqtree._mesh
         if mesh is not None:
             self._bind_mesh(assert_spatial_mesh(mesh))
         coll = self.get_collection()
-        if coll is not None:
-            coll._relocate_all(0)
-        # This hook also fires after a state file was read, which may put the clock back - a
-        # rollback, a restart from an earlier dump. The guard in after_transient_solve would then
+        if coll is None or self._mesh is None:
+            return
+        problem = self._mesh.get_problem()
+        now = float(problem.get_current_time(as_float=True, dimensional=False))
+
+        if self._last_advected_time is not None and now > self._last_advected_time:
+            # AN ORDINARY MID-RUN REMESH, with this step's advection still to come: Problem's step
+            # runs _perform_pending_remesh() BEFORE actions_after_transient_solve(), so the mesh is
+            # already at the end of the step while the particles are still at the start of it.
+            #
+            # Relocating them here would do it in the END-OF-STEP configuration, which is wrong
+            # twice over. Anything the domain boundary has swept past during the step - the free
+            # surface of a jet retracting into its nozzle moves whole elements per step - is
+            # outside that configuration and gets retired, although it is a perfectly good particle
+            # that has simply not been moved yet. And stamping _last_advected_time would then make
+            # after_transient_solve() skip the advection for this step altogether, so every
+            # surviving particle would silently lose one step of displacement per remesh.
+            #
+            # advect_all() already handles this: the positions belong to history level 1, it
+            # relocates them there whenever the topology generation changed - which a remesh does -
+            # and then advects over the step in the new mesh's own position history. So leave both
+            # the relocation and the stamp to it. (The relocation here would actively prevent that:
+            # it builds a locator and marks the generation as seen.)
+            return
+
+        # No advection pending for the current time: a remesh forced between steps, or a state file
+        # that was just read - a rollback, a restart from an earlier dump. Relocating now is right,
+        # and in the interface case it is what re-projects the particles onto the rebuilt surface.
+        nbefore = coll.nglobal()
+        coll._relocate_all(0)
+        nlost = nbefore - coll.nglobal()
+        if nlost and not problem.is_quiet():
+            # Worth saying out loud: relocate_all counts these in stat_lost, which the next
+            # advect_all zeroes before step_statistics() is ever read, so a loss here would
+            # otherwise leave no trace anywhere.
+            print("Tracers '" + self.tracer_name + "' on '" + self._mesh.get_full_name() + "': " +
+                  str(nlost) + " particle(s) lost in the remeshing - the rebuilt mesh does not "
+                  "contain them")
+        # A state file may have put the clock back. The guard in after_transient_solve would then
         # refuse to advect until the run had caught up with the time it last saw, leaving the
         # particles frozen in place while the flow moved on. The restored particles have completed
         # the step ending at the restored time, which is exactly what the guard has to be told.
-        if self._mesh is not None:
-            problem = self._mesh.get_problem()
-            self._last_advected_time = float(problem.get_current_time(as_float=True, dimensional=False))
+        self._last_advected_time = now
 
     # ----------------------------------------------------------------------------- code generation
 
