@@ -280,6 +280,17 @@ def CompositionNSCHEquations(positive_props:AnyFluidProperties,negative_props:An
 
 
 
+def _phase_field_equation_types():
+    """The equation classes that own a phase field named by ``phase_name`` (default ``phi``).
+
+    Late import: ``low_order_NSCH`` pulls in the package root, so importing it at module level here
+    would close an import cycle. Both helpers below look the phase field up BY TYPE, so without
+    this the simple first-order NSCH would raise "Could not find a single phase field".
+    """
+    from .low_order_NSCH import LowOrderNSCH
+    return (CompositionNSCHPhaseField, LowOrderNSCH)
+
+
 class RefinePhaseFieldGradients(Equations):
     def __init__(self, level:Literal["max"] | int="max",bound=0.8):
         super(RefinePhaseFieldGradients, self).__init__()
@@ -292,20 +303,20 @@ class RefinePhaseFieldGradients(Equations):
         must_refine = 100 * mesh.max_permitted_error
         may_not_unrefine = 0.5 * (mesh.max_permitted_error+mesh.min_permitted_error)
         
-        eq=self.get_combined_equations().get_equation_of_type(CompositionNSCHPhaseField,always_as_list=True)
+        eq=self.get_combined_equations().get_equation_of_type(_phase_field_equation_types(),always_as_list=True)
         currmesh=mesh
         while len(eq)==0 and currmesh is not None:
             currmesh=currmesh.get_bulk_mesh()
             if currmesh is None:
-                raise RuntimeError("Cannot find a CompositionNSCHPhaseField equation in this domain")
-            eq=currmesh._eqtree.get_equations().get_equation_of_type(CompositionNSCHPhaseField,always_as_list=True)
+                raise RuntimeError("Cannot find a phase-field equation (CompositionNSCHPhaseField or LowOrderNSCH) in this domain")
+            eq=currmesh._eqtree.get_equations().get_equation_of_type(_phase_field_equation_types(),always_as_list=True)
         
         if len(eq)!=1:
-            raise RuntimeError("Cannot find a unique CompositionNSCHPhaseField equation in this domain")
+            raise RuntimeError("Cannot find a unique phase-field equation in this domain")
         
-        eq=cast(CompositionNSCHPhaseField,eq[0])
+        eq=eq[0]
 
-        phi_index=mesh.get_code_gen().get_code().get_nodal_field_index(eq.phase_name)
+        phi_index=mesh.get_code_gen().get_code().get_nodal_field_index(getattr(eq,"phase_name","phi"))
         for e in mesh.elements():
             refine_this_elem=False
             for ni in range(e.nnode()):
@@ -346,11 +357,12 @@ class DisjunctDomainMarkerNSCH(Equations):
         self.set_Dirichlet_condition(self.name,True) # Do not solve for it. Will be set by hand
 
     def _update_marker(self,mesh:AnySpatialMesh):
-        phase_field_eqs=self.get_combined_equations().get_equation_of_type(CompositionNSCHPhaseField,always_as_list=True)
+        phase_field_eqs=self.get_combined_equations().get_equation_of_type(_phase_field_equation_types(),always_as_list=True)
         if len(phase_field_eqs)!=1:
             raise RuntimeError("Could not find a single phase field")
-        phase_field_eq=cast(CompositionNSCHPhaseField,phase_field_eqs[0])
-        phase_ind=mesh.get_code_gen().get_code().get_nodal_field_index(phase_field_eq.phase_name)
+        phase_field_eq=phase_field_eqs[0]
+        # LowOrderNSCH hardcodes the name instead of exposing it.
+        phase_ind=mesh.get_code_gen().get_code().get_nodal_field_index(getattr(phase_field_eq,"phase_name","phi"))
 
         if mesh.nelement()==0:
             return
