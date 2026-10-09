@@ -1,0 +1,51 @@
+{
+ "_about": "Reference numbers for SpatioTemporal_PDEs/wave_eq.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "finalstate:domain_*.txt": {
+  "columns": [
+   "coordinate_x",
+   "u"
+  ],
+  "file": "wave_eq/domain/domain_000200.txt",
+  "kind": "finalstate",
+  "nrows": 201,
+  "reduce": true,
+  "stats": {
+   "coordinate_x": {
+    "l2": 41.13088863615762,
+    "max": 5.0,
+    "mean": 0.0,
+    "min": -5.0,
+    "n": 201,
+    "n_finite": 201
+   },
+   "u": {
+    "l2": 5.006623893711068,
+    "max": 0.9941858048616069,
+    "mean": 0.1763635665340202,
+    "min": -0.0011545990022545443,
+    "n": 201,
+    "n_finite": 201
+   }
+  }
+ },
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/u": {
+     "l2": 5.006623893711068,
+     "max": 0.9941858048616069,
+     "mean": 0.17813606469014098,
+     "min": -0.0011545990022545443,
+     "n": 199
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 199,
+   "params": {},
+   "time": 20.000001
+  }
+ }
+}

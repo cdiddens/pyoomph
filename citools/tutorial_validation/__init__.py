@@ -190,19 +190,29 @@ class FinalState(Check):
             makes the check survive a node ordering that depends on the mesh partitioning or on an
             adaptation. Set False only where the mesh is fixed and the ordering is not in doubt.
         columns: which columns to compare, by name. None means all of them.
+        stats: which of n/n_finite/min/max/mean/l2 to compare. None means all, which is right for a
+            spatial field. For a reduced TIME SERIES pass stats=("min","max"): the row count of an
+            adaptive run is a property of the machine, and the mean, the l2 and the count itself go
+            with it, while the extremes - the deepest pinch, the largest fragment count, the bounds
+            on a conserved volume - are the physics. Measured on Moving_Mesh/beads_on_string.py: min
+            and max of r_min and z_min came out bit-identical over two runs while the l2 of z_min
+            moved by 3.3 %.
     """
 
     kind = "finalstate"
 
-    def __init__(self, file: str, reduce: bool = True, columns: "list[str] | None" = None, **kw):
+    def __init__(self, file: str, reduce: bool = True, columns: "list[str] | None" = None,
+                 stats: "tuple[str,...] | None" = None, **kw):
         super().__init__(**kw)
         self.file, self.reduce, self.columns = file, reduce, columns
+        self.stats = tuple(stats) if stats is not None else None
 
     def slug(self) -> str:
         return "finalstate:" + self.file
 
     def label(self) -> str:
-        return ("reduced " if self.reduce else "nodal ") + "final state of " + self.file
+        which = "" if self.stats is None else " (%s only)" % "/".join(self.stats)
+        return ("reduced " if self.reduce else "nodal ") + "final state of " + self.file + which
 
 
 class Fingerprint(Check):
@@ -637,10 +647,19 @@ def _cmp_evolution(check: Evolution, art: RunArtifacts, ref: dict, out: Outcome)
             got = numpy.column_stack([numpy.interp(refrows[:, 0], x[keep], rows_sorted[keep, i])
                                       for i in cols])
 
+    # Each column is judged against ITS OWN RANGE over the stored rows, for the third time in this
+    # module and for the same reason as the fingerprint's dof groups and FinalState's columns: a
+    # physical quantity that passes through zero makes a relative comparison explode exactly where
+    # it crosses. Measured on SpatioTemporal_PDEs/kuramoto_sivanshinsky_bifurcation.py: h_rms near
+    # the fold is 0.00414 against a range of 0.321, and it moved by 8.6e-8 - 2.7e-7 of the range,
+    # and 2.1e-5 of the value. A critical eigenvalue crossing zero is the same shape.
+    extents = [max(abs(float(refrows[:, c + 1].min())), abs(float(refrows[:, c + 1].max())))
+               for c in range(len(ref["columns"]))]
     worst = []
     for r in range(len(refrows)):
         for c, name in enumerate(ref["columns"]):
-            if not _close(refrows[r, c + 1], got[r, c], check.rtol, check.atol):
+            if not _close(refrows[r, c + 1], got[r, c], check.rtol,
+                          check.atol + check.rtol * extents[c]):
                 worst.append("at %s=%.12g, %s: %s"
                              % (ref["abscissa"], refrows[r, 0], name,
                                 _deviation(refrows[r, c + 1], got[r, c])))
@@ -682,10 +701,21 @@ def _cmp_finalstate(check: FinalState, art: RunArtifacts, ref: dict, out: Outcom
     if ref.get("reduce", True):
         for name in ref["columns"]:
             got = _reduce_column(data[:, columns.index(name)])
-            for stat, want in sorted(ref["stats"][name].items()):
+            refstats = ref["stats"][name]
+            # The column's own extent, for the same reason the fingerprint uses the dof group's:
+            # min, max and mean carry the field's units, so judging one against ITS OWN magnitude is
+            # hypersensitive wherever the column passes through zero. Measured on
+            # Moving_Mesh/beads_on_string.py: the mean of normal_y is 7e-8 against an extent of
+            # order 1, and it moved by 115 % of itself between two runs - which is nothing at all in
+            # the field it belongs to. l2 keeps a relative comparison; its magnitude IS the scale.
+            scale = max(abs(float(refstats.get("min", 0.0))), abs(float(refstats.get("max", 0.0))))
+            for stat, want in sorted(refstats.items()):
+                if check.stats is not None and stat not in check.stats:
+                    continue
+                extra = check.rtol * scale if stat in ("min", "max", "mean") else 0.0
                 if stat not in got:
                     out.problems.append("%s: %s has no %s any more" % (check.label(), name, stat))
-                elif not _close(want, got[stat], check.rtol, check.atol):
+                elif not _close(want, got[stat], check.rtol, check.atol + extra):
                     out.problems.append("%s: %s %s: %s" % (check.label(), name, stat,
                                                            _deviation(want, got[stat])))
     else:
@@ -966,6 +996,11 @@ def propose(key: str, art: RunArtifacts) -> str:
     of them is the meaningful quantity and how tight the tolerance can be.
     """
     lines = ['  "%s": [' % key]
+    # One line per distinct CHECK, not per file. TextFileOutput writes one numbered file per output
+    # step, and they all collapse onto the same "<trunk>_*.txt" glob, so a transient script with 200
+    # outputs otherwise proposed the same FinalState two hundred times - which made the proposal
+    # useless for exactly the chapters that have most of them.
+    seen: "set[str]" = set()
     for rel in art.text_files():
         columns, data = [], None
         try:
@@ -981,8 +1016,17 @@ def propose(key: str, art: RunArtifacts) -> str:
         lines.append("      # %d row(s): %s" % (len(data), ", ".join(columns)))
         numbered = re.search(r"_\d+\.txt$", rel.name)
         if numbered:
-            lines.append('      FinalState("%s"),' % re.sub(r"_\d+\.txt$", "_*.txt", name))
+            glob = re.sub(r"_\d+\.txt$", "_*.txt", name)
+            if glob in seen:
+                lines.pop()  # drop the "# N row(s)" line we just wrote for this duplicate
+                continue
+            seen.add(glob)
+            lines.append('      FinalState("%s"),' % glob)
             continue
+        if name in seen:
+            lines.pop()
+            continue
+        seen.add(name)
         import numpy
         if not bool(numpy.all(numpy.diff(data[:, 0]) >= 0.0)):
             lines.append('      Evolution("%s", match="rows", reason="the first column does not '

@@ -1,0 +1,122 @@
+{
+ "_about": "Reference numbers for SpatioTemporal_PDEs/wave_eq_doubleslit.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "finalstate:domain__screen_*.txt": {
+  "columns": [
+   "coordinate_x",
+   "coordinate_y",
+   "u",
+   "I",
+   "normal_x",
+   "normal_y"
+  ],
+  "file": "wave_eq_doubleslit/domain__screen/domain__screen_000100.txt",
+  "kind": "finalstate",
+  "nrows": 201,
+  "reduce": true,
+  "stats": {
+   "I": {
+    "l2": 0.06687459450038334,
+    "max": 0.014261684663951711,
+    "mean": 0.0025378398956960742,
+    "min": 2.072139135239131e-06,
+    "n": 201,
+    "n_finite": 201
+   },
+   "coordinate_x": {
+    "l2": 28.35489375751565,
+    "max": 2.0,
+    "mean": 2.0,
+    "min": 2.0,
+    "n": 201,
+    "n_finite": 201
+   },
+   "coordinate_y": {
+    "l2": 32.782312304076584,
+    "max": 4.0,
+    "mean": 2.000000000003105,
+    "min": 0.0,
+    "n": 201,
+    "n_finite": 201
+   },
+   "normal_x": {
+    "l2": 14.177446878757825,
+    "max": 1.0,
+    "mean": 1.0,
+    "min": 1.0,
+    "n": 201,
+    "n_finite": 201
+   },
+   "normal_y": {
+    "l2": 0.0,
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "n": 201,
+    "n_finite": 201
+   },
+   "u": {
+    "l2": 1.5983380116813306,
+    "max": 0.1741410652378651,
+    "mean": -0.05133140342899095,
+    "min": -0.22186427057702518,
+    "n": 201,
+    "n_finite": 201
+   }
+  }
+ },
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/out_bottom/u": {
+     "l2": 0.5516645527467329,
+     "max": 0.11889938219126477,
+     "mean": -0.0057066274631881525,
+     "min": -0.08974860971556263,
+     "n": 97
+    },
+    "domain/out_top/u": {
+     "l2": 0.5515566893782141,
+     "max": 0.11884180065935028,
+     "mean": -0.005742133699825452,
+     "min": -0.08960958723207962,
+     "n": 97
+    },
+    "domain/screen/I": {
+     "l2": 0.06687459450038334,
+     "max": 0.014261684663951711,
+     "mean": 0.0025378398956960747,
+     "min": 2.072139135239131e-06,
+     "n": 201
+    },
+    "domain/screen/u": {
+     "l2": 1.5983055092791765,
+     "max": 0.1741410652378651,
+     "mean": -0.051919734981249376,
+     "min": -0.22186427057702518,
+     "n": 199
+    },
+    "domain/u": {
+     "l2": 63.34115420340479,
+     "max": 1.1996856854641427,
+     "mean": -0.0209932375188218,
+     "min": -1.0767617980911703,
+     "n": 28279
+    },
+    "domain/wall_left/u": {
+     "l2": 0.4401357517707317,
+     "max": 0.1794416641058042,
+     "mean": 0.020691455656052446,
+     "min": -0.04753653731582099,
+     "n": 187
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 29060,
+   "params": {},
+   "time": 1.0000001
+  }
+ }
+}

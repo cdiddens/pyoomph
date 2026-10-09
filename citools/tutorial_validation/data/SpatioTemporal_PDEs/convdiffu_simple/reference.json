@@ -1,0 +1,23 @@
+{
+ "_about": "Reference numbers for SpatioTemporal_PDEs/convdiffu_simple.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/c": {
+     "l2": 20.093024798755476,
+     "max": 0.9258163750676011,
+     "mean": 0.14954679398680562,
+     "min": -0.0002809368753526875,
+     "n": 5221
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 5221,
+   "params": {},
+   "time": 1.0
+  }
+ }
+}

@@ -1,0 +1,30 @@
+{
+ "_about": "Reference numbers for Moving_Mesh/ALE_correction.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/c": {
+     "l2": 3.5355171926536952,
+     "max": 0.19567423216562355,
+     "mean": 0.03134312903103319,
+     "min": 0.00015221262707854866,
+     "n": 4225
+    },
+    "domain/mesh_x": {
+     "l2": 19.05481402428268,
+     "max": 0.49999999999999994,
+     "mean": 0.0,
+     "min": -0.5000000000000003,
+     "n": 4225
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 8450,
+   "params": {},
+   "time": 1.0
+  }
+ }
+}

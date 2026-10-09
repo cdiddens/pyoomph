@@ -1,0 +1,46 @@
+{
+ "_about": "Reference numbers for Moving_Mesh/cantilever.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/mesh_x": {
+     "l2": 98.97071453729284,
+     "max": 9.996143066307784,
+     "mean": 2.4588014503043207,
+     "min": 0.0018768253440249111,
+     "n": 752
+    },
+    "domain/mesh_y": {
+     "l2": 11.583846739264409,
+     "max": 0.4979942747636936,
+     "mean": -0.17576774029888376,
+     "min": -1.186505633629881,
+     "n": 752
+    },
+    "domain/top/mesh_x": {
+     "l2": 42.0263829993656,
+     "max": 10.01887562843296,
+     "mean": 3.4077524140709365,
+     "min": 0.002032604008611972,
+     "n": 86
+    },
+    "domain/top/mesh_y": {
+     "l2": 3.511599868608846,
+     "max": 0.49992543648212034,
+     "mean": 0.3229082466194129,
+     "min": -0.1906707202844076,
+     "n": 86
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 1676,
+   "params": {
+    "P": 5e-05
+   },
+   "time": 5.0
+  }
+ }
+}

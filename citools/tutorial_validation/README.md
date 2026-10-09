@@ -78,6 +78,80 @@ and read the diff before committing it.
 * `Stdout(...)` is the last resort, for a number that is neither in a file nor a parameter. It
   breaks when somebody rewords a `print`, so prefer anything else.
 
+### What a tolerance is measured against
+
+For the per-field statistics - a `Fingerprint`'s dof groups and a reduced `FinalState`'s columns -
+`min`, `max` and `mean` are compared against the **field's own scale**, `max(|min|, |max|)` over
+that group or column, rather than against each statistic's own magnitude:
+
+    tolerance = atol + rtol * max(|reference value|, scale)
+
+Without that, any field passing through zero becomes hypersensitive: a pressure is referenced to an
+arbitrary level and a symmetric component has `min = -max`, so whichever statistic straddles zero
+gets a tolerance near zero with it. Two measured cases:
+`stokes_flow_around_object.py`'s `liquid_sphere/pressure` has a minimum at 0.03 % of the field's
+range which moved by six parts in a billion of the scale over four MPI ranks, and
+`beads_on_string.py`'s `normal_y` has a mean of 7e-8 against an extent of order 1 which moved by
+115 % *of itself* between two runs.
+
+`l2` is deliberately left out of that rule in both places: its magnitude **is** the field's scale,
+so a relative comparison on it is already the right question, and it is the statistic that notices a
+field changing as a whole. Counts are exact.
+
+### Reducing a time series
+
+`FinalState` over a line-per-output file compares its columns' statistics instead of the nodes of a
+spatial field, which is the right check for an observable written on an **adaptive** time grid: the
+instants are a property of the machine, so matching rows would fail for no reason, and `match="interp"`
+would only approximate them at a tolerance wide enough to hide a real drift.
+
+Pass `stats=("min", "max")` when you do. An adaptive run writes a machine-dependent *number* of
+rows, and `mean`, `l2` and `n` all go with it - measured on `beads_on_string.py`, where min and max
+of `r_min` and `z_min` were bit-identical across two runs while the l2 of `z_min` moved by 3.3 %.
+The extremes are the physics anyway: the deepest pinch, the largest fragment count, the bounds on a
+conserved volume.
+
+### Scripts that are not reproducible run to run
+
+Most are, to the last bit - two independent generations of `Temporal_ODEs` and of `Spatial_PDEs`
+came out byte-identical. Some are not, and no tolerance fixes that; find out which before writing
+the entry.
+
+**Two runs do not bound a spread.** Where a quantity varies at all, its run-to-run difference is a
+draw from a distribution, and two draws can land arbitrarily close. This has now been wrong twice
+here, in both directions:
+
+* `kuramoto_sivanshinsky.py`: the first pair agreed to 4.4e-05 on `h`'s l2, which looked like room
+  to pin it at `rtol=1e-3`. Eight runs put the spread at **23 %** - four orders of magnitude wider.
+* `beads_on_string.py`: two runs agreed on `max(z_min)`, so it went into the entry. It is bimodal
+  (21.0198 or 18.8496) and failed 3 of 5 repeats.
+
+So two runs are enough to prove a script *is* irreproducible, and never enough to prove it is
+reproducible. If a check is going to rest on a measured spread, measure it five to eight times -
+the scripts here cost seconds to tens of seconds each, which is cheaper than a nightly that fails
+intermittently a month later.
+
+**An unseeded random initial condition is its own category.** `DeterministicRandomField` is
+deterministic only *within* a run: without `seed=`, the cloud is redrawn per run, so the script
+genuinely starts somewhere else each time and no amount of tolerance makes its state comparable.
+Only structural quantities (`ndof`, the per-group node counts) can be pinned. In the tutorial set,
+`SpatioTemporal_PDEs/kuramoto_sivanshinsky.py` and `Plotting_Interface/kuramoto_sivanshinsky.py`
+are unseeded; `Multicomponent_Flow/marangoni_instability.py` passes a seed and is fully
+reproducible. Check for this first - it looks exactly like chaos in a diff, and the entry it calls
+for is the same, but the reason belongs in the comment.
+
+`rayleigh_plateau.py` is the clearest case. Four runs on one machine agree bit-for-bit for 148 rows
+of `minimum.txt`, differ by **one ULP** (2.44e-16) at t=8.6259, exceed 1e-6 one row later and 1e-3
+by t=8.76, and finish with a deepest neck radius spread over 0.000379..0.000400 - 5 %. Two of them
+remeshed differently, 299 dofs of `mesh_y` against 433. Pinch-off is a finite-time singularity, so
+it amplifies round-off the way a chaotic trajectory does. The entry therefore checks the trajectory
+*before* the singularity, exactly, and records nothing after it.
+
+`droplet_spread_marangoni_and_gravity.py` is a different shape: its parameters are bit-identical and
+everything geometric agrees to 1e-10 or better, but every pressure group's min, max and mean shifted
+by an identical -0.414154 between runs, and the volume Lagrange multiplier by -0.414155. The
+pressure level and that multiplier are one free direction, so the entry skips both.
+
 ### Tolerances
 
 The default is `rtol=1e-5`, `atol=1e-10`. That is deliberately not as tight as one machine can
@@ -98,6 +172,25 @@ two runs of it separate exponentially - what stays reproducible is the extent of
 `"tcc"`). Needing it is a result, not an annoyance: it says that this script's answer depends on the
 number of ranks, which is worth knowing. A script whose every check is excused is reported as
 `skipped here` rather than as validated.
+
+Two causes of rank-dependence showed up, and they want different entries:
+
+* **The mesh itself differs.** `moffatt_eddies.py` stops its adaptation at 73740 dofs over four
+  ranks against 73705 serially, and `heated_cylinder.py` at 74167 against 74146; every field
+  statistic then follows the mesh. A different mesh is a different discretisation, so these are
+  excused rather than loosened. They are the exception, not the rule - `convdiffu_simple`,
+  `marangoni_instability`, `navier_stokes`, `lubrication_coalescence`, `laplace_smoothed_mesh` and
+  `cantilever` adapt too and came through the same pass untouched, which is why the dof counts are
+  still compared everywhere else.
+* **The instants differ.** `rayleigh_plateau.py`'s adaptive stepper lands ~6e-7 away from the
+  stored instants over four ranks, so `match="exact"`'s lookup misses. The fix is *not*
+  `match="interp"`: that would weaken the serial comparison, which is the strong one, to buy a
+  weaker MPI one.
+
+A reduced series often survives where a final state does not, and that is the argument for
+preferring one. `rayleigh_plateau_pinchoff.py` is the clean demonstration: 76 fingerprint entries
+move over four ranks (up to 0.44 % on `mesh_x`'s l2, because the state follows a topological
+surgery), while the reduced `max(fragments)` and the bounds on volume come through untouched.
 
 ### Files without a header
 

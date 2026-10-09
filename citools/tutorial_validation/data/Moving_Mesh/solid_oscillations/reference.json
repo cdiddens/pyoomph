@@ -1,0 +1,37 @@
+{
+ "_about": "Reference numbers for Moving_Mesh/solid_oscillations.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/mesh_x": {
+     "l2": 18.523313370512493,
+     "max": 0.9987834424380644,
+     "mean": 0.5105390613151339,
+     "min": 0.02470713412372981,
+     "n": 1000
+    },
+    "domain/mesh_y": {
+     "l2": 1.0221567251406347,
+     "max": 0.07922783474952393,
+     "mean": 0.026057446112975696,
+     "min": -0.016195551829863035,
+     "n": 1000
+    },
+    "domain/mesh_z": {
+     "l2": 0.8401045994535322,
+     "max": 0.059126653667536465,
+     "mean": 0.006672747836997574,
+     "min": -0.06714008339542295,
+     "n": 1000
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 3000,
+   "params": {},
+   "time": 10.0
+  }
+ }
+}

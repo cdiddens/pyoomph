@@ -1,0 +1,58 @@
+{
+ "_about": "Reference numbers for SpatioTemporal_PDEs/kuramoto_sivanshinsky.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/bottom/h": {
+     "l2": 3.6180267052194046,
+     "max": 0.9706457144139236,
+     "mean": 0.23144236816786473,
+     "min": -0.19638453299056038,
+     "n": 79
+    },
+    "domain/bottom/lapl_h": {
+     "l2": 1.45184435195251,
+     "max": 0.25842239863592353,
+     "mean": -0.005245918782670875,
+     "min": -0.2848122978137451,
+     "n": 79
+    },
+    "domain/h": {
+     "l2": 33.0136696685056,
+     "max": 0.9764270773703422,
+     "mean": 0.22650512690396882,
+     "min": -0.2688412785294684,
+     "n": 6241
+    },
+    "domain/lapl_h": {
+     "l2": 14.566091018842902,
+     "max": 0.3041304031996704,
+     "mean": 2.5634709313857896e-05,
+     "min": -0.2880739727602538,
+     "n": 6241
+    },
+    "domain/left/h": {
+     "l2": 3.736684066788896,
+     "max": 0.9760052966638232,
+     "mean": 0.22656866461403585,
+     "min": -0.2655521876012921,
+     "n": 80
+    },
+    "domain/left/lapl_h": {
+     "l2": 1.6468500443502077,
+     "max": 0.30275651411022725,
+     "mean": -0.00010460846729141993,
+     "min": -0.2877999330309269,
+     "n": 80
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 12800,
+   "params": {},
+   "time": 2000.000159
+  }
+ }
+}

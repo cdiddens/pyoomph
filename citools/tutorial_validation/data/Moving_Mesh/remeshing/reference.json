@@ -1,0 +1,44 @@
+{
+ "_about": "Reference numbers for Moving_Mesh/remeshing.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/mesh_x": {
+     "l2": 136.6569856585859,
+     "max": 5.9738948521374216,
+     "mean": 3.3559997187777526,
+     "min": 0.07436161781776912,
+     "n": 1335
+    },
+    "domain/mesh_y": {
+     "l2": 28.008169940092156,
+     "max": 0.9974415548441026,
+     "mean": 0.7324596586164659,
+     "min": 0.06659977422620651,
+     "n": 1335
+    },
+    "domain/right/mesh_y": {
+     "l2": 8.011367738547097,
+     "max": 0.9974415548441057,
+     "mean": 0.6545330534353082,
+     "min": 0.01752015286557382,
+     "n": 127
+    },
+    "domain/top/mesh_x": {
+     "l2": 48.02495481766025,
+     "max": 5.986687077916923,
+     "mean": 3.987349941028139,
+     "min": 0.10417987288344903,
+     "n": 123
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 2920,
+   "params": {},
+   "time": 10.0
+  }
+ }
+}

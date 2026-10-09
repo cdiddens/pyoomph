@@ -1,0 +1,51 @@
+{
+ "_about": "Reference numbers for SpatioTemporal_PDEs/convdiffu_SUPG.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "finalstate:domain_*.txt": {
+  "columns": [
+   "coordinate_x",
+   "c"
+  ],
+  "file": "convdiffu_SUPG/domain/domain_000050.txt",
+  "kind": "finalstate",
+  "nrows": 101,
+  "reduce": true,
+  "stats": {
+   "c": {
+    "l2": 1.3892900081158819,
+    "max": 0.6926747735158096,
+    "mean": 0.035098094149253634,
+    "min": -0.051849688133766704,
+    "n": 101,
+    "n_finite": 101
+   },
+   "coordinate_x": {
+    "l2": 420.41646019155814,
+    "max": 80.0,
+    "mean": 30.0,
+    "min": -20.0,
+    "n": 101,
+    "n_finite": 101
+   }
+  }
+ },
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/c": {
+     "l2": 1.3892900081158819,
+     "max": 0.6926747735158096,
+     "mean": 0.03580714655630926,
+     "min": -0.051849688133766704,
+     "n": 99
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 99,
+   "params": {},
+   "time": 50.0
+  }
+ }
+}

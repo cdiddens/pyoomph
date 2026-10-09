@@ -1,0 +1,44 @@
+{
+ "_about": "Reference numbers for Moving_Mesh/laplace_smoothed_mesh.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/mesh_x": {
+     "l2": 11.41147689962497,
+     "max": 1.4683180857331244,
+     "mean": 0.7839458012862898,
+     "min": 0.0862313680665503,
+     "n": 165
+    },
+    "domain/mesh_y": {
+     "l2": 8.905271723667896,
+     "max": 1.0051936003192894,
+     "mean": 0.6253497223298418,
+     "min": 0.08383257687703878,
+     "n": 165
+    },
+    "domain/right/mesh_y": {
+     "l2": 3.243608860721898,
+     "max": 0.9953168421401337,
+     "mean": 0.6847124834466028,
+     "min": 0.08625619307162838,
+     "n": 19
+    },
+    "domain/top/mesh_x": {
+     "l2": 4.505780221656306,
+     "max": 1.4696739382590136,
+     "mean": 0.9381310875845195,
+     "min": 0.1067872590823154,
+     "n": 19
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 368,
+   "params": {},
+   "time": 1.0
+  }
+ }
+}

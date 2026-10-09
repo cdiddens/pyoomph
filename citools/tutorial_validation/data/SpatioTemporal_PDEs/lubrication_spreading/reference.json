@@ -1,0 +1,67 @@
+{
+ "_about": "Reference numbers for SpatioTemporal_PDEs/lubrication_spreading.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "finalstate:domain_*.txt": {
+  "columns": [
+   "coordinate_x",
+   "h",
+   "p"
+  ],
+  "file": "lubrication_spreading/domain/domain_000108.txt",
+  "kind": "finalstate",
+  "nrows": 1001,
+  "reduce": true,
+  "stats": {
+   "coordinate_x": {
+    "l2": 91.35555538663206,
+    "max": 5.0,
+    "mean": 2.5,
+    "min": 0.0,
+    "n": 1001,
+    "n_finite": 1001
+   },
+   "h": {
+    "l2": 3.282850382288176,
+    "max": 0.2699734568808879,
+    "mean": 0.05513063265883864,
+    "min": 0.007502234943505638,
+    "n": 1001,
+    "n_finite": 1001
+   },
+   "p": {
+    "l2": 11.428432402341933,
+    "max": 0.5715685192642743,
+    "mean": 0.28864611572439347,
+    "min": 0.030587209842074702,
+    "n": 1001,
+    "n_finite": 1001
+   }
+  }
+ },
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/h": {
+     "l2": 3.282850382288176,
+     "max": 0.2699734568808879,
+     "mean": 0.05513063265883864,
+     "min": 0.007502234943505638,
+     "n": 1001
+    },
+    "domain/p": {
+     "l2": 11.428432402341933,
+     "max": 0.5715685192642743,
+     "mean": 0.28864611572439347,
+     "min": 0.030587209842074702,
+     "n": 1001
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 2002,
+   "params": {},
+   "time": 1000.0000871
+  }
+ }
+}

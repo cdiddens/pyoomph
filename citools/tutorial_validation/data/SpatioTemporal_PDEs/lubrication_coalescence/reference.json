@@ -1,0 +1,30 @@
+{
+ "_about": "Reference numbers for SpatioTemporal_PDEs/lubrication_coalescence.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/h": {
+     "l2": 2.439338574245679,
+     "max": 0.33864285764065233,
+     "mean": 0.02174464374068772,
+     "min": 0.007507427332049884,
+     "n": 3891
+    },
+    "domain/p": {
+     "l2": 28.51339597337053,
+     "max": 0.5995042595475408,
+     "mean": 0.45005343221148,
+     "min": 0.10136056917094667,
+     "n": 3891
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 7782,
+   "params": {},
+   "time": 1000.0000746
+  }
+ }
+}

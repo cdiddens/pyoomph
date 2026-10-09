@@ -1,0 +1,127 @@
+{
+ "_about": "Reference numbers for SpatioTemporal_PDEs/moffatt_eddies.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "_meshwide__wedge/pressure": {
+     "l2": 2.5898631705238335e-12,
+     "max": -2.5898631705238335e-12,
+     "mean": -2.5898631705238335e-12,
+     "min": -2.5898631705238335e-12,
+     "n": 1
+    },
+    "wedge/driven/pressure": {
+     "l2": 110.13168649277206,
+     "max": 10.895450837594884,
+     "mean": -0.018422756580539712,
+     "min": -10.895456651509924,
+     "n": 160
+    },
+    "wedge/lower_wall/pressure": {
+     "l2": 59.08849672567964,
+     "max": 0.4387126421439284,
+     "mean": -3.4989808130771376,
+     "min": -10.905761085801558,
+     "n": 118
+    },
+    "wedge/pressure": {
+     "l2": 464.84125991427385,
+     "max": 10.818187463623033,
+     "mean": 0.0212559870935459,
+     "min": -10.81931879018159,
+     "n": 7862
+    },
+    "wedge/upper_wall/pressure": {
+     "l2": 59.64701400118207,
+     "max": 10.905763703227775,
+     "mean": 3.6276259785883243,
+     "min": -0.43838079547876596,
+     "n": 116
+    },
+    "wedge/velocity_x": {
+     "l2": 23.00036102534916,
+     "max": 0.23871795311047803,
+     "mean": -0.0017647646752961433,
+     "min": -0.2387233619107177,
+     "n": 32724
+    },
+    "wedge/velocity_y": {
+     "l2": 39.43893389837952,
+     "max": 0.9661598917065182,
+     "mean": 0.0363571367058737,
+     "min": -0.21744126529371227,
+     "n": 32724
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 73705,
+   "params": {},
+   "time": 0.0
+  }
+ },
+ "fingerprint::1": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "_meshwide__wedge/pressure": {
+     "l2": 4.084642869159485e-11,
+     "max": -4.084642869159485e-11,
+     "mean": -4.084642869159485e-11,
+     "min": -4.084642869159485e-11,
+     "n": 1
+    },
+    "wedge/driven/pressure": {
+     "l2": 83.03870724309861,
+     "max": 10.895902689161717,
+     "mean": -0.057801114925863414,
+     "min": -10.895929726709761,
+     "n": 92
+    },
+    "wedge/lower_wall/pressure": {
+     "l2": 45.19324303322792,
+     "max": 0.4389098713146992,
+     "mean": -1.3601396835729738,
+     "min": -10.906433258052793,
+     "n": 182
+    },
+    "wedge/pressure": {
+     "l2": 263.5687088943148,
+     "max": 10.735214506206406,
+     "mean": 0.0009214007559618001,
+     "min": -10.73739548937784,
+     "n": 7733
+    },
+    "wedge/upper_wall/pressure": {
+     "l2": 45.69524867343998,
+     "max": 10.906457762020867,
+     "mean": 1.3215793068283928,
+     "min": -0.4385513909322963,
+     "n": 197
+    },
+    "wedge/velocity_x": {
+     "l2": 13.70776781341127,
+     "max": 0.23867962004908955,
+     "mean": -7.099468818159823e-06,
+     "min": -0.2386927221338164,
+     "n": 33306
+    },
+    "wedge/velocity_y": {
+     "l2": 24.202477282716433,
+     "max": 0.961727968457834,
+     "mean": -0.0015100448998277437,
+     "min": -0.21744125919345988,
+     "n": 33306
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 74817,
+   "params": {},
+   "time": 0.0
+  }
+ }
+}

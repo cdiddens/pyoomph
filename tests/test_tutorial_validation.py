@@ -398,3 +398,102 @@ def test_l2_is_still_compared_relatively(validation):
     drifted = validation.run("drifted")
     _write_fingerprint(drifted, {"liquid/pressure": dict(base["liquid/pressure"], l2=14.8424 * 1.001)})
     assert validation.check(drifted).status == "mismatch", "a 0.1 % change in l2 must be caught"
+
+
+def test_propose_does_not_repeat_a_check_per_numbered_file(validation):
+    """TextFileOutput writes one numbered file per output step and they all collapse onto the same
+    "<trunk>_*.txt" glob. A transient script with 200 outputs otherwise proposed the same FinalState
+    two hundred times, which made the proposal useless for the chapters that have most of them."""
+    run = validation.run("a")   # writes domain_000000.txt and domain_000001.txt
+    text = tv.propose(KEY, validation.artifacts(run))
+    assert text.count('FinalState("domain_*.txt")') == 1, text
+    # ...and the row-count comment is not left behind for the dropped duplicate either
+    assert text.count("row(s): coordinate_x") == 1, text
+
+
+def test_a_reduced_column_is_judged_against_its_own_extent(validation):
+    """Same reasoning as the fingerprint's field scale, for FinalState's reductions. Measured on
+    Moving_Mesh/beads_on_string.py: the mean of normal_y over the interface is 7e-8 against an
+    extent of order 1, and it moved by 115 % of itself between two runs - nothing at all in the
+    field it belongs to."""
+    run = validation.run("ref")
+    col = run / "synthetic" / "tiny_mean.txt"
+
+    def write(path, mean_shift):
+        with open(path, "w") as f:
+            f.write("#x\tv\n")
+            # symmetric about zero, so the mean is ~1e-8 of the extent
+            for i in range(-50, 51):
+                f.write("%r\t%r\n" % (i / 50.0, i / 50.0 + mean_shift))
+
+    write(col, 0.0)
+    validation.set_checks([FinalState("tiny_mean.txt")])
+    validation.record(run)
+
+    other = validation.run("other")
+    write(other / "synthetic" / "tiny_mean.txt", 1e-9)   # 1e-9 of the extent
+    assert validation.check(other).status == "ok", "round-off on a near-zero mean is not a drift"
+    moved = validation.run("moved")
+    write(moved / "synthetic" / "tiny_mean.txt", 0.02)   # 2 % of the extent
+    assert validation.check(moved).status == "mismatch"
+
+
+def test_stats_restricts_a_reduced_series_to_its_extremes(validation):
+    """An adaptive run writes a machine-dependent number of rows, so the mean, the l2 and the count
+    go with it while the extremes do not."""
+    run = validation.run("ref")
+    series = run / "synthetic" / "series.txt"
+
+    def write(path, n):
+        with open(path, "w") as f:
+            f.write("#t\tr\n")
+            for i in range(n):
+                # same range whatever n, so min/max are fixed and mean/l2/n are not
+                f.write("%r\t%r\n" % (i / (n - 1.0), i / (n - 1.0)))
+
+    write(series, 100)
+    validation.set_checks([FinalState("series.txt")])
+    validation.record(run)
+    longer = validation.run("longer")
+    write(longer / "synthetic" / "series.txt", 137)
+    assert validation.check(longer).status == "mismatch", "n/mean/l2 must notice the row count"
+
+    validation.set_checks([FinalState("series.txt", stats=("min", "max"),
+                                      reason="an adaptive run writes a machine-dependent row count")])
+    validation.record(run)
+    assert validation.check(longer).status == "ok", "the extremes are invariant under the row count"
+    # ...and a real change in the extremes is still caught
+    shifted = validation.run("shifted")
+    with open(shifted / "synthetic" / "series.txt", "w") as f:
+        f.write("#t\tr\n")
+        for i in range(100):
+            f.write("%r\t%r\n" % (i / 99.0, 1.5 * i / 99.0))
+    assert validation.check(shifted).status == "mismatch"
+
+
+def test_an_evolution_column_is_judged_against_its_own_range(validation):
+    """The third place this applies, and for the same reason. Measured on
+    SpatioTemporal_PDEs/kuramoto_sivanshinsky_bifurcation.py: h_rms near the fold is 0.00414 against
+    a range of 0.321, and it moved by 2.1e-5 of itself between a serial run and four ranks - which
+    is 2.7e-7 of the range it lives in."""
+    run = validation.run("ref")
+    series = run / "synthetic" / "crossing.txt"
+
+    def write(path, bump):
+        with open(path, "w") as f:
+            f.write("#t\tv\n")
+            for i in range(101):
+                t = i / 100.0
+                # crosses zero in the middle, range +-1
+                f.write("%r\t%r\n" % (t, (2 * t - 1) + bump))
+
+    write(series, 0.0)
+    validation.set_checks([Evolution("crossing.txt")])
+    validation.record(run)
+
+    near = validation.run("near")
+    write(near / "synthetic" / "crossing.txt", 1e-9)     # 1e-9 of the range
+    assert validation.check(near).status == "ok", "round-off near the crossing is not a drift"
+    far = validation.run("far")
+    write(far / "synthetic" / "crossing.txt", 0.01)      # 1 % of the range
+    assert validation.check(far).status == "mismatch"

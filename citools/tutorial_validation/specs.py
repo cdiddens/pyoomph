@@ -515,4 +515,337 @@ VALIDATION: "dict[str,list]" = {
       # global parameter - here Udesired - alongside the state it was recovered from.
       Fingerprint(),
   ],
+
+  # ===============================================================================================
+  # SpatioTemporal_PDEs: transient fields. The nodal output is numbered per output step, so
+  # FinalState takes the last one - the instants are prescribed by run(), so which file that is does
+  # not depend on the machine even where the time STEPPING is adaptive.
+  #
+  # Where a script writes a line-per-output observable file on an adaptive time grid, the series is
+  # REDUCED rather than matched row by row: FinalState over such a file compares min/max/mean/l2 of
+  # each column, which is invariant under the grid and still says what the run did (the deepest
+  # pinch, the largest fragment count, the volume's bounds). That is the honest check for a quantity
+  # whose instants are a property of the machine, and it is what match="interp" would only
+  # approximate at a tolerance wide enough to hide a real drift.
+  # ===============================================================================================
+
+  "SpatioTemporal_PDEs/wave_eq.py": [
+      # 1d wave equation on a fixed mesh; the last output is the field after the pulse has travelled.
+      FinalState("domain_*.txt"),
+      Fingerprint(),
+  ],
+  "SpatioTemporal_PDEs/wave_eq_doubleslit.py": [
+      # The screen is the physics: I is the intensity, so its extremes and l2 are the interference
+      # pattern. A regression in the slit geometry or the wave speed moves the fringes and with them
+      # these numbers.
+      FinalState("domain__screen_*.txt"),
+      Fingerprint(),
+  ],
+  "SpatioTemporal_PDEs/wave_eq_drums.py": [
+      Fingerprint(),
+  ],
+  "SpatioTemporal_PDEs/convdiffu_simple.py": [
+      # Adaptive in both space and time. ndof is left strict for the same reason as the adaptive
+      # Spatial_PDEs scripts: it pins the refinement, and it is the first thing to relax if another
+      # platform's error estimator stops elsewhere.
+      Fingerprint(),
+  ],
+  "SpatioTemporal_PDEs/convdiffu_SUPG.py": [
+      # SUPG against the unstabilised scheme: what distinguishes them is the over- and undershoot at
+      # the front, i.e. exactly min(c) and max(c) of the last profile. A stabilisation that silently
+      # stopped being applied would show up there first.
+      FinalState("domain_*.txt"),
+      Fingerprint(),
+  ],
+  "SpatioTemporal_PDEs/lubrication.py": [
+      FinalState("domain_*.txt"),
+      Fingerprint(),
+  ],
+  "SpatioTemporal_PDEs/lubrication_spreading.py": [
+      # 1001 nodes, adaptive in time; the last output is at a prescribed instant all the same.
+      FinalState("domain_*.txt"),
+      Fingerprint(),
+  ],
+  "SpatioTemporal_PDEs/lubrication_coalescence.py": [
+      Fingerprint(),
+  ],
+  "SpatioTemporal_PDEs/marangoni_instability.py": [
+      Fingerprint(),
+  ],
+  "SpatioTemporal_PDEs/navier_stokes.py": [
+      Fingerprint(),
+  ],
+  "SpatioTemporal_PDEs/navier_stokes_around_object.py": [
+      # globals.txt is 11 rows at the ten prescribed output times, so the abscissa is exact. UStokes
+      # is the Stokes-drag velocity the object settles at, which is the quantity the script is about.
+      Evolution("globals.txt"),
+      Fingerprint(),
+  ],
+  "SpatioTemporal_PDEs/rayleigh_taylor_instability.py": [
+      Fingerprint(),
+  ],
+  "SpatioTemporal_PDEs/heated_cylinder.py": [
+      # Two problems, one per refinement criterion, each into its own output directory - comparing
+      # the criteria IS the script, so both are pinned.
+      #
+      # Serially only, for the same reason as moffatt_eddies below: the refinement is rank-dependent.
+      # Over four ranks problem 0 stopped at 74167 dofs against 74146 and problem 1 at 18257 nodes
+      # against 18237, and the field statistics follow the mesh - velocity_y's l2 by 0.51 %, the
+      # near-zero tracer l2 on the cylinder by 0.43 %. A refinement criterion that is evaluated per
+      # partition is a different criterion, so there is nothing here for a tolerance to fix.
+      Fingerprint(skip_under=("mpi",),
+                  reason="the adaptation stops at a different mesh over four ranks: 74167 dofs "
+                         "against 74146"),
+      Fingerprint(index=1, skip_under=("mpi",),
+                  reason="the adaptation stops at a different mesh over four ranks: 18257 nodes "
+                         "against 18237"),
+  ],
+  "SpatioTemporal_PDEs/moffatt_eddies.py": [
+      # Likewise two, one per corner angle k.
+      #
+      # Serially only: one of the two adaptive scripts in these two chapters whose refinement is
+      # RANK-dependent (heated_cylinder above is the other). Over four ranks it stopped at 73740
+      # dofs against 73705, 35 more, and every field statistic follows from the different mesh -
+      # the pressure l2 by 1.1e-4, its mean by 1.3 %, and problem 1's near-zero pressure mean by a
+      # factor of four. Not a tolerance problem: a different mesh is a different discretisation.
+      #
+      # Worth recording that the two are the exception. convdiffu_simple, marangoni_instability,
+      # navier_stokes, lubrication_coalescence, laplace_smoothed_mesh and cantilever all adapt too
+      # and all came through the four-rank pass untouched, so rank-dependent refinement is not a
+      # general property of the adaptation - which is why it is excused on these two rather than
+      # the counts being dropped from every adaptive entry.
+      Fingerprint(skip_under=("mpi",),
+                  reason="the adaptation stops at a different mesh over four ranks: 73740 dofs "
+                         "against 73705"),
+      Fingerprint(index=1, skip_under=("mpi",),
+                  reason="the adaptation stops at a different mesh over four ranks"),
+  ],
+  "SpatioTemporal_PDEs/kuramoto_sivanshinsky.py": [
+      # This script starts from a DIFFERENT INITIAL CONDITION on every run, and that - not round-off
+      # amplified by chaos - is why nothing in its final state can be pinned. The initial condition
+      # is a DeterministicRandomField with no seed= passed, and "deterministic" there means only
+      # that evaluating the field twice at the same point agrees (which pyoomph requires of any
+      # CustomMathExpression); the cloud itself is redrawn per run. The script writes no observable
+      # series to fall back on either, vtu only.
+      #
+      # So each run samples the L=50 attractor from an independent start, and what the fingerprint
+      # would compare is an ensemble, not a trajectory. Measured over eight runs: h's l2 spreads by
+      # 23 % of itself, its max by 22 % and its mean by 8.5 % of the field's extent, and the
+      # boundary lines are worse still (left/h's max by 55 %). Meanwhile every per-group node count
+      # and ndof came out identical in all eight.
+      #
+      # Eight and not two deliberately. The first pair of runs happened to agree to 4.4e-05 on h's
+      # l2, which would have justified pinning it at rtol=1e-3 with apparent margin; the spread is
+      # four orders of magnitude wider than that pair showed. Two runs cannot bound the spread of a
+      # quantity whose distribution is the thing being measured - the same trap as
+      # Moving_Mesh/beads_on_string.py's bimodal max(z_min).
+      #
+      # ndof is therefore all that is compared, and it is worth keeping: the mesh is fixed, so it
+      # says the run was set up and reached the end. That is a weak check and is meant to read as
+      # one. Seeding the field would make this script fully checkable, but a tutorial is
+      # documentation and is not rewritten to suit its test.
+      Fingerprint(only=["ndof"],
+                  reason="an unseeded DeterministicRandomField initial condition, so every run "
+                         "starts from a different state; over eight runs h's l2 spreads by 23 %"),
+  ],
+  "SpatioTemporal_PDEs/kuramoto_sivanshinsky_bifurcation.py": [
+      # A fold of the hexagonal state, continued in delta and gamma. The parameters at the fold are
+      # the answer, and they are what the fingerprint records alongside the critical eigenvalue.
+      Evolution("hexfold.txt", match="rows", reason="a continuation, so the first column does not grow"),
+      # The script ends in the AUGMENTED fold-tracking state, so the dof vector carries the null
+      # eigenvector as well: the "(not described)" group is its 7614 components plus the one
+      # continuation unknown (which is why that group's max is exactly gamma). A null eigenvector is
+      # defined only up to sign, and over four ranks it came out with the other one - measured, not
+      # inferred: the sum of its components is +4.981098 serially and -4.981063 there, a ratio of
+      # -0.999993, and the group's min moved from -0.10261 to -0.08665, which is precisely the
+      # negated positive extreme. So min, max and mean of that group say which sign the eigensolver
+      # happened to return, and nothing about the fold.
+      #
+      # l2 and n are kept, because neither depends on the orientation: l2 is exactly invariant under
+      # a sign flip and n is structural. Skipped unconditionally rather than skip_under=("mpi",) -
+      # the sign is not a property of the rank count, and another BLAS would be as free to flip it.
+      # Everything that IS the answer stays compared: delta and gamma at the fold, the critical
+      # eigenvalue, ndof, and both physical fields, all of which came through the four-rank pass.
+      #
+      # kuramoto_sivanshinsky_arclength_eigen.py needs none of this: it ends on a plain state and
+      # has no unnamed group at all.
+      Fingerprint(skip=["dofs.(not described).min",
+                        "dofs.(not described).max",
+                        "dofs.(not described).mean"],
+                  reason="a null eigenvector is defined only up to sign, and over four ranks the "
+                         "eigensolver returned the other one (component sum ratio -0.999993)"),
+  ],
+  "SpatioTemporal_PDEs/kuramoto_sivanshinsky_arclength_eigen.py": [
+      # gamma, h_rms, and the real and imaginary parts of the critical eigenvalue along the branch.
+      # Serially that reproduces exactly; across rank counts the eigenvalue does not. Measured
+      # against four ranks: Re(eigenvalue) came out 0.00370 where the reference holds 0.00428, which
+      # is 1.85 % of that column's whole range (-0.0311..0.0164) - the accuracy of a near-zero
+      # eigenvalue of a 7614-dof system, not a drift. No tolerance should cover that and still be a
+      # check, so the strong serial comparison is kept and the MPI pass leaves this one to the
+      # fingerprint, which does hold there.
+      Evolution("hexdots.txt", match="rows", skip_under=("mpi",),
+                reason="a continuation, so the first column does not grow; and the critical "
+                       "eigenvalue moves by ~2 % of its range across rank counts"),
+      Fingerprint(),
+  ],
+  "SpatioTemporal_PDEs/viscoelastic_cylinder.py": [
+      # The best-anchored check in the tutorial: cylinder_drag.txt holds the drag on the confined
+      # cylinder at Wi = 0.1, 0.5 and 0.7 (the three rows of Claus & Phillips 2013 Fig. 12), and
+      # their Table 3, P=18 column gives 130.364 at Wi=0.1. tests/test_viscoelastic_cylinder.py
+      # measures this mesh at +0.013 % to +0.187 % of those values over Wi=0.1..0.5, so what the
+      # reference pins here is a published benchmark and not just yesterday's output.
+      #
+      # match="rows": the three rows are stationary solves at successive Wi, so the time column
+      # stands still and there is no abscissa to look an instant up by.
+      Evolution("cylinder_drag.txt", match="rows",
+                reason="three stationary solves at successive Wi, so the time column stands still"),
+      Fingerprint(),
+  ],
+
+  # ===============================================================================================
+  # Moving_Mesh: the mesh positions are unknowns too, so the fingerprint's coordinate dof types are
+  # part of the solution rather than background. Four of these remesh mid-run, which changes ndof
+  # while the script is running; their entries say what that costs.
+  # ===============================================================================================
+
+  "Moving_Mesh/ALE_correction.py": [
+      Fingerprint(),
+  ],
+  "Moving_Mesh/free_surface.py": [
+      Fingerprint(),
+  ],
+  "Moving_Mesh/laplace_smoothed_mesh.py": [
+      # The smoother IS the script: what it produces is the node positions, which are dofs here, so
+      # the coordinate groups' extents are the thing being checked.
+      Fingerprint(),
+  ],
+  "Moving_Mesh/solid_oscillations.py": [
+      Fingerprint(),
+  ],
+  "Moving_Mesh/cantilever.py": [
+      # Loaded by the global parameter P, whose value the fingerprint records with the deflection.
+      Fingerprint(),
+  ],
+  "Moving_Mesh/compressed_disc.py": [
+      # disc_output.txt is a compression sweep: P against the numerically computed radius AND the
+      # linear-theory prediction, side by side. Comparing it therefore checks the two against each
+      # other as well as against the reference, which is what the script is for. P is set by the
+      # script and grows, so the abscissa is exact.
+      Evolution("disc_output.txt"),
+      Fingerprint(),
+  ],
+  "Moving_Mesh/remeshing.py": [
+      Fingerprint(),
+  ],
+  "Moving_Mesh/beads_on_string.py": [
+      # The interface shape after the beads have formed, and the minimum radius over the run. The
+      # series is reduced rather than matched: this script is adaptive in time AND remeshes, so its
+      # instants are a property of the machine while min(r_min) - how far the neck thinned - is not.
+      # Two runs of this script agree on the interface reductions only to about 1e-5 - measured, by
+      # running it twice: it is adaptive in time AND remeshes, and a remesh decision near the bead
+      # necks flips on round-off. 1e-3 is therefore the honest tolerance here, and it still catches
+      # a bead that forms in the wrong place.
+      FinalState("liquid__interface_*.txt", rtol=1e-3,
+                 reason="two runs agree to ~1e-5 on these reductions; the script remeshes and the "
+                        "decision near a neck flips on round-off"),
+      # minimum.txt is deliberately NOT checked, and it took three attempts to establish why.
+      # Reducing the whole series fails because an adaptive run writes a machine-dependent number of
+      # rows (the l2 of z_min moved by 3.3 %), so that was narrowed to the extremes - and the
+      # extremes are bimodal: over five repeats max(z_min) came out 21.0198 three times and
+      # 18.8496 twice, nothing in between. z_min is the axial POSITION of the thinnest neck, and a
+      # beads-on-string jet has several necks competing for that title, so which one wins is a
+      # discrete choice that round-off decides. No tolerance covers a discrete branch, and widening
+      # one to 11 % would not be a check any more.
+      #
+      # The two checks above cover the physics regardless: the interface shape is what the script
+      # produces, and the fingerprint carries the whole state.
+      # The fingerprint gets the same 1e-3 as the interface, and for the same measured reason. At
+      # the default 1e-5 it sat exactly on this script's reproducibility and failed intermittently:
+      # liquid/bottom/log_conformation_xy.l2 came out 1.47e-5 apart on one repeat, which is the
+      # script's own run-to-run spread and not a drift. Note that the field-scale rule does not help
+      # there and should not - an l2 IS the field's scale, so the comparison on it is already the
+      # right question; what was wrong was the tolerance.
+      Fingerprint(rtol=1e-3,
+                  reason="two runs agree to ~1e-5 at best; the script remeshes and is adaptive in "
+                         "time, so a decision near a neck flips on round-off"),
+  ],
+  "Moving_Mesh/rayleigh_plateau.py": [
+      # Pinch-off is a finite-time singularity, and it amplifies ONE ULP. Measured over four runs on
+      # one machine: they agree bit-for-bit for 148 rows of minimum.txt (to t=8.6259), differ by
+      # 2.44e-16 there, exceed 1e-6 relative one row later and 1e-3 by t=8.76, and finish with a
+      # deepest neck radius spread across 0.000379..0.000400 - 5 %. The final state is worse still:
+      # two runs remeshed differently, 299 dofs of mesh_y against 433. So neither the reduced series
+      # nor the final fingerprint is reproducible on a single machine, and no tolerance would make
+      # them mean anything.
+      #
+      # What IS reproducible is everything before the singularity, and exactly - the instants
+      # included, which is why match="exact" works there. That is the whole check. There is
+      # deliberately no Fingerprint: the state it would record is past the singularity.
+      # ...and serially only. Over four ranks the adaptive stepper lands on different instants even
+      # before the singularity - 10 of the 64 stored ones were missing, the worst 5.8e-07 away - so
+      # the lookup match="exact" rests on does not hold there. Excused rather than switched to
+      # match="interp", which would weaken the serial comparison everywhere to buy an MPI one.
+      Evolution("minimum.txt", until_time=8.5, skip_under=("mpi",),
+                reason="past t=8.63 the pinch-off singularity amplifies one ULP to 5 % within 80 "
+                       "rows (measured over four runs), and across rank counts the adaptive "
+                       "instants themselves shift by ~6e-7"),
+  ],
+  "Moving_Mesh/rayleigh_plateau_pinchoff.py": [
+      # The two quantities that make this script the topology test it is: max of the fragment count
+      # (how many drops the jet broke into) and the bounds on volume (which the surgery must
+      # conserve). Both fall out of reducing the columns, and both are invariant under the adaptive
+      # time grid - which matching rows would not be.
+      #
+      # stats=("min","max") although this script came out fully reproducible here (112 of 112
+      # fingerprint keys and all 71 rows bit-identical over two runs): the row count of an adaptive
+      # run is not something one machine can promise, and the mean, the l2 and the count would carry
+      # that straight into a cross-platform failure. The extremes are what the check is about.
+      FinalState("pinchoff.txt", stats=("min", "max"),
+                 reason="the row count of an adaptive run is machine-dependent even where this one "
+                        "reproduced exactly here"),
+      # The final state is past the pinch-off, so it is rank-dependent: over four ranks 76 of the
+      # fingerprint's entries moved, up to 0.44 % on mesh_x's l2. The reduced extremes above came
+      # through that pass untouched, which is the whole argument for reducing a series rather than
+      # pinning the state it ends in - max(fragments) and the bounds on volume are the same on one
+      # rank and on four.
+      Fingerprint(skip_under=("mpi",),
+                  reason="the state after a topological surgery is rank-dependent; 76 entries "
+                         "moved over four ranks, up to 0.44 %"),
+  ],
+  # The droplet-spreading family. Each varies one ingredient - the slip length, free slip, a
+  # hyperelastic tangential shift, Marangoni plus gravity - on the same spreading drop, so what
+  # distinguishes them is the contact-line position and the interface shape, i.e. the coordinate dof
+  # groups the fingerprint separates out.
+  "Moving_Mesh/droplet_spread_sliplength.py": [
+      Fingerprint(),
+  ],
+  "Moving_Mesh/droplet_spread_free_slip.py": [
+      Fingerprint(),
+  ],
+  "Moving_Mesh/droplet_spread_hyperelastic_tangential_shift.py": [
+      Fingerprint(),
+  ],
+  "Moving_Mesh/droplet_spread_marangoni_and_gravity.py": [
+      # Continued in its parameters, so contact_angle, gravity_factor and sigma_gradient are the
+      # answer as much as the shape is - and all three come out bit-identical between runs.
+      #
+      # The pressure does not, and the measurement says why rather than how much: over two runs
+      # EVERY pressure group shifted by exactly the same constant, -0.414154 on its min, its max and
+      # its mean alike, and volume_constraint/volume_lagrange shifted by -0.414155. The pressure
+      # level and that multiplier are one degree of freedom, and the solve lands anywhere along it -
+      # a near-nullspace, not a drift. Everything else agrees to 1e-10 or better (the mesh
+      # coordinates to 1e-15, the velocities to 1e-10), so skipping the gauge costs nothing and
+      # pinning it would pin an arbitrary choice.
+      #
+      # Worth a look independently of this check: a volume constraint is supposed to DETERMINE that
+      # level, so the pair being free suggests the constraint is degenerate here.
+      Fingerprint(skip=["dofs.*pressure*", "dofs.volume_constraint/*"],
+                  reason="the pressure level and the volume Lagrange multiplier are one gauge "
+                         "freedom - measured as an identical -0.414154 shift of every pressure "
+                         "group's min, max and mean"),
+  ],
+  "Moving_Mesh/droplet_spread_3d.py": [
+      # The only 3d script in these two chapters, 36 dof groups.
+      Fingerprint(),
+  ],
 }

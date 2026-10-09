@@ -1,0 +1,23 @@
+{
+ "_about": "Reference numbers for SpatioTemporal_PDEs/wave_eq_drums.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/u": {
+     "l2": 24.150018142569735,
+     "max": 0.5189712618001359,
+     "mean": -2.3604906278026515e-16,
+     "min": -0.5189712618001356,
+     "n": 12161
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 12161,
+   "params": {},
+   "time": 20.000001
+  }
+ }
+}
