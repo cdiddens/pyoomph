@@ -78,6 +78,13 @@ _pyoomph_run_.txt
 *.whl
 *.code-workspace
 *.json
+# Committed reference numbers for the tutorial validation, compared by
+# citools/test_all_tutorial_scripts.py after each script runs. Same situation as
+# pyoomph/materials/csv_data above - but AFTER the blanket rule it undoes, because the last
+# matching pattern is the one git honours. Without it the data would be dropped silently, and a
+# validation that finds no reference data does not fail: it reports the script as unchecked, so
+# the loss would be invisible.
+!citools/tutorial_validation/data/**/*.json
 *.layout
 *.cbp
 .vscode/

@@ -1,0 +1,33 @@
+{
+ "_about": "Reference numbers for Temporal_ODEs/pendulum_gencoord_eigenvalues.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "pendulum/phi": {
+     "l2": 3.141592653589793,
+     "max": 3.141592653589793,
+     "mean": 3.141592653589793,
+     "min": 3.141592653589793,
+     "n": 1
+    },
+    "pendulum/psi": {
+     "l2": 0.0,
+     "max": 0.0,
+     "mean": 0.0,
+     "min": 0.0,
+     "n": 1
+    }
+   },
+   "eigenvalues": [
+    [-1.0, 0.0],
+    [1.0, 0.0]
+   ],
+   "mpi_size": 1,
+   "ndof": 2,
+   "params": {},
+   "time": 0.0
+  }
+ }
+}

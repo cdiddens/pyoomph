@@ -1,0 +1,50 @@
+{
+ "_about": "Reference numbers for Temporal_ODEs/bifurcation_hopf_tracking_lorenz.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "(not described)": {
+     "l2": 51.33830179618753,
+     "max": 49.88427255312708,
+     "mean": 7.815771721413028,
+     "min": -0.9551546615305465,
+     "n": 8
+    },
+    "lorenz/x": {
+     "l2": 11.417445429765472,
+     "max": -11.417445429765472,
+     "mean": -11.417445429765472,
+     "min": -11.417445429765472,
+     "n": 1
+    },
+    "lorenz/y": {
+     "l2": 11.417445429765472,
+     "max": -11.417445429765472,
+     "mean": -11.417445429765472,
+     "min": -11.417445429765472,
+     "n": 1
+    },
+    "lorenz/z": {
+     "l2": 48.88427255312708,
+     "max": 48.88427255312708,
+     "mean": 48.88427255312708,
+     "min": 48.88427255312708,
+     "n": 1
+    }
+   },
+   "eigenvalues": [
+    [0.0, 12.055799094324355]
+   ],
+   "mpi_size": 1,
+   "ndof": 11,
+   "params": {
+    "beta": 2.6666666666666665,
+    "rho": 49.88427255312708,
+    "sigma": 4.619086872889945
+   },
+   "time": 3.2
+  }
+ }
+}

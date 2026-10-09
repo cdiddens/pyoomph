@@ -1068,6 +1068,8 @@ class Problem(_pyoomph.Problem):
         self._log_start_time=None
         #: Guards against writing the elapsed-time log footer twice (release() vs. the atexit fallback)
         self._log_footer_written=False
+        #: Same, for the $PYOOMPH_VALIDATION_DUMP fingerprint (see _write_validation_dump)
+        self._validation_dump_written=False
         #: Checks whether the elements in the meshes are nicely oriented (facing) so that refinement works as it should. Can be only done once initially or at each refinement step
         self.check_mesh_integrity:bool | Literal["initially"]="initially"
 
@@ -1648,6 +1650,10 @@ class Problem(_pyoomph.Problem):
         if self._released:
             return
         self._released=True
+        # Before anything is torn down: the fingerprint is read off the dof vector, and the loop
+        # below drops the meshes it lives in. _write_log_footer(), at the other end of release(),
+        # is far too late for it.
+        self._write_validation_dump()
         self._shutdown_dedicated_plotter()
         for m in self._meshdict.values():
             if not isinstance(m,ODEStorageMesh):
@@ -4759,6 +4765,113 @@ class Problem(_pyoomph.Problem):
         _pyoomph._write_to_log_file(os.linesep)
 
 
+    def _collect_validation_fingerprint(self)->"dict[str,Any]":
+        """The reduced description of the current state that _write_validation_dump() writes."""
+        dofs,_pinned=self.get_current_dofs()
+        values=numpy.asarray(dofs,dtype=float)
+        # quiet: a handler installed at the end of the run leaves rows this walk cannot name, and
+        # that is expected here - they are collected as "(not described)" below. Without this the
+        # fingerprint would print two lines into the stdout of every tutorial that ends inside a
+        # bifurcation tracker, which is output the harness also reads.
+        types,names=self.get_dof_description(quiet=True)
+        types=numpy.asarray(types,dtype=numpy.int64)
+        n=min(len(values),len(types))
+        values,types=values[:n],types[:n]
+        bytype:dict[str,Any]={}
+        # Type -1 is "not described": get_dof_description() is sized by ndof(), which is the
+        # AUGMENTED count while a bifurcation/orbit handler is installed, and its walk fills the
+        # base entries alone. Those rows are a group of their own rather than silently dropped -
+        # their count alone already tells a reader which handler was still on at the end.
+        for index,name in enumerate(list(names)+[None]):
+            sel=values[types==(index if name is not None else -1)]
+            if not len(sel):
+                continue
+            key=str(name) if name is not None else "(not described)"
+            bytype[key]={"n":int(len(sel)),"min":float(numpy.min(sel)),"max":float(numpy.max(sel)),
+                         "mean":float(numpy.mean(sel)),"l2":float(numpy.sqrt(numpy.sum(sel*sel)))}
+        params:dict[str,float]={}
+        for pname in sorted(self.get_global_parameter_names()):
+            try:
+                params[pname]=float(self.get_global_parameter(pname).value)
+            except Exception:
+                pass # a parameter carrying something that is not a plain float says nothing here
+        # Sorted, so that an eigensolver returning the same spectrum in another order - which SLEPc
+        # and the built-in spectra backend routinely do - is not reported as a different answer.
+        eigen=[[float(numpy.real(ev)),float(numpy.imag(ev))] for ev in self.get_last_eigenvalues()]
+        eigen.sort()
+        return {"ndof":int(self.ndof()),
+                "time":float(self.get_current_time(dimensional=False,as_float=True)),
+                "params":params,
+                "eigenvalues":eigen,
+                "dofs":bytype,
+                # Recorded so that a comparison can tell the modes apart: with a mesh distributed
+                # over the ranks AND a handler installed, the gathered vector is interleaved per
+                # rank and the per-type grouping above is not trustworthy.
+                "mpi_size":int(get_mpi_nproc()),
+                "distributed":bool(self.is_distributed())}
+
+    def _write_validation_dump(self,from_atexit:bool=False):
+        """Append a reduced fingerprint of the current state to the output directory.
+
+        Only when $PYOOMPH_VALIDATION_DUMP is set, i.e. never during an ordinary run. This is what
+        citools/test_all_tutorial_scripts.py compares a tutorial script against: those scripts
+        carry no validation code of their own - they are documentation, and an assertion in the
+        middle of one is just noise to a reader - and 29 of them write no data file at all, so
+        this is the only place their numbers can be read from.
+
+        Reductions, deliberately, and never the dof vector itself: min/max/mean/l2 per dof TYPE
+        (the names get_dof_description() hands out, e.g. "domain/u") do not change when the dofs
+        are reordered, which is what lets one committed reference serve a serial run, an
+        "mpirun -n 4" run and a run whose mesh adaptation renumbered everything. The global
+        parameter values matter at least as much as the fields: for the fold/Hopf/pitchfork
+        trackers and the arclength continuations, the answer IS a parameter value.
+
+        Called at the top of release(), and from an atexit fallback for the scripts that never
+        reach release() at all - the same pair of paths, and the same weakref, as the
+        elapsed-time log footer.
+        """
+        # Every early exit here has to be taken by EVERY rank or by none: the collection below is
+        # collective, and a condition that differs per rank would leave some ranks inside an
+        # MPI call and the rest past it. These three do not differ - the environment is inherited,
+        # and the other two are properties of the problem.
+        if self._validation_dump_written or not os.environ.get("PYOOMPH_VALIDATION_DUMP"):
+            return
+        if not self.is_initialised() or self._outdir is None:
+            return
+        if from_atexit and get_mpi_nproc()>1:
+            # Not from atexit under MPI. release() is reached by every rank at the same point of
+            # the script, so a collective is safe there; interpreter shutdown is not - the ranks
+            # arrive at their own pace, one may already have finalised MPI or died, and a collective
+            # entered by some of them is a hang at the end of the job rather than a diagnostic.
+            # A script that never releases its Problem therefore has no fingerprint in the MPI pass,
+            # which the harness reports as an unchecked script.
+            self._validation_dump_written=True
+            print("PYOOMPH_VALIDATION_DUMP: no fingerprint - this problem was never released, and "
+                  "collecting one at interpreter exit is not safe under MPI")
+            return
+        self._validation_dump_written=True
+        try:
+            # On ALL ranks: get_current_dofs() gathers and get_dof_description() merges its
+            # per-rank answers, so both are collective and rank 0 alone cannot enter them.
+            record=self._collect_validation_fingerprint()
+        except Exception as e:
+            # A diagnostic must never be the reason a script fails. Say what went wrong - a silent
+            # miss would show up much later as "no reference data" on a script that has some.
+            print("PYOOMPH_VALIDATION_DUMP: no fingerprint written ("+str(e)+")")
+            return
+        # ...but only rank 0 writes, like the log file: after the gather every rank holds the same
+        # answer, so letting all of them write would put N copies of it into one file.
+        if get_mpi_rank()>0:
+            return
+        try:
+            # One JSON object per line, APPENDED: a script may build several problems one after
+            # another, and a few of them point two problems at the same output directory.
+            with open(os.path.join(self._outdir,"_pyoomph_validation.jsonl"),"a") as vf:
+                vf.write(json.dumps(record,sort_keys=True)+"\n")
+        except OSError as e:
+            print("PYOOMPH_VALIDATION_DUMP: no fingerprint written ("+str(e)+")")
+
+
     def _write_log_footer(self):
         # Idempotent: the footer must be written exactly once, whether we get here via
         # release() (with-block/explicit call) or via the atexit fallback registered in
@@ -4829,6 +4942,17 @@ class Problem(_pyoomph.Problem):
                     _p._write_log_footer()
             atexit.register(_log_footer_atexit)
 
+        # Same fallback for the validation fingerprint, but not tied to the log file: a script run
+        # with logfile_name=None still has a state worth recording. Registered here rather than in
+        # release() for the same reason as above - a plain script never gets there.
+        if os.environ.get("PYOOMPH_VALIDATION_DUMP"):
+            import atexit, weakref
+            _vself_ref=weakref.ref(self)
+            def _validation_dump_atexit():
+                _p=_vself_ref()
+                if _p is not None:
+                    _p._write_validation_dump(from_atexit=True)
+            atexit.register(_validation_dump_atexit)
 
         if self._runmode=="continue":
             # Resolve --where here and not at the load further down: reading a state header touches
@@ -5713,7 +5837,7 @@ class Problem(_pyoomph.Problem):
             return doflist
         return get_mpi_elementwise_max(doflist)
 
-    def get_dof_description(self):
+    def get_dof_description(self,quiet:bool=False):
         """
         Returns two arrays containing the description of the degrees of freedom.
         The first is a list of dof-type indices, where the i-th entry is the type of the i-th degree of freedom.
@@ -5726,6 +5850,12 @@ class Problem(_pyoomph.Problem):
         dofs its own elements reach, so the per-rank answers are merged and every rank returns the same
         full-length description - which is what the callers need, since the residual vector they index
         it with is gathered as well.
+
+        Args:
+            quiet: Suppress the notes about dofs this walk could not describe. Those notes are
+                worth having when a caller asked about a problem it believes to be plain, but not
+                when it knows a handler is installed and treats the undescribed rows as a group of
+                their own (see Problem._collect_validation_fingerprint).
 
         Returns:
             A pair of arrays containing the dof-type indices and the type names to classify the degrees of freedom.
@@ -5766,7 +5896,8 @@ class Problem(_pyoomph.Problem):
 
         if numpy.any(doflist<0): #type:ignore
             if self.get_bifurcation_tracking_mode()=="azimuthal":
-                print("DOING AZIMUTHAL PATCHING",self.ndof())
+                if not quiet:
+                    print("DOING AZIMUTHAL PATCHING",self.ndof())
                 num_unassigned=len(numpy.argwhere(doflist<0))
                 num_assigned=len(doflist)-num_unassigned
                 
@@ -5794,7 +5925,7 @@ class Problem(_pyoomph.Problem):
                 if has_imag:
                     doflist[2*N_base:3*N_base]=doflist[:N_base]+2*dof_base
             # TODO: Other handlers
-            else:                
+            elif not quiet:
                 print("UNASSIGNED DOF IN DOFLIST")
                 print("NUM:",len(numpy.argwhere(doflist<0)),"of",len(doflist)) #type:ignore
 

@@ -860,6 +860,8 @@ PASS_SECS=()
 PASS_FAILURES=()
 PASS_SKIPS=()
 PASS_SELFSKIPS=()
+PASS_VALIDATED=()
+PASS_NOTVALIDATED=()
 PASS_BAD=()
 PASS_LOG=()
 PASS_LOGDIR=()
@@ -901,6 +903,14 @@ run_tutorial_pass() { # label, tag, timeout, extra arguments for the runner
     # Reported for the same reason: the MPI pass covers slightly less than the serial one.
     selfskips="$(grep -E '^ +SKIPPING .* -- ' "$log" 2>/dev/null | sed 's/^ *//' | sort -u)"
 
+    # Coverage of a second kind: how many scripts were not only run but had their numbers compared
+    # against citools/tutorial_validation/data. A pass where nothing was validated looks exactly
+    # like one where everything was, unless this is said out loud. The runner prints both counts
+    # (see its "VALIDATED AGAINST REFERENCE DATA" section); a mismatch itself needs nothing here,
+    # it is already a FAILED line that the grep above picks up.
+    valid="$(grep -E '^VALIDATED AGAINST REFERENCE DATA: ' "$log" 2>/dev/null | tail -n 1 | sed 's/^VALIDATED AGAINST REFERENCE DATA: *//')"
+    notvalid="$(grep -E '^NOT VALIDATED: ' "$log" 2>/dev/null | tail -n 1 | sed 's/^NOT VALIDATED: *//')"
+
     # "TIME <seconds> s <folder>/<script>" per script, from the runner's SIMULATION TIMES section:
     # the elapsed time each run recorded for itself, which is what makes the serial and the mpirun
     # pass comparable at all. The full table is kept on disk; the mail only names the slowest few.
@@ -931,6 +941,8 @@ run_tutorial_pass() { # label, tag, timeout, extra arguments for the runner
     PASS_FAILURES+=("$failures")
     PASS_SKIPS+=("$skips")
     PASS_SELFSKIPS+=("$selfskips")
+    PASS_VALIDATED+=("$valid")
+    PASS_NOTVALIDATED+=("$notvalid")
     PASS_BAD+=("$bad")
     PASS_LOG+=("$log")
     PASS_LOGDIR+=("$logdir")
@@ -1088,6 +1100,11 @@ if [ "$BUILD_RC" -eq 0 ]; then
         if [ -n "${PASS_SELFSKIPS[$i]}" ]; then
             say "  not run in the ${PASS_LABELS[$i]} pass (the runner excludes them there):"
             printf '%s\n' "${PASS_SELFSKIPS[$i]}" | sed 's/^/    /' >>"$REPORT"
+        fi
+    done
+    for i in "${!PASS_LABELS[@]}"; do
+        if [ -n "${PASS_VALIDATED[$i]:-}" ]; then
+            say "  ${PASS_LABELS[$i]} pass, checked against reference data: ${PASS_VALIDATED[$i]}${PASS_NOTVALIDATED[$i]:+, unchecked: ${PASS_NOTVALIDATED[$i]%%:*}}"
         fi
     done
 fi

@@ -1,0 +1,35 @@
+{
+ "_about": "Reference numbers for Temporal_ODEs/bifurcation_eigenvalues_transcritical.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "transcritical/x": {
+     "l2": 1.0000000002328306,
+     "max": 1.0000000002328306,
+     "mean": 1.0000000002328306,
+     "min": 1.0000000002328306,
+     "n": 1
+    }
+   },
+   "eigenvalues": [
+    [-1.0000000004656613, 0.0]
+   ],
+   "mpi_size": 1,
+   "ndof": 1,
+   "params": {
+    "r": 1.0
+   },
+   "time": 0.0
+  }
+ },
+ "stdout:stationary solution x=([-\\d.eE+]+) with r=([-\\d.eE+]+)": {
+  "kind": "stdout",
+  "matches": [
+   [-1.0040100200183632e-12, 1.0],
+   [1.0000000002328306, 1.0]
+  ],
+  "pattern": "stationary solution x=([-\\d.eE+]+) with r=([-\\d.eE+]+)"
+ }
+}

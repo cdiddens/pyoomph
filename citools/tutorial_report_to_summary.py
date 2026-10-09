@@ -48,6 +48,14 @@ from pathlib import Path
 
 _MARK = {"passed": ":white_check_mark:", "failed": ":x:", "skipped": ":fast_forward:"}
 
+# Whether a script was also checked NUMERICALLY, not just run. "ok" and "mismatch" are the two
+# that say something about the physics; the rest say why no comparison happened, and a dash keeps
+# the column quiet on a pass where validation was off wholesale.
+_VALIDATION = {"ok": ":heavy_check_mark:", "mismatch": ":x:", "no-reference": "no ref. data",
+               "no-spec": "no spec", "updated": "written", "update-failed": ":x: not written",
+               "skipped": "skipped here",
+               "proposed": "proposed", "off": "-"}
+
 
 def seconds(value):
     return "-" if value is None else "%.1f" % value
@@ -56,13 +64,15 @@ def seconds(value):
 def row(rec):
     name = rec["folder"] + "/" + rec["script"]
     note = rec.get("note") or ""
-    return "| %s %s | `%s` | %s | %s | %s |" % (
+    val = rec.get("validation")
+    return "| %s %s | `%s` | %s | %s | %s | %s |" % (
         _MARK.get(rec["status"], ""), rec["status"], name,
-        seconds(rec.get("wall_seconds")), seconds(rec.get("sim_seconds")), note)
+        seconds(rec.get("wall_seconds")), seconds(rec.get("sim_seconds")),
+        "" if val is None else _VALIDATION.get(val, val), note)
 
 
-HEADER = ["| Result | Script | Wall (s) | Simulation (s) | Note |",
-          "| --- | --- | ---: | ---: | --- |"]
+HEADER = ["| Result | Script | Wall (s) | Simulation (s) | Validated | Note |",
+          "| --- | --- | ---: | ---: | :-: | --- |"]
 
 
 def main():
@@ -100,6 +110,17 @@ def main():
     out.append("")
     out.append("Total %.0f s wall, of which %.0f s inside the simulations "
                "(the rest is interpreter start-up and imports, once per script)." % (total_wall, total_sim))
+
+    # Running a script and checking its answer are two different kinds of coverage, and a page that
+    # reports only the first reads as though the second had happened too.
+    val = report.get("validation") or {}
+    if val.get("mode") == "compare":
+        out.append("")
+        out.append("Validated against reference data: **%d** script(s); %d ran unchecked."
+                   % (val.get("validated", 0), val.get("not_validated", 0)))
+    elif val.get("off_because"):
+        out.append("")
+        out.append(":warning: No numerical validation in this pass - %s." % val["off_because"])
 
     for problem in report.get("bundle_problems", []):
         out.append("")

@@ -1,0 +1,39 @@
+{
+ "_about": "Reference numbers for Temporal_ODEs/hopf_switch.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "lorenz/x": {
+     "l2": 6.71795038288322,
+     "max": 6.71795038288322,
+     "mean": 6.71795038288322,
+     "min": 6.71795038288322,
+     "n": 1
+    },
+    "lorenz/y": {
+     "l2": 1.4831267737784888,
+     "max": 1.4831267737784888,
+     "mean": 1.4831267737784888,
+     "min": 1.4831267737784888,
+     "n": 1
+    },
+    "lorenz/z": {
+     "l2": 20.668339570543054,
+     "max": 20.668339570543054,
+     "mean": 20.668339570543054,
+     "min": 20.668339570543054,
+     "n": 1
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 3,
+   "params": {
+    "rho": 14.669079941957884
+   },
+   "time": 0.0
+  }
+ }
+}

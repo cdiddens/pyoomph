@@ -53,6 +53,14 @@ parser.add_argument("--extra-arg", action="append", default=[], metavar="ARG", h
 parser.add_argument("--only", action="append", default=[], metavar="SUBSTRING", help="Run only the scripts whose 'Folder/script.py' path contains one of these substrings. Repeatable. Folders with no match are skipped entirely")
 # Folders to skip used to be read from sys.argv directly, which stopped working when argparse was
 # added - argparse rejects any positional argument it does not know about.
+# Numerical validation against the reference data in citools/tutorial_validation/data. Running a
+# script is not the same as checking it: a flipped sign in a weak form, a regressed time integrator
+# or an eigensolver converging to the wrong mode all exit 0. On by default, so that the nightly and
+# the GitHub workflow gain the coverage without a config change; a script with no spec entry in
+# citools/tutorial_validation/specs.py is reported as uncovered, not as a failure.
+parser.add_argument("--no-validation", help="Do not compare any script against its reference data, only check that it runs", action="store_true")
+parser.add_argument("--update-validation", help="Write the reference data from THIS run instead of comparing against it. Review the diff before committing - a changed number is either a bug or a deliberate change of what the tutorial computes, and widening a tolerance is not the answer to either", action="store_true")
+parser.add_argument("--propose-validation", help="Print a ready-to-paste citools/tutorial_validation/specs.py entry for each script: the data files its run left behind, and what its state fingerprint has to offer. Nothing is compared or written", action="store_true")
 parser.add_argument("skips", nargs="*", help="Bundle folders to skip, e.g. Temporal_ODEs")
 args = parser.parse_args()
 
@@ -334,6 +342,20 @@ def petsc_pythonpath(arch,varname):
       return cand
   raise FileNotFoundError("No petsc4py found for $%s=%s - looked in %s"%(varname,arch,", ".join(str(c) for c in candidates)))
 
+def with_validation_dump(env):
+  """Ask every Problem the script builds to leave a state fingerprint behind.
+
+  See Problem._write_validation_dump: it appends one JSON record per problem to
+  _pyoomph_validation.jsonl inside that problem's own output directory. For 29 of the tutorial
+  scripts that is the only numerical artefact there is, and it is what carries the global parameter
+  values, i.e. the answer of every fold, Hopf, pitchfork and arclength script.
+  """
+  if validation_mode=="off":
+    return env
+  env=dict(os.environ) if env is None else dict(env)
+  env["PYOOMPH_VALIDATION_DUMP"]="1"
+  return env
+
 def env_with_petsc(petscdir):
   env=dict(os.environ)
   # Prepended, not replaced: PYTHONPATH is where the tutorial bundle's own helper modules can live.
@@ -393,6 +415,42 @@ if not args.no_petsc:
   print("Complex PETSc:    ",env_complex["PYTHONPATH"].split(os.pathsep)[0],"(normal-mode stability and periodic-orbit scripts only)")
 
 
+# citools/tutorial_validation, i.e. the package next to this file. By absolute path rather than
+# relying on the chdir above, which moves on into the exported bundle a few lines further down.
+sys.path.insert(0,str(Path(__file__).resolve().parent))
+import tutorial_validation
+
+# What validation does in this pass, decided once. Two flags switch it off for reasons that have
+# nothing to do with the scripts, and it says which:
+#   --quick-test  the script sys.exit(0)s from inside its first Newton solve (Problem.parse_cmd_line
+#                 acts on it), so there is no converged final state and no evolution to compare.
+#   --extra-arg   forcing a solver changes WHAT is computed, not just how fast - see the note above.
+# A pass that runs the scripts differently (--mpirun, --distribute, --omp, --tcc) still validates;
+# the individual checks that cannot hold there say so themselves, with skip_under=(...).
+validation_mode="compare"
+validation_off_because=None
+if args.propose_validation:
+  validation_mode="propose"
+elif args.update_validation:
+  validation_mode="update"
+elif args.no_validation:
+  validation_mode,validation_off_because="off","--no-validation was passed"
+elif args.quick_test:
+  validation_mode,validation_off_because="off","--quick-test stops inside the first Newton solve, so there is no result to compare"
+elif args.extra_arg:
+  validation_mode,validation_off_because="off","--extra-arg changes what is computed, not just how it is computed"
+if validation_off_because is not None:
+  print("Validation: OFF --",validation_off_because)
+elif validation_mode=="compare":
+  print("Validation: comparing against",tutorial_validation.data_root())
+else:
+  print("Validation:",validation_mode.upper(),"-- nothing is compared in this pass")
+# Labels a check can be excused under with skip_under=(...).
+validation_pass_labels=tuple(l for l in (("mpi" if args.mpirun>0 else None),
+                                         ("distribute" if args.distribute else None),
+                                         ("omp" if args.omp>0 else None),
+                                         ("tcc" if args.tcc else None)) if l)
+
 problems=tutorial_bundle.check_consistency()
 for problem in problems:
   print("PROBLEM:",problem)
@@ -414,6 +472,8 @@ manual_gui=[]      # (folder, script) of the GUI scripts nobody can test unatten
 timings=[]  # (folder, script, seconds, number of log files, whether the script failed)
 untimed=[]  # ran, but left no "Elapsed time" footer anywhere
 records=[]  # one dict per script, for --report-json
+validated=[]    # (folder, script) of the scripts that were actually compared against reference data
+unvalidated=[]  # (folder, script, why) of the ones that ran but were not checked
 
 
 def folder_label(d):
@@ -463,6 +523,7 @@ for d in glob.glob("./*/"):
       records.append({"folder":folder_label(d),"script":f,"status":"skipped","note":"only a spawner of other scripts, and this pass is already under mpirun"})
       continue
     env=None if args.no_petsc else (env_complex if needs_complex_petsc(f) else env_real)
+    env=with_validation_dump(env)
     print("   Testing",f,"-- with the complex PETSc" if env is not None and env is env_complex else "")
     cmd=[sys.executable, '-u', f]
     if args.mpirun>0:
@@ -476,6 +537,16 @@ for d in glob.glob("./*/"):
     if args.omp>0:
       cmd+=["--omp",str(args.omp)]
     cmd+=args.extra_arg
+    if validation_mode!="off":
+      # Belt and braces around the freshness test in RunArtifacts._fresh: drop the fingerprints
+      # that earlier scripts of this folder left behind, so that "this run wrote no fingerprint"
+      # cannot be answered with somebody else's. Only the output directory named after the script
+      # is deleted after a run, and several scripts write into directories of their own choosing.
+      for stale in Path(".").rglob("_pyoomph_validation.jsonl"):
+        try:
+          stale.unlink()
+        except OSError:
+          pass
     started_at=time.time()
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
     #proc = subprocess.Popen([sys.executable, '-u', f], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -530,6 +601,74 @@ for d in glob.glob("./*/"):
       # to skip the atexit footer. Named at the end so the total is not silently short.
       untimed.append((folder_label(d),f))
 
+    # Validation goes here, i.e. AFTER the verdict above and BEFORE the rmtree below: the output
+    # directory holding the numbers is about to be deleted. Only a script that actually ran is
+    # worth comparing - a crashed or killed one has no result, and a skipped one did not produce
+    # anything at all.
+    valstatus,valdetail="off",""
+    if validation_mode!="off" and status=="passed":
+      key=folder_label(d)+"/"+f
+      art=tutorial_validation.RunArtifacts(Path("."),started_at,stdout)
+      if validation_mode=="propose":
+        print(tutorial_validation.propose(key,art))
+        valstatus="proposed"
+      elif tutorial_validation.checks_for(key) is None:
+        valstatus="no-spec"
+        unvalidated.append((folder_label(d),f,"no entry in citools/tutorial_validation/specs.py"))
+      elif validation_mode=="update":
+        outcome,path=tutorial_validation.update(key,art)
+        if outcome.problems:
+          # Not a failure of the script: the spec asks for something this run did not produce, so
+          # it is the spec or the reference layout that is wrong, and saying so is the whole point
+          # of this mode. The script itself ran.
+          print("      REFERENCE DATA NOT WRITTEN for",key)
+          for line in outcome.problems:
+            print("        "+line)
+          valstatus="update-failed"
+          unvalidated.append((folder_label(d),f,"--update-validation could not record it"))
+        else:
+          print("      wrote reference data for %d check(s) to %s"%(len(outcome.ran),path))
+          valstatus="updated"
+          validated.append((folder_label(d),f))
+      else:
+        outcome=tutorial_validation.validate(key,art,validation_pass_labels)
+        valdetail=outcome.summary()
+        valstatus=outcome.status
+        if outcome.status=="mismatch":
+          # The same line shape a crash gets, so that nightly_develop.sh's
+          # "grep -E '^PROBLEM: |=+ FAILED '" and the GitHub summary pick this up unchanged, and
+          # the full numeric diff goes into the same per-script log the nightly harvests.
+          logf=Path(f).stem+".log"
+          print(" ================= FAILED",f,"-- validation mismatch, see log at ",logf)
+          for line in outcome.problems:
+            print("        "+line)
+          with open(logf,"wb") as lf:
+            lf.write(stdout)
+            lf.write(("\n\n===== VALIDATION MISMATCH against %s =====\n"
+                      %tutorial_validation.reference_path(key)).encode())
+            lf.write(("\n".join(outcome.problems)+"\n").encode())
+          folder_okay=False
+          status,note="failed","validation mismatch, see "+logf
+          records[-1]["status"],records[-1]["note"]=status,note
+          # The SIMULATION TIMES block was filled a few lines up, when this script still counted as
+          # passed, and its "(FAILED)" marker is read straight off that tuple.
+          if timings and timings[-1][0:2]==(folder_label(d),f):
+            timings[-1]=timings[-1][:4]+(True,)
+        elif outcome.status=="no-reference":
+          valstatus="no-reference"
+          unvalidated.append((folder_label(d),f,"no reference data yet in "
+                              +str(tutorial_validation.reference_path(key).parent)))
+        elif outcome.status=="skipped":
+          # Every check of this script says it cannot hold in this pass. Deliberate, and stated in
+          # its spec entry, but still a gap in this pass's coverage.
+          valstatus="skipped"
+          unvalidated.append((folder_label(d),f,"every check is skip_under this pass"))
+        else:
+          print("      validated:",valdetail)
+          validated.append((folder_label(d),f))
+    records[-1]["validation"]=valstatus
+    records[-1]["validation_detail"]=valdetail
+
     if not args.keep_outdirs:
       shutil.rmtree(Path(f).stem,ignore_errors=True)
 
@@ -555,6 +694,29 @@ if manual_gui:
   print("NOT RUN, CHECK MANUALLY (interactive GUI scripts):")
   for folder,script in manual_gui:
     print("   %s/%s %s"%(folder,script,_MANUAL_GUI_SCRIPTS[script]))
+  print()
+
+# Coverage, in the same style and for the same reason as the two sections above: a green run has
+# to say out loud what it did NOT check. Without this, "ALL TESTS PASSED" on a pass where every
+# script happens to lack reference data reads exactly like one where all 141 were verified.
+if validation_mode=="compare":
+  print()
+  if validated:
+    print("VALIDATED AGAINST REFERENCE DATA: %d script(s)"%len(validated))
+  else:
+    print("VALIDATED AGAINST REFERENCE DATA: none")
+  if unvalidated:
+    print("NOT VALIDATED: %d script(s) ran but were not checked:"%len(unvalidated))
+    for folder,script,why in unvalidated:
+      print("   %s/%s -- %s"%(folder,script,why))
+  print()
+elif validation_mode=="update":
+  print()
+  print("REFERENCE DATA WRITTEN for %d script(s)"%len(validated))
+  if unvalidated:
+    print("REFERENCE DATA NOT WRITTEN for %d script(s):"%len(unvalidated))
+    for folder,script,why in unvalidated:
+      print("   %s/%s -- %s"%(folder,script,why))
   print()
 
 # Slowest first, since that is the end of the list one reads. The fixed "TIME" prefix is what the
@@ -587,6 +749,9 @@ if report_json is not None:
                "bundle_problems":problems,
                "platform":platform.platform(),
                "python":sys.version.split()[0],
+               "validation":{"mode":validation_mode,"off_because":validation_off_because,
+                             "pass_labels":list(validation_pass_labels),
+                             "validated":len(validated),"not_validated":len(unvalidated)},
                "options":{"quick_test":args.quick_test,"tcc":args.tcc,"no_petsc":args.no_petsc,
                           "mpirun":args.mpirun,"omp":args.omp,"distribute":args.distribute,
                           "extra_arg":args.extra_arg,

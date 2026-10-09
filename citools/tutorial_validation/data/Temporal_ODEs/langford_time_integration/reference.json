@@ -1,0 +1,39 @@
+{
+ "_about": "Reference numbers for Temporal_ODEs/langford_time_integration.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "langford/x": {
+     "l2": 0.49320245107176175,
+     "max": 0.49320245107176175,
+     "mean": 0.49320245107176175,
+     "min": 0.49320245107176175,
+     "n": 1
+    },
+    "langford/y": {
+     "l2": 0.8487434085491055,
+     "max": -0.8487434085491055,
+     "mean": -0.8487434085491055,
+     "min": -0.8487434085491055,
+     "n": 1
+    },
+    "langford/z": {
+     "l2": 1.253805501460875,
+     "max": 1.253805501460875,
+     "mean": 1.253805501460875,
+     "min": 1.253805501460875,
+     "n": 1
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 3,
+   "params": {
+    "mu": 2.005
+   },
+   "time": 1005.3096744368241
+  }
+ }
+}
