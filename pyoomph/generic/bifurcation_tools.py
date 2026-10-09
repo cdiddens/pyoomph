@@ -298,6 +298,24 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
         # It is still the slower of the two routes under MPI, because that transpose replicates: the
         # eigensolver branch above is taken whenever the solver supports a complex target, and
         # should be preferred. That is a performance note, not a refusal.
+        # Save the parameter across this route, and not as housekeeping: HopfTracker holds the
+        # PARAMETER as an unknown of its augmented system, so the solve below moves it. The adjoint
+        # problem converges to a parameter value that differs from the primal tracker's by about the
+        # Newton tolerance, and nothing downstream puts it back - the dofs are restored by the
+        # set_current_dofs(u) calls further down, the parameter was not. Everything after this point
+        # then works from a Hopf parameter that is slightly off: the "old" the dmu/dparam finite
+        # difference restores to, and the eps**2 step Problem.switch_to_hopf_orbit() takes from here.
+        #
+        # Measured on the Hopf normal form of tests/hopf_lyapunov_worker.py: the tracker converges mu
+        # to -1.4e-17, this solve left it at -4.92e-10, and the emerging orbit was placed at
+        # mu = eps**2 - 4.9e-10 instead of eps**2 - caught by
+        # tests/test_hopf_lyapunov.py::test_orbit_matches_the_exact_limit_cycle.
+        #
+        # Only THIS branch was affected, which is why that suite is green wherever the eigensolver
+        # can target a complex eigenvalue (the route above, which installs no tracker) and was red on
+        # a plain wheel, where this one is taken. Commit 9df3a002 made these tests run there on
+        # purpose; this is the defect that exposed.
+        param_at_hopf=param.value
         problem.deactivate_bifurcation_tracking()        
         problem.set_custom_assembler(HopfTracker(problem,param.get_name(),numpy.conjugate(q_resolved),omega=-omega0,left_eigenvector=True,eigenscale=1))
         problem.solve()
@@ -309,6 +327,8 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
             evalT=-evalT
             evectT=numpy.conjugate(evectT)        
         problem.set_custom_assembler(None)
+        # ...and put it back, before anything reads it as "the Hopf parameter".
+        param.value=param_at_hopf
         
         #raise RuntimeError("Eigenvalue solver does not support target. Please use a different eigenvalue solver.")
     #print("GOT",evalT,evectT)
