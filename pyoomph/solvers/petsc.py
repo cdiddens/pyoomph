@@ -1049,7 +1049,25 @@ class PETSCSolver(GenericLinearSystemSolver):
         arr=self._aux_x.getArray() #type:ignore
         # Real system; on a complex PETSc build the imaginary part is pure round-off. Dropped
         # explicitly rather than by a numpy ComplexWarning, as in solve_serial.
-        return numpy.ascontiguousarray(arr.real if arr.dtype.kind=="c" else arr,dtype=numpy.float64)
+        #
+        # COPIED, and that is load-bearing. getArray() hands back the Vec's OWN buffer, and
+        # numpy.ascontiguousarray copies only when it has to -- for the already-contiguous float64
+        # array of a real PETSc build it returns that same buffer. solve_python_built_distributed_many
+        # calls this once per right-hand side against one factorisation, so every element of the list
+        # it returned was an alias of this one Vec and they all held the LAST solution. A caller
+        # asking for k right-hand sides silently got the k-th answer k times.
+        #
+        # What that cost: LyapunovExponentCalculator asks for k perturbations at once, so all k came
+        # back identical, the Gram-Schmidt sweep then orthogonalised round-off noise, and the
+        # exponents were garbage until a norm came out exactly 0 and turned every later value into
+        # NaN. It is why tests/test_mpi_lyapunov.py failed in EVERY regime including serial, and why
+        # Temporal_ODEs/lorenz_lyapunov.py wrote a file of NaN under mpirun while a plain serial run
+        # -- which does not use this solver - was fine.
+        #
+        # The single-right-hand-side entry point was exposed too, more quietly: its result aliased a
+        # buffer that the next solve overwrites. numpy.array(...,copy=True) is what the KSP path at
+        # the top of this file already does with self.x.getArray(), for the same reason.
+        return numpy.array(arr.real if arr.dtype.kind=="c" else arr,dtype=numpy.float64,copy=True)
 
     def _aux_factor_package(self)->str | None:
         """The direct-solver package to factorise an auxiliary system with, or None for PETSc's own.
