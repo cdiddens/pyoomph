@@ -1,0 +1,30 @@
+{
+ "_about": "Reference numbers for Spatial_PDEs/helmholtz_pml.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/u": {
+     "l2": 1.9369241887719266,
+     "max": 0.09151119514315902,
+     "mean": 0.0008623752051603645,
+     "min": -0.057430597483060314,
+     "n": 4604
+    },
+    "domain/u_Im": {
+     "l2": 1.9468097583036907,
+     "max": 0.0712775714789272,
+     "mean": 0.004268774681494138,
+     "min": -0.04943524379340041,
+     "n": 4604
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 9208,
+   "params": {},
+   "time": 0.0
+  }
+ }
+}

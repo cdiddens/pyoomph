@@ -1,0 +1,86 @@
+{
+ "_about": "Reference numbers for Spatial_PDEs/stokes_no_normal_flow.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/axis/pressure": {
+     "l2": 22.43018704214325,
+     "max": -1.0000930237313335,
+     "mean": -4.960676977857849,
+     "min": -9.599183682516339,
+     "n": 16
+    },
+    "domain/axis/velocity_y": {
+     "l2": 71.70618952689743,
+     "max": -0.26301418030381285,
+     "mean": -11.335239952249527,
+     "min": -19.19141893165809,
+     "n": 31
+    },
+    "domain/bottom/pressure": {
+     "l2": 5.122413478509594,
+     "max": -1.0099822328879702,
+     "mean": -1.3043729582004475,
+     "min": -1.6629750085072623,
+     "n": 15
+    },
+    "domain/interface/noflux_lambda": {
+     "l2": 44919.55792342884,
+     "max": -2209.6201777154274,
+     "mean": -7472.391139028133,
+     "min": -10456.705837225927,
+     "n": 32
+    },
+    "domain/interface/pressure": {
+     "l2": 32.06815692399868,
+     "max": -1.6900179539311224,
+     "mean": -7.2362865036144575,
+     "min": -10.350360719012125,
+     "n": 17
+    },
+    "domain/interface/velocity_x": {
+     "l2": 31.569994403075086,
+     "max": -0.020440079009088032,
+     "mean": -4.844848205962022,
+     "min": -8.589227267724894,
+     "n": 31
+    },
+    "domain/interface/velocity_y": {
+     "l2": 28.708021882472885,
+     "max": 7.8646150438482625,
+     "mean": 4.272636914000588,
+     "min": -0.0007968897049725504,
+     "n": 32
+    },
+    "domain/pressure": {
+     "l2": 68.28022268077837,
+     "max": -1.529993217922117,
+     "mean": -4.820682792481473,
+     "min": -9.636111623816241,
+     "n": 169
+    },
+    "domain/velocity_x": {
+     "l2": 115.00175079305582,
+     "max": 7.695942613745358,
+     "mean": 0.9882277195707749,
+     "min": -8.60526662252523,
+     "n": 721
+    },
+    "domain/velocity_y": {
+     "l2": 205.42061647236238,
+     "max": 7.543872134002535,
+     "mean": -4.262437060892076,
+     "min": -19.062592869725624,
+     "n": 721
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 1785,
+   "params": {},
+   "time": 0.0
+  }
+ }
+}

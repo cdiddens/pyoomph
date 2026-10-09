@@ -1,0 +1,65 @@
+{
+ "_about": "Reference numbers for Spatial_PDEs/poisson_robin_via_neumann.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "finalstate:domain_*.txt": {
+  "columns": [
+   "coordinate_x",
+   "u"
+  ],
+  "file": "poisson_robin_via_neumann/domain/domain_000000.txt",
+  "kind": "finalstate",
+  "nrows": 201,
+  "reduce": true,
+  "stats": {
+   "coordinate_x": {
+    "l2": 8.226177727231525,
+    "max": 1.0,
+    "mean": 7.070076972737315e-17,
+    "min": -1.0,
+    "n": 201,
+    "n_finite": 201
+   },
+   "u": {
+    "l2": 90.30191950715952,
+    "max": -1.000000000003022,
+    "mean": -5.6683333333432335,
+    "min": -11.00000000001777,
+    "n": 201,
+    "n_finite": 201
+   }
+  }
+ },
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/left/u": {
+     "l2": 1.000000000003022,
+     "max": -1.000000000003022,
+     "mean": -1.000000000003022,
+     "min": -1.000000000003022,
+     "n": 1
+    },
+    "domain/right/u": {
+     "l2": 11.00000000001777,
+     "max": -11.00000000001777,
+     "mean": -11.00000000001777,
+     "min": -11.00000000001777,
+     "n": 1
+    },
+    "domain/u": {
+     "l2": 89.62386214997166,
+     "max": -1.0400500000030821,
+     "mean": -5.665000000009895,
+     "min": -10.940050000017683,
+     "n": 199
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 201,
+   "params": {},
+   "time": 0.0
+  }
+ }
+}

@@ -1,0 +1,23 @@
+{
+ "_about": "Reference numbers for Spatial_PDEs/mesh_Lshape_by_hand.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/u": {
+     "l2": 13.597460619851212,
+     "max": 0.9415798337608646,
+     "mean": 0.6052499797135433,
+     "min": 0.05842523221736801,
+     "n": 487
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 487,
+   "params": {},
+   "time": 1.0
+  }
+ }
+}

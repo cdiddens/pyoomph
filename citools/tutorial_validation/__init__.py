@@ -729,6 +729,36 @@ def _flatten_fingerprint(record: dict) -> "dict[str,object]":
     return flat
 
 
+def _fingerprint_scales(record: dict) -> "dict[str,float]":
+    """The scale each dof statistic should be judged against, by dotted key.
+
+    min, max and mean carry the field's units, and comparing one of them against ITS OWN magnitude
+    is hypersensitive exactly where a field passes through zero - which is most of them. A pressure
+    is referenced to an arbitrary level, a symmetric velocity component has min = -max, so the
+    statistic that happens to sit near zero gets a tolerance near zero with it.
+
+    Measured case, Spatial_PDEs/stokes_flow_around_object.py over four ranks:
+    liquid/liquid_sphere/pressure has min 9.6e-4 against max 3.0, i.e. the minimum is 0.03 % of the
+    field's own range. The minimum moved by 1.9e-8 - six parts in a billion of the field's scale,
+    which is the linear solver summing in another order - and that was 2e-5 of the value itself, so
+    a 1e-5 relative check called it a mismatch.
+
+    The scale is therefore the GROUP's: max(|min|, |max|) over the same dof type. l2 is left out
+    deliberately - its magnitude IS the field's scale, so a relative comparison on it is already the
+    right question, and it is the statistic that notices a field changing as a whole. Counts are
+    exact and never scaled.
+    """
+    scales: "dict[str,float]" = {}
+    for name, stats in (record.get("dofs") or {}).items():
+        extent = max(abs(float(stats.get("min", 0.0))), abs(float(stats.get("max", 0.0))))
+        if extent <= 0.0:
+            continue
+        for stat in ("min", "max", "mean"):
+            if stat in stats:
+                scales["dofs.%s.%s" % (name, stat)] = extent
+    return scales
+
+
 def _fingerprint_record(check: Fingerprint, art: RunArtifacts) -> dict:
     records = art.fingerprints(check.outdir)
     if len(records) <= check.index:
@@ -751,6 +781,8 @@ def _cmp_fingerprint(check: Fingerprint, art: RunArtifacts, ref: dict, out: Outc
         return
     want = _flatten_fingerprint(ref["record"])
     got = _flatten_fingerprint(record)
+    # Judged against the field's scale rather than the statistic's own magnitude; see there.
+    scales = _fingerprint_scales(ref["record"])
 
     def selected(key: str) -> bool:
         if key in _FINGERPRINT_NEVER_COMPARED:
@@ -768,7 +800,8 @@ def _cmp_fingerprint(check: Fingerprint, art: RunArtifacts, ref: dict, out: Outc
             problems.append("%s is gone (the reference has %r)" % (key, want[key]))
         elif key not in want:
             problems.append("%s appeared (%r), which the reference does not have" % (key, got[key]))
-        elif not _close(want[key], got[key], check.rtol, check.atol):
+        elif not _close(want[key], got[key], check.rtol,
+                        check.atol + check.rtol * scales.get(key, 0.0)):
             problems.append("%s: %s" % (key, _deviation(want[key], got[key])))
     if problems:
         out.problems.append("%s: %d difference(s)\n        %s"

@@ -1,0 +1,37 @@
+{
+ "_about": "Reference numbers for Spatial_PDEs/cr_static_condensation.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/pressure": {
+     "l2": 215.2312369532257,
+     "max": 102.69924703157616,
+     "mean": -0.5268210749627839,
+     "min": -52.20748034363085,
+     "n": 767
+    },
+    "domain/velocity_x": {
+     "l2": 5.2841171576655395,
+     "max": 0.8690293461939628,
+     "mean": -0.010389952156399847,
+     "min": -0.24389686936246271,
+     "n": 737
+    },
+    "domain/velocity_y": {
+     "l2": 4.2630340965605695,
+     "max": 0.33085991416254407,
+     "mean": -4.886023100859364e-05,
+     "min": -0.56603466397266,
+     "n": 737
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 2241,
+   "params": {},
+   "time": 0.0
+  }
+ }
+}

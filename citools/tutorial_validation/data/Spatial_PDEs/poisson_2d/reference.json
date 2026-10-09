@@ -1,0 +1,37 @@
+{
+ "_about": "Reference numbers for Spatial_PDEs/poisson_2d.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/bottom/u": {
+     "l2": 3.839864211720214,
+     "max": 1.1490201495928136,
+     "mean": 0.8345771288105318,
+     "min": 0.28668244906995305,
+     "n": 19
+    },
+    "domain/top/u": {
+     "l2": 0.28179342195671925,
+     "max": 0.11021786675052629,
+     "mean": 0.036563239461424236,
+     "min": -0.03741744088444389,
+     "n": 19
+    },
+    "domain/u": {
+     "l2": 11.153793842193199,
+     "max": 1.2434632443444786,
+     "mean": 0.48992176321226133,
+     "min": -0.0009200979135039626,
+     "n": 361
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 399,
+   "params": {},
+   "time": 0.0
+  }
+ }
+}

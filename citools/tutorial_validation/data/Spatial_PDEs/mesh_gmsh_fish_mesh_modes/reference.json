@@ -1,0 +1,23 @@
+{
+ "_about": "Reference numbers for Spatial_PDEs/mesh_gmsh_fish_mesh_modes.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "fish/u": {
+     "l2": 1.27786338966722,
+     "max": 0.05661859628236244,
+     "mean": 0.02666680313289563,
+     "min": 0.00027466439980631103,
+     "n": 1677
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 1677,
+   "params": {},
+   "time": 1.0
+  }
+ }
+}

@@ -1,0 +1,88 @@
+{
+ "_about": "Reference numbers for Spatial_PDEs/cavity_inverse_problem.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "_meshwide__domain/pressure": {
+     "l2": 5.655681171097371e-16,
+     "max": -5.655681171097371e-16,
+     "mean": -5.655681171097371e-16,
+     "min": -5.655681171097371e-16,
+     "n": 1
+    },
+    "domain/bottom/pressure": {
+     "l2": 12.967498177635392,
+     "max": 4.2053902633275735,
+     "mean": 1.9420956104183216,
+     "min": -0.2179554832010511,
+     "n": 26
+    },
+    "domain/left/pressure": {
+     "l2": 209.01431047435906,
+     "max": 146.39562556723504,
+     "mean": 20.92812040146175,
+     "min": 0.8805673788000885,
+     "n": 24
+    },
+    "domain/pressure": {
+     "l2": 384.31609543598796,
+     "max": 137.81205808435234,
+     "mean": -0.4897965036863769,
+     "min": -58.467488664656614,
+     "n": 576
+    },
+    "domain/right/pressure": {
+     "l2": 86.96246177950142,
+     "max": 1.7404900237214929,
+     "mean": -9.032745744902982,
+     "min": -58.60170834497018,
+     "n": 24
+    },
+    "domain/top/pressure": {
+     "l2": 391.94584201213723,
+     "max": 259.1894099332387,
+     "mean": 10.868127634335984,
+     "min": -154.3786739211302,
+     "n": 26
+    },
+    "domain/top/velocity_x": {
+     "l2": 24.39693428138085,
+     "max": -0.3852572721381873,
+     "mean": -3.2445618878611526,
+     "min": -4.646898029850403,
+     "n": 49
+    },
+    "domain/velocity_x": {
+     "l2": 37.6429522392775,
+     "max": 0.89477930040394,
+     "mean": 0.03185035194543451,
+     "min": -3.9635846508981536,
+     "n": 2401
+    },
+    "domain/velocity_y": {
+     "l2": 28.357807165355926,
+     "max": 1.0165688150401206,
+     "mean": 0.00024272219456203354,
+     "min": -1.8079964998894282,
+     "n": 2401
+    },
+    "globals/T": {
+     "l2": 35.82529661190458,
+     "max": 35.82529661190458,
+     "mean": 35.82529661190458,
+     "min": 35.82529661190458,
+     "n": 1
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 5529,
+   "params": {
+    "Udesired": 1.0
+   },
+   "time": 0.0
+  }
+ }
+}

@@ -1,0 +1,37 @@
+{
+ "_about": "Reference numbers for Spatial_PDEs/stokes_pressure_fix.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/pressure": {
+     "l2": 2.079201304245632,
+     "max": 0.4500000000450356,
+     "mean": 1.7132923099562387e-11,
+     "min": -0.44999999997360096,
+     "n": 299
+    },
+    "domain/velocity_x": {
+     "l2": 0.07319429514924457,
+     "max": 0.007841809901233341,
+     "mean": 6.071897370861136e-15,
+     "min": -0.00784180990128013,
+     "n": 361
+    },
+    "domain/velocity_y": {
+     "l2": 0.07319429514801906,
+     "max": 0.007841809901401018,
+     "mean": -1.4808099345069609e-15,
+     "min": -0.00784180990186729,
+     "n": 361
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 1021,
+   "params": {},
+   "time": 0.0
+  }
+ }
+}

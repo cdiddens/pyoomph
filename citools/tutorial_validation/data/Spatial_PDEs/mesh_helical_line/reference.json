@@ -1,0 +1,23 @@
+{
+ "_about": "Reference numbers for Spatial_PDEs/mesh_helical_line.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "helix/u": {
+     "l2": 2532.1352698654614,
+     "max": 263.11405221548006,
+     "mean": 161.7351085116709,
+     "min": 2.9863981265342097,
+     "n": 199
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 199,
+   "params": {},
+   "time": 1.0
+  }
+ }
+}

@@ -1,0 +1,79 @@
+{
+ "_about": "Reference numbers for Spatial_PDEs/poisson_robin_via_lagrange.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "finalstate:domain_*.txt": {
+  "columns": [
+   "coordinate_x",
+   "u"
+  ],
+  "file": "poisson_robin_via_lagrange/domain/domain_000000.txt",
+  "kind": "finalstate",
+  "nrows": 201,
+  "reduce": true,
+  "stats": {
+   "coordinate_x": {
+    "l2": 8.226177727231525,
+    "max": 1.0,
+    "mean": 7.070076972737315e-17,
+    "min": -1.0,
+    "n": 201,
+    "n_finite": 201
+   },
+   "u": {
+    "l2": 66.21945836872008,
+    "max": 6.9999999999974785,
+    "mean": 4.331666666665053,
+    "min": 1.0,
+    "n": 201,
+    "n_finite": 201
+   }
+  }
+ },
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/left/_lagr_robin_u": {
+     "l2": 1.9999999999997886,
+     "max": -1.9999999999997886,
+     "mean": -1.9999999999997886,
+     "min": -1.9999999999997886,
+     "n": 1
+    },
+    "domain/left/u": {
+     "l2": 6.9999999999974785,
+     "max": 6.9999999999974785,
+     "mean": 6.9999999999974785,
+     "min": 6.9999999999974785,
+     "n": 1
+    },
+    "domain/right/_lagr_robin_u": {
+     "l2": 3.9999999999976628,
+     "max": 3.9999999999976628,
+     "mean": 3.9999999999976628,
+     "min": 3.9999999999976628,
+     "n": 1
+    },
+    "domain/right/u": {
+     "l2": 1.0,
+     "max": 1.0,
+     "mean": 1.0,
+     "min": 1.0,
+     "n": 1
+    },
+    "domain/u": {
+     "l2": 65.84084345333592,
+     "max": 6.97994999999748,
+     "mean": 4.3349999999983835,
+     "min": 1.0399499999999764,
+     "n": 199
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 203,
+   "params": {},
+   "time": 0.0
+  }
+ }
+}

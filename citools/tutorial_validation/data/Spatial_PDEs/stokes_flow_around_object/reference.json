@@ -1,0 +1,114 @@
+{
+ "_about": "Reference numbers for Spatial_PDEs/stokes_flow_around_object.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "globals/UStokes": {
+     "l2": 1.0002445890127076,
+     "max": 1.0002445890127076,
+     "mean": 1.0002445890127076,
+     "min": 1.0002445890127076,
+     "n": 1
+    },
+    "liquid/axisymm_lower/pressure": {
+     "l2": 12.529574115735452,
+     "max": 2.8593477496903965,
+     "mean": 1.8124721044224095,
+     "min": 1.5157134081146495,
+     "n": 46
+    },
+    "liquid/axisymm_lower/velocity_y": {
+     "l2": 5.374818287793051,
+     "max": 0.8470724421896555,
+     "mean": 0.4868435377345968,
+     "min": 0.0009134044082284921,
+     "n": 93
+    },
+    "liquid/axisymm_upper/pressure": {
+     "l2": 8.40056758642009,
+     "max": 1.4826272357308963,
+     "mean": 1.185891917648222,
+     "min": 0.13870929013914046,
+     "n": 46
+    },
+    "liquid/axisymm_upper/velocity_y": {
+     "l2": 5.374820496412686,
+     "max": 0.8470716084969863,
+     "mean": 0.4868435702204025,
+     "min": 0.0009076736665313859,
+     "n": 93
+    },
+    "liquid/far_field/_lagr_enf_bc_velocity_x": {
+     "l2": 11.99470805711416,
+     "max": 1.4998135800811392,
+     "mean": 0.9618698815559441,
+     "min": 0.035700113009736446,
+     "n": 127
+    },
+    "liquid/far_field/_lagr_enf_bc_velocity_y": {
+     "l2": 12.090779180552266,
+     "max": 1.4544636623143192,
+     "mean": -0.022607171928422976,
+     "min": -1.5438738151825582,
+     "n": 129
+    },
+    "liquid/far_field/pressure": {
+     "l2": 12.087027251951623,
+     "max": 1.5141795650708192,
+     "mean": 1.4991731482403032,
+     "min": 1.4841696603619605,
+     "n": 65
+    },
+    "liquid/far_field/velocity_x": {
+     "l2": 0.29707270036703065,
+     "max": 0.03713410249852415,
+     "mean": 1.1746946372756332e-18,
+     "min": -0.03713410249852413,
+     "n": 127
+    },
+    "liquid/far_field/velocity_y": {
+     "l2": 10.085122534452076,
+     "max": 0.9249762037940947,
+     "mean": 0.8875542393167338,
+     "min": 0.850707965048027,
+     "n": 129
+    },
+    "liquid/liquid_sphere/pressure": {
+     "l2": 14.842395207847805,
+     "max": 2.9980818067774435,
+     "mean": 1.5226297136900204,
+     "min": 0.0009595574193979188,
+     "n": 64
+    },
+    "liquid/pressure": {
+     "l2": 79.64456690524179,
+     "max": 2.894843240111879,
+     "mean": 1.50961764232368,
+     "min": 0.09647206451007069,
+     "n": 2633
+    },
+    "liquid/velocity_x": {
+     "l2": 6.871641461325312,
+     "max": 0.14435296450947654,
+     "mean": 0.003949352650936084,
+     "min": -0.14433691567510903,
+     "n": 10751
+    },
+    "liquid/velocity_y": {
+     "l2": 66.26119867584046,
+     "max": 0.9237072910965446,
+     "mean": 0.5761878318815965,
+     "min": 0.00041128525931246387,
+     "n": 10751
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 25055,
+   "params": {},
+   "time": 0.0
+  }
+ }
+}

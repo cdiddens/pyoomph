@@ -1,0 +1,79 @@
+{
+ "_about": "Reference numbers for Spatial_PDEs/stokes_dimensional.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/bottom/pressure": {
+     "l2": 1.962141687034855,
+     "max": 1.0000000000000002,
+     "mean": 0.49999999999999856,
+     "min": -4.765585933203059e-16,
+     "n": 11
+    },
+    "domain/left/pressure": {
+     "l2": 3.0000000000000013,
+     "max": 1.000000000000004,
+     "mean": 1.0000000000000004,
+     "min": 0.999999999999999,
+     "n": 9
+    },
+    "domain/left/velocity_x": {
+     "l2": 0.40824701468596236,
+     "max": 0.12500000000000008,
+     "mean": 0.08750000000000009,
+     "min": 0.02374999999999999,
+     "n": 19
+    },
+    "domain/pressure": {
+     "l2": 5.0645829048402256,
+     "max": 0.9000000000000008,
+     "mean": 0.49999999999999833,
+     "min": 0.09999999999999895,
+     "n": 81
+    },
+    "domain/right/pressure": {
+     "l2": 2.5889636670707637e-15,
+     "max": 1.0942023024812161e-15,
+     "mean": -8.921321034723964e-17,
+     "min": -2.1896377007738495e-15,
+     "n": 9
+    },
+    "domain/right/velocity_x": {
+     "l2": 0.40824701468596225,
+     "max": 0.12500000000000008,
+     "mean": 0.08750000000000009,
+     "min": 0.023749999999999927,
+     "n": 19
+    },
+    "domain/top/pressure": {
+     "l2": 1.9621416870348556,
+     "max": 1.0000000000000022,
+     "mean": 0.49999999999999906,
+     "min": 1.0979453237971116e-15,
+     "n": 11
+    },
+    "domain/velocity_x": {
+     "l2": 1.7795074810182752,
+     "max": 0.1250000000000002,
+     "mean": 0.08750000000000009,
+     "min": 0.023749999999999927,
+     "n": 361
+    },
+    "domain/velocity_y": {
+     "l2": 5.6139808851669425e-16,
+     "max": 8.680094906188149e-17,
+     "mean": 1.9412799369944692e-17,
+     "min": -1.7350541363597387e-17,
+     "n": 361
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 881,
+   "params": {},
+   "time": 0.0
+  }
+ }
+}

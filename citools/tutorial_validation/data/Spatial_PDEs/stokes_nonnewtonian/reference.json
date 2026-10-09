@@ -1,0 +1,72 @@
+{
+ "_about": "Reference numbers for Spatial_PDEs/stokes_nonnewtonian.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/bottom/pressure": {
+     "l2": 7.025508370284803,
+     "max": 3.8208263939951563,
+     "mean": 1.7677014476916861,
+     "min": 1.1459742283489752e-05,
+     "n": 11
+    },
+    "domain/left/pressure": {
+     "l2": 10.547037254078512,
+     "max": 3.7926299825160013,
+     "mean": 3.5089425096716784,
+     "min": 3.179293920541417,
+     "n": 9
+    },
+    "domain/pressure": {
+     "l2": 17.46590568714563,
+     "max": 3.2582600177597483,
+     "mean": 1.722140524756019,
+     "min": 0.3431330861452288,
+     "n": 81
+    },
+    "domain/right/pressure": {
+     "l2": 1.8398663429620718e-05,
+     "max": 1.0112252070325224e-05,
+     "mean": 2.1228073977381726e-06,
+     "min": -5.999120712097093e-06,
+     "n": 9
+    },
+    "domain/right/velocity_x": {
+     "l2": 0.8247906655955319,
+     "max": 0.26152928814816956,
+     "mean": 0.1750450918361878,
+     "min": 0.04358355531433579,
+     "n": 19
+    },
+    "domain/top/pressure": {
+     "l2": 7.025508370284802,
+     "max": 3.8208263939951546,
+     "mean": 1.7677014476916868,
+     "min": 1.1459742286439558e-05,
+     "n": 11
+    },
+    "domain/velocity_x": {
+     "l2": 3.588083165317333,
+     "max": 0.26157421341847936,
+     "mean": 0.17503705805601052,
+     "min": 0.04355288671968926,
+     "n": 361
+    },
+    "domain/velocity_y": {
+     "l2": 0.026995114775802843,
+     "max": 0.0043141366154761255,
+     "mean": 1.3130559274533588e-17,
+     "min": -0.004314136615476094,
+     "n": 361
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 862,
+   "params": {},
+   "time": 0.0
+  }
+ }
+}

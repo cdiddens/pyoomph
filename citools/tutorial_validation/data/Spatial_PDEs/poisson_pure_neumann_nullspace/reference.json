@@ -1,0 +1,86 @@
+{
+ "_about": "Reference numbers for Spatial_PDEs/poisson_pure_neumann_nullspace.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "evolution:lambda_space.txt": {
+  "abscissa": "time",
+  "columns": [
+   "lambda"
+  ],
+  "file": "poisson_pure_neumann_nullspace/lambda_space.txt",
+  "kind": "evolution",
+  "match": "rows",
+  "nrows": 1,
+  "row_indices": [0],
+  "rows": [
+   [0.0, -1.02283249210449e-11]
+  ]
+ },
+ "finalstate:domain_*.txt": {
+  "columns": [
+   "coordinate_x",
+   "u"
+  ],
+  "file": "poisson_pure_neumann_nullspace/domain/domain_000000.txt",
+  "kind": "finalstate",
+  "nrows": 201,
+  "reduce": true,
+  "stats": {
+   "coordinate_x": {
+    "l2": 8.226177727231525,
+    "max": 1.0,
+    "mean": 7.070076972737315e-17,
+    "min": -1.0,
+    "n": 201,
+    "n_finite": 201
+   },
+   "u": {
+    "l2": 142.0129219472647,
+    "max": 10.999999999999634,
+    "mean": 9.999999999999993,
+    "min": 9.000000000000666,
+    "n": 201,
+    "n_finite": 201
+   }
+  }
+ },
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/left/u": {
+     "l2": 9.000000000000666,
+     "max": 9.000000000000666,
+     "mean": 9.000000000000666,
+     "min": 9.000000000000666,
+     "n": 1
+    },
+    "domain/right/u": {
+     "l2": 10.999999999999634,
+     "max": 10.999999999999634,
+     "mean": 10.999999999999634,
+     "min": 10.999999999999634,
+     "n": 1
+    },
+    "domain/u": {
+     "l2": 141.29992922857352,
+     "max": 10.989999999999633,
+     "mean": 9.99999999999999,
+     "min": 9.010000000000664,
+     "n": 199
+    },
+    "lambda_space/lambda": {
+     "l2": 1.02283249210449e-11,
+     "max": -1.02283249210449e-11,
+     "mean": -1.02283249210449e-11,
+     "min": -1.02283249210449e-11,
+     "n": 1
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 202,
+   "params": {},
+   "time": 0.0
+  }
+ }
+}

@@ -1,0 +1,37 @@
+{
+ "_about": "Reference numbers for Spatial_PDEs/poisson_axisymm_adaptive.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/bottom/u": {
+     "l2": 8.223452250030343,
+     "max": 1.6080176991767214,
+     "mean": 0.929602637609351,
+     "min": 0.015223720268173271,
+     "n": 59
+    },
+    "domain/top/u": {
+     "l2": 1.3324213420007305,
+     "max": 0.3353665597101104,
+     "mean": 0.14452629093372305,
+     "min": -0.03421408760249073,
+     "n": 45
+    },
+    "domain/u": {
+     "l2": 69.08980235804619,
+     "max": 1.5601711376413658,
+     "mean": 0.6606872820929705,
+     "min": -0.022966287784761532,
+     "n": 8969
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 9073,
+   "params": {},
+   "time": 0.0
+  }
+ }
+}

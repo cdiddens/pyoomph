@@ -361,4 +361,158 @@ VALIDATION: "dict[str,list]" = {
       Fingerprint(only=["ndof", "params.*"],
                   reason="the trajectory is chaotic, so its final state is not reproducible"),
   ],
+
+  # ===============================================================================================
+  # Spatial_PDEs: stationary problems, so there is no evolution to compare - what is checked is the
+  # solved field. The 1d Poisson family writes its nodes to a text file; everything else writes vtu
+  # only, and for those the fingerprint's per-dof-type extent IS the solution (a Stokes script's
+  # velocity extremes and pressure norm pin the field down without a single node position).
+  # ===============================================================================================
+
+  # --- the 1d Poisson family, on a LineMesh(minimum=-1, size=2, N=100) ------------------------
+  "Spatial_PDEs/poisson.py": [
+      # -u'' = 1 on [-1,1] with u(+-1)=0, i.e. u = (1-x^2)/2 and max(u) = 1/2 exactly; the recorded
+      # fingerprint has 0.4999999999999123, so the discretisation is exact for this quadratic on C2
+      # and what the reference pins is round-off.
+      #
+      # reduce=False here and nowhere else in this chapter: node by node over 201 nodes, which is
+      # the strongest form the check has and the one case where it is clearly safe - a fixed 1d
+      # LineMesh, written through a single output with no adaptation. It is also the only production
+      # use of that path, which otherwise only tests/test_tutorial_validation.py exercises.
+      FinalState("domain_*.txt", reduce=False),
+      Fingerprint(),
+  ],
+  "Spatial_PDEs/poisson_neumann.py": [
+      # The same source with a Neumann flux on one side, so the solution is no longer symmetric.
+      FinalState("domain_*.txt"),
+      Fingerprint(),
+  ],
+  "Spatial_PDEs/poisson_coupled.py": [
+      # Two Poisson equations sourcing each other (u by w, w by -10u), so a regression in the
+      # coupling shows up in one field and not the other - which is why both columns are compared.
+      FinalState("domain_*.txt"),
+      Fingerprint(),
+  ],
+  # These two impose the SAME Robin condition by two different mechanisms - a Lagrange multiplier
+  # pair, and an equivalent Neumann flux - and the tutorial's point is that they agree. Each is
+  # compared against its own reference, so a drift in either is caught; that they agree with EACH
+  # OTHER is then a consequence, and the dof counts differ (203 vs 201) because the multiplier is
+  # itself an unknown.
+  "Spatial_PDEs/poisson_robin_via_lagrange.py": [
+      FinalState("domain_*.txt"),
+      Fingerprint(),
+  ],
+  "Spatial_PDEs/poisson_robin_via_neumann.py": [
+      FinalState("domain_*.txt"),
+      Fingerprint(),
+  ],
+  "Spatial_PDEs/poisson_pure_neumann_nullspace.py": [
+      # Pure Neumann: the problem is singular up to a constant, and a Lagrange multiplier pins the
+      # average value. The multiplier is the scalar that says the nullspace was removed correctly,
+      # and it is the whole content of lambda_space.txt - one row, hence match="rows" (a single
+      # instant cannot be looked up by a growing abscissa).
+      FinalState("domain_*.txt"),
+      Evolution("lambda_space.txt", match="rows", reason="the file holds one row, the converged "
+                                                         "multiplier"),
+      Fingerprint(),
+  ],
+
+  # --- 2d/axisymmetric Poisson, vtu only ------------------------------------------------------
+  "Spatial_PDEs/poisson_2d.py": [
+      Fingerprint(),
+  ],
+  # The two adaptive ones. ndof is part of the fingerprint on purpose: it pins the refinement
+  # pattern, and a changed error estimator or a changed refinement decision is exactly the kind of
+  # regression worth catching. It is also the first thing to relax (skip=["ndof", "dofs.*.n"]) if
+  # another platform's estimator legitimately stops at a different element count - which cannot be
+  # known from one machine, so it is left strict until a nightly elsewhere says otherwise.
+  "Spatial_PDEs/poisson_2d_adaptive.py": [
+      Fingerprint(),
+  ],
+  "Spatial_PDEs/poisson_axisymm_adaptive.py": [
+      Fingerprint(),
+  ],
+  "Spatial_PDEs/cr_static_condensation.py": [
+      # Crouzeix-Raviart with the interior dofs condensed out. The dof count is the point of the
+      # script, so the fingerprint's ndof is the quantity that would notice condensation breaking.
+      Fingerprint(),
+  ],
+  "Spatial_PDEs/helmholtz_pml.py": [
+      # A perfectly matched layer: the field has to decay inside the layer rather than reflect, and
+      # a reflection would move the extremes of both dof groups.
+      Fingerprint(),
+  ],
+
+  # --- meshing ---------------------------------------------------------------------------------
+  # These solve a Poisson problem on a hand-built mesh; the mesh IS what the script demonstrates, so
+  # the dof count and the field extent together say the template still produces the same mesh.
+  "Spatial_PDEs/mesh_Lshape_by_hand.py": [
+      Fingerprint(),
+  ],
+  "Spatial_PDEs/mesh_fish_dimensional_curved.py": [
+      Fingerprint(),
+  ],
+  "Spatial_PDEs/mesh_helical_line.py": [
+      Fingerprint(),
+  ],
+  # ...and these two get their mesh from gmsh, which is an unpinned dependency (pygmsh>=7.1.17 in
+  # pyproject.toml; 4.15.1 on the machine the reference was taken on). A different gmsh meshes the
+  # fish differently, which moves the dof count outright and the field extremes with it, so pinning
+  # either would make the check a test of the gmsh version. What is left is loose but not empty: a
+  # broken boundary condition or a sign error in the weak form moves a Poisson solution by O(1),
+  # which 1 % catches comfortably.
+  "Spatial_PDEs/mesh_gmsh_fish_mesh_modes.py": [
+      Fingerprint(skip=["ndof", "dofs.*.n"], rtol=1e-2,
+                  reason="the mesh comes from gmsh, whose version is not pinned, so the element "
+                         "count and with it the discretisation error are not ours to fix"),
+  ],
+  "Spatial_PDEs/mesh_gmsh_fish_with_holes.py": [
+      Fingerprint(skip=["ndof", "dofs.*.n"], rtol=1e-2,
+                  reason="the mesh comes from gmsh, whose version is not pinned, so the element "
+                         "count and with it the discretisation error are not ours to fix"),
+  ],
+
+  # --- Stokes ----------------------------------------------------------------------------------
+  # Saddle-point systems, vtu only. The fingerprint separates velocity_x, velocity_y and pressure
+  # into their own dof types, so it says what a single norm would not: a pressure mode that drifts
+  # while the velocity stays put is visible here.
+  "Spatial_PDEs/stokes.py": [
+      Fingerprint(),
+  ],
+  "Spatial_PDEs/stokes_dimensional.py": [
+      # The same flow with units, so this also pins the scaling: a wrong non-dimensionalisation
+      # changes the dof extremes while the vtu still looks plausible.
+      Fingerprint(),
+  ],
+  "Spatial_PDEs/stokes_pressure_fix.py": [
+      # Pressure fixed at one point instead of by a constraint - the thing that would break here is
+      # the pressure level, which is its own dof type in the fingerprint.
+      Fingerprint(),
+  ],
+  "Spatial_PDEs/stokes_no_normal_flow.py": [
+      Fingerprint(),
+  ],
+  "Spatial_PDEs/stokes_nonnewtonian.py": [
+      # Same mesh and dof count as stokes.py (862) but a shear-rate-dependent viscosity, so the
+      # velocity extremes are what distinguishes the two - and would notice the constitutive law
+      # silently reverting to Newtonian.
+      Fingerprint(),
+  ],
+  "Spatial_PDEs/stokes_flow_around_object.py": [
+      # 25055 dofs, the largest in the chapter.
+      Fingerprint(),
+  ],
+
+  # --- the cavity inverse-problem pair ---------------------------------------------------------
+  "Spatial_PDEs/cavity_forward_problem.py": [
+      # U_vs_T.txt is the forward sweep: the observable U at each prescribed T, which is the curve
+      # the inverse problem below then inverts. T is set by the script, so the abscissa is exact.
+      Evolution("U_vs_T.txt"),
+      Fingerprint(),
+  ],
+  "Spatial_PDEs/cavity_inverse_problem.py": [
+      # The answer is the parameter the inverse problem recovers, and the fingerprint records every
+      # global parameter - here Udesired - alongside the state it was recovered from.
+      Fingerprint(),
+  ],
 }

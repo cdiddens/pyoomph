@@ -353,3 +353,48 @@ def test_the_previous_scripts_output_is_not_credited_to_this_one(validation):
     art = tv.RunArtifacts(leftover, time.time(), b"")
     assert art.outdirs == [], "output written before the script started is not its output"
     assert art.text_files() == [] and art.fingerprints() == []
+
+
+def _write_fingerprint(run, dofs):
+    """Overwrite the fake run's fingerprint with one carrying the given dof statistics."""
+    path = run / "synthetic" / "_pyoomph_validation.jsonl"
+    record = json.loads(path.read_text())
+    record["dofs"] = dofs
+    path.write_text(json.dumps(record) + "\n")
+
+
+def test_a_near_zero_extremum_is_judged_against_the_fields_scale(validation):
+    """min, max and mean carry the field's units, so comparing one against its OWN magnitude is
+    hypersensitive wherever a field passes through zero - a pressure referenced to an arbitrary
+    level, a symmetric velocity component. Measured on stokes_flow_around_object.py over four ranks:
+    a pressure minimum of 9.6e-4 against a maximum of 3.0 moved by 1.9e-8 of solver round-off, which
+    is 2e-5 of the value and six parts in a billion of the field."""
+    validation.set_checks([Fingerprint()])
+    ref = validation.run("ref")
+    _write_fingerprint(ref, {"liquid/pressure": {"n": 64, "min": 0.000959557419398,
+                                                 "max": 2.99808, "mean": 1.4, "l2": 14.8424}})
+    validation.record(ref)
+
+    noisy = validation.run("noisy")
+    _write_fingerprint(noisy, {"liquid/pressure": {"n": 64, "min": 0.000959576099052,
+                                                   "max": 2.99808, "mean": 1.4, "l2": 14.8424}})
+    assert validation.check(noisy).status == "ok", "round-off on a near-zero minimum is not a drift"
+
+    # ...but a minimum that moves by a real fraction of the field still fails: 1 % of the scale.
+    moved = validation.run("moved")
+    _write_fingerprint(moved, {"liquid/pressure": {"n": 64, "min": 0.000959557419398 + 0.03,
+                                                   "max": 2.99808, "mean": 1.4, "l2": 14.8424}})
+    assert validation.check(moved).status == "mismatch"
+
+
+def test_l2_is_still_compared_relatively(validation):
+    """The scale rule deliberately leaves l2 out: its magnitude IS the field's scale, and it is the
+    statistic that notices the field changing as a whole."""
+    validation.set_checks([Fingerprint()])
+    ref = validation.run("ref")
+    base = {"liquid/pressure": {"n": 64, "min": 0.0, "max": 3.0, "mean": 1.4, "l2": 14.8424}}
+    _write_fingerprint(ref, base)
+    validation.record(ref)
+    drifted = validation.run("drifted")
+    _write_fingerprint(drifted, {"liquid/pressure": dict(base["liquid/pressure"], l2=14.8424 * 1.001)})
+    assert validation.check(drifted).status == "mismatch", "a 0.1 % change in l2 must be caught"

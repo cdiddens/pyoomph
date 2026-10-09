@@ -1,0 +1,30 @@
+{
+ "_about": "Reference numbers for Spatial_PDEs/mesh_gmsh_fish_with_holes.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "fish/eye/u": {
+     "l2": 0.5176258964741192,
+     "max": -0.049070687285783336,
+     "mean": -0.06260218367328292,
+     "min": -0.06745848673737162,
+     "n": 68
+    },
+    "fish/u": {
+     "l2": 1.4278701229181257,
+     "max": 0.036808015021983956,
+     "mean": 0.0008249628111967226,
+     "min": -0.06321972503787142,
+     "n": 3190
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 3258,
+   "params": {},
+   "time": 1.0
+  }
+ }
+}

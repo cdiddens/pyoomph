@@ -1,0 +1,67 @@
+{
+ "_about": "Reference numbers for Spatial_PDEs/poisson_coupled.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "finalstate:domain_*.txt": {
+  "columns": [
+   "coordinate_x",
+   "u",
+   "w"
+  ],
+  "file": "poisson_coupled/domain/domain_000000.txt",
+  "kind": "finalstate",
+  "nrows": 201,
+  "reduce": true,
+  "stats": {
+   "coordinate_x": {
+    "l2": 8.226177727231525,
+    "max": 1.0,
+    "mean": 7.070076972737315e-17,
+    "min": -1.0,
+    "n": 201,
+    "n_finite": 201
+   },
+   "u": {
+    "l2": 0.5910412962040021,
+    "max": 0.05831137215113307,
+    "mean": 1.380874408737757e-15,
+    "min": -0.058311372151131455,
+    "n": 201,
+    "n_finite": 201
+   },
+   "w": {
+    "l2": 7.7673908696045295,
+    "max": 1.0,
+    "mean": 6.928675433282569e-15,
+    "min": -1.0,
+    "n": 201,
+    "n_finite": 201
+   }
+  }
+ },
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/u": {
+     "l2": 0.5910412962040021,
+     "max": 0.05831137215113307,
+     "mean": 1.392520939429342e-15,
+     "min": -0.058311372151131455,
+     "n": 199
+    },
+    "domain/w": {
+     "l2": 7.637562498678214,
+     "max": 0.9879703087601734,
+     "mean": 6.9983103622602836e-15,
+     "min": -0.9879703087601719,
+     "n": 199
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 398,
+   "params": {},
+   "time": 0.0
+  }
+ }
+}
