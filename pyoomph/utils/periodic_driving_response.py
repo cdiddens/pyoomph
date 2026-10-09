@@ -276,8 +276,21 @@ class PeriodicDrivingResponse():
             # this branch is never taken -- get_parallel_row_split() reports parallel for any nproc>1 --
             # so unlike the old code there is no replicated solve_serial() to warn the gather path about.
             sol=b_local.copy()
-            la.solve_serial(1,ntot,fullmat.nnz,1,fullmat.data,fullmat.indices,fullmat.indptr,sol,0,1)
-            la.solve_serial(2,ntot,fullmat.nnz,1,fullmat.data,fullmat.indices,fullmat.indptr,sol,0,1)
+            # fullmat is the bordered response system, not the Jacobian: the two border rows and the
+            # two border columns are not each other's transpose, and the s*omega*M / omega*M blocks
+            # differ, so it is unsymmetric even where J and M are symmetric. Handing it to solve_serial
+            # unguarded lets the backends ask the JACOBIAN's symmetry proof about it, and a symmetric
+            # factorisation keeps only one triangle - see _solving_foreign_matrix().
+            #
+            # A safeguard rather than a fix for a reachable bug, measured rather than assumed: the
+            # _DrivingForResponse equations this class injects are themselves unsymmetric
+            # (dEQ_y/dd = -1 against dEQ_yp/ddp = omega**2), so _get_proven_matrix_symmetry answers
+            # False for every problem a PeriodicDrivingResponse is attached to and the verdict here is
+            # False today whether or not this guard is present. It is here because that is a property
+            # of the driving equations, not of this solve, and the solve is foreign either way.
+            with la._solving_foreign_matrix():
+                la.solve_serial(1,ntot,fullmat.nnz,1,fullmat.data,fullmat.indices,fullmat.indptr,sol,0,1)
+                la.solve_serial(2,ntot,fullmat.nnz,1,fullmat.data,fullmat.indices,fullmat.indptr,sol,0,1)
         else:
             first_block_row=2*first_row
             local=la.solve_python_built_distributed(ntot,nrow_block,first_block_row,fullmat,b_local)

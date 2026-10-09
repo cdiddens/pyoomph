@@ -96,8 +96,18 @@ class HalleySolver:
             dJdU,=request.assemble()
             self.problem._reset_augmented_dof_vector_to_nonaugmented()
             J=J-dJdU/2
-            self.problem.get_la_solver().solve_serial(1,J.shape[0],J.nnz,1,J.data,J.indices,J.indptr,Rorig,0,0) #type:ignore[attr-defined]
-            self.problem.get_la_solver().solve_serial(2,J.shape[0],J.nnz,1,J.data,J.indices,J.indptr,Rorig,0,0) #type:ignore[attr-defined]
+            # J-dJdU/2 is no longer the Jacobian, so the symmetry proof does not cover it: dJdU is the
+            # second derivative contracted with the Newton step, and nothing in the proof says that is
+            # symmetric when J is. The solve above, which does use the plain Jacobian, deliberately
+            # keeps the symmetric factorisation it has earned. See _solving_foreign_matrix() - a
+            # symmetric factorisation of an unsymmetric matrix is a silently wrong answer, while the
+            # general one here only costs pivoting. No case is known in which it currently changes an
+            # answer: a Jacobian that the proof accepts has in practice come from a potential, whose
+            # third derivative is fully symmetric, and the only problem Halley is tested on
+            # (tests/test_halleys_method.py) has one degree of freedom.
+            with self.problem.get_la_solver()._solving_foreign_matrix(): #type:ignore[attr-defined]
+                self.problem.get_la_solver().solve_serial(1,J.shape[0],J.nnz,1,J.data,J.indices,J.indptr,Rorig,0,0) #type:ignore[attr-defined]
+                self.problem.get_la_solver().solve_serial(2,J.shape[0],J.nnz,1,J.data,J.indices,J.indptr,Rorig,0,0) #type:ignore[attr-defined]
                         
             dofs=dofs-Rorig
             self.problem.set_current_dofs(dofs.tolist())

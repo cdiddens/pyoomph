@@ -1010,6 +1010,17 @@ class PETSCSolver(GenericLinearSystemSolver):
                 # real and independent -- this path demonstrably did not see use_mumps()'s settings --
                 # and because tests/test_mpi_bordered_solve.py exercises it. No case is known in which
                 # it currently changes an answer.
+                #
+                # One candidate for that other defect has since been found and ruled out, so nobody
+                # need chase it twice: the generic (non-PETSc) Python-built entry points used to route
+                # a caller's own matrix through the JACOBIAN's symmetry proof and silently discard its
+                # lower triangle (now gated by _solving_foreign_matrix(), see
+                # tests/test_foreign_matrix_symmetry.py). It cannot be this one. Measured on the Bratu
+                # fold with the Python FoldTracker installed: the verdict is already False the moment a
+                # custom assembler is there ("augmented/custom assembly"), at every factorisation of
+                # the tracked solve -- so the symmetric path was never taken during fold tracking, with
+                # any backend. And this path has its own _aux_ KSP, which never consults the verdict at
+                # all.
                 pc.setUp() #type:ignore
                 try:
                     F=pc.getFactorMatrix() #type:ignore

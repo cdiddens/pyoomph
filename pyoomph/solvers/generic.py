@@ -29,6 +29,7 @@ from __future__ import annotations
  
 from ..meshes.mesh import AnyMesh, ODEStorageMesh
 from ..typings import *
+import contextlib
 import numpy
 import os
 import weakref
@@ -239,6 +240,11 @@ class GenericLinearSystemSolver:
 		#: Which of the two is the right place is not a matter of taste: the post-processing reduces,
 		#: and a reduction inside a rank-0-only branch deadlocks.
 		self._suppress_newton_step_postprocessing:bool=False
+		#: Set while solve_serial()/solve_distributed() is being driven with a matrix that is NOT the
+		#: problem's Jacobian - see _solving_foreign_matrix(), which is the only thing that should set
+		#: it. The symmetry proof the solvers switch on is a statement about the JACOBIAN, so it says
+		#: nothing at all about such a matrix, and acting on it there is a silently wrong answer.
+		self._foreign_matrix_solve:bool=False
 
 	def _custom_solve_routine_active(self)->bool:
 		"""Is a custom assembler installed that wants to drive the solve itself?
@@ -291,12 +297,54 @@ class GenericLinearSystemSolver:
 			return ca.custom_solve_routine(solve_fn,b,first_row=first_row,reduce_dot=reduce_dot)
 		return self._postprocess_newton_step(solve_fn(b),first_row=first_row,reduce_dot=reduce_dot)
 
+	@contextlib.contextmanager
+	def _solving_foreign_matrix(self)->"Iterator[None]":
+		"""Drive solve_serial()/solve_distributed() with a matrix that is NOT the problem's Jacobian.
+
+		Wrap EVERY such call pair (the op_flag==1 factorisation and the op_flag==2 back-substitutions
+		that belong to it) in this. Several utilities assemble their own system in Python and hand it to
+		the backend through the same entry point the Newton solve uses - the Python-built distributed
+		entry points below, PeriodicDrivingResponse's bordered frequency-response system, Halley's
+		method's J-dJdU/2 - and the backends ask _use_symmetric_factorisation_now() there, which proves
+		something about the JACOBIAN and nothing about the matrix actually passed.
+
+		That is not a missed optimisation but a wrong answer: on a problem whose Jacobian is proven
+		symmetric, an unsymmetric Python-built matrix was factorised as real symmetric indefinite,
+		which DISCARDS its lower triangle (pardiso.py takes sp.triu of it) and returns the solution of
+		the symmetrised matrix with nothing raised and nothing warned. Measured on a 3x3 system: 4.2 %
+		off the true solution and identical to the symmetrised one to 1e-16. A bordered system is the
+		worst case, because a normalisation row and a parameter column make it unsymmetric BY
+		CONSTRUCTION even when the base Jacobian is symmetric. See
+		tests/test_foreign_matrix_symmetry.py.
+
+		The flag rather than a per-backend fix because all four backends that act on the decision
+		(pardiso mtype -2, mumps sym=2, accelerate ldlt_sbk, petsc MAT_SYMMETRIC) go through that one
+		method, so one gate covers them at once and a fifth backend is covered before it is written.
+		PETSc's own override of the Python-built entry points never consults the decision - it builds a
+		separate _aux_ KSP with a plain LU - so it is unaffected either way.
+
+		Re-entrant, and try/finally: solve_serial() raises (a SolverError on a failed factorisation is
+		routine), and leaving the flag set would then silently cost the symmetric factorisation of
+		every Newton solve that follows.
+		"""
+		was=self._foreign_matrix_solve
+		self._foreign_matrix_solve=True
+		try:
+			yield
+		finally:
+			self._foreign_matrix_solve=was
+
 	def _use_symmetric_factorisation_now(self)->bool:
 		"""Per-solve decision whether the matrix about to be factorised is proven symmetric.
 
 		Never cached: the same problem flips between symmetric and not when a bifurcation tracker or
 		custom assembler is (de)activated, so backends must ask again at every op_flag==1.
 		"""
+		# Checked before exploit_proven_symmetry, because this one is not a preference: the proof below
+		# is about the Jacobian and the matrix being factorised is not it. See _solving_foreign_matrix.
+		if self._foreign_matrix_solve:
+			self.last_symmetry_decision,self.last_symmetry_decision_reason=False,"the matrix being solved is not the problem's Jacobian, so its symmetry is unproven"
+			return False
 		if not self.exploit_proven_symmetry:
 			self.last_symmetry_decision,self.last_symmetry_decision_reason=False,"disabled by exploit_proven_symmetry=False"
 			return False
@@ -627,8 +675,11 @@ class GenericLinearSystemSolver:
 		# fails loudly rather than silently against these factors -- see _note_external_serial_solve.
 		self._note_external_serial_solve()
 		sol=numpy.array(b_g,dtype=numpy.float64,copy=True)
-		self.solve_serial(1,ntot,mat_g.nnz,1,mat_g.data,mat_g.indices,mat_g.indptr,sol,0,1)
-		self.solve_serial(2,ntot,mat_g.nnz,1,mat_g.data,mat_g.indices,mat_g.indptr,sol,0,1)
+		# The matrix is the CALLER's, not the Jacobian, so the symmetry proof must not reach it --
+		# _solving_foreign_matrix() explains what that silently cost before.
+		with self._solving_foreign_matrix():
+			self.solve_serial(1,ntot,mat_g.nnz,1,mat_g.data,mat_g.indices,mat_g.indptr,sol,0,1)
+			self.solve_serial(2,ntot,mat_g.nnz,1,mat_g.data,mat_g.indices,mat_g.indptr,sol,0,1)
 		return numpy.ascontiguousarray(sol[first_row:first_row+nrow_local])
 
 	def solve_python_built_distributed_many(self,ntot:int,nrow_local:int,first_row:int,mat_local:"Any",b_locals:"Sequence[NPFloatArray]")->"List[NPFloatArray]":
@@ -655,17 +706,23 @@ class GenericLinearSystemSolver:
 		self._note_external_serial_solve()
 		out:"List[NPFloatArray]"=[]
 		factorised=False
-		for b_local in b_locals:
-			b_g=mpi_allgather_vector(ntot,first_row,nrow_local,b_local,
-									 context="replicating a Python-built right-hand side on every rank")
-			sol=numpy.array(b_g,dtype=numpy.float64,copy=True)
-			if not factorised:
-				# op_flag 1 ONCE. The gather of each right-hand side still has to happen per solve --
-				# it is a different vector -- but the factorisation does not.
-				self.solve_serial(1,ntot,mat_g.nnz,1,mat_g.data,mat_g.indices,mat_g.indptr,sol,0,1)
-				factorised=True
-			self.solve_serial(2,ntot,mat_g.nnz,1,mat_g.data,mat_g.indices,mat_g.indptr,sol,0,1)
-			out.append(numpy.ascontiguousarray(sol[first_row:first_row+nrow_local]))
+		# Around the WHOLE loop, not around each solve: the one factorisation inside it is the call that
+		# takes the symmetry decision, and the back-substitutions read what it decided. The matrix is
+		# the caller's own, so the Jacobian's symmetry proof says nothing about it -- see
+		# _solving_foreign_matrix(). The collective gather inside the loop is unaffected: the flag is
+		# plain local state on this rank's solver and every rank sets it identically.
+		with self._solving_foreign_matrix():
+			for b_local in b_locals:
+				b_g=mpi_allgather_vector(ntot,first_row,nrow_local,b_local,
+										 context="replicating a Python-built right-hand side on every rank")
+				sol=numpy.array(b_g,dtype=numpy.float64,copy=True)
+				if not factorised:
+					# op_flag 1 ONCE. The gather of each right-hand side still has to happen per solve --
+					# it is a different vector -- but the factorisation does not.
+					self.solve_serial(1,ntot,mat_g.nnz,1,mat_g.data,mat_g.indices,mat_g.indptr,sol,0,1)
+					factorised=True
+				self.solve_serial(2,ntot,mat_g.nnz,1,mat_g.data,mat_g.indices,mat_g.indptr,sol,0,1)
+				out.append(numpy.ascontiguousarray(sol[first_row:first_row+nrow_local]))
 		return out
 
 	_replicated_python_solve_reported:bool=False
