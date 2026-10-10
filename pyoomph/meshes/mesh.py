@@ -27,6 +27,7 @@ from __future__ import annotations
 # ========================================================================
  
 import abc
+import re
 import inspect
 import math
 import os.path
@@ -153,6 +154,107 @@ class BaseMesh(abc.ABC):
             else:
                 raise ValueError(
                     "Please set Dirichlet active either to True or False")
+
+    def set_interpolate_lagrangian_on_remeshing(self, interpolate: bool = True):
+        """Carry the Lagrangian (undeformed) coordinates over from the old mesh when remeshing,
+        instead of re-baking them from the current positions.
+
+        By default a remesh redefines the reference configuration to be the mesh it just created,
+        which is what you want for a mesh that has deformed far from its original shape. It is *not*
+        what you want if a boundary position is prescribed in terms of ``var("lagrangian_*")``: that
+        value then refers to the configuration the remesh has just overwritten. See
+        dev_docs/position_dirichlet_mesh_motion.md.
+        """
+        assert isinstance(self, _pyoomph.Mesh)
+        self._set_interpolate_lagrangian_on_remeshing(interpolate)
+
+    #: The fields a Dirichlet condition can use to prescribe a nodal position.
+    _position_dirichlet_fields = {"mesh_x", "mesh_y", "mesh_z", "coordinate_x", "coordinate_y", "coordinate_z"}
+
+    @staticmethod
+    def _lagrangian_components_of(expr) -> set[int] | None:
+        """Which Lagrangian components the printed expression reads, or ``None`` if that cannot be
+        decided and every component has to be assumed.
+
+        Two spellings reach here: ``var("lagrangian_y")`` prints ``field(lagrangian_y,..)``, and
+        ``var("lagrangian")[1]`` prints ``single_index(field(lagrangian,..),1)``.
+        """
+        text = str(expr)
+        if "field(lagrangian" not in text:
+            return set()
+        comps: set[int] = set()
+        for i, d in enumerate("xyz"):
+            if "field(lagrangian_" + d in text:
+                comps.add(i)
+        for m in re.finditer(r"single_index\(\s*field\(lagrangian\s*,.*?\)\s*,\s*(\d+)\s*\)", text):
+            comps.add(int(m.group(1)))
+        # A bare vector reference that is not a single_index - e.g. the whole var("lagrangian") - or
+        # anything this does not recognise: stay conservative.
+        remaining = re.sub(r"single_index\(\s*field\(lagrangian\s*,.*?\)\s*,\s*\d+\s*\)", "", text)
+        remaining = re.sub(r"field\(lagrangian_[xyz]", "", remaining)
+        if "field(lagrangian" in remaining:
+            return None
+        return comps
+
+    def lagrangian_dependent_position_dirichlets(self, only_if_displaced: bool = False) -> list[str]:
+        """Active position Dirichlet conditions on this mesh or any of its interfaces whose
+        prescribed value depends on ``var("lagrangian_*")``, as ``"domain/bottom: mesh_y"`` strings.
+
+        Such a condition is only meaningful while the Lagrangian coordinates still describe the
+        configuration the value was written against. Anything that re-bakes them - a remesh, or
+        :py:class:`~pyoomph.equations.ALE.SetLagrangianToEulerianAfterSolve` - makes the condition
+        refer to the displaced mesh and therefore compose with itself on the next pass, which is
+        what this is used to warn about.
+
+        With ``only_if_displaced``, a condition is reported only if re-baking would actually change
+        what it reads, i.e. if the mesh is currently displaced in one of the Lagrangian components
+        the value depends on. A condition that reads a component which has not moved - a shear
+        prescribed in terms of the undeformed height, say - is then correctly left alone.
+        """
+        res: list[str] = []
+        stack: list["BaseMesh"] = [self]
+        displacement: dict[int, float] = {}
+        while stack:
+            m = stack.pop()
+            cg = getattr(m, "_codegen", None)
+            eqs = cg.get_equations() if cg is not None else None
+            # The conditions are owned by the domain's Equations object, not by the code generator.
+            if eqs is not None and getattr(eqs, "_Dirichlet_conditions", None):
+                for field, entry in eqs._Dirichlet_conditions.items():
+                    if field not in BaseMesh._position_dirichlet_fields:
+                        continue
+                    expr = entry[0]
+                    # `True` means pin-only, i.e. no expression at all.
+                    if expr is True:
+                        continue
+                    comps = BaseMesh._lagrangian_components_of(expr)
+                    if comps is not None and not comps:
+                        continue
+                    assert isinstance(m, _pyoomph.Mesh)
+                    if not m._get_dirichlet_active(field):
+                        continue
+                    if only_if_displaced:
+                        if not displacement:
+                            displacement = self._max_displacement_per_component()
+                        relevant = displacement.values() if comps is None else [displacement.get(c, 0.0) for c in comps]
+                        if max(relevant, default=0.0) <= 1e-10:
+                            continue
+                    # get_full_name is defined on each concrete mesh class, not on BaseMesh.
+                    full_name = getattr(m, "get_full_name", lambda: str(m))()
+                    res.append(full_name + ": " + field)
+            stack.extend(m._interfacemeshes.values())
+        return sorted(res)
+
+    def _max_displacement_per_component(self) -> dict[int, float]:
+        """``max |x_i - xi_i|`` over this mesh's nodes, per coordinate component."""
+        out: dict[int, float] = {}
+        assert isinstance(self, _pyoomph.Mesh)
+        for n in self.nodes():
+            for i in range(n.ndim()):
+                d = abs(n.x(i) - n.x_lagr(i))
+                if d > out.get(i, 0.0):
+                    out[i] = d
+        return out
 
     def boundary_intersection_nodes(self, bname1: str, bname2: str) -> list[Node]:
         assert isinstance(self, _pyoomph.Mesh)

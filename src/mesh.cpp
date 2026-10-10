@@ -2957,6 +2957,55 @@ namespace pyoomph
     }
   }
 
+  // Freeze the Lagrangian (undeformed reference) configuration on exactly the nodes whose Eulerian
+  // position the macro map has just placed -- and on no others.
+  //
+  // The mesh-wide set_lagrangian_nodal_coordinates() below is the right thing for an explicit,
+  // opted-in re-bake (remeshing, SetLagrangianToEulerianAfterSolve), but it is the wrong thing during
+  // setup: Problem.initialise() applies the Dirichlet conditions BEFORE it maps the nodes on the
+  // macro elements, so a mesh-wide xi := x there baked a prescribed boundary position into the
+  // reference configuration. Both smoothers write their residual purely in displ = x - X, so
+  // displ == 0 then solves the mesh-motion equation exactly with the boundary sitting where it was
+  // told: the boundary moved and the interior stayed at exactly its undeformed position, and a value
+  // referring to var("lagrangian_*") composed with itself on the next pass. A mesh WITH macro
+  // elements never showed it, because map_nodes_on_macro_element() re-derives x from the geometry and
+  // undoes the displacement just before the freeze; a plain RectangularQuadMesh has no macro element
+  // at all, so nothing undid it. dev_docs/position_dirichlet_mesh_motion.md has the measurements.
+  //
+  // Restricting the freeze to the macro-mapped nodes keeps what the freeze is for -- the mesh template
+  // sets xi := x at construction (meshtemplate.cpp) and only afterwards snaps x onto the curved macro
+  // geometry, so on those nodes xi genuinely has to be corrected -- while leaving every other node's
+  // reference at the as-built coordinate, which is the only configuration that is neither a Dirichlet
+  // value, nor an initial condition, nor a solution.
+  unsigned Mesh::freeze_lagrangian_on_macro_mapped_nodes()
+  {
+    unsigned frozen = 0;
+    oomph::Vector<double> r;
+    const unsigned long n_el = nelement();
+    for (unsigned long e = 0; e < n_el; e++)
+    {
+      BulkElementBase *el = dynamic_cast<BulkElementBase *>(this->element_pt(e));
+      if (!el || !el->macro_elem_pt()) continue;
+      const unsigned n_node = el->nnode();
+      for (unsigned ni = 0; ni < n_node; ni++)
+      {
+        if (!el->macro_position_of_node(ni, r)) continue;
+        Node *node_pt = dynamic_cast<Node *>(el->node_pt(ni));
+        if (!node_pt) continue;
+        // Every Lagrangian type and every history level, for the same reason
+        // map_nodes_on_macro_element() writes every level: oomph's synchronise_nonhanging_nodes
+        // compares them while distributing.
+        const unsigned n_lagrangian = node_pt->nlagrangian();
+        const unsigned n_lagrangian_type = node_pt->nlagrangian_type();
+        for (unsigned k = 0; k < n_lagrangian_type; k++)
+          for (unsigned j = 0; j < n_lagrangian; j++)
+            node_pt->xi_gen(k, j) = node_pt->x_gen(k, j);
+        frozen++;
+      }
+    }
+    return frozen;
+  }
+
   void Mesh::set_lagrangian_nodal_coordinates()
   {
     unsigned long n_node = nnode();

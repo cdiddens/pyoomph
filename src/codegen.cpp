@@ -9258,6 +9258,11 @@ namespace pyoomph
 		}
 		if (pyoomph_verbose)
 			std::cout << "SETTING DIRICHLET COND " << expression << std::endl;
+		// expand_initial_or_Dirichlet only expands the placeholders here; the position substitution it
+		// does internally (which maps lagrangian_* onto the same symbols as coordinate_*) belongs to its
+		// throw-away numeric validation and is NOT what the generated code uses. The authoritative
+		// mapping is built in write_code_Dirichlet_condition, where lagrangian_* goes to _xlagr[i] and
+		// coordinate_*/mesh_* to _x[i].
 		field->Dirichlet_condition = this->expand_initial_or_Dirichlet(fieldname, expression);
 		field->Dirichlet_condition_set = true;
 		field->Dirichlet_condition_pin_only = use_identity;

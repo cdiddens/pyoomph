@@ -78,6 +78,45 @@ class BaseMeshToMeshInterpolator:
         raise NotImplementedError()
 
 
+_warned_lagrangian_rebake:set[str]=set()
+
+
+def warn_on_lagrangian_rebake(mesh:"AnyMesh", site:str)->None:
+    """Warn once if re-baking ``mesh``'s Lagrangian coordinates would change what an active position
+    Dirichlet condition means.
+
+    A condition written as ``DirichletBC(mesh_y=var("lagrangian_y")+h)`` is evaluated against the
+    Lagrangian coordinates, so redefining those to the current positions makes the next evaluation
+    add ``h`` to a position that already contains it. Remeshing does redefine them on purpose, so this
+    is a warning and not a refusal; the cures are to interpolate the Lagrangian coordinates instead,
+    or to write the condition without ``lagrangian_*``.
+    See dev_docs/position_dirichlet_mesh_motion.md.
+    """
+    getter=getattr(mesh,"lagrangian_dependent_position_dirichlets",None)
+    if getter is None:
+        return # an ODE storage mesh has no positions
+    try:
+        # only_if_displaced: a condition that reads a component the mesh has not moved in - a shear
+        # written in terms of the undeformed height, say - means the same thing after the re-bake.
+        offenders=getter(only_if_displaced=True)
+    except Exception:
+        return # never let a diagnostic break a remesh
+    if not offenders:
+        return
+    name=getattr(mesh,"get_full_name",lambda:str(mesh))()
+    key=name+"@"+site
+    if key in _warned_lagrangian_rebake:
+        return
+    _warned_lagrangian_rebake.add(key)
+    print("WARNING: "+site+" is about to re-bake the Lagrangian (undeformed) coordinates of '"+name+
+          "' to the current nodal positions, but the following position Dirichlet condition(s) are "
+          "prescribed in terms of var('lagrangian_*'):\n    "+"\n    ".join(offenders)+
+          "\n  Their value will then refer to the displaced configuration rather than the original "
+          "one, i.e. the prescribed displacement accumulates. Either call "
+          "mesh.set_interpolate_lagrangian_on_remeshing(True) to carry the Lagrangian coordinates "
+          "over instead, or express the condition without var('lagrangian_*').")
+
+
 def _transfer_internal_facet_fields(old:"AnySpatialMesh", new:"AnySpatialMesh")->None:
     """Carry the fields living on the interior-facet skeleton of ``old`` over to ``new``.
 
@@ -133,6 +172,10 @@ class ProjectionInternalInterpolator(BaseMeshToMeshInterpolator):
         self.new:AnySpatialMesh=new
         # The source is the OLD mesh. This used to pass `new`, i.e. it located the new mesh's
         # integration points in itself, which is a no-op mapping.
+        # prepare_interpolation() re-bakes xi := x unless the Lagrangian coordinates are
+        # interpolated, which silently re-bases a lagrangian_*-dependent position condition.
+        if not old._get_interpolate_lagrangian_on_remeshing():
+            warn_on_lagrangian_rebake(old,"Remeshing")
         old.prepare_interpolation()
         new.prepare_zeta_interpolation(old)
         ProjectionInternalInterpolator._pending.append(self)
@@ -310,6 +353,10 @@ class InternalInterpolator(BaseMeshToMeshInterpolator):
         #: interface geometry instead of blending the two nearest old nodes. Set False to get the old
         #: behaviour back. See dev_docs/mesh_point_locator.md.
         self.project_on_boundary_without_zeta:bool=True
+        # prepare_interpolation() re-bakes xi := x unless the Lagrangian coordinates are
+        # interpolated, which silently re-bases a lagrangian_*-dependent position condition.
+        if not old._get_interpolate_lagrangian_on_remeshing():
+            warn_on_lagrangian_rebake(old,"Remeshing")
         old.prepare_interpolation()
         # Remove the macro elements, since they are really troublesome for the locate_zeta
         for e in old.elements():

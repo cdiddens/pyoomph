@@ -74,8 +74,15 @@ class BaseMovingMeshEquations(Equations):
         self.set_test_scaling(mesh=1/scale_factor("spatial"))
 
     def after_mapping_on_macro_elements(self):
-        self.get_mesh().set_lagrangian_nodal_coordinates()
-        self.get_mesh().bump_topology_generation()
+        # Only the nodes the macro map has just placed may have their Lagrangian reference re-baked.
+        # Problem.initialise() applies the Dirichlet conditions *before* it maps the nodes, so a
+        # mesh-wide ``set_lagrangian_nodal_coordinates()`` here baked a prescribed boundary position
+        # into the undeformed configuration - and since the residual is written in ``x - X``, zero
+        # displacement then solved the mesh-motion equation exactly with the boundary where it had been
+        # told to go: the interior never followed, and a value built on ``var("lagrangian_*")`` composed
+        # with itself on the next pass. See dev_docs/position_dirichlet_mesh_motion.md.
+        if self.get_mesh().freeze_lagrangian_on_macro_mapped_nodes():
+            self.get_mesh().bump_topology_generation()
 
     def with_average_position_constraint(self, problem:"Problem", *, act_on:str="mesh",ode_domain_name:str="globals",lagrange_prefix:str="lagr_intconstr_mesh_", set_zero_on_normal_mode_eigensolve:bool=True, **avg_pos:ExpressionOrNum)->Equations:
 
@@ -422,6 +429,8 @@ class SetLagrangianToEulerianAfterSolve(Equations):
     def after_newton_solve(self):
         super(SetLagrangianToEulerianAfterSolve, self).after_newton_solve()
         if self.active:
+            from ..meshes.interpolator import warn_on_lagrangian_rebake
+            warn_on_lagrangian_rebake(self.get_mesh(),"SetLagrangianToEulerianAfterSolve")
             self.get_mesh().set_lagrangian_nodal_coordinates()
             self.get_mesh().bump_topology_generation()
 

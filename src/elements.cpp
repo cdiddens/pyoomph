@@ -592,6 +592,13 @@ namespace pyoomph
 	// the Lagrangian coordinate instead of the position, via the undeformed macro element -- was
 	// prototyped and works, but is deliberately not built; dev_docs/macro_elements.md 7.1 records what
 	// it takes and 7.2 why it has to be an explicit per-boundary declaration rather than a default.
+	// Note that Mesh::map_nodes_on_macro_elements() does NOT consult this guard -- only
+	// reapply_macro_element_positions() below does -- so on a curved moving mesh the initial mapping
+	// does snap a prescribed boundary back onto the undeformed geometry. That is deliberate and
+	// harmless: the mapping is what makes xi the exact curved geometry (see
+	// Mesh::freeze_lagrangian_on_macro_mapped_nodes), and the next Dirichlet pass re-imposes the
+	// prescribed position before anything is solved. Honouring the guard there would instead leave the
+	// reference configuration on the straight FE interpolant, i.e. destroy what the mapping is for.
 	bool BulkElementBase::macro_element_may_set_positions() const
 	{
 		if (!this->jitcode) return true;
@@ -613,6 +620,29 @@ namespace pyoomph
 		return std::vector<double>(r.begin(), r.end());
 	}
 
+	// Does this element's macro element place node ni, and if so, where? Factored out of
+	// map_nodes_on_macro_element() so that freeze_lagrangian_on_macro_mapped_nodes() cannot disagree
+	// with it about which nodes the macro map owns: the Lagrangian reference may only be re-baked on
+	// exactly those nodes, since for them - and only for them - the position is the geometry rather
+	// than a Dirichlet value, an initial condition or a solution. See dev_docs/position_dirichlet_mesh_motion.md.
+	bool BulkElementBase::macro_position_of_node(unsigned ni, oomph::Vector<double> &r)
+	{
+		if (!macro_elem_pt()) return false;
+		// A hanging node's position is dictated by its masters; snapping it onto the geometry would
+		// break agreement with the coarse neighbour that constrains it, and the boundary is anyway
+		// only as accurate as that neighbour's edge. Leave it to the hanging-node machinery.
+		if (this->node_pt(ni)->is_hanging()) return false;
+		oomph::Vector<double> s(dim());
+		this->local_coordinate_of_node(ni, s);
+		std::vector<double> s_macro = this->get_macro_element_coordinate_at_s(s);
+		if (s_macro.empty()) return false; // T-family: no macro mapping implemented (TODO)
+		oomph::Vector<double> s_macro_o(s_macro.size());
+		for (unsigned int i = 0; i < s_macro.size(); i++) s_macro_o[i] = s_macro[i];
+		r.resize(this->nodal_dimension(), 0.0);
+		macro_elem_pt()->macro_map(s_macro_o, r);
+		return true;
+	}
+
 	// For elements built on a macro-element (structured, e.g. curved-boundary) mesh, snaps every
 	// node's Eulerian position exactly onto the macro element's geometric mapping (evaluated at that
 	// node's local coordinate), so the initial mesh exactly represents the macro-element geometry
@@ -622,21 +652,10 @@ namespace pyoomph
 	{
 		if (!macro_elem_pt())
 			return;
-		const unsigned el_dim = dim();
-		oomph::Vector<double> s(el_dim);
 		oomph::Vector<double> r(this->nodal_dimension(), 0.0);
 		for (unsigned int ni = 0; ni < this->nnode(); ni++)
 		{
-			// A hanging node's position is dictated by its masters; snapping it onto the geometry would
-			// break agreement with the coarse neighbour that constrains it, and the boundary is anyway
-			// only as accurate as that neighbour's edge. Leave it to the hanging-node machinery.
-			if (this->node_pt(ni)->is_hanging()) continue;
-			this->local_coordinate_of_node(ni, s);
-			std::vector<double> s_macro = this->get_macro_element_coordinate_at_s(s);
-			if (s_macro.empty()) continue;
-			oomph::Vector<double> s_macro_o(s_macro.size());
-			for (unsigned int i = 0; i < s_macro.size(); i++) s_macro_o[i] = s_macro[i];
-			macro_elem_pt()->macro_map(s_macro_o, r);
+			if (!this->macro_position_of_node(ni, r)) continue;
 			// Every history level, not just the present one. The macro geometry does not depend on time,
 			// so one evaluation serves them all -- but leaving t>=1 behind on the straight interpolant is
 			// not merely untidy. It makes the node's stored history disagree with what get_x(t,...)

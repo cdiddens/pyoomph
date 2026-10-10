@@ -169,6 +169,10 @@ namespace pyoomph
 		virtual void describe_my_dofs(std::ostream &os, const std::string &in) { this->describe_local_dofs(os, in); }
 		// Copy the current nodal Eulerian coordinates into the Lagrangian coordinates of all nodes (i.e. "freeze" the current shape as reference configuration).
 		virtual void set_lagrangian_nodal_coordinates();		
+		// Re-bake the Lagrangian reference on exactly the nodes the macro map placed. Returns how many
+		// were frozen. Unlike set_lagrangian_nodal_coordinates() this is safe to call during setup,
+		// where a Dirichlet pass may already have displaced other nodes.
+		unsigned freeze_lagrangian_on_macro_mapped_nodes();
 		// Fill a lookup buffer mapping each local dof to its global field index, used to assemble field-wise data.
 		virtual void fill_dof_to_global_field_index_buffer(std::vector<int> &dofs_to_global_field_index);
 		// From the old mesh, map each element with the local coordinates associated to each integration point of the new mesh.

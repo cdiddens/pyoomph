@@ -974,6 +974,11 @@ namespace pyoomph
     // For macro-element-based (structured) meshes: projects/attaches nodes to their position on the
     // underlying macro element geometry, used e.g. for curved boundary representation.
     virtual void map_nodes_on_macro_element();
+    // Where the macro element places node ni, if it places it at all (false for a hanging node and
+    // for the T-family, which has no macro mapping yet). The predicate map_nodes_on_macro_element()
+    // and Mesh::freeze_lagrangian_on_macro_mapped_nodes() must agree on, hence shared rather than
+    // inlined twice.
+    bool macro_position_of_node(unsigned ni, oomph::Vector<double> &r);
     // Re-apply the macro map to this element's nodes after a build that discarded it (see the
     // definition: oomph's solid build overwrites node positions with the FE interpolation).
     void reapply_macro_element_positions();

@@ -1209,6 +1209,11 @@ void PyReg_Mesh(nb::module_ &m)
 			pyoomph::Mesh* mesh =dynamic_cast<pyoomph::Mesh*>(self);
 			if (mesh) mesh->interpolated_lagrangian_coordinates_at_remeshing=lagr;
 			 }), nb::arg("interpolate"), "Controls whether the Lagrangian (undeformed) coordinates of new nodes are interpolated from the old mesh when remeshing")
+		.def("_get_interpolate_lagrangian_on_remeshing",oomph_mesh_method([](oomph::Mesh *self)
+			 {
+			pyoomph::Mesh* mesh =dynamic_cast<pyoomph::Mesh*>(self);
+			return mesh ? mesh->interpolated_lagrangian_coordinates_at_remeshing : false;
+			 }), "Whether the Lagrangian (undeformed) coordinates of new nodes are interpolated from the old mesh when remeshing, rather than being re-baked from the current positions")
 		.def("_set_discontinuous_fields_need_no_transfer",oomph_mesh_method([](oomph::Mesh *self, bool skip)
 			 {
 			pyoomph::Mesh* mesh =dynamic_cast<pyoomph::Mesh*>(self);
@@ -1432,6 +1437,7 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("fill_dof_types",mesh_method([](pyoomph::Mesh *self, nb::ndarray<nb::numpy, int> &desc)
 			 { self->fill_dof_types(desc.data()); }), nb::arg("dof_type_array"), "Fills the given numpy int array with a type tag for every degree of freedom of this mesh (used e.g. by block preconditioners)")
 		.def("set_lagrangian_nodal_coordinates",mesh_method(&pyoomph::Mesh::set_lagrangian_nodal_coordinates), "Sets the Lagrangian (undeformed/reference) coordinates of all nodes to their current Eulerian coordinates")
+		.def("freeze_lagrangian_on_macro_mapped_nodes",mesh_method(&pyoomph::Mesh::freeze_lagrangian_on_macro_mapped_nodes), "Sets the Lagrangian (undeformed/reference) coordinates to the current Eulerian ones on exactly those nodes that the macro element mapping has placed, and returns how many were frozen. Unlike set_lagrangian_nodal_coordinates, this is safe during setup, where boundary conditions may already have displaced other nodes.")
 		.def("get_refinement_pattern",mesh_method([](pyoomph::Mesh *self)
 			 {
 	  oomph::TreeBasedRefineableMeshBase * tbself=dynamic_cast<oomph::TreeBasedRefineableMeshBase*>(self);

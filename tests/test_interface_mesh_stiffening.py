@@ -67,9 +67,12 @@ class SquashedSquare(Problem):
         self += RectangularQuadMesh(N=4)
         eqs = LaplaceSmoothedMesh() + ElementSpace("C2")
         eqs += PinMeshCoordinates() @ ["left", "bottom", "right"]
-        # The mesh is built from macro elements, so the Lagrangian coordinates are reset to whatever
-        # the initial condition produced. Driving the deformation by a parameter after initialise()
-        # is what makes the displacement nonzero at all.
+        # Driving the deformation by a parameter after initialise() is what makes the displacement
+        # nonzero at all: the top value is exactly the as-built boundary while amp is still 0.
+        # (An earlier comment here claimed the mesh is built from macro elements and that the
+        # Lagrangian coordinates are reset from the initial condition. Neither is true -
+        # RectangularQuadMesh carries no macro element, and the reference configuration is the
+        # as-built mesh; see dev_docs/position_dirichlet_mesh_motion.md.)
         eqs += DirichletBC(mesh_x=True, mesh_y=1 + self.amp * var("lagrangian_x") * (1 - var("lagrangian_x"))) @ "top"
         if self.interface_eqs is not None:
             eqs += self.interface_eqs @ "top"
