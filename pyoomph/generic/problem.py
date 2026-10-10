@@ -7622,7 +7622,7 @@ class Problem(_pyoomph.Problem):
 
         An eigenvector is only defined up to a complex factor, so a comparison has to be invariant
         under one. ``|<a,b>| / (|a| |b|)`` with the HERMITIAN inner product is: replacing a by alpha*a
-        and b by beta*b multiplies the numerator by |alpha||beta| and the denominator by the same.
+        and b by beta*b multiplies the numerator by ``|alpha||beta|`` and the denominator by the same.
         Taking the modulus is what removes the phase; the real part alone would not, and would report
         two copies of one mode differing by a phase of pi as perfectly anti-correlated.
 
@@ -7630,7 +7630,7 @@ class Problem(_pyoomph.Problem):
         either member, and conj(v) is NOT a rescaling of v. So the comparison is also taken against
         the conjugate and the better of the two is reported -- lambda and conj(lambda) are the same
         physical mode, which is the same reading as mpi_augmented_systems.md section 11's "compare
-        |omega|". For a real eigenvector the two coincide.
+        ``|omega|``". For a real eigenvector the two coincide.
 
         Takes real arrays as well as complex ones, and not only for convenience: a real eigenvector
         is the ordinary case for a fold or a pitchfork, and the two branches below then coincide.
