@@ -1,0 +1,58 @@
+{
+ "_about": "Reference numbers for Plotting_Interface/kuramoto_sivanshinsky.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/bottom/h": {
+     "l2": 3.6315844142727367,
+     "max": 0.9640296913069387,
+     "mean": 0.2309613214657852,
+     "min": -0.2068569466857441,
+     "n": 79
+    },
+    "domain/bottom/lapl_h": {
+     "l2": 1.475811834445145,
+     "max": 0.2709985152449815,
+     "mean": -0.0045218301336878465,
+     "min": -0.2847698267667127,
+     "n": 79
+    },
+    "domain/h": {
+     "l2": 33.01218122074346,
+     "max": 0.9798272354951526,
+     "mean": 0.22651121590208115,
+     "min": -0.27103346961611297,
+     "n": 6241
+    },
+    "domain/lapl_h": {
+     "l2": 14.563685602304275,
+     "max": 0.3062312891344323,
+     "mean": 1.6469956349255163e-05,
+     "min": -0.2882220537684783,
+     "n": 6241
+    },
+    "domain/left/h": {
+     "l2": 3.7366824449370495,
+     "max": 0.9757359873311962,
+     "mean": 0.22656867986361764,
+     "min": -0.2642842693677882,
+     "n": 80
+    },
+    "domain/left/lapl_h": {
+     "l2": 1.646819893762916,
+     "max": 0.30557535379188316,
+     "mean": -0.00010468071740561829,
+     "min": -0.28781616138428406,
+     "n": 80
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 12800,
+   "params": {},
+   "time": 2000.000159
+  }
+ }
+}

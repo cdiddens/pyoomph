@@ -669,11 +669,29 @@ VALIDATION: "dict[str,list]" = {
       #
       # kuramoto_sivanshinsky_arclength_eigen.py needs none of this: it ends on a plain state and
       # has no unnamed group at all.
+      #
+      # rtol=1e-4, and the number is measured rather than chosen. This script is NOT reproducible
+      # run to run at the default 1e-5, and not because of MPI: against the committed reference a
+      # fresh SERIAL run deviates by 7.6e-06 on h's l2, 8.7e-06 on lapl_h's and 1.11e-05 on
+      # lapl_h's max - already outside 1e-5 - while three four-rank runs deviate LESS (2.7e-06 to
+      # 6.0e-06) and differ among themselves by up to 9.9e-06. So the spread is the continuation's
+      # own, at any rank count, and the committed reference is one draw from it. The default
+      # tolerance sat exactly on that spread, which is the worst place for it: the same check failed
+      # on h's l2 in one pass and passed in another.
+      #
+      # The fold location is still pinned to something meaningful at 1e-4: delta and gamma deviate
+      # by 2.2e-06 and 1.3e-06 over the same four runs, and a genuinely different fold would move
+      # them by far more than 1e-4. Keeping them at 1e-5 in a second check was considered and
+      # dropped - it doubles the entry to buy one order on a quantity that is already four times
+      # inside the looser bound.
       Fingerprint(skip=["dofs.(not described).min",
                         "dofs.(not described).max",
                         "dofs.(not described).mean"],
+                  rtol=1e-4,
                   reason="a null eigenvector is defined only up to sign, and over four ranks the "
-                         "eigensolver returned the other one (component sum ratio -0.999993)"),
+                         "eigensolver returned the other one (component sum ratio -0.999993); and "
+                         "this script's own run-to-run spread is ~1e-05 at any rank count, measured "
+                         "over four runs, so the default tolerance sat exactly on it"),
   ],
   "SpatioTemporal_PDEs/kuramoto_sivanshinsky_arclength_eigen.py": [
       # gamma, h_rms, and the real and imaginary parts of the critical eigenvalue along the branch.
@@ -1528,6 +1546,169 @@ VALIDATION: "dict[str,list]" = {
       # types across the two domains. The script has no "if __name__" guard but does use a
       # with-block, so Problem.release() is reached and the fingerprint is collected normally -
       # unlike Advanced_Linear_Dynamics/rivulet.py, which has neither.
+      Fingerprint(),
+  ],
+  # ===============================================================================================
+  # PreCICE_Coupling. Be clear about what these two entries do and do not cover: each script
+  # branches on precice_participant, and with the default empty value it solves the FULL domain
+  # monolithically rather than coupling anything. Coupling needs two participants alive at once
+  # against a shared precice-config.xml, which the harness cannot launch - it runs one process per
+  # script - so the Dirichlet/Neumann coupling, which is what the chapter is about, is NOT exercised
+  # here and a green check must not be read as saying it is.
+  #
+  # What IS covered is worth having all the same, because the monolithic branch is a manufactured
+  # solution: the source term and every Dirichlet value come from an analytic u, and the script
+  # integrates (u - u_analytical)**2 into domain_IntObsv.txt. So these entries pin the
+  # discretisation error of a problem with a known exact answer, at the prescribed instants of
+  # run(1, outstep=0.1) - and that error is precisely the quantity a coupled run would have to
+  # reproduce, which makes it the right reference for the coupling even though it does not test it.
+  # ===============================================================================================
+
+  "PreCICE_Coupling/partitioned_heat_conduction.py": [
+      # The squared error against the analytic solution at eleven prescribed instants, on the
+      # 22x11 full domain (903 dofs, u only).
+      Evolution("domain_IntObsv.txt"),
+      Fingerprint(),
+  ],
+  "PreCICE_Coupling/partitioned_heat_conduction_circle.py": [
+      # The same manufactured solution on the circular geometry, 1657 dofs.
+      Evolution("domain_IntObsv.txt"),
+      Fingerprint(),
+  ],
+
+  # ===============================================================================================
+  # Plotting_Interface. These scripts exist to demonstrate the plotting interface, so most of them
+  # re-use a problem from an earlier chapter and differ only in what they draw. The plots themselves
+  # are not checked - a PNG is not a number, and the harness's own pass/fail already says the
+  # plotting ran - but the underlying problem is the same physics and is pinned the same way, with
+  # the reasoning cross-referenced rather than repeated.
+  #
+  # Three of them are near-duplicates of entries elsewhere: rising_bubble.py of the
+  # Advanced_Linear_Dynamics script of that name, evaporating_water_droplet.py of the
+  # Multiple_Domains one (identical ndof, 29022), and kuramoto_sivanshinsky.py of the
+  # SpatioTemporal_PDEs one. They are separate scripts in the bundle and get separate references;
+  # what that buys is a check that the plotting interface does not disturb the solve.
+  # ===============================================================================================
+
+  "Plotting_Interface/one_dimensional.py": [
+      # Two problems into two output directories, which is why this script is named in the harness
+      # note about scripts that set their own: 121 dofs for the first, 39 for the second. vtu and
+      # plots only, so the fingerprints are the whole check.
+      Fingerprint(),
+      Fingerprint(index=1),
+  ],
+  "Plotting_Interface/tracers.py": [
+      # Tracer particles advected through a flow. The seed= here is a TracerSeedGrid, i.e. a
+      # deterministic grid of starting positions and not a random seed - worth saying, because every
+      # other "seed" in this file is about reproducible randomness.
+      Fingerprint(),
+  ],
+  "Plotting_Interface/eigendynamics.py": [
+      # An eigenmode-driven transient, with Bo and the azimuthal mode as parameters and the critical
+      # eigenvalue recorded. One Problem with three run() calls, hence one fingerprint and three
+      # elapsed times in the log - not three problems.
+      Fingerprint(),
+  ],
+  "Plotting_Interface/evaporating_water_droplet.py": [
+      # The Multiple_Domains droplet again, same 29022 dofs. Reduced for the reason given there:
+      # outstep=True with temporal_error=1, so the four rows are the stepper's choice, and min/max
+      # of the volume are the initial and final values, which is what the series is about.
+      FinalState("EVO_droplet.txt", stats=("min", "max"),
+                 reason="an adaptive row grid; min and max of the volume are the initial and final "
+                        "values - see Multiple_Domains/evaporating_water_droplet.py"),
+      Fingerprint(),
+  ],
+  "Plotting_Interface/plotting_evaporating_droplet.py": [
+      # The same droplet with only two output rows, reduced for the same reason. With two rows the
+      # extremes ARE the series, so nothing is given up by reducing it.
+      FinalState("EVO_droplet.txt", stats=("min", "max"),
+                 reason="an adaptive row grid; with two rows the extremes are the whole series"),
+      Fingerprint(),
+  ],
+  "Plotting_Interface/kuramoto_sivanshinsky.py": [
+      # Physically identical to SpatioTemporal_PDEs/kuramoto_sivanshinsky.py - same L=50, same
+      # run(2000, outstep=True, startstep=0.1, temporal_error=1, maxstep=50), same 12800 dofs, and
+      # the same DeterministicRandomField with no seed= - so it starts somewhere different on every
+      # run and the measurement made there carries over without repeating it: over eight runs h's
+      # l2 spreads by 23 % of itself and the boundary lines by up to 64 %.
+      #
+      # ndof alone, therefore, and it is meant to read as the weak check it is.
+      Fingerprint(only=["ndof"],
+                  reason="an unseeded DeterministicRandomField initial condition, so every run "
+                         "starts from a different state - measured on the SpatioTemporal_PDEs twin"),
+  ],
+  "Plotting_Interface/kuramoto_sivanshinsky_bifurcation.py": [
+      # The fold of the hexagonal state again, written without a header here (hence column_0,
+      # column_1, column_2 as positional names) and with 29 rows against the 58 of the
+      # SpatioTemporal_PDEs twin.
+      Evolution("hexfold.txt", match="rows",
+                reason="a continuation, so the first column does not grow"),
+      # Ends in the augmented fold-tracking state, so the dof vector carries the null eigenvector:
+      # the "(not described)" group is 7614 of its components plus the one continuation unknown,
+      # which is why that group's max is exactly gamma (0.2738001088). ndof = 15229 = 7614 + 7614 + 1.
+      #
+      # A null eigenvector is defined only up to sign - that is mathematics, not a measurement - and
+      # the SpatioTemporal_PDEs twin supplies the measurement that it really does flip: at four
+      # ranks the sum of its components came back as -0.999993 times the serial one, magnitudes
+      # unchanged. So min, max and mean of that group say which sign the eigensolver happened to
+      # return. l2 and n are kept, being invariant under a flip and structural, and everything that
+      # is the answer stays compared: delta and gamma at the fold, the eigenvalue, ndof, and both
+      # physical fields.
+      # rtol=1e-4 for the same measured reason as the twin: the family's field statistics move by
+      # ~1e-05 between runs at any rank count. This particular script happened to PASS the four-rank
+      # pass at the default, which is precisely the problem - a check that lands on both sides of
+      # its tolerance depending on the run is one that will flake in a nightly weeks from now.
+      Fingerprint(skip=["dofs.(not described).min",
+                        "dofs.(not described).max",
+                        "dofs.(not described).mean"],
+                  rtol=1e-4,
+                  reason="a null eigenvector is defined only up to sign; and this family's fields "
+                         "have a ~1e-05 run-to-run spread at any rank count"),
+  ],
+  "Plotting_Interface/kuramoto_sivanshinsky_arclength_eigen.py": [
+      # gamma, h_rms and the critical eigenvalue along the branch, 36 rows, headerless.
+      #
+      # Serially only, and this needs no separate investigation: at four ranks exactly one of the
+      # 144 compared values moves, the critical eigenvalue at column_0=0.2457868, from
+      # 0.00427606969927 to 0.00370144097136 - the same two numbers to eleven digits that the
+      # SpatioTemporal_PDEs twin produced, where it was measured as 1.85 % of that column's whole
+      # range (-0.0311..0.0164). It is the accuracy of a near-zero eigenvalue of a 7614-dof system
+      # across rank counts, not a drift, and no tolerance covers that and still leaves a check. So
+      # the strong serial comparison is kept and the MPI pass leaves this one to the fingerprint,
+      # which does hold there.
+      Evolution("hexdots.txt", match="rows", skip_under=("mpi",),
+                reason="a continuation, so the first column does not grow; and the critical "
+                       "eigenvalue moves by ~2 % of its range across rank counts, identically to "
+                       "the SpatioTemporal_PDEs twin"),
+      Fingerprint(),
+  ],
+  "Plotting_Interface/plotting_eigenmodes.py": [
+      # The fold with its eigenmodes drawn, on a finer mesh than the other two: 59893 dofs, the only
+      # script in this chapter over the 40000-dof MPI guidance, so it runs on its own in that pass.
+      Evolution("hexfold.txt", match="rows",
+                reason="a continuation, so the first column does not grow"),
+      # The same augmented state and the same unnamed null-eigenvector group as
+      # kuramoto_sivanshinsky_bifurcation.py above, at this mesh: n = 29947 = 29946 components plus
+      # the continuation unknown, max exactly gamma (0.2789130702), ndof = 59893 = 29946 + 29946 + 1.
+      #
+      # And the same rtol, for the same measured reason: this family's field statistics carry a
+      # run-to-run spread of ~1e-05 whatever the rank count (measured on the SpatioTemporal_PDEs
+      # script). Here it showed as lapl_h's l2 at 1.02e-05 over four ranks, i.e. the default
+      # tolerance missing by two percent of itself.
+      Fingerprint(skip=["dofs.(not described).min",
+                        "dofs.(not described).max",
+                        "dofs.(not described).mean"],
+                  rtol=1e-4,
+                  reason="a null eigenvector is defined only up to sign; and this family's fields "
+                         "have a ~1e-05 run-to-run spread at any rank count, measured over four "
+                         "runs of the SpatioTemporal_PDEs script"),
+  ],
+  "Plotting_Interface/rising_bubble.py": [
+      # The Advanced_Linear_Dynamics rising bubble again, same 39361 dofs and the same m=1
+      # instability curve against a Bond number stepped by a fixed increment, so the abscissa is
+      # exact. See that entry for why an eigenfunction-driven refinement turned out NOT to be
+      # rank-dependent.
+      Evolution("m1_instability.txt"),
       Fingerprint(),
   ],
 }

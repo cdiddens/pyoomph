@@ -127,7 +127,20 @@ here, in both directions:
   (21.0198 or 18.8496) and failed 3 of 5 repeats.
 
 So two runs are enough to prove a script *is* irreproducible, and never enough to prove it is
-reproducible. If a check is going to rest on a measured spread, measure it five to eight times -
+reproducible.
+
+**And a verification pass that passes does not establish margin.** `--update-validation` compares a
+run against itself, so generation can never reveal a spread; the verification pass that follows is
+the first honest test, but it is still only one draw. The Kuramoto-Sivashinsky fold family is the
+case that proves the point: its fingerprint passed the serial verification in one batch and the MPI
+verification in another, and a later run deviated by 1.11e-05 against a default tolerance of 1e-05.
+Measured over four runs, the spread is the continuation's own and has nothing to do with MPI - a
+fresh serial run was the *worst* of the four, while three four-rank runs sat at 2.7e-06 to 6.0e-06
+and differed among themselves by 9.9e-06. A tolerance sitting on a script's spread fails about half
+the time, which in a nightly means a flake weeks later with no change to blame.
+
+The practical rule: if a check's observed deviation is within a factor of a few of its tolerance,
+that is not a pass, it is a warning. Measure the spread and set the tolerance from it. If a check is going to rest on a measured spread, measure it five to eight times -
 the scripts here cost seconds to tens of seconds each, which is cheaper than a nightly that fails
 intermittently a month later.
 

@@ -1,0 +1,46 @@
+{
+ "_about": "Reference numbers for PreCICE_Coupling/partitioned_heat_conduction_circle.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "evolution:domain_IntObsv.txt": {
+  "abscissa": "time",
+  "columns": [
+   "error[]"
+  ],
+  "file": "partitioned_heat_conduction_circle/domain_IntObsv.txt",
+  "kind": "evolution",
+  "match": "exact",
+  "nrows": 11,
+  "rows": [
+   [0.0, 1.5399611082808862e-11],
+   [0.1, 0.0538964078422543],
+   [0.2, 0.027817018165290964],
+   [0.30000000000000004, 0.006376241929326627],
+   [0.4, 0.0007884171926753182],
+   [0.5, 3.569323572101641e-05],
+   [0.6000000000000001, 6.534361340995664e-07],
+   [0.7000000000000001, 2.7619009311587504e-06],
+   [0.8, 1.1495838073495057e-06],
+   [0.9, 2.3084287516043703e-07],
+   [1.0, 2.41474424639607e-08]
+  ]
+ },
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/u": {
+     "l2": 173.0526675022039,
+     "max": 8.839332176453611,
+     "mean": 4.049244611165908,
+     "min": 2.2057721872352123,
+     "n": 1657
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 1657,
+   "params": {},
+   "time": 1.0
+  }
+ }
+}
