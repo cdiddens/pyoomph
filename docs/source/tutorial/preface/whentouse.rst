@@ -13,14 +13,15 @@ As every numerical framework, pyoomph has some strong points but of course also 
 * when you don't want to code a lot of matrix filling routines by hand
 * when you want to track (azimuthal) bifurcations
 * when you want to use a monolithic sharp-interface moving mesh method
+* when you want to parallelize: the element assembly can run on OpenMP threads, and entire simulations can be run with MPI, optionally with a distributed mesh (cf. :numref:`secparallel`)
 
 
 **You should consider using something else**
 
 * when you want to use all features of `oomph-lib <https://oomph-lib.github.io/oomph-lib/doc/html/>`_.
 * when you want to operate on a lower level for more flexibility
-* when you need highly parallelized computational power
-* for computationally expensive three-dimensional problems
+* when you need to scale to a large number of cores - pyoomph parallelizes well on a single workstation, but efficient MPI runs on a cluster require problem-specific preconditioners, for the setup of which pyoomph does not offer a convenient interface yet
+* for very large three-dimensional problems, where the memory of a monolithic approach becomes the limiting factor
 * for high Reynolds numbers (go for e.g. advanced finite differences as in `AFiD <https://stevensrjam.github.io/Website/afid.html>`_)
 * for topological changes in general geometries (axisymmetric pinch-off and coalescence are supported, cf. :numref:`secalepinchoff`, but for the general three-dimensional case the sharp-interface method is not well suited, go for VoF instead, e.g. `Basilisk <http://basilisk.fr/>`_)
 * if you need more fancy finite-element spaces (go for `FEniCS <https://fenicsproject.org/>`_ or `NGSolve <https://ngsolve.org/>`_)

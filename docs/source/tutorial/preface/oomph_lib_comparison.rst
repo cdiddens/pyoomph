@@ -255,6 +255,15 @@ Both libraries inherit the same conceptual toolbox (pyoomph builds directly on o
    * - Lyapunov exponents / normal-form / periodic-driving response
      - —
      - Yes (utility modules)
+   * - Deflation (finding further solutions of the same system)
+     - —
+     - Yes (cf. :numref:`sectemporaldeflation`)
+   * - Branch switching at a detected bifurcation
+     - —
+     - Yes, via the normal form (cf. :numref:`sectemporalbranchswitch`)
+   * - Interactive exploration
+     - —
+     - Yes, an interactive GUI for continuation, bifurcation tracking and loci (cf. :numref:`advstabbifgui`)
 
 
 Multi-physics, multi-domain and free surfaces
@@ -273,7 +282,9 @@ oomph-lib additionally offers immersed rigid-body dynamics and a hijacking mecha
 Parallel computing
 ===================
 
-This is one of oomph-lib's clear strengths: fully distributed meshes with halo/haloed nodes, METIS/ParMETIS partitioning, and parallel direct solvers and preconditioners (SuperLU_DIST, MUMPS/ScaLAPACK, Trilinos, Hypre). pyoomph supports MPI in source builds, but its distributed-solver ecosystem is less mature, and the pre-built wheels ship without MPI. 
+Both frameworks parallelize with MPI, and pyoomph inherits oomph-lib's distributed-mesh machinery: with ``mpirun`` the assembly and the linear solve are parallel, and with ``--distribute`` the mesh itself is partitioned (via METIS) and held with halo/haloed nodes, including spatial adaptivity and remeshing of the distributed mesh. In addition, pyoomph can parallelize the element assembly over OpenMP threads within one process (``--omp N``), which requires no MPI at all. See :numref:`secparallel`.
+
+The remaining difference is the ecosystem for *large-scale* iterative solves, which is one of oomph-lib's clear strengths: parallel direct solvers and a rich preconditioner framework (SuperLU_DIST, MUMPS/ScaLAPACK, Trilinos, Hypre, geometric multigrid). pyoomph reaches PETSc's preconditioners, but does not yet offer a convenient interface to set up the problem-specific preconditioners that efficient large-core-count runs require. Note also that the pre-built wheels ship without MPI, i.e. MPI requires a source build.
 
 
 What pyoomph adds on top of oomph-lib
@@ -286,6 +297,8 @@ What pyoomph adds on top of oomph-lib
 * **Azimuthal symmetry-breaking** stability analysis and native bifurcation tracking on moving meshes.
 * A rich set of external linear/eigen-solver bridges (PETSc, SLEPc, MKL Pardiso, …).
 * Built-in matplotlib / VTK / ParaView output and a preCICE coupling adapter.
+* An interactive GUI for continuation, bifurcation tracking and bifurcation loci.
+* OpenMP-parallel element assembly within a single process, i.e. without requiring MPI.
 
 
 Features of oomph-lib not (yet) available in pyoomph

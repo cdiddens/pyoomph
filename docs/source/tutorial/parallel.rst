@@ -17,7 +17,7 @@ on a single thread in a single process. Note that, depending on the choice, the 
 
 .. note::
 
-	All pyoomph tutorial scripts have been tested against both OpenMP and MPI. However, in particular MPI is still under development.
+	All pyoomph tutorial scripts have been tested against both OpenMP and MPI. For MPI runs on a larger number of cores, however, the performance is usually limited by the linear solver: this requires a problem-specific preconditioner, for the convenient setup of which (e.g. via PETSc) pyoomph does not offer a dedicated interface yet.
 
 
 .. toctree::
