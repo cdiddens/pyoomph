@@ -1,0 +1,101 @@
+{
+ "_about": "Reference numbers for Discontinuous_Galerkin/hybrid_poisson.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "finalstate:domain_*.txt": {
+  "columns": [
+   "coordinate_x",
+   "u"
+  ],
+  "file": "hybrid_poisson/domain/domain_000000.txt",
+  "kind": "finalstate",
+  "nrows": 40,
+  "reduce": true,
+  "stats": {
+   "coordinate_x": {
+    "l2": 3.6537651812890224,
+    "max": 1.0,
+    "mean": 0.5,
+    "min": 0.0,
+    "n": 40,
+    "n_finite": 40
+   },
+   "u": {
+    "l2": 4.472137848211093,
+    "max": 1.0000004233349642,
+    "mean": 0.6353105057577716,
+    "min": 0.0,
+    "n": 40,
+    "n_finite": 40
+   }
+  }
+ },
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/_internal_facets_/lam": {
+     "l2": 9.424776631517872,
+     "max": 3.1029139972212394,
+     "mean": 4.440892098500626e-16,
+     "min": -3.10291399722124,
+     "n": 19
+    },
+    "domain/_internal_facets_/u": {
+     "l2": 3.1622789988710793,
+     "max": 1.0000004233349642,
+     "mean": 0.6687479007976543,
+     "min": 0.15643453126440957,
+     "n": 19
+    },
+    "domain/u": {
+     "l2": 3.1622789988710793,
+     "max": 1.0000004233349642,
+     "mean": 0.6687479007976543,
+     "min": 0.15643453126440957,
+     "n": 19
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 57,
+   "params": {},
+   "time": 0.0
+  }
+ },
+ "stdout:L2 error of u = ([-\\d.eE+]+)": {
+  "kind": "stdout",
+  "matches": [
+   [0.005798],
+   [0.00632],
+   [0.001453]
+  ],
+  "pattern": "L2 error of u = ([-\\d.eE+]+)"
+ },
+ "stdout:\\|jump\\(u\\)\\| = ([-\\d.eE+]+)": {
+  "kind": "stdout",
+  "matches": [
+   [1.446e-08],
+   [1.422e-08],
+   [2.27e-08]
+  ],
+  "pattern": "\\|jump\\(u\\)\\| = ([-\\d.eE+]+)"
+ },
+ "stdout:error of lam = ([-\\d.eE+]+)": {
+  "kind": "stdout",
+  "matches": [
+   [1.421e-05],
+   [0.02881],
+   [1.328e-06]
+  ],
+  "pattern": "error of lam = ([-\\d.eE+]+)"
+ },
+ "stdout:unfilled facets = (\\d+)": {
+  "kind": "stdout",
+  "matches": [
+   [0.0],
+   [0.0],
+   [0.0]
+  ],
+  "pattern": "unfilled facets = (\\d+)"
+ }
+}

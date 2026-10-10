@@ -1,0 +1,86 @@
+{
+ "_about": "Reference numbers for Discontinuous_Galerkin/hdg_poisson.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/_internal_facets_/u": {
+     "l2": 8.945305129195008,
+     "max": 1.0001399217339446,
+     "mean": 0.4437737687974748,
+     "min": -0.0006256020027032809,
+     "n": 287
+    },
+    "domain/_internal_facets_/uhat": {
+     "l2": 9.798403537442713,
+     "max": 1.0000658065600858,
+     "mean": 0.45425428274610735,
+     "min": -0.0006255556458902131,
+     "n": 336
+    },
+    "domain/bottom/u": {
+     "l2": 0.0017694153181266685,
+     "max": 3.9137495906797575e-07,
+     "mean": -0.00037358018696676394,
+     "min": -0.0006256020027032045,
+     "n": 17
+    },
+    "domain/left/u": {
+     "l2": 0.0017694152315585782,
+     "max": -0.00012204136785004839,
+     "mean": -0.0004234430618901376,
+     "min": -0.0006256020027029066,
+     "n": 15
+    },
+    "domain/right/u": {
+     "l2": 0.0017694152315585838,
+     "max": -0.00012204136785003866,
+     "mean": -0.0004234430618901302,
+     "min": -0.0006256020027030022,
+     "n": 15
+    },
+    "domain/top/u": {
+     "l2": 0.001769415318125887,
+     "max": 3.9137495910996487e-07,
+     "mean": -0.00037358018696659085,
+     "min": -0.0006256020027027465,
+     "n": 17
+    },
+    "domain/u": {
+     "l2": 8.0006269890956,
+     "max": 1.0001399217339442,
+     "mean": 0.4581994279650387,
+     "min": 0.038060862957959296,
+     "n": 225
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 912,
+   "params": {},
+   "time": 0.0
+  }
+ },
+ "stdout:L2 error of u\\s+:\\s+([-\\d.eE+]+)": {
+  "kind": "stdout",
+  "matches": [
+   [5.1415e-05]
+  ],
+  "pattern": "L2 error of u\\s+:\\s+([-\\d.eE+]+)"
+ },
+ "stdout:elements\\s+:\\s+(\\d+)": {
+  "kind": "stdout",
+  "matches": [
+   [64.0]
+  ],
+  "pattern": "elements\\s+:\\s+(\\d+)"
+ },
+ "stdout:interior facets\\s+:\\s+(\\d+)": {
+  "kind": "stdout",
+  "matches": [
+   [112.0]
+  ],
+  "pattern": "interior facets\\s+:\\s+(\\d+)"
+ }
+}

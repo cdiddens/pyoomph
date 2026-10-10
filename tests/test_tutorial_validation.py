@@ -497,3 +497,115 @@ def test_an_evolution_column_is_judged_against_its_own_range(validation):
     far = validation.run("far")
     write(far / "synthetic" / "crossing.txt", 0.01)      # 1 % of the range
     assert validation.check(far).status == "mismatch"
+
+
+def _write_dispersion(path, flip):
+    """A (k, ReL, ImL1, ImL2) table whose conjugate pair is returned in one order or the other."""
+    s = -1.0 if flip else 1.0
+    with open(path, "w") as f:
+        f.write("#k\tReL\tImL1\tImL2\n")
+        for i in range(21):
+            k = i / 20.0
+            im = 1.3066 * (1.0 - k)          # a conjugate pair that shrinks with k
+            f.write("%r\t%r\t%r\t%r\n" % (k, -0.186 - k, s * im, -s * im))
+
+
+def test_abs_columns_ignores_the_sign_of_a_conjugate_pair(validation):
+    """A solver may return (lambda, conj(lambda)) in either order.
+
+    turing_dispersion.py did exactly that between one rank and four: 14 of 256 values flipped sign
+    and nothing else moved at all. The magnitude - the oscillation frequency - is the physics, so
+    abs_columns has to make this pass while the signed comparison catches it.
+
+    Also the point that the reference needs no regeneration: the record below is written from the
+    UNflipped run with the signed spec, and only the spec changes before the comparison.
+    """
+    ref_run = validation.run("ref")
+    _write_dispersion(ref_run / "synthetic" / "d.txt", flip=False)
+    validation.set_checks([Evolution("d.txt")])
+    validation.record(ref_run)
+
+    flipped = validation.run("flipped")
+    _write_dispersion(flipped / "synthetic" / "d.txt", flip=True)
+
+    assert validation.check(flipped).status == "mismatch", \
+        "a sign flip must be caught while the signs are being compared"
+
+    validation.set_checks([Evolution("d.txt", abs_columns=("ImL1", "ImL2"))])
+    result = validation.check(flipped)
+    assert (result.status, result.problems) == ("ok", []), result.problems
+
+
+def test_abs_columns_still_catches_a_changed_magnitude(validation):
+    """Taking |value| must narrow the question, not switch the check off."""
+    ref_run = validation.run("ref")
+    _write_dispersion(ref_run / "synthetic" / "d.txt", flip=False)
+    validation.set_checks([Evolution("d.txt", abs_columns=("ImL1", "ImL2"))])
+    validation.record(ref_run)
+
+    moved = validation.run("moved")
+    path = moved / "synthetic" / "d.txt"
+    _write_dispersion(path, flip=True)
+    text = path.read_text().replace("1.3066", "1.4000")   # the magnitude itself moved
+    path.write_text(text)
+    assert validation.check(moved).status == "mismatch"
+
+
+def test_abs_columns_rejects_a_name_the_file_does_not_have(validation):
+    """A typo must be reported rather than silently comparing nothing differently."""
+    ref_run = validation.run("ref")
+    _write_dispersion(ref_run / "synthetic" / "d.txt", flip=False)
+    validation.set_checks([Evolution("d.txt")])
+    validation.record(ref_run)
+
+    validation.set_checks([Evolution("d.txt", abs_columns=("nosuch",))])
+    result = validation.check(ref_run)
+    assert result.status == "mismatch"
+    assert any("abs_columns" in p for p in result.problems), result.problems
+
+
+def test_changing_match_without_regenerating_is_reported(validation):
+    """match= is part of the reference, not of the spec.
+
+    The generator stores row_indices only for match="rows", so a spec that changes the mode without
+    regenerating cannot be honoured. It used to be ignored in silence while the label claimed the
+    new mode; it has to be reported instead.
+    """
+    ref_run = validation.run("ref")
+    _write_dispersion(ref_run / "synthetic" / "d.txt", flip=False)
+    validation.set_checks([Evolution("d.txt")])                  # generated as match="exact"
+    validation.record(ref_run)
+
+    validation.set_checks([Evolution("d.txt", match="rows")])    # spec changed, reference not
+    result = validation.check(ref_run)
+    assert result.status == "mismatch"
+    assert any("regenerate" in p for p in result.problems), result.problems
+
+
+def test_rows_mode_compares_the_abscissa_too(validation):
+    """In rows mode the first column is the bifurcation PARAMETER, and it is the answer.
+
+    The other modes use the abscissa to line rows up, so comparing it there would be circular. Row
+    matching uses the index, which leaves the abscissa free - and it has to be checked, otherwise a
+    continuation that found its fold at a different parameter value would pass as long as the
+    ordinate happened to agree.
+    """
+    def write(path, shift):
+        with open(path, "w") as f:
+            f.write("#r\tx\n")
+            for i in range(11):
+                r = 1.0 - 0.01 * i          # a sweep that does not grow, hence rows mode
+                f.write("%r\t%r\n" % (r + shift, 2.0 + i))
+
+    ref_run = validation.run("ref")
+    write(ref_run / "synthetic" / "fold.txt", 0.0)
+    validation.set_checks([Evolution("fold.txt", match="rows")])
+    validation.record(ref_run)
+    assert validation.check(ref_run).status == "ok"
+
+    # the ordinate is untouched; only the parameter moved, by 1 % of its range
+    moved = validation.run("moved")
+    write(moved / "synthetic" / "fold.txt", 0.01)
+    result = validation.check(moved)
+    assert result.status == "mismatch", "a shifted parameter column must be caught"
+    assert any("r" in p for p in result.problems), result.problems

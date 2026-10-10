@@ -1,0 +1,58 @@
+{
+ "_about": "Reference numbers for Discontinuous_Galerkin/convection_diffusion.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "finalstate:domain_*.txt": {
+  "columns": [
+   "coordinate_x",
+   "c"
+  ],
+  "file": "convection_diffusion/domain/domain_000050.txt",
+  "kind": "finalstate",
+  "nrows": 200,
+  "reduce": true,
+  "stats": {
+   "c": {
+    "l2": 2.085627473748371,
+    "max": 0.8250303671760434,
+    "mean": 0.035449077018106366,
+    "min": -0.030949243770791498,
+    "n": 200,
+    "n_finite": 200
+   },
+   "coordinate_x": {
+    "l2": 588.8123640006212,
+    "max": 80.0,
+    "mean": 30.0,
+    "min": -20.0,
+    "n": 200,
+    "n_finite": 200
+   }
+  }
+ },
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/_internal_facets_/c": {
+     "l2": 1.4919218577515503,
+     "max": 0.8250303671760434,
+     "mean": 0.035807148503130486,
+     "min": -0.030949243770791498,
+     "n": 99
+    },
+    "domain/c": {
+     "l2": 1.457398754499665,
+     "max": 0.7957458548557663,
+     "mean": 0.035098096057538164,
+     "min": -0.022023073718602865,
+     "n": 101
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 200,
+   "params": {},
+   "time": 50.0
+  }
+ }
+}

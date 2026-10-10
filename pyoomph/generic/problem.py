@@ -4843,8 +4843,13 @@ class Problem(_pyoomph.Problem):
             # the script, so a collective is safe there; interpreter shutdown is not - the ranks
             # arrive at their own pace, one may already have finalised MPI or died, and a collective
             # entered by some of them is a hang at the end of the job rather than a diagnostic.
-            # A script that never releases its Problem therefore has no fingerprint in the MPI pass,
-            # which the harness reports as an unchecked script.
+            # A script that never releases its Problem therefore has no fingerprint in the MPI pass.
+            # The harness reports that as a MISMATCH, not as an unchecked script: a reference that
+            # names a fingerprint and finds none is indistinguishable from the dump having failed
+            # for a bad reason (the environment variable unset, a crash during collection), so it is
+            # loud by design. The one legitimate case is excused in the spec instead - see
+            # Advanced_Linear_Dynamics/rivulet.py in citools/tutorial_validation/specs.py, which
+            # builds its problem at module level and so is the only script that takes this path.
             self._validation_dump_written=True
             print("PYOOMPH_VALIDATION_DUMP: no fingerprint - this problem was never released, and "
                   "collecting one at interpreter exit is not safe under MPI")

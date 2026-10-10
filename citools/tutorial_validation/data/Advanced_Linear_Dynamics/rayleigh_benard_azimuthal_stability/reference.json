@@ -1,0 +1,226 @@
+{
+ "_about": "Reference numbers for Advanced_Linear_Dynamics/rayleigh_benard_azimuthal_stability.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "finalstate:curve_m_0.txt": {
+  "columns": [
+   "Gamma",
+   "Ra"
+  ],
+  "file": "rayleigh_benard_azimuthal_stability/curve_m_0.txt",
+  "kind": "finalstate",
+  "nrows": 52,
+  "reduce": true,
+  "stats": {
+   "Gamma": {
+    "l2": 13.896582313648201,
+    "max": 3.0499999999999976,
+    "mean": 1.7750000000000001,
+    "min": 0.5,
+    "n": 52,
+    "n_finite": 52
+   },
+   "Ra": {
+    "l2": 21512.902912234294,
+    "max": 10896.432262319498,
+    "mean": 2470.368280989455,
+    "min": 1789.0541143719001,
+    "n": 52,
+    "n_finite": 52
+   }
+  }
+ },
+ "finalstate:curve_m_1.txt": {
+  "columns": [
+   "Gamma",
+   "Ra"
+  ],
+  "file": "rayleigh_benard_azimuthal_stability/curve_m_1.txt",
+  "kind": "finalstate",
+  "nrows": 52,
+  "reduce": true,
+  "stats": {
+   "Gamma": {
+    "l2": 13.896582313648201,
+    "max": 3.0499999999999976,
+    "mean": 1.7750000000000001,
+    "min": 0.5,
+    "n": 52,
+    "n_finite": 52
+   },
+   "Ra": {
+    "l2": 15697.658476787707,
+    "max": 3773.2791807929552,
+    "mean": 2129.80385342759,
+    "min": 1773.5963883627996,
+    "n": 52,
+    "n_finite": 52
+   }
+  }
+ },
+ "finalstate:curve_m_2.txt": {
+  "columns": [
+   "Gamma",
+   "Ra"
+  ],
+  "file": "rayleigh_benard_azimuthal_stability/curve_m_2.txt",
+  "kind": "finalstate",
+  "nrows": 52,
+  "reduce": true,
+  "stats": {
+   "Gamma": {
+    "l2": 13.896582313648201,
+    "max": 3.0499999999999976,
+    "mean": 1.7750000000000001,
+    "min": 0.5,
+    "n": 52,
+    "n_finite": 52
+   },
+   "Ra": {
+    "l2": 20392.55087619549,
+    "max": 9144.595793805833,
+    "mean": 2478.482565195913,
+    "min": 1781.046147005754,
+    "n": 52,
+    "n_finite": 52
+   }
+  }
+ },
+ "finalstate:curve_m_3.txt": {
+  "columns": [
+   "Gamma",
+   "Ra"
+  ],
+  "file": "rayleigh_benard_azimuthal_stability/curve_m_3.txt",
+  "kind": "finalstate",
+  "nrows": 52,
+  "reduce": true,
+  "stats": {
+   "Gamma": {
+    "l2": 13.896582313648201,
+    "max": 3.0499999999999976,
+    "mean": 1.7750000000000001,
+    "min": 0.5,
+    "n": 52,
+    "n_finite": 52
+   },
+   "Ra": {
+    "l2": 35092.72115684503,
+    "max": 20691.6791302068,
+    "mean": 3369.63173005949,
+    "min": 1784.0604922790735,
+    "n": 52,
+    "n_finite": 52
+   }
+  }
+ },
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/T": {
+     "l2": 10.8316665384419,
+     "max": -0.049999999999995486,
+     "mean": -0.5000000000000053,
+     "min": -0.950000000000013,
+     "n": 361
+    },
+    "domain/bottom/pressure": {
+     "l2": 0.72739126120336,
+     "max": 0.16687500000002528,
+     "mean": 0.1668750000000023,
+     "min": 0.16687499999999097,
+     "n": 19
+    },
+    "domain/left/T": {
+     "l2": 2.484954727958088,
+     "max": -0.05000000000001401,
+     "mean": -0.5000000000000661,
+     "min": -0.950000000000014,
+     "n": 19
+    },
+    "domain/left/pressure": {
+     "l2": 0.7187698366828635,
+     "max": 0.16687500000002714,
+     "mean": -0.0039583333333333155,
+     "min": -0.33312500000002665,
+     "n": 21
+    },
+    "domain/left/velocity_y": {
+     "l2": 9.152281355120336e-12,
+     "max": -2.3662606774846717e-14,
+     "mean": -1.2449226062362913e-12,
+     "min": -2.2610823887605607e-12,
+     "n": 39
+    },
+    "domain/pressure": {
+     "l2": 2.679253700310058,
+     "max": 0.16562500000002334,
+     "mean": 0.004375000000000027,
+     "min": -0.28437500000002336,
+     "n": 361
+    },
+    "domain/right/T": {
+     "l2": 2.484954727957824,
+     "max": -0.0499999999999994,
+     "mean": -0.499999999999997,
+     "min": -0.9499999999999994,
+     "n": 19
+    },
+    "domain/right/pressure": {
+     "l2": 0.7187698366827858,
+     "max": 0.16687499999999922,
+     "mean": -0.003958333333333304,
+     "min": -0.3331250000000002,
+     "n": 21
+    },
+    "domain/top/pressure": {
+     "l2": 1.452058210566997,
+     "max": -0.3331249999999917,
+     "mean": -0.33312500000000234,
+     "min": -0.33312500000002543,
+     "n": 19
+    },
+    "domain/velocity_phi": {
+     "l2": 0.0,
+     "max": 6.4e-323,
+     "mean": 5e-324,
+     "min": -6e-323,
+     "n": 1521
+    },
+    "domain/velocity_x": {
+     "l2": 1.6187949313358424e-11,
+     "max": 1.2003015844992001e-12,
+     "mean": -2.612448095848859e-16,
+     "min": -1.1950590373678436e-12,
+     "n": 1521
+    },
+    "domain/velocity_y": {
+     "l2": 1.9994905044140585e-11,
+     "max": 7.584185991085331e-13,
+     "mean": -1.1274886249646609e-13,
+     "min": -2.220687043115075e-12,
+     "n": 1521
+    },
+    "globals/lagr_intconstr_pressure": {
+     "l2": 2.1527743159876274e-19,
+     "max": 2.1527743159876274e-19,
+     "mean": 2.1527743159876274e-19,
+     "min": 2.1527743159876274e-19,
+     "n": 1
+    }
+   },
+   "eigenvalues": [
+    [0.0, 2.843904410505294e-19]
+   ],
+   "mpi_size": 1,
+   "ndof": 5443,
+   "params": {
+    "Gamma": 3.0499999999999976,
+    "Pr": 1.0,
+    "Ra": 1792.2892183265799,
+    "azimuthal_m": 0.0
+   },
+   "time": 4.0
+  }
+ }
+}

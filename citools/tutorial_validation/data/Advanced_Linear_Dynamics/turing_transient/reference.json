@@ -1,0 +1,63 @@
+{
+ "_about": "Reference numbers for Advanced_Linear_Dynamics/turing_transient.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/right/u": {
+     "l2": 5.099791531294487,
+     "max": 1.0699586154776788,
+     "mean": 0.4317896808881584,
+     "min": 0.02761010497951976,
+     "n": 79
+    },
+    "domain/right/v": {
+     "l2": 3.3464373255089503,
+     "max": 0.4577466882931311,
+     "mean": 0.3723784512744891,
+     "min": 0.3073187588401878,
+     "n": 79
+    },
+    "domain/top/u": {
+     "l2": 5.341916761298165,
+     "max": 1.072359592893892,
+     "mean": 0.4615664569936559,
+     "min": 0.018449262017648443,
+     "n": 80
+    },
+    "domain/top/v": {
+     "l2": 3.4521609677087937,
+     "max": 0.4707366596002753,
+     "mean": 0.3821377079423479,
+     "min": 0.2998164367635433,
+     "n": 80
+    },
+    "domain/u": {
+     "l2": 48.692847485578255,
+     "max": 1.213970308980089,
+     "mean": 0.47321973401640716,
+     "min": 0.009398333779569674,
+     "n": 6241
+    },
+    "domain/v": {
+     "l2": 30.291769254121483,
+     "max": 0.4832635044102949,
+     "mean": 0.3789914404369094,
+     "min": 0.26691347006595195,
+     "n": 6241
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 12800,
+   "params": {
+    "a": 0.01,
+    "b": 1.2,
+    "c": 0.7,
+    "d": 40.0
+   },
+   "time": 2000.0007481134799
+  }
+ }
+}

@@ -200,6 +200,15 @@ are then named `column_0`, `column_1`, ... by position, which is what a spec sel
 say. Several of the bifurcation scripts write their `(r, x, eigenvalue)` branch files by hand like
 this, and those are the strongest checks in that chapter.
 
+### Do not edit the spec while a pass is running
+
+`checks_for()` does `from . import specs`, and Python caches that in `sys.modules`, so a pass reads
+the spec once - at the first script it validates, which is a minute or so after launch because the
+harness regenerates the tutorial bundle first. Editing `specs.py` during a pass therefore produces a
+report against an unknown mixture of the old and the new spec, and the ambiguity is invisible in the
+output. If a correction cannot wait, re-check the affected scripts afterwards rather than reading
+that pass's verdict for them.
+
 ## When a number legitimately changes
 
 A changed number is either a bug or a deliberate change in what the tutorial computes. Regenerate

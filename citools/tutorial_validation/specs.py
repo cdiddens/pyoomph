@@ -848,4 +848,337 @@ VALIDATION: "dict[str,list]" = {
       # The only 3d script in these two chapters, 36 dof groups.
       Fingerprint(),
   ],
+  # ===============================================================================================
+  # Advanced_Linear_Dynamics: the chapter where a validated answer is worth most, because it is the
+  # one whose quantities are hardest to eyeball. Three real pyoomph defects were found here while
+  # this validation was being built - a PETSc multi-solve returning aliases of one Vec, a
+  # non-Jacobian matrix inheriting the Jacobian's symmetry proof, and the Lyapunov adjoint route
+  # leaking its tracked parameter - and all three were invisible to a pass/fail run.
+  #
+  # Most of these scripts write their answer as a CURVE against a scanned parameter rather than
+  # against time: a dispersion relation lambda(k), a frequency response, a critical curve Bo_c(V).
+  # The abscissa then comes from a numpy.linspace or an explicit list and is exact, which is why
+  # match="exact" is right here even though nothing in the chapter is a time series.
+  #
+  # The harness picks the PETSc build per script (see needs_complex_petsc in
+  # citools/test_all_tutorial_scripts.py): azimuthal_stability= and additional_cartesian_mode=
+  # route to the complex build, the rest to the real one. The reference data below was generated
+  # under exactly that routing, so it must be regenerated if the routing changes - a script that
+  # silently fell back to the scipy eigensolver would compute something else entirely.
+  # ===============================================================================================
+
+  "Advanced_Linear_Dynamics/turing_dispersion.py": [
+      # The dispersion relation of a Turing system: two eigenvalues over k in linspace(0,1,400),
+      # which is what tells you the system is Turing-unstable and at which wavenumber. The dominant
+      # k read off this curve (0.46) is what turing_transient.py then builds its domain around, so
+      # these two scripts are a pair and this one carries the quantitative half.
+      #
+      # 77 of the 400 rows, k=0..0.19, hold a COMPLEX-CONJUGATE PAIR: the real parts tie to 1e-15
+      # and the imaginary parts are +-1.3067, so which of the two the solver returns first is
+      # arbitrary and the sign of ImLambda1 with it. Two serial runs came out bit-identical (all
+      # 2000 numbers), but four ranks did NOT: 14 of 256 compared values flipped sign and nothing
+      # else moved at all - 1.30664760204 against -1.30664760204, the same magnitude to every
+      # digit.
+      #
+      # So the two imaginary columns are compared by magnitude. |Im lambda| is the oscillation
+      # frequency and is the physics; its sign says which conjugate came back first, which is not a
+      # result. Nothing is lost by it either: a real eigenvalue has Im = 0, and the two members of
+      # a conjugate pair have equal |Im|. The real parts stay signed, because their sign is the
+      # stability and is the whole point of a dispersion relation.
+      Evolution("dispersion.txt", abs_columns=("ImLambda1", "ImLambda2"),
+                reason="which member of a complex-conjugate pair the eigensolver returns first is "
+                       "arbitrary - measured as 14 of 256 values flipping sign, magnitudes "
+                       "identical, between one rank and four"),
+      Fingerprint(),
+  ],
+  "Advanced_Linear_Dynamics/rivulet.py": [
+      # The growth rate of a rivulet against the axial wavenumber, at three contact angles - the
+      # whole point of the script is how the curve changes between 60, 90 and 120 degrees, so all
+      # three are pinned rather than only the last. 50 k values each, from an explicit scan.
+      Evolution("for_60_deg_SL_0.01.txt"),
+      Evolution("for_90_deg_SL_0.01.txt"),
+      Evolution("for_120_deg_SL_0.01.txt"),
+      # The proposer also offered a FinalState over each of these as "for_..._SL_*.txt". That glob
+      # matches the one file the Evolution already compares row by row, so it would only restate a
+      # weaker form of the same check.
+      #
+      # The fingerprint is serial-only, and for a structural reason rather than a numerical one:
+      # this script builds its problem at module level ("problem=RivuletProblem()", no with-block),
+      # so Problem.release() is never called and the only route left is the atexit fallback - which
+      # refuses to collect under MPI on purpose, because a collective entered at interpreter
+      # shutdown is a hang rather than a diagnostic (the ranks arrive at their own pace, and one may
+      # already have finalised MPI). rivulet.py is the first script in the tutorial set to take that
+      # path. The three dispersion curves above come from files and are checked under MPI as usual,
+      # so what is lost here is only the state dump.
+      Fingerprint(skip_under=("mpi",),
+                  reason="the problem is never released (no with-block), so the fingerprint can "
+                         "only come from the atexit fallback, which does not collect under MPI"),
+  ],
+  "Advanced_Linear_Dynamics/linear_response_drum.py": [
+      # The frequency response of a driven axisymmetric drum, projected onto the first ten
+      # Fourier-Bessel modes, over 1000 frequencies from linspace(1,1000,1000).
+      #
+      # The header is part of the check and not just decoration: each column is named
+      # "mode_i[...](f=<resonance>)" with the analytic undamped resonance of that mode, computed
+      # from the Bessel roots and c/R. A column name that changed would be reported as "the columns
+      # changed" rather than as a numeric diff, which is the clearest failure message in the module
+      # - and it pins the drum's wave speed and radius without a separate check. The resonances are
+      # analytic, so they cannot drift with the solver; that is exactly why they make a good header.
+      #
+      # The response spans orders of magnitude between a resonance peak and the troughs between
+      # them, which is what the per-column range rule is for: an off-resonance amplitude is judged
+      # against the peak of its own column, not against itself.
+      Evolution("response.txt"),
+      Fingerprint(),
+  ],
+  "Advanced_Linear_Dynamics/linear_response_oscillator.py": [
+      # The cleanest check in the chapter, and it takes 0.4 s: the frequency response of a damped
+      # harmonic oscillator over omega in linspace(0.01,3,300), computed by PeriodicDrivingResponse
+      # AND in closed form, written side by side as (A/F)_num and (A/F)_ana.
+      #
+      # Both columns are pinned, which is what makes a failure here immediately diagnosable: if the
+      # numerical column moves while the analytic one does not, the response machinery drifted; if
+      # both move, the scaling or the driving did. No other script in the tutorial carries its own
+      # exact answer in the same file.
+      #
+      # And it means this reference is known to be RIGHT rather than merely reproducible, which is
+      # otherwise the weak point of generated reference data: across the 64 stored rows the two
+      # columns agree to 8.4e-16, machine precision, with a peak response of 9.710564 in both. Most
+      # entries in this file pin what pyoomph computed; this one pins what the answer is.
+      #
+      # (The script's oscillator.txt is empty by design - the transient route to the same answer sits
+      # behind an "if False:" in the tutorial text - so there is nothing to compare in it.)
+      Evolution("response.txt"),
+      Fingerprint(),
+  ],
+  "Advanced_Linear_Dynamics/rising_bubble.py": [
+      # The m=1 instability of a rising bubble against the Bond number. Bo is stepped by a FIXED
+      # increment (go_to_param(Bo=Bo+dBond)), so the abscissa is exact even though everything else
+      # about this script is adaptive.
+      #
+      # It is adaptive in an unusual way: refine_eigenfunction() refines the mesh according to the
+      # EIGENFUNCTION at every step, so the mesh the eigenvalue is computed on is itself chosen by
+      # the eigenvalue. That looked like the entry most likely to need excusing under MPI, for the
+      # reason moffatt_eddies and heated_cylinder do - a refinement criterion evaluated per
+      # partition is a different criterion - and it turned out not to: all 39361 dofs and the whole
+      # Bo curve came through four ranks untouched. So an eigenfunction-driven criterion is NOT
+      # rank-dependent here, which is worth knowing precisely because the spatial-error-estimator
+      # ones in SpatioTemporal_PDEs are.
+      Evolution("m1_instability.txt"),
+      Fingerprint(),
+  ],
+  "Advanced_Linear_Dynamics/eigenbranch_continuation.py": [
+      # Seven branches of an eigenvalue through folds: two Bond numbers, two eigenvalue indices, and
+      # the stable/unstable/fold variants, each a curve of (L, ReLambda, ImLambda). The script's
+      # subject is an eigenvalue tracked along a branch rather than a solution, so what matters is
+      # the range the eigenvalue covers on each branch - in particular whether it crosses zero,
+      # which is where the branch changes stability.
+      #
+      # REDUCED rather than matched row by row, and not because the rows disagreed: every one of the
+      # seven comes from arclength_continuation("L", dL, max_ds=dL0), so both the L values and the
+      # row count (35, 29, 57, 29, 29, 30, 29 here) are chosen by the step adaptation. This project
+      # already has the measurement that says such a grid is not invariant - rayleigh_plateau.py's
+      # adaptive instants shift by ~6e-7 merely between rank counts on this one machine - so pinning
+      # the grid would buy a check that fails for the wrong reason. stats=("min","max") for the same
+      # reason it is used on the reduced series in Moving_Mesh: an adaptive row count takes the mean,
+      # the l2 and the count down with it, while the extremes are the physics.
+      # Worth recording what was NOT tested: hanging_droplet.py above turned out to keep its row
+      # count and to move its abscissa only by round-off, which is what makes match="rows" work
+      # there, and the same might well hold for these seven. It was not measured, because these
+      # loops exit on overshooting a bound (L past maxL/minL) and a different step count would then
+      # fail on the row count rather than on the physics. Reducing is the conservative choice here
+      # and can be strengthened to match="rows" if the extremes ever prove too weak to catch
+      # something.
+      FinalState("curve_Bo_0_0_std.txt", stats=("min", "max"),
+                 reason="an adaptive arclength grid, so only the extremes of each column are "
+                        "invariant"),
+      FinalState("curve_Bo_0_1_std.txt", stats=("min", "max"),
+                 reason="an adaptive arclength grid"),
+      FinalState("curve_Bo_0_0_unstab.txt", stats=("min", "max"),
+                 reason="an adaptive arclength grid"),
+      FinalState("curve_Bo_0.0025_0_fold.txt", stats=("min", "max"),
+                 reason="an adaptive arclength grid"),
+      FinalState("curve_Bo_0.0025_1_fold.txt", stats=("min", "max"),
+                 reason="an adaptive arclength grid"),
+      FinalState("curve_Bo_0.0025_0_unstab.txt", stats=("min", "max"),
+                 reason="an adaptive arclength grid"),
+      FinalState("curve_Bo_0.0025_1_unstab.txt", stats=("min", "max"),
+                 reason="an adaptive arclength grid"),
+      Fingerprint(),
+  ],
+  "Advanced_Linear_Dynamics/turing_transient.py": [
+      # The transient counterpart of turing_dispersion.py: the domain is built around the dominant
+      # wavenumber that script predicts (kc=0.46), and this one runs to t=2000 to let the pattern
+      # grow out of a perturbed homogeneous state.
+      #
+      # The perturbation is numpy.random.rand(ndof)*0.001 with NO seed, so every run starts from a
+      # different one, and the pattern it settles into differs with it. Measured over eight runs:
+      # the pattern does NOT pick a unique amplitude - u's max spreads by 13 % of the field's
+      # extent and the boundary lines by up to 64 %, because several patterns (different spot
+      # counts and orientations) are all stable attractors here. That is multistability rather than
+      # the chaos of SpatioTemporal_PDEs/kuramoto_sivanshinsky.py, but it has the same root cause
+      # and the same consequence: no instantaneous field statistic is reproducible.
+      #
+      # The two BULK means are the exception, and they are worth keeping. Over the same eight runs
+      # u's mean stayed within 0.46707..0.48202 and v's within 0.37682..0.38185, a spread of 1.2 %
+      # and 1.0 % of each field's extent - a spatial average over 6241 nodes is far less sensitive
+      # to which pattern was selected than any extreme is. And they measure something a mere ndof
+      # check cannot: the homogeneous stationary state this script perturbs AWAY from is
+      # u=0.651007, v=0.423810 (turing_dispersion.py's 2-dof fingerprint records exactly it), so a
+      # regression in which no pattern formed at all would land u's mean 0.1785 away - twelve times
+      # the observed spread.
+      #
+      # Hence rtol=0.04, which against the field-scale rule is 0.049 absolute: 3.3x the measured
+      # spread, and still 3.6x inside the deviation a failed pattern would produce.
+      Fingerprint(only=["ndof", "dofs.domain/u.mean", "dofs.domain/v.mean"], rtol=0.04,
+                  reason="an unseeded numpy.random.rand perturbation, so the pattern differs every "
+                         "run; only the bulk means are stable enough to compare (1.2 % over eight "
+                         "runs against the 14.6 % a failure to form a pattern would give)"),
+  ],
+  "Advanced_Linear_Dynamics/rayleigh_benard_azimuthal_stability.py": [
+      # The neutral-stability curve Ra(Gamma) of Rayleigh-Benard convection in a cylinder, one curve
+      # per azimuthal mode m = 0, 1, 2, 3, each found by bifurcation tracking and then continued in
+      # the aspect ratio from 0.5 to 3.0.
+      #
+      # These are anchored to physics and not just to a previous run, which is worth spelling out
+      # because it is what makes the entry meaningful rather than circular. Ra falls as Gamma rises,
+      # so max(Ra) on each curve is that mode's onset at Gamma=0.5, and the four come out
+      #
+      #     m=0  10896.4      m=1  3773.28      m=2  9144.6      m=3  20691.7
+      #
+      # i.e. m=1 is the lowest, at 3773 - exactly what the script's own comment states ("at
+      # Gamma=0.5 the lowest onset is the one of m=1 at Ra=3773"). All four modes therefore confirm
+      # a documented claim, not merely yesterday's number.
+      #
+      # min(Ra) is the other end, at Gamma=3.05: 1789.05, 1773.60, 1781.05, 1784.06. A cylinder of
+      # growing aspect ratio must approach the classical laterally-unbounded onset Ra_c = 1707.76
+      # from above, and these do - still 4 % above it at Gamma=3, which is the right side and the
+      # right order of magnitude for this aspect ratio.
+      #
+      # All four are pinned, not just the last: comparing the modes against each other is the
+      # script. The proposer offered a single FinalState over "curve_m_*.txt", which would have
+      # taken one file of the four and silently dropped the rest.
+      #
+      # Reduced to the extremes for the same reason as eigenbranch_continuation above - the Gamma
+      # grid comes from arclength_continuation with max_ds=0.05 and the loop exits at the first
+      # Gamma past 3.0, so both the grid and the row count are the step adaptation's choice.
+      FinalState("curve_m_0.txt", stats=("min", "max"),
+                 reason="an adaptive arclength grid in Gamma, so only each column's extremes are "
+                        "invariant; min(Ra) is the critical Rayleigh number of this mode"),
+      FinalState("curve_m_1.txt", stats=("min", "max"), reason="an adaptive arclength grid"),
+      FinalState("curve_m_2.txt", stats=("min", "max"), reason="an adaptive arclength grid"),
+      FinalState("curve_m_3.txt", stats=("min", "max"), reason="an adaptive arclength grid"),
+      # The fingerprint's parameters are m=3's final state, i.e. the first Gamma past 3.0, which the
+      # step adaptation picks - so it is pinned here but is the first thing to relax if another
+      # platform's continuation lands elsewhere.
+      Fingerprint(),
+  ],
+  "Advanced_Linear_Dynamics/hanging_droplet.py": [
+      # The critical Bond number against droplet volume: 14 points of the curve at which a hanging
+      # droplet becomes unstable. That curve IS the script's result, and each of its points is a
+      # fold found by bifurcation tracking, so the check covers the tracker as well as the physics.
+      #
+      # match="rows" because the abscissa is not a grid - V comes out of
+      # arclength_continuation("V", dV, max_ds=0.1*V) with remeshing in between, so it is a
+      # computed result like the ordinate. Measured, by the first attempt at match="exact" failing:
+      # 11 of the 14 stored V values recur bit-for-bit in a second run and the other three move by
+      # up to 3.95e-09, i.e. 7.5e-10 of V. That is round-off in an otherwise identical step
+      # sequence - the row count is the same - so matching by index compares the whole curve while
+      # matching by abscissa value cannot look it up at all.
+      #
+      # This is a third reason for match="rows", distinct from the two already in this file: not a
+      # non-monotonic abscissa and not a repeated one, but an abscissa that is itself a result.
+      #
+      # The risk it carries is the row count: the loop runs "while V < 5" and exits on overshooting
+      # that bound, so a platform whose round-off tips the last step the other way would produce 13
+      # or 15 rows and fail here. That is a signal worth getting rather than smoothing over, and
+      # the fallback if it ever fires is to reduce this the way eigenbranch_continuation below is
+      # reduced.
+      Evolution("critical_curve.txt", match="rows",
+                reason="V is produced by adaptive arclength continuation, not prescribed, so the "
+                       "stored abscissa drifts by ~4e-09 and cannot be used as a lookup key"),
+      Fingerprint(),
+  ],
+
+  # ===============================================================================================
+  # Discontinuous_Galerkin: four variants of the same Poisson problem, plus one DG advection. The
+  # chapter exists to compare discretisations, and two of the scripts measure themselves against an
+  # EXACT solution and print the L2 error - which is the strongest kind of quantity in the whole
+  # tutorial set, because it is an error and not just a number: it does not depend on the mesh
+  # ordering, it has a known limit, and a sign error or a lost stabilisation term moves it by orders
+  # of magnitude rather than by a tolerance.
+  #
+  # Those errors are read out of stdout because that is the only place they exist (they come from an
+  # IntegralObservables that the scripts evaluate and print rather than write). Note the tolerance
+  # that forces: a value printed with %.4e carries ~8e-5 of relative quantisation and one with %.3e
+  # ~8e-4, so the rtol admits one quantum of the printed representation. That is not a statement
+  # about the solver's reproducibility, which is far better - it is the resolution of the print.
+  # ===============================================================================================
+
+  "Discontinuous_Galerkin/poisson_weak_dirichlet.py": [
+      # Nitsche's weak Dirichlet condition. vtu only, so the fingerprint's per-dof-type extent is
+      # the solution; the boundary condition being weak is exactly what a wrong penalty term would
+      # show up in, as a field that no longer reaches its prescribed value at the edge.
+      Fingerprint(),
+  ],
+  "Discontinuous_Galerkin/hybrid_poisson.py": [
+      # A hybridized Poisson problem: u in the elements, lam on the skeleton. report() is called
+      # THREE times - on the solution, after a uniform refinement but BEFORE re-solving, and after
+      # re-solving - and one pattern picks up all three in order, so the twelve captured numbers
+      # cover what the chapter is actually about: the refinement rebuilds the facet skeleton from
+      # scratch, and the middle report measures how well the recovery expression filled the facets
+      # that the refinement created. "unfilled facets" is an integer count and is compared exactly.
+      # Four patterns over the same three lines rather than one with four groups, because the four
+      # quantities need four different questions asked of them. Each pattern matches all three
+      # reports, in order.
+      #
+      # The L2 error of u is the convergence quantity: 5.798e-03 on the solution, 6.320e-03 after
+      # the refinement before re-solving, 1.453e-03 after - a factor of four, which is the O(h^2)
+      # a uniform refinement should buy.
+      Stdout(r"L2 error of u = ([-\d.eE+]+)", rtol=2e-3,
+             reason="printed with %.3e, so one quantum of the printed representation is ~8e-4 "
+                    "relative; this is the resolution of the print, not of the solver"),
+      # The error of lam spans 1.3e-06 to 2.9e-02 across the three reports, so it carries the same
+      # relative tolerance, with an atol that keeps the smallest of them from being judged against
+      # its own round-off.
+      Stdout(r"error of lam = ([-\d.eE+]+)", rtol=2e-3, atol=1e-8,
+             reason="printed with %.3e; the atol covers the 1.3e-06 value of the third report"),
+      # |jump(u)| is SUPPOSED to vanish - a hybridized solution is continuous across its facets by
+      # construction - and it comes out at 1.4e-08, i.e. round-off. Judging that relatively would
+      # make the check fail whenever round-off lands elsewhere, which is the near-zero trap this
+      # module hits everywhere else (see the field-scale rule on the fingerprint and on FinalState;
+      # Stdout has no scale to appeal to, so the scale is stated here instead). rtol=0 with
+      # atol=1e-6 asks the only question worth asking: is the jump still zero?
+      Stdout(r"\|jump\(u\)\| = ([-\d.eE+]+)", rtol=0.0, atol=1e-6,
+             reason="a hybridized solution is continuous across facets by construction, so this is "
+                    "round-off (1.4e-08); the check is that it stays below 1e-6, not that round-off "
+                    "reproduces"),
+      # An integer, and the one that says the facet recovery left nothing behind.
+      Stdout(r"unfilled facets = (\d+)"),
+      FinalState("domain_*.txt"),
+      Fingerprint(),
+  ],
+  "Discontinuous_Galerkin/hdg_poisson.py": [
+      # The hybridizable DG form, with static condensation. The L2 error is the answer.
+      Stdout(r"L2 error of u\s+:\s+([-\d.eE+]+)",
+             rtol=1e-4,
+             reason="printed with %.4e, so one quantum of the printed representation is ~8e-5 "
+                    "relative"),
+      # The element and interior-facet counts are structural and exact, and they pin the skeleton
+      # the HDG form is built on - a facet mesh that came out a different size would change the
+      # answer without necessarily changing ndof.
+      Stdout(r"elements\s+:\s+(\d+)"),
+      Stdout(r"interior facets\s+:\s+(\d+)"),
+      # Deliberately NOT the static-condensation line. It reports this process's share of the
+      # blocks while the dof count is the whole problem's, and the script says so in its own
+      # comment by appending "on this process" under MPI - so it is a per-rank quantity and belongs
+      # in no reference file.
+      Fingerprint(),
+  ],
+  "Discontinuous_Galerkin/convection_diffusion.py": [
+      # DG advection-diffusion run to t=50. The last profile is the one worth pinning: a DG scheme
+      # that lost its upwinding smears or oscillates, and either shows up in min/max of c.
+      FinalState("domain_*.txt"),
+      Fingerprint(),
+  ],
 }

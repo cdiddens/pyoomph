@@ -1,0 +1,58 @@
+{
+ "_about": "Reference numbers for Discontinuous_Galerkin/poisson_weak_dirichlet.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/_internal_facets_/u": {
+     "l2": 7.351160463462653,
+     "max": 2.016024748853644,
+     "mean": 0.3678943289280757,
+     "min": -0.009558556661356372,
+     "n": 175
+    },
+    "domain/bottom/u": {
+     "l2": 1.2601517866001855,
+     "max": 0.994834620273731,
+     "mean": 0.25301105396967016,
+     "min": -0.00233609567805713,
+     "n": 9
+    },
+    "domain/left/u": {
+     "l2": 0.011544548506356955,
+     "max": 0.0008225828928650053,
+     "mean": -0.002165997879199187,
+     "min": -0.009476610639325192,
+     "n": 7
+    },
+    "domain/right/u": {
+     "l2": 0.011544548506356967,
+     "max": 0.0008225828928649954,
+     "mean": -0.0021659978791991855,
+     "min": -0.009476610639325228,
+     "n": 7
+    },
+    "domain/top/u": {
+     "l2": 0.0017554486201452853,
+     "max": -7.810514990140557e-07,
+     "mean": -0.00048586315169314855,
+     "min": -0.0009034113039570572,
+     "n": 9
+    },
+    "domain/u": {
+     "l2": 4.1104193040593175,
+     "max": 1.9244850116477976,
+     "mean": 0.4185385092991065,
+     "min": 0.03250488024534269,
+     "n": 49
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 256,
+   "params": {},
+   "time": 0.0
+  }
+ }
+}

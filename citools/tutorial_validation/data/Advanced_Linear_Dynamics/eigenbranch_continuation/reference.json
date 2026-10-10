@@ -1,0 +1,462 @@
+{
+ "_about": "Reference numbers for Advanced_Linear_Dynamics/eigenbranch_continuation.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "finalstate:curve_Bo_0.0025_0_fold.txt": {
+  "columns": [
+   "L",
+   "ReLambda",
+   "ImLambda"
+  ],
+  "file": "eigenbranch_continuation/curve_Bo_0.0025_0_fold.txt",
+  "kind": "finalstate",
+  "nrows": 35,
+  "reduce": true,
+  "stats": {
+   "ImLambda": {
+    "l2": 0.0,
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "n": 35,
+    "n_finite": 35
+   },
+   "L": {
+    "l2": 33.78513235799197,
+    "max": 6.094823250119031,
+    "mean": 5.699429721454095,
+    "min": 5.021620976430275,
+    "n": 35,
+    "n_finite": 35
+   },
+   "ReLambda": {
+    "l2": 0.3402106486353222,
+    "max": 0.14336808420806166,
+    "mean": 0.010617124733478036,
+    "min": -0.09133576587765933,
+    "n": 35,
+    "n_finite": 35
+   }
+  }
+ },
+ "finalstate:curve_Bo_0.0025_0_unstab.txt": {
+  "columns": [
+   "L",
+   "ReLambda",
+   "ImLambda"
+  ],
+  "file": "eigenbranch_continuation/curve_Bo_0.0025_0_unstab.txt",
+  "kind": "finalstate",
+  "nrows": 29,
+  "reduce": true,
+  "stats": {
+   "ImLambda": {
+    "l2": 0.0,
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "n": 29,
+    "n_finite": 29
+   },
+   "L": {
+    "l2": 33.942762825455866,
+    "max": 7.5398223686155035,
+    "mean": 6.258663043773592,
+    "min": 5.013675568982815,
+    "n": 29,
+    "n_finite": 29
+   },
+   "ReLambda": {
+    "l2": 0.34283178759303523,
+    "max": 0.15577114675614953,
+    "mean": 0.05149860760722573,
+    "min": 0.012976029414508615,
+    "n": 29,
+    "n_finite": 29
+   }
+  }
+ },
+ "finalstate:curve_Bo_0.0025_1_fold.txt": {
+  "columns": [
+   "L",
+   "ReLambda",
+   "ImLambda"
+  ],
+  "file": "eigenbranch_continuation/curve_Bo_0.0025_1_fold.txt",
+  "kind": "finalstate",
+  "nrows": 57,
+  "reduce": true,
+  "stats": {
+   "ImLambda": {
+    "l2": 0.0,
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "n": 57,
+    "n_finite": 57
+   },
+   "L": {
+    "l2": 44.25895343121,
+    "max": 6.094830032288133,
+    "mean": 5.852330355137629,
+    "min": 5.02183336723124,
+    "n": 57,
+    "n_finite": 57
+   },
+   "ReLambda": {
+    "l2": 1.4326609702093416,
+    "max": -0.055130519235355085,
+    "mean": -0.1813815883859967,
+    "min": -0.3445143530629804,
+    "n": 57,
+    "n_finite": 57
+   }
+  }
+ },
+ "finalstate:curve_Bo_0.0025_1_unstab.txt": {
+  "columns": [
+   "L",
+   "ReLambda",
+   "ImLambda"
+  ],
+  "file": "eigenbranch_continuation/curve_Bo_0.0025_1_unstab.txt",
+  "kind": "finalstate",
+  "nrows": 29,
+  "reduce": true,
+  "stats": {
+   "ImLambda": {
+    "l2": 0.0,
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "n": 29,
+    "n_finite": 29
+   },
+   "L": {
+    "l2": 33.94279760909796,
+    "max": 7.5398223686155035,
+    "mean": 6.258667332266036,
+    "min": 5.013535897661446,
+    "n": 29,
+    "n_finite": 29
+   },
+   "ReLambda": {
+    "l2": 0.616720175443618,
+    "max": -0.04906023801480672,
+    "mean": -0.11021812217562141,
+    "min": -0.15384453117440833,
+    "n": 29,
+    "n_finite": 29
+   }
+  }
+ },
+ "finalstate:curve_Bo_0_0_std.txt": {
+  "columns": [
+   "L",
+   "ReLambda",
+   "ImLambda"
+  ],
+  "file": "eigenbranch_continuation/curve_Bo_0_0_std.txt",
+  "kind": "finalstate",
+  "nrows": 29,
+  "reduce": true,
+  "stats": {
+   "ImLambda": {
+    "l2": 0.0,
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "n": 29,
+    "n_finite": 29
+   },
+   "L": {
+    "l2": 34.195880044888426,
+    "max": 7.551367539759676,
+    "mean": 6.306092040992441,
+    "min": 5.026548245743669,
+    "n": 29,
+    "n_finite": 29
+   },
+   "ReLambda": {
+    "l2": 0.22351449439039797,
+    "max": 0.050897299975515835,
+    "mean": -0.005753256461826774,
+    "min": -0.09140558292876672,
+    "n": 29,
+    "n_finite": 29
+   }
+  }
+ },
+ "finalstate:curve_Bo_0_0_unstab.txt": {
+  "columns": [
+   "L",
+   "ReLambda",
+   "ImLambda"
+  ],
+  "file": "eigenbranch_continuation/curve_Bo_0_0_unstab.txt",
+  "kind": "finalstate",
+  "nrows": 30,
+  "reduce": true,
+  "stats": {
+   "ImLambda": {
+    "l2": 0.0,
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "n": 30,
+    "n_finite": 30
+   },
+   "L": {
+    "l2": 34.919772215816806,
+    "max": 7.600477933827821,
+    "mean": 6.330729888478591,
+    "min": 5.026548245743669,
+    "n": 30,
+    "n_finite": 30
+   },
+   "ReLambda": {
+    "l2": 0.3129889891570188,
+    "max": 0.1474804090776094,
+    "mean": 0.045119401593480275,
+    "min": 0.0007321245406829981,
+    "n": 30,
+    "n_finite": 30
+   }
+  }
+ },
+ "finalstate:curve_Bo_0_1_std.txt": {
+  "columns": [
+   "L",
+   "ReLambda",
+   "ImLambda"
+  ],
+  "file": "eigenbranch_continuation/curve_Bo_0_1_std.txt",
+  "kind": "finalstate",
+  "nrows": 29,
+  "reduce": true,
+  "stats": {
+   "ImLambda": {
+    "l2": 0.0,
+    "max": 0.0,
+    "mean": 0.0,
+    "min": 0.0,
+    "n": 29,
+    "n_finite": 29
+   },
+   "L": {
+    "l2": 34.195881333558866,
+    "max": 7.551367706442451,
+    "mean": 6.30609227536835,
+    "min": 5.026548245743669,
+    "n": 29,
+    "n_finite": 29
+   },
+   "ReLambda": {
+    "l2": 1.0581736583952706,
+    "max": -0.06814231326366552,
+    "mean": -0.17945558500045217,
+    "min": -0.3445594027987792,
+    "n": 29,
+    "n_finite": 29
+   }
+  }
+ },
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "_meshwide__domain__right/_kin_bc": {
+     "l2": 5.841280044623155e-31,
+     "max": -5.841280044623155e-31,
+     "mean": -5.841280044623155e-31,
+     "min": -5.841280044623155e-31,
+     "n": 1
+    },
+    "domain/bottom/left/pressure": {
+     "l2": 1.0000000000000018,
+     "max": 1.0000000000000018,
+     "mean": 1.0000000000000018,
+     "min": 1.0000000000000018,
+     "n": 1
+    },
+    "domain/bottom/pressure": {
+     "l2": 2.236067977499793,
+     "max": 1.000000000000002,
+     "mean": 1.0000000000000013,
+     "min": 1.000000000000001,
+     "n": 5
+    },
+    "domain/left/mesh_y": {
+     "l2": 37.87717552422503,
+     "max": 7.500471645224825,
+     "mean": 3.8002389669139105,
+     "min": 0.10000628860299765,
+     "n": 75
+    },
+    "domain/left/pressure": {
+     "l2": 6.082762530298228,
+     "max": 1.0000000000000082,
+     "mean": 1.0000000000000013,
+     "min": 0.9999999999999952,
+     "n": 37
+    },
+    "domain/left/velocity_y": {
+     "l2": 5.909675284085278e-16,
+     "max": 2.610738136023813e-16,
+     "mean": 9.716656627886437e-18,
+     "min": -1.3480149414902184e-16,
+     "n": 75
+    },
+    "domain/mesh_x": {
+     "l2": 16.233966448981786,
+     "max": 0.9166666666666676,
+     "mean": 0.4999999999999996,
+     "min": 0.083333333333333,
+     "n": 825
+    },
+    "domain/mesh_y": {
+     "l2": 125.62437933228752,
+     "max": 7.500471645224825,
+     "mean": 3.8002389669139105,
+     "min": 0.10000628860299755,
+     "n": 825
+    },
+    "domain/pressure": {
+     "l2": 13.601470508735458,
+     "max": 1.0000000000000053,
+     "mean": 1.000000000000001,
+     "min": 0.9999999999999973,
+     "n": 185
+    },
+    "domain/right/_kin_bc": {
+     "l2": 0.07874523891402183,
+     "max": 0.010425459048513133,
+     "mean": 0.009086360261247598,
+     "min": 0.007533480401836581,
+     "n": 75
+    },
+    "domain/right/mesh_x": {
+     "l2": 8.66025403784438,
+     "max": 1.000000000000001,
+     "mean": 0.9999999999999992,
+     "min": 0.999999999999997,
+     "n": 75
+    },
+    "domain/right/mesh_y": {
+     "l2": 37.87717552422503,
+     "max": 7.500471645224824,
+     "mean": 3.8002389669139105,
+     "min": 0.10000628860299751,
+     "n": 75
+    },
+    "domain/right/pressure": {
+     "l2": 6.164414002968983,
+     "max": 1.0000000000000053,
+     "mean": 1.0000000000000013,
+     "min": 0.9999999999999972,
+     "n": 38
+    },
+    "domain/right/top/mesh_y": {
+     "l2": 7.60047793382782,
+     "max": 7.60047793382782,
+     "mean": 7.60047793382782,
+     "min": 7.60047793382782,
+     "n": 1
+    },
+    "domain/right/top/pressure": {
+     "l2": 1.0000000000000016,
+     "max": 1.0000000000000016,
+     "mean": 1.0000000000000016,
+     "min": 1.0000000000000016,
+     "n": 1
+    },
+    "domain/right/velocity_x": {
+     "l2": 5.5651290084088594e-30,
+     "max": 4.8023700634072295e-31,
+     "mean": -5.575471797127999e-31,
+     "min": -1.2947634776637468e-30,
+     "n": 75
+    },
+    "domain/right/velocity_y": {
+     "l2": 8.848725695173342e-16,
+     "max": 2.259454861919734e-16,
+     "mean": -1.6947126992090362e-17,
+     "min": -2.6051230353389456e-16,
+     "n": 75
+    },
+    "domain/top/_lagr_enf_bc_mesh_y": {
+     "l2": 0.6140782844875623,
+     "max": -0.03670024534554222,
+     "mean": -0.12367854105754629,
+     "min": -0.47480408488275333,
+     "n": 12
+    },
+    "domain/top/left/_lagr_enf_bc_mesh_y": {
+     "l2": 2.500881950644449,
+     "max": -2.500881950644449,
+     "mean": -2.500881950644449,
+     "min": -2.500881950644449,
+     "n": 1
+    },
+    "domain/top/left/mesh_y": {
+     "l2": 7.600477933827821,
+     "max": 7.600477933827821,
+     "mean": 7.600477933827821,
+     "min": 7.600477933827821,
+     "n": 1
+    },
+    "domain/top/left/pressure": {
+     "l2": 1.0000000000000016,
+     "max": 1.0000000000000016,
+     "mean": 1.0000000000000016,
+     "min": 1.0000000000000016,
+     "n": 1
+    },
+    "domain/top/mesh_y": {
+     "l2": 25.207933533882535,
+     "max": 7.600477933827821,
+     "mean": 7.600477933827819,
+     "min": 7.60047793382782,
+     "n": 11
+    },
+    "domain/top/pressure": {
+     "l2": 2.236067977499792,
+     "max": 1.0000000000000016,
+     "mean": 1.000000000000001,
+     "min": 1.0000000000000004,
+     "n": 5
+    },
+    "domain/velocity_x": {
+     "l2": 1.5025979461033322e-15,
+     "max": 1.9390354883078057e-16,
+     "mean": 4.917051301385057e-19,
+     "min": -2.6121382060522223e-16,
+     "n": 825
+    },
+    "domain/velocity_y": {
+     "l2": 1.1947107685975084e-15,
+     "max": 1.8666004119802647e-16,
+     "mean": 3.655396133832886e-18,
+     "min": -1.4822638618518433e-16,
+     "n": 825
+    },
+    "globals/P": {
+     "l2": 0.009037309772502701,
+     "max": 0.009037309772502701,
+     "mean": 0.009037309772502701,
+     "min": 0.009037309772502701,
+     "n": 1
+    }
+   },
+   "eigenvalues": [
+    [0.052380269891009135, 0.0]
+   ],
+   "mpi_size": 1,
+   "ndof": 4126,
+   "params": {
+    "Bo": 0.0,
+    "L": 7.600477933827821
+   },
+   "time": 0.0
+  }
+ }
+}

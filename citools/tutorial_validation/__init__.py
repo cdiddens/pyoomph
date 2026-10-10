@@ -141,14 +141,24 @@ class Evolution(Check):
                 small drift.
             "rows" matches by row index and insists on the same number of rows. For a file whose
                 first column does not grow at all - an arclength continuation writing the parameter
-                there, a sweep that turns around.
+                there, a sweep that turns around - and also for one whose abscissa is itself a
+                computed result that moves by round-off (see Advanced_Linear_Dynamics/
+                hanging_droplet.py, where an adaptive continuation writes V into the first column).
+        abs_columns: columns compared by magnitude, |value|, on both sides. For a quantity whose
+            SIGN is a labelling artefact rather than a result. The case it exists for is a
+            complex-conjugate eigenvalue pair: a solver returning (lambda, conj(lambda)) may return
+            it in either order, and then the two imaginary-part columns swap signs together while
+            the physics - the oscillation frequency |Im lambda| - is unchanged. Measured on
+            Advanced_Linear_Dynamics/turing_dispersion.py, where 14 of 256 values flipped sign and
+            nothing else moved at all between one rank and four. Taking the magnitude loses nothing
+            there, because a real eigenvalue has Im = 0 and a conjugate pair has equal |Im|.
     """
 
     kind = "evolution"
 
     def __init__(self, file: str, columns: "list[str] | None" = None, abscissa: "str | None" = None,
                  until_time: "float | None" = None, from_time: "float | None" = None,
-                 match: str = "exact", **kw):
+                 match: str = "exact", abs_columns: "tuple[str,...] | None" = None, **kw):
         super().__init__(**kw)
         if match not in ("exact", "interp", "rows"):
             raise ValueError("match= is 'exact', 'interp' or 'rows', not %r" % match)
@@ -159,6 +169,7 @@ class Evolution(Check):
         self.file, self.columns, self.abscissa = file, columns, abscissa
         self.until_time, self.from_time = until_time, from_time
         self.match = match
+        self.abs_columns = tuple(abs_columns) if abs_columns is not None else ()
 
     def window(self, data, xi):
         """*data* restricted to [from_time, until_time] on column *xi*."""
@@ -172,12 +183,14 @@ class Evolution(Check):
         return "evolution:" + self.file
 
     def label(self) -> str:
+        # name the magnitude columns, so a diff says why a sign is not being compared
         window = ""
         if self.from_time is not None or self.until_time is not None:
             window = " [%s:%s]" % ("" if self.from_time is None else "%g" % self.from_time,
                                    "" if self.until_time is None else "%g" % self.until_time)
+        mag = "" if not self.abs_columns else " |%s|" % "/".join(self.abs_columns)
         return ("evolution of " + self.file + window
-                + ("" if self.match == "exact" else " (%s)" % self.match))
+                + ("" if self.match == "exact" else " (%s)" % self.match) + mag)
 
 
 class FinalState(Check):
@@ -593,8 +606,22 @@ def _cmp_evolution(check: Evolution, art: RunArtifacts, ref: dict, out: Outcome)
         out.problems.append("%s: no rows left in %s once from_time/until_time are applied"
                             % (check.label(), files[0].as_posix()))
         return
-    refrows = numpy.asarray(ref["rows"], dtype=float)
+    # A copy, explicitly: abs_columns below rewrites this array in place, and the reference dict is
+    # the loaded JSON that the other checks of the same script still have to read.
+    refrows = numpy.array(ref["rows"], dtype=float, copy=True)
+    # The matching mode belongs to the REFERENCE, not to the spec: the generator stores
+    # row_indices only for match="rows" and prefers rows with a unique abscissa only for
+    # match="exact", so the two are a pair (see the section comment above). Changing match= in
+    # specs.py therefore needs the reference regenerated, and saying so beats obeying the stored
+    # mode silently - which is what happened once here: the spec was changed to match="rows", the
+    # label dutifully printed "(rows)", and the comparison went on looking instants up.
     mode = ref.get("match", "exact")
+    if check.match != mode:
+        out.problems.append("%s: the spec asks for match=%r but this reference was generated with "
+                            "match=%r, and the two store different things - regenerate it with "
+                            "--update-validation"
+                            % (check.label(), check.match, mode))
+        return
 
     if mode == "rows":
         if len(data) != ref["nrows"]:
@@ -647,25 +674,54 @@ def _cmp_evolution(check: Evolution, art: RunArtifacts, ref: dict, out: Outcome)
             got = numpy.column_stack([numpy.interp(refrows[:, 0], x[keep], rows_sorted[keep, i])
                                       for i in cols])
 
+    # Columns named in abs_columns are compared by magnitude on BOTH sides. Done here rather than
+    # when the reference is written, so that marking a column this way is a spec-side change like
+    # skip= and only=: the stored record keeps the signs it was generated with and no reference has
+    # to be regenerated to narrow what is being asked of it.
+    if check.abs_columns:
+        unknown = [c for c in check.abs_columns if c not in ref["columns"]]
+        if unknown:
+            out.problems.append("%s: abs_columns names %s, which this file does not have (it has %s)"
+                                % (check.label(), ", ".join(unknown), ", ".join(ref["columns"])))
+            return
+        for c, name in enumerate(ref["columns"]):
+            if name in check.abs_columns:
+                refrows[:, c + 1] = numpy.abs(refrows[:, c + 1])
+                got[:, c] = numpy.abs(got[:, c])
+
     # Each column is judged against ITS OWN RANGE over the stored rows, for the third time in this
     # module and for the same reason as the fingerprint's dof groups and FinalState's columns: a
     # physical quantity that passes through zero makes a relative comparison explode exactly where
     # it crosses. Measured on SpatioTemporal_PDEs/kuramoto_sivanshinsky_bifurcation.py: h_rms near
     # the fold is 0.00414 against a range of 0.321, and it moved by 8.6e-8 - 2.7e-7 of the range,
     # and 2.1e-5 of the value. A critical eigenvalue crossing zero is the same shape.
-    extents = [max(abs(float(refrows[:, c + 1].min())), abs(float(refrows[:, c + 1].max())))
-               for c in range(len(ref["columns"]))]
+    # In "rows" mode the abscissa is compared as well, and that is not cosmetic: these files are
+    # arclength continuations and sweeps, so their first column is the PARAMETER - r at a fold, Bo
+    # of a hanging droplet, Wi of the viscoelastic cylinder - which is the answer the script exists
+    # to produce. The other two modes USE the abscissa to line rows up, by a lookup or an
+    # interpolation, so comparing it there would be circular; row matching lines rows up by index
+    # and leaves the abscissa free, which until now meant it was compared in none of the 24 checks
+    # that use this mode. The fingerprint pinned only its final value, never the curve.
+    if mode == "rows":
+        names = [ref["abscissa"]] + list(ref["columns"])
+        refvals, gotvals = refrows, numpy.column_stack([data[ref["row_indices"], xi], got])
+    else:
+        names = list(ref["columns"])
+        refvals, gotvals = refrows[:, 1:], got
+
+    extents = [max(abs(float(refvals[:, c].min())), abs(float(refvals[:, c].max())))
+               for c in range(len(names))]
     worst = []
     for r in range(len(refrows)):
-        for c, name in enumerate(ref["columns"]):
-            if not _close(refrows[r, c + 1], got[r, c], check.rtol,
+        for c, name in enumerate(names):
+            if not _close(refvals[r, c], gotvals[r, c], check.rtol,
                           check.atol + check.rtol * extents[c]):
                 worst.append("at %s=%.12g, %s: %s"
                              % (ref["abscissa"], refrows[r, 0], name,
-                                _deviation(refrows[r, c + 1], got[r, c])))
+                                _deviation(refvals[r, c], gotvals[r, c])))
     if worst:
         out.problems.append("%s: %d of %d values differ\n        %s"
-                            % (check.label(), len(worst), len(refrows) * len(ref["columns"]),
+                            % (check.label(), len(worst), len(refrows) * len(names),
                                "\n        ".join(worst[:8])
                                + ("\n        ... and %d more" % (len(worst) - 8) if len(worst) > 8 else "")))
 
