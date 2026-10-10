@@ -1,0 +1,86 @@
+{
+ "_about": "Reference numbers for Multicomponent_Flow/rayleigh_taylor_instability.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/bottom/massfrac_glycerol": {
+     "l2": 0.21683946419574757,
+     "max": 0.06374772266462239,
+     "mean": 0.04826792434050203,
+     "min": 0.03141863326276824,
+     "n": 19
+    },
+    "domain/bottom/pressure": {
+     "l2": 8079.859328467721,
+     "max": 1854.2675022146334,
+     "mean": 1853.6468102471554,
+     "min": 1853.155220240441,
+     "n": 19
+    },
+    "domain/left/massfrac_glycerol": {
+     "l2": 4.5964707967101015,
+     "max": 1.000110064894258,
+     "mean": 0.4225431022686638,
+     "min": 0.031847033592039053,
+     "n": 65
+    },
+    "domain/left/pressure": {
+     "l2": 8862.033566833366,
+     "max": 1832.6514468428295,
+     "mean": 1028.090054078786,
+     "min": -2.2176372012149193,
+     "n": 65
+    },
+    "domain/massfrac_glycerol": {
+     "l2": 29.44698443549994,
+     "max": 1.0001414866901686,
+     "mean": 0.4393712547893031,
+     "min": 0.032666864767815856,
+     "n": 2984
+    },
+    "domain/pressure": {
+     "l2": 58751.19878517345,
+     "max": 1833.4427915804474,
+     "mean": 1046.9912522860845,
+     "min": 0.2666418100490413,
+     "n": 2984
+    },
+    "domain/right/massfrac_glycerol": {
+     "l2": 4.596470796712232,
+     "max": 1.0001100648942591,
+     "mean": 0.4225431022692773,
+     "min": 0.03184703359211515,
+     "n": 65
+    },
+    "domain/right/pressure": {
+     "l2": 8862.03356683319,
+     "max": 1832.651446842837,
+     "mean": 1028.0900540787636,
+     "min": -2.2176372012152337,
+     "n": 65
+    },
+    "domain/velocity_x": {
+     "l2": 6.119501585516423,
+     "max": 0.1439524629000168,
+     "mean": 3.4355862946255455e-13,
+     "min": -0.1439524628921258,
+     "n": 12606
+    },
+    "domain/velocity_y": {
+     "l2": 19.033720594615275,
+     "max": 0.31423648013269984,
+     "mean": -0.03915836333506314,
+     "min": -0.42464582590889344,
+     "n": 12606
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 31478,
+   "params": {},
+   "time": 10.0
+  }
+ }
+}

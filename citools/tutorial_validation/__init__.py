@@ -238,21 +238,40 @@ class Fingerprint(Check):
         only / skip: dotted keys of the fingerprint to compare or to leave out, e.g.
             only=["params.r"], or skip=["ndof", "dofs.*.n"] for an adaptive script whose element
             count is not reproducible across platforms.
+        gauge_free: dof GROUP name patterns (not dotted keys) whose absolute LEVEL is undetermined,
+            so that only the gauge-invariant part of them is compared: each such group keeps its n
+            and contributes a single "spread" = max - min, while its min, max, mean and l2 - all of
+            which move with the level - are dropped.
+
+            The case it exists for is the pressure of an incompressible flow with no Dirichlet
+            pressure anywhere: the level is a free constant, and the solve lands wherever it lands.
+            Measured on Multiple_Domains/falling_droplet.py, where between two runs on one machine
+            every pressure group's min, max AND mean shifted by the same -6.3145163, the kinematic
+            boundary condition's Lagrange multiplier (which carries pressure units) shifted by the
+            same amount again, and each group's max - min was preserved exactly.
+
+            This is strictly better than skipping those groups, which is what the first script with
+            this shape had to do: a pressure that drifted in SHAPE rather than in level - the real
+            regression one wants to catch - still shows up in the spread. A spread needs no scale
+            rule of its own, being its own scale, so it is compared relatively like an l2.
     """
 
     kind = "fingerprint"
 
     def __init__(self, index: int = 0, outdir: "str | None" = None,
-                 only: "list[str] | None" = None, skip: "list[str] | None" = None, **kw):
+                 only: "list[str] | None" = None, skip: "list[str] | None" = None,
+                 gauge_free: "list[str] | None" = None, **kw):
         super().__init__(**kw)
         self.index, self.outdir, self.only, self.skip = index, outdir, only, list(skip or [])
+        self.gauge_free = list(gauge_free or [])
 
     def slug(self) -> str:
         return "fingerprint:%s:%d" % (self.outdir or "", self.index)
 
     def label(self) -> str:
+        gauge = "" if not self.gauge_free else " [%s by spread only]" % "/".join(self.gauge_free)
         return "state fingerprint" + (" of %s" % self.outdir if self.outdir else "") + \
-               ("" if self.index == 0 else " (problem %d)" % self.index)
+               ("" if self.index == 0 else " (problem %d)" % self.index) + gauge
 
 
 class Stdout(Check):
@@ -815,6 +834,31 @@ def _flatten_fingerprint(record: dict) -> "dict[str,object]":
     return flat
 
 
+def _apply_gauge_free(record: dict, patterns: "list[str]") -> dict:
+    """*record* with each gauge-free dof group reduced to its invariant part.
+
+    Applied to the reference and to the produced record alike, and at comparison time rather than
+    when the reference is written - so marking a group gauge-free is a spec-side change like skip=
+    and only=, and no reference has to be regenerated to narrow what is asked of it.
+    """
+    if not patterns:
+        return record
+    dofs = {}
+    for name, stats in (record.get("dofs") or {}).items():
+        if any(fnmatch.fnmatch(name, p) for p in patterns):
+            kept = {}
+            if "n" in stats:
+                kept["n"] = stats["n"]
+            if "min" in stats and "max" in stats:
+                kept["spread"] = float(stats["max"]) - float(stats["min"])
+            dofs[name] = kept
+        else:
+            dofs[name] = stats
+    out = dict(record)
+    out["dofs"] = dofs
+    return out
+
+
 def _fingerprint_scales(record: dict) -> "dict[str,float]":
     """The scale each dof statistic should be judged against, by dotted key.
 
@@ -865,10 +909,13 @@ def _cmp_fingerprint(check: Fingerprint, art: RunArtifacts, ref: dict, out: Outc
     except FileNotFoundError as e:
         out.problems.append("%s: %s" % (check.label(), e))
         return
-    want = _flatten_fingerprint(ref["record"])
-    got = _flatten_fingerprint(record)
+    # A group whose level is a free constant keeps only its gauge-invariant part; see gauge_free.
+    ref_record = _apply_gauge_free(ref["record"], check.gauge_free)
+    got_record = _apply_gauge_free(record, check.gauge_free)
+    want = _flatten_fingerprint(ref_record)
+    got = _flatten_fingerprint(got_record)
     # Judged against the field's scale rather than the statistic's own magnitude; see there.
-    scales = _fingerprint_scales(ref["record"])
+    scales = _fingerprint_scales(ref_record)
 
     def selected(key: str) -> bool:
         if key in _FINGERPRINT_NEVER_COMPARED:

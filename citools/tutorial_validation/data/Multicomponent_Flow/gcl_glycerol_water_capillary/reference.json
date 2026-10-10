@@ -1,0 +1,225 @@
+{
+ "_about": "Reference numbers for Multicomponent_Flow/gcl_glycerol_water_capillary.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "finalstate:domain_*.txt": {
+  "columns": [
+   "coordinate_x[m]",
+   "velocity_x[m/s]",
+   "pressure[Pa]",
+   "massfrac_glycerol"
+  ],
+  "file": "gcl_glycerol_water_capillary/domain/domain_000079.txt",
+  "kind": "finalstate",
+  "nrows": 2009,
+  "reduce": true,
+  "stats": {
+   "coordinate_x[m]": {
+    "l2": 0.1311759833459922,
+    "max": 0.0050785195808717475,
+    "mean": 0.002529152992974871,
+    "min": 0.0,
+    "n": 2009,
+    "n_finite": 2009
+   },
+   "massfrac_glycerol": {
+    "l2": 31.4283827192567,
+    "max": 0.7866944108957312,
+    "mean": 0.7001725424344175,
+    "min": 0.6592646013627651,
+    "n": 2009,
+    "n_finite": 2009
+   },
+   "pressure[Pa]": {
+    "l2": 1524.6891497120275,
+    "max": 58.89362383299229,
+    "mean": 29.42903437946779,
+    "min": -1.630883056002749e-08,
+    "n": 2009,
+    "n_finite": 2009
+   },
+   "velocity_x[m/s]": {
+    "l2": 5.388414300238152e-07,
+    "max": -1.117369454329244e-08,
+    "mean": -1.200741217639912e-08,
+    "min": -1.3126281840598574e-08,
+    "n": 2009,
+    "n_finite": 2009
+   }
+  }
+ },
+ "finalstate:mass_evolution.txt": {
+  "columns": [
+   "time[s]",
+   "M_glycerol[kg]"
+  ],
+  "file": "gcl_glycerol_water_capillary/mass_evolution.txt",
+  "kind": "finalstate",
+  "nrows": 80,
+  "reduce": true,
+  "stats": {
+   "M_glycerol[kg]": {
+    "l2": 2.952633341334519e-05,
+    "max": 3.3011444327246395e-06,
+    "mean": 3.3011444319281617e-06,
+    "min": 3.301144431781373e-06,
+    "n": 80,
+    "n_finite": 80
+   },
+   "time[s]": {
+    "l2": 296942.464840419,
+    "max": 172800.27909138738,
+    "mean": 11215.678417469051,
+    "min": 0.0,
+    "n": 80,
+    "n_finite": 80
+   }
+  }
+ },
+ "finalstate:top_interface.txt": {
+  "columns": [
+   "time[s]",
+   "u[m/s]",
+   "y[m]"
+  ],
+  "file": "gcl_glycerol_water_capillary/top_interface.txt",
+  "kind": "finalstate",
+  "nrows": 80,
+  "reduce": true,
+  "stats": {
+   "time[s]": {
+    "l2": 296942.464840419,
+    "max": 172800.27909138738,
+    "mean": 11215.678417469051,
+    "min": 0.0,
+    "n": 80,
+    "n_finite": 80
+   },
+   "u[m/s]": {
+    "l2": 1.0577258960451802e-05,
+    "max": 1.5047150541868548e-06,
+    "mean": 1.0332951702616137e-06,
+    "min": 0.0,
+    "n": 80,
+    "n_finite": 80
+   },
+   "y[m]": {
+    "l2": 0.03671283363508369,
+    "max": 0.014921480419128252,
+    "mean": 0.0018820905711544559,
+    "min": 0.0,
+    "n": 80,
+    "n_finite": 80
+   }
+  }
+ },
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domain/left/_kin_bc": {
+     "l2": 0.28566341376383403,
+     "max": -0.28566341376383403,
+     "mean": -0.28566341376383403,
+     "min": -0.28566341376383403,
+     "n": 1
+    },
+    "domain/left/massfrac_glycerol": {
+     "l2": 0.7866944108957312,
+     "max": 0.7866944108957312,
+     "mean": 0.7866944108957312,
+     "min": 0.7866944108957312,
+     "n": 1
+    },
+    "domain/left/masstrans_water": {
+     "l2": 0.008939659178205727,
+     "max": 0.008939659178205727,
+     "mean": 0.008939659178205727,
+     "min": 0.008939659178205727,
+     "n": 1
+    },
+    "domain/left/pressure": {
+     "l2": 0.2856634136839795,
+     "max": 0.2856634136839795,
+     "mean": 0.2856634136839795,
+     "min": 0.2856634136839795,
+     "n": 1
+    },
+    "domain/left/velocity_x": {
+     "l2": 0.007795902899044382,
+     "max": -0.007795902899044382,
+     "mean": -0.007795902899044382,
+     "min": -0.007795902899044382,
+     "n": 1
+    },
+    "domain/massfrac_glycerol": {
+     "l2": 22.20543817571184,
+     "max": 0.7866763418397383,
+     "mean": 0.7001384343132389,
+     "min": 0.659264715685437,
+     "n": 1003
+    },
+    "domain/mesh_x": {
+     "l2": 6.55388191182423,
+     "max": 0.25379901605406563,
+     "mean": 0.12645714607139125,
+     "min": 7.935186845112627e-06,
+     "n": 2007
+    },
+    "domain/pressure": {
+     "l2": 5.223555467896548,
+     "max": 0.28564521495787615,
+     "mean": 0.14274534797351845,
+     "min": 0.0002830884347424839,
+     "n": 1003
+    },
+    "domain/right/_kin_bc": {
+     "l2": 0.746074020956423,
+     "max": 0.746074020956423,
+     "mean": 0.746074020956423,
+     "min": 0.746074020956423,
+     "n": 1
+    },
+    "domain/right/massfrac_glycerol": {
+     "l2": 0.6592646013627651,
+     "max": 0.6592646013627651,
+     "mean": 0.6592646013627651,
+     "min": 0.6592646013627651,
+     "n": 1
+    },
+    "domain/right/mesh_x": {
+     "l2": 0.2539259790435874,
+     "max": 0.2539259790435874,
+     "mean": 0.2539259790435874,
+     "min": 0.2539259790435874,
+     "n": 1
+    },
+    "domain/right/pressure": {
+     "l2": 7.91059525252235e-11,
+     "max": -7.91059525252235e-11,
+     "mean": -7.91059525252235e-11,
+     "min": -7.91059525252235e-11,
+     "n": 1
+    },
+    "domain/right/velocity_x": {
+     "l2": 0.009158225890130977,
+     "max": -0.009158225890130977,
+     "mean": -0.009158225890130977,
+     "min": -0.009158225890130977,
+     "n": 1
+    },
+    "domain/velocity_x": {
+     "l2": 0.3757580204753745,
+     "max": -0.007795919260297342,
+     "mean": -0.0083774897730798,
+     "min": -0.009157362589436585,
+     "n": 2007
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 6030,
+   "params": {},
+   "time": 12.383540178518158
+  }
+ }
+}

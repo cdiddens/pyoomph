@@ -1,0 +1,107 @@
+{
+ "_about": "Reference numbers for Multiple_Domains/two_layer_flow_single_domain.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "_meshwide__domain/pressure": {
+     "l2": 3.964827502377568e-24,
+     "max": 3.964827502377568e-24,
+     "mean": 3.964827502377568e-24,
+     "min": 3.964827502377568e-24,
+     "n": 1
+    },
+    "domain/interface/_kin_bc": {
+     "l2": 3.7959322483643157e-06,
+     "max": 3.777097839530292e-07,
+     "mean": 1.8791515065758573e-09,
+     "min": -3.777098478580974e-07,
+     "n": 201
+    },
+    "domain/interface/mesh_y": {
+     "l2": 1.417744689056444,
+     "max": 0.10000001673862234,
+     "mean": 0.10000000008327675,
+     "min": 0.0999999832613763,
+     "n": 201
+    },
+    "domain/interface/velocity_x": {
+     "l2": 1.0300959483231618e-07,
+     "max": 1.030098214188997e-08,
+     "mean": 6.26814224001803e-17,
+     "min": -1.0300982237782566e-08,
+     "n": 199
+    },
+    "domain/interface/velocity_y": {
+     "l2": 4.7866968333255694e-08,
+     "max": 4.762941884642621e-09,
+     "mean": -2.3696757368413774e-11,
+     "min": -4.762941147468921e-09,
+     "n": 201
+    },
+    "domain/left/mesh_y": {
+     "l2": 0.7095773823149976,
+     "max": 0.19500000078442709,
+     "mean": 0.10000000809118433,
+     "min": 0.005000000784427108,
+     "n": 38
+    },
+    "domain/left/velocity_y": {
+     "l2": 1.8154246256265203e-08,
+     "max": -1.9735708826686733e-11,
+     "mean": -2.38095341188679e-09,
+     "min": -5.167715812666841e-09,
+     "n": 38
+    },
+    "domain/mesh_y": {
+     "l2": 10.009820175133385,
+     "max": 0.19500000078404006,
+     "mean": 0.0999999999593408,
+     "min": 0.004999999215572839,
+     "n": 7562
+    },
+    "domain/pressure": {
+     "l2": 1.161048653027952e-05,
+     "max": 5.557016355331939e-07,
+     "mean": -7.500504677436543e-15,
+     "min": -5.557018456052855e-07,
+     "n": 6000
+    },
+    "domain/right/mesh_y": {
+     "l2": 0.7095773823149978,
+     "max": 0.19500000078442714,
+     "mean": 0.10000000809118437,
+     "min": 0.005000000784427111,
+     "n": 38
+    },
+    "domain/right/velocity_y": {
+     "l2": 1.8154246229076054e-08,
+     "max": -1.9735709700001854e-11,
+     "mean": -2.3809534127618744e-09,
+     "min": -5.167715783879486e-09,
+     "n": 38
+    },
+    "domain/velocity_x": {
+     "l2": 5.664344917119385e-07,
+     "max": 1.4192983250646743e-08,
+     "mean": -1.5542011892623188e-18,
+     "min": -1.4192983265054114e-08,
+     "n": 7562
+    },
+    "domain/velocity_y": {
+     "l2": 1.8063239910496672e-07,
+     "max": 5.167717149562146e-09,
+     "mean": 1.196455619374172e-11,
+     "min": -5.165173552793935e-09,
+     "n": 7562
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 29641,
+   "params": {},
+   "time": 50.0
+  }
+ }
+}

@@ -839,10 +839,20 @@ VALIDATION: "dict[str,list]" = {
       #
       # Worth a look independently of this check: a volume constraint is supposed to DETERMINE that
       # level, so the pair being free suggests the constraint is degenerate here.
-      Fingerprint(skip=["dofs.*pressure*", "dofs.volume_constraint/*"],
+      # gauge_free on the pressure rather than skip, which is what this entry did when it was the
+      # first script of this shape: the level is free but the pressure's spread is not, and the
+      # spread is where a regression in the traction balance or the Marangoni stress would show.
+      # Multiple_Domains/falling_droplet.py has the same structure and the same measurement.
+      #
+      # The volume Lagrange multiplier stays in skip= and deliberately: it is a SCALAR group, n=1,
+      # so its max - min is identically zero and comparing that would be a check in appearance only.
+      # Where a gauge-free group has one entry there is nothing invariant left to compare, and
+      # saying so beats dressing it up.
+      Fingerprint(gauge_free=["*pressure*"], skip=["dofs.volume_constraint/*"],
                   reason="the pressure level and the volume Lagrange multiplier are one gauge "
                          "freedom - measured as an identical -0.414154 shift of every pressure "
-                         "group's min, max and mean"),
+                         "group's min, max and mean; the pressure is compared by its spread, and "
+                         "the multiplier is a scalar with no invariant part left"),
   ],
   "Moving_Mesh/droplet_spread_3d.py": [
       # The only 3d script in these two chapters, 36 dof groups.
@@ -1179,6 +1189,345 @@ VALIDATION: "dict[str,list]" = {
       # DG advection-diffusion run to t=50. The last profile is the one worth pinning: a DG scheme
       # that lost its upwinding smears or oscillates, and either shows up in min/max of c.
       FinalState("domain_*.txt"),
+      Fingerprint(),
+  ],
+  # ===============================================================================================
+  # Multicomponent_Flow. Half of this chapter does not solve anything: it DEFINES materials and
+  # prints their properties, with no Problem, no mesh and no output file. The fingerprint has
+  # nothing to collect there (the proposer says so rather than inventing one), so those scripts are
+  # checked through stdout, which is the one place their numbers exist.
+  #
+  # That turns out to be the strongest kind of check in the chapter, because a material property is
+  # a formula with a known answer. The pure-gas densities below are the ideal gas law, and they
+  # reproduce p*M/(R*T) to 0 or 1.8e-16 at every temperature printed - so what these entries pin is
+  # arithmetic that can be checked by hand, not merely yesterday's output. They also cover a
+  # surprising amount of machinery on the way: the registry and its override=True, the unit algebra,
+  # evaluate_at_condition, and the conversion from a symbolic expression to a float.
+  #
+  # The printed values are plain repr() floats, so unlike the L2 errors in Discontinuous_Galerkin
+  # the print costs no precision and the default rtol applies.
+  # ===============================================================================================
+
+  "Multicomponent_Flow/materials_pure_gas.py": [
+      # The density at five temperatures, with the temperature captured alongside each value so a
+      # reordered loop cannot pass. Verified against p*M/(R*T) with M=28.9645 g/mol and pyoomph's
+      # own gas_constant (8.314462618153239504): exact to the last bit at 10, 25 and 30 C and 1.8e-16
+      # at 15 and 20 C.
+      Stdout(r"DENSITY AT T\[C\]= (\d+) is ([-\d.eE+]+) kg/m\^3"),
+      # The same density at 18 C, as a float. Also printed with units just above, which is where the
+      # symbolic route rather than the float one would show a problem.
+      Stdout(r"EVALUATED DENSITY in \(kg/m\*\*3\) ([-\d.eE+]+)"),
+      # Two properties of the DEFINITION rather than of an evaluation, both read out of the leading
+      # coefficient of a printed expression:
+      #   - the viscosity constant, 1.813e-05 Pa s, from the first (constant) definition of air;
+      #   - rho(p,T)'s coefficient, M/R = 0.003483628627635038758, which pins the molar mass and the
+      #     gas constant together.
+      # Only the leading number is captured, never the expression around it: GiNaC's printed form
+      # (the operand order, "field(temperature,< code=0 , tags=>)") is not a contract and would make
+      # a brittle check.
+      Stdout(r"Dynamic viscosity: \(([-\d.eE+]+)\)"),
+      Stdout(r"VARIABLE DENSITY \(([-\d.eE+]+)\)"),
+      # This one checks behaviour, not a number: the script sets air.mass_density by hand to
+      # 2 kg/m^3 and then loads a SECOND instance, which must still have the registered 1.225. If
+      # get_pure_gas ever started handing out a shared object, this is the line that would catch it.
+      Stdout(r"Mass densities \S+ \(([-\d.eE+]+)\)"),
+  ],
+  "Multicomponent_Flow/temperature_and_pressure_dependency.py": [
+      # The same ideal-gas material as materials_pure_gas.py, reached by the route the tutorial text
+      # takes here, so the same three numbers are pinned and for the same reason.
+      Stdout(r"DENSITY AT T\[C\]= (\d+) is ([-\d.eE+]+) kg/m\^3"),
+      Stdout(r"EVALUATED DENSITY in \(kg/m\*\*3\) ([-\d.eE+]+)"),
+      Stdout(r"VARIABLE DENSITY \(([-\d.eE+]+)\)"),
+  ],
+  "Multicomponent_Flow/materials_gas_mixture.py": [
+      # A binary gas mixture, water vapour in air at 2 % by mass. Two things are printed and both
+      # are worth pinning: the mixture's initial condition (the mass fractions it was built with)
+      # and its density at 20 C and 1 atm.
+      #
+      # On the density, note what is and is not claimed. The mass-fraction and mole-fraction mixing
+      # rules are algebraically the same, 1/M_mix = sum(w_i/M_i), and with the script's own molar
+      # masses (28.9645 and 18.01528 g/mol) and pyoomph's gas constant that gives
+      # 1.1896284268010473 against the printed 1.1896288300208942 - agreeing to 3.4e-7, which
+      # confirms the physics but is not the exact match the pure-gas case gives. The residue is
+      # three orders inside this check's tolerance, so it is pinned as computed; it is noted because
+      # a reader comparing this entry with the pure-gas one above would otherwise wonder why one is
+      # exact and the other is not.
+      Stdout(r"'massfrac_water': ([-\d.eE+]+), 'massfrac_air': ([-\d.eE+]+)"),
+      # (?m) because the module matches with re.finditer and no MULTILINE flag, so a bare ^ would
+      # anchor to the start of the whole output and quietly match nothing at all.
+      Stdout(r"(?m)^\(([-\d.eE+]+)\)\*meter\*\*\(-3\)\*kilogram"),
+  ],
+  "Multicomponent_Flow/insoluble_surfactant_definition.py": [
+      # Another script with no Problem: it defines a surfactant and prints its equation of state.
+      # Two of the three printed lines are symbolic expressions in temperature and surface
+      # concentration, and those are deliberately NOT matched - GiNaC's printed form (operand order,
+      # "field(temperature,< code=0 , tags=>)", the subexpression() wrapper) is not a contract.
+      # The third line is the state EVALUATED at a condition, 0.06999979028348837657 N/m, which is
+      # a number and is the one thing here worth pinning: it exercises the whole chain from the
+      # registered definition through the unit algebra to a float.
+      Stdout(r"(?m)^\(([-\d.eE+]+)\)\*second\*\*\(-2\)\*kilogram$"),
+  ],
+  "Multicomponent_Flow/soluble_surfactants.py": [
+      # The soluble counterpart, same shape and same reasoning: the evaluated surface tension,
+      # 0.06971774159219308997 N/m. Worth having both, because the pair is the comparison the
+      # tutorial is making - the soluble isotherm gives a slightly lower tension at the same
+      # condition, and a regression that collapsed one onto the other would show up here.
+      Stdout(r"(?m)^\(([-\d.eE+]+)\)\*second\*\*\(-2\)\*kilogram$"),
+  ],
+  "Multicomponent_Flow/marangoni_instability.py": [
+      # Solutal Marangoni instability. The initial perturbation is a DeterministicRandomField with a
+      # seed= passed, which is what makes this script checkable at all: it is the one random initial
+      # condition in the tutorial set that is reproducible, in contrast to
+      # SpatioTemporal_PDEs/kuramoto_sivanshinsky.py and Advanced_Linear_Dynamics/turing_transient.py
+      # (see the README section on unseeded initial conditions). vtu only, so the fingerprint's
+      # per-dof-type extent is the whole check.
+      Fingerprint(),
+  ],
+  "Multicomponent_Flow/rayleigh_taylor_instability.py": [
+      # The multicomponent version of the SpatioTemporal_PDEs script of the same name - a different
+      # script, hence a separate entry; both are in the set.
+      Fingerprint(),
+  ],
+  "Multicomponent_Flow/gcl_glycerol_water_capillary.py": [
+      # Evaporation of a glycerol-water mixture from a capillary, 48 h of it.
+      #
+      # The two observable series are REDUCED rather than matched row by row, and the run() call is
+      # the reason: outstep=True with temporal_error=1 writes a row per adaptive step, so both the
+      # instants and the row count (80 here) belong to the machine. The extremes are the physics -
+      # how much glycerol is left, how far the interface travelled - and they are invariant under
+      # the grid. stats=("min","max") for the usual reason: the mean, the l2 and the count all ride
+      # on the row count.
+      FinalState("mass_evolution.txt", stats=("min", "max"),
+                 reason="outstep=True with temporal_error=1, so the row grid is adaptive"),
+      FinalState("top_interface.txt", stats=("min", "max"),
+                 reason="outstep=True with temporal_error=1, so the row grid is adaptive"),
+      # The final nodal profile, on the other hand, is at a prescribed end time and is compared in
+      # full (reduced per column, as every nodal output is).
+      FinalState("domain_*.txt"),
+      Fingerprint(),
+  ],
+  "Multicomponent_Flow/nacl_capillary_evaporation.py": [
+      # The same capillary with salt, solved twice: once with the full compositional model and once
+      # with the dilute approximation. Comparing the two IS the script, so both are pinned.
+      #
+      # Reduced for the same reason as gcl_glycerol_water_capillary.py above - outstep=True with
+      # temporal_error=1 - and the reduction is where a real physical check appears: N_salt is a
+      # CONSERVED quantity, salt does not evaporate, so min and max of that column have to agree
+      # with each other as well as with the reference. A leak in the compositional transport shows
+      # up as the two drifting apart, which no single stored value would reveal.
+      FinalState("nacl_capillary_component/bulk_evolution.txt", stats=("min", "max"),
+                 reason="an adaptive row grid; and min/max of N_salt must agree, since salt is "
+                        "conserved"),
+      FinalState("nacl_capillary_component/evaporating_end.txt", stats=("min", "max"),
+                 reason="an adaptive row grid"),
+      FinalState("nacl_capillary_component/top_interface.txt", stats=("min", "max"),
+                 reason="an adaptive row grid"),
+      FinalState("nacl_capillary_component/domain/domain_*.txt"),
+      FinalState("nacl_capillary_dilute/bulk_evolution.txt", stats=("min", "max"),
+                 reason="an adaptive row grid; and min/max of N_salt must agree, since salt is "
+                        "conserved"),
+      FinalState("nacl_capillary_dilute/evaporating_end.txt", stats=("min", "max"),
+                 reason="an adaptive row grid"),
+      FinalState("nacl_capillary_dilute/top_interface.txt", stats=("min", "max"),
+                 reason="an adaptive row grid"),
+      FinalState("nacl_capillary_dilute/domain/domain_*.txt"),
+      Fingerprint(),
+      # Problem 1 serially only. Measured, and the cause is the time stepper rather than the
+      # physics: at four ranks this problem ends at t=4.811532879254676 against 4.811532688712693
+      # serially - 4.0e-08 relative - and the evaporative flux at that instant moves by 0.43 %
+      # (4.1490782e-07 to 4.1313897e-07, with the interface velocity following it exactly, as mass
+      # conservation requires). An amplification of about 1e5, because the capillary is drying out
+      # and the rate is changing steeply just where the run stops.
+      #
+      # Problem 0 above ends at a bit-identical instant at four ranks and needs no such excuse, so
+      # this is one stepper decision tipping, not a property of the script. The three reduced series
+      # came through four ranks untouched, N_salt conservation included - which is the argument for
+      # reducing a series rather than pinning the state it ends in, made here for the third time
+      # (see Moving_Mesh/rayleigh_plateau_pinchoff.py and the README).
+      Fingerprint(index=1, skip_under=("mpi",),
+                  reason="the adaptive stepper ends 4.0e-08 later at four ranks and the evaporative "
+                         "flux is changing steeply there, so the final state moves by 0.43 %"),
+  ],
+  "Multicomponent_Flow/double_layer_relaxation.py": [
+      # Eight problems in one script: a polarized double layer, a sweep over bulk concentration
+      # (250, 1000, 4000, 16000 nM) and a sweep over the transfer coefficient (0.1, 0.5, 2). The
+      # sweeps are the script - the point is how zeta and the adsorbed amount change along them - so
+      # every one of the eight is pinned rather than only the last.
+      #
+      # Unlike the two evaporation scripts above, these series ARE matched row by row:
+      # run(12*tD, outstep=0.1*tD) prescribes the instants, so the 121 rows belong to the script and
+      # not to the time stepper, and match="exact" is the strong comparison that deserves.
+      #
+      # Per problem: zeta and the adsorbed amount over time (interface.txt), the surface charge and
+      # the dissolved amount (bulk.txt), and the final profiles on both sides of the interface - the
+      # Debye layer in the liquid (c_anion, c_cation, phi, charge_density, field, ionic strength)
+      # and the field in the gas, which is where the continuity of the electric field across the
+      # interface would break first.
+      #
+      # 40 checks and 108 KB make this the largest entry in the set by a factor of three, so for the
+      # record it is a considered size rather than an oversight: the 16 time series are 70 % of it,
+      # which is 8 studies times 2 observables, and the whole file averages ~1 KB per check, in line
+      # with every other entry. Eight separate scripts would have carried the same data in eight
+      # unremarkable files. If it ever does need trimming, bulk.txt is the one to reduce to its
+      # extremes - zeta on the interface is the headline quantity, the surface charge follows it.
+      Evolution("dl_polarized/interface.txt"),
+      Evolution("dl_polarized/bulk.txt"),
+      FinalState("dl_polarized/liq/liq_*.txt"),
+      FinalState("dl_polarized/gas/gas_*.txt"),
+      Evolution("dl_sweep_250nM/interface.txt"),
+      Evolution("dl_sweep_250nM/bulk.txt"),
+      FinalState("dl_sweep_250nM/liq/liq_*.txt"),
+      FinalState("dl_sweep_250nM/gas/gas_*.txt"),
+      Evolution("dl_sweep_1000nM/interface.txt"),
+      Evolution("dl_sweep_1000nM/bulk.txt"),
+      FinalState("dl_sweep_1000nM/liq/liq_*.txt"),
+      FinalState("dl_sweep_1000nM/gas/gas_*.txt"),
+      Evolution("dl_sweep_4000nM/interface.txt"),
+      Evolution("dl_sweep_4000nM/bulk.txt"),
+      FinalState("dl_sweep_4000nM/liq/liq_*.txt"),
+      FinalState("dl_sweep_4000nM/gas/gas_*.txt"),
+      Evolution("dl_sweep_16000nM/interface.txt"),
+      Evolution("dl_sweep_16000nM/bulk.txt"),
+      FinalState("dl_sweep_16000nM/liq/liq_*.txt"),
+      FinalState("dl_sweep_16000nM/gas/gas_*.txt"),
+      Evolution("dl_transfer_0.1/interface.txt"),
+      Evolution("dl_transfer_0.1/bulk.txt"),
+      FinalState("dl_transfer_0.1/liq/liq_*.txt"),
+      FinalState("dl_transfer_0.1/gas/gas_*.txt"),
+      Evolution("dl_transfer_0.5/interface.txt"),
+      Evolution("dl_transfer_0.5/bulk.txt"),
+      FinalState("dl_transfer_0.5/liq/liq_*.txt"),
+      FinalState("dl_transfer_0.5/gas/gas_*.txt"),
+      Evolution("dl_transfer_2/interface.txt"),
+      Evolution("dl_transfer_2/bulk.txt"),
+      FinalState("dl_transfer_2/liq/liq_*.txt"),
+      FinalState("dl_transfer_2/gas/gas_*.txt"),
+      # One fingerprint per problem. The last three carry one dof type more than the first five
+      # (12 against 11), which is the transfer studies adding the dissolved-species field - so the
+      # count itself distinguishes the two halves of the script.
+      Fingerprint(),
+      Fingerprint(index=1),
+      Fingerprint(index=2),
+      Fingerprint(index=3),
+      Fingerprint(index=4),
+      Fingerprint(index=5),
+      Fingerprint(index=6),
+      Fingerprint(index=7),
+  ],
+  # Multicomponent_Flow/materials_liquids.py has NO entry, and deliberately: it registers liquid
+  # materials and prints nothing, builds no Problem and writes no file, so it exits 0 with no number
+  # anywhere to compare. The harness reports it in the NOT VALIDATED section, which is the honest
+  # outcome - what it tests is that the definitions import and evaluate without raising, and that is
+  # exactly what its exit status already says.
+  # ===============================================================================================
+  # Multiple_Domains: problems split across several meshes that talk to each other across an
+  # interface. What is worth checking here is almost always the COUPLING - a temperature that stays
+  # continuous across a wall, a drag that a surfactant-laden interface changes, a phase boundary
+  # that moves at the rate the latent heat allows - and a broken coupling is exactly the kind of
+  # defect that leaves a script exiting 0.
+  #
+  # Three of the nine are over 40000 dofs (melting_ice_convection 60794,
+  # falling_droplet_with_surfactants 47468, falling_droplet 47339), so the MPI pass over this
+  # chapter is split and those three run on their own.
+  # ===============================================================================================
+
+  "Multiple_Domains/temperature_conduction.py": [
+      # The simplest coupling in the tutorial and the fastest script in the chapter at 0.15 s: heat
+      # conduction through two domains joined at an interface, solved stationary. Both profiles are
+      # pinned, which is what makes the check about the coupling rather than about one side of it -
+      # the temperature has to be continuous there, so a broken interface condition moves one
+      # profile relative to the other and cannot move both consistently.
+      FinalState("domainA_*.txt"),
+      FinalState("domainB_*.txt"),
+      Fingerprint(),
+  ],
+  "Multiple_Domains/temperature_conduction_propagation.py": [
+      # The transient version, with a moving ice/liquid phase boundary, run to 1000 s.
+      #
+      # Both nodal profiles are compared at the prescribed end time. Note the one thing to relax
+      # first if another platform disagrees: this script uses spatial_adapt=1, so the node counts
+      # (83 in the ice, 163 in the liquid here) are the error estimator's choice, and the reduced
+      # n per column carries them. The same caveat as the adaptive scripts in Spatial_PDEs.
+      FinalState("ice_*.txt"),
+      FinalState("liquid_*.txt"),
+      Fingerprint(),
+  ],
+  "Multiple_Domains/falling_droplet.py": [
+      # A droplet falling under gravity, with the terminal velocity written to globals.txt. The
+      # instants are prescribed - run(0.5*second, startstep=0.05*second, outstep=True) with no
+      # temporal_error, so eleven rows at fixed steps - which is why match="exact" holds here while
+      # the evaporation scripts in Multicomponent_Flow have to be reduced.
+      #
+      # UStokes is the quantity the script exists to produce, and it is the one to compare against
+      # falling_droplet_with_surfactants.py below: a clean interface follows Hadamard-Rybczynski,
+      # a surfactant-laden one is retarded towards the rigid-sphere Stokes limit, so the two
+      # references should differ in a direction the physics dictates.
+      Evolution("globals.txt"),
+      # The pressure LEVEL is free here: the droplet and the surrounding fluid are both
+      # incompressible and nothing pins a pressure anywhere, so the solve lands wherever it lands.
+      # Measured between two runs on this machine: every pressure group's min, max and mean moved
+      # by the same -6.3145163, the kinematic boundary condition's Lagrange multiplier (which
+      # carries pressure units, and so rides the same constant) by -6.3145153, and each group's
+      # max - min was preserved exactly - 8.111 before and after.
+      #
+      # gauge_free rather than skip: the level is not a result, but the pressure's SHAPE is, and
+      # that is what a regression in the traction balance would change. Each of these groups is
+      # therefore compared by its spread, which is invariant under the gauge.
+      Fingerprint(gauge_free=["*pressure*", "*_kin_bc*"],
+                  reason="nothing pins the pressure level, so it drifts between runs by a constant "
+                         "(-6.3145163, identical on every pressure group and on the kinematic-BC "
+                         "multiplier); the spread of each group is what carries the physics"),
+  ],
+  "Multiple_Domains/falling_droplet_with_surfactants.py": [
+      # The same droplet with an insoluble surfactant on its interface. One more dof type than the
+      # clean case (29 against 28), which is the surface concentration field, and a terminal
+      # velocity that the Marangoni stresses reduce.
+      Evolution("globals.txt"),
+      # Same free pressure level as the clean case, measured the same way: a common shift of
+      # -0.3538285 across every pressure group and the kinematic-BC multiplier, with each group's
+      # spread unchanged. The constant differs from the clean case because the scales do; the
+      # structure is identical.
+      Fingerprint(gauge_free=["*pressure*", "*_kin_bc*"],
+                  reason="nothing pins the pressure level, so it drifts between runs by a constant "
+                         "(-0.3538285 here); the spread of each group carries the physics"),
+  ],
+  "Multiple_Domains/evaporating_water_droplet.py": [
+      # An evaporating droplet coupled to the vapour in the surrounding gas, 35 dof types - the most
+      # of any script in this chapter.
+      #
+      # EVO_droplet.txt holds the droplet volume against time, and it is REDUCED rather than matched:
+      # run(100*second, startstep=10*second, outstep=True, temporal_error=1) writes a row per
+      # adaptive step, which is why there are four of them rather than a round number. Reducing to
+      # min and max is also the right question to ask of this particular series - the extremes are
+      # the initial and the final volume, i.e. how much evaporated, which is the result. Matching
+      # four adaptive rows would pin the time stepper instead.
+      FinalState("EVO_droplet.txt", stats=("min", "max"),
+                 reason="outstep=True with temporal_error=1, so the four rows are adaptive; min and "
+                        "max are the initial and final volume, which is what the script measures"),
+      Fingerprint(),
+  ],
+  "Multiple_Domains/two_layer_flow.py": [
+      # Two immiscible layers with a free interface between them, as two coupled domains.
+      Fingerprint(),
+  ],
+  "Multiple_Domains/two_layer_flow_single_domain.py": [
+      # The same physics in ONE domain, with the interface captured instead of meshed. Comparing the
+      # two formulations is the point of the pair, and both are pinned - but note that the framework
+      # cannot compare them against each other: the dof types differ (13 here against 34 in the
+      # two-domain version), so each reference pins its own formulation and the agreement between
+      # them stays a matter for a reader, not for the check.
+      Fingerprint(),
+  ],
+  "Multiple_Domains/melting_ice_convection.py": [
+      # Ice melting into convecting water: the largest script in the chapter at 60794 dofs, and the
+      # one whose answer depends on the latent-heat coupling at the moving phase boundary.
+      Fingerprint(),
+  ],
+  "Multiple_Domains/simple_fsi.py": [
+      # Fluid-structure interaction: a solid deforming under the flow it is immersed in, 26 dof
+      # types across the two domains. The script has no "if __name__" guard but does use a
+      # with-block, so Problem.release() is reached and the fingerprint is collected normally -
+      # unlike Advanced_Linear_Dynamics/rivulet.py, which has neither.
       Fingerprint(),
   ],
 }

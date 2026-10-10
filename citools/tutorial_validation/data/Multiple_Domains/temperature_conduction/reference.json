@@ -1,0 +1,107 @@
+{
+ "_about": "Reference numbers for Multiple_Domains/temperature_conduction.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "finalstate:domainA_*.txt": {
+  "columns": [
+   "coordinate_x",
+   "T"
+  ],
+  "file": "temperature_conduction/domainA/domainA_000000.txt",
+  "kind": "finalstate",
+  "nrows": 99,
+  "reduce": true,
+  "stats": {
+   "T": {
+    "l2": 4.607358798928244,
+    "max": 0.8000000000003611,
+    "mean": 0.4000000000001984,
+    "min": 0.0,
+    "n": 99,
+    "n_finite": 99
+   },
+   "coordinate_x": {
+    "l2": 5.759198498657497,
+    "max": 1.0,
+    "mean": 0.49999999999999994,
+    "min": 0.0,
+    "n": 99,
+    "n_finite": 99
+   }
+  }
+ },
+ "finalstate:domainB_*.txt": {
+  "columns": [
+   "coordinate_x",
+   "T"
+  ],
+  "file": "temperature_conduction/domainB/domainB_000000.txt",
+  "kind": "finalstate",
+  "nrows": 99,
+  "reduce": true,
+  "stats": {
+   "T": {
+    "l2": 8.973668965029006,
+    "max": 1.0,
+    "mean": 0.9000000000002709,
+    "min": 0.8000000000003611,
+    "n": 99,
+    "n_finite": 99
+   },
+   "coordinate_x": {
+    "l2": 15.204222023732052,
+    "max": 2.0,
+    "mean": 1.5,
+    "min": 1.0,
+    "n": 99,
+    "n_finite": 99
+   }
+  }
+ },
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "domainA/T": {
+     "l2": 4.537373149969146,
+     "max": 0.7918367346942368,
+     "mean": 0.4000000000001987,
+     "min": 0.008163265306126806,
+     "n": 97
+    },
+    "domainA/interface/T": {
+     "l2": 0.8000000000003611,
+     "max": 0.8000000000003611,
+     "mean": 0.8000000000003611,
+     "min": 0.8000000000003611,
+     "n": 1
+    },
+    "domainA/interface/lambda": {
+     "l2": 0.4000000000000942,
+     "max": -0.4000000000000942,
+     "mean": -0.4000000000000942,
+     "min": -0.4000000000000942,
+     "n": 1
+    },
+    "domainB/T": {
+     "l2": 8.881820460576996,
+     "max": 0.9979591836734796,
+     "mean": 0.9000000000002729,
+     "min": 0.802040816326892,
+     "n": 97
+    },
+    "domainB/interface/T": {
+     "l2": 0.8000000000003611,
+     "max": 0.8000000000003611,
+     "mean": 0.8000000000003611,
+     "min": 0.8000000000003611,
+     "n": 1
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 197,
+   "params": {},
+   "time": 0.0
+  }
+ }
+}

@@ -609,3 +609,66 @@ def test_rows_mode_compares_the_abscissa_too(validation):
     result = validation.check(moved)
     assert result.status == "mismatch", "a shifted parameter column must be caught"
     assert any("r" in p for p in result.problems), result.problems
+
+
+def _write_pressure_fingerprint(rundir, level, spread, vmax=1.0):
+    """A fingerprint with a pressure group at a given LEVEL and spread, plus a velocity group."""
+    rec = {"ndof": 10, "time": 1.0, "params": {}, "eigenvalues": [],
+           "dofs": {"flow/pressure": {"n": 5, "min": level, "max": level + spread,
+                                      "mean": level + spread / 2.0, "l2": abs(level) * 5},
+                    "flow/velocity_x": {"n": 5, "min": -vmax, "max": vmax,
+                                        "mean": 0.0, "l2": 1.4142}},
+           "mpi_size": 1, "distributed": False}
+    path = Path(rundir) / "synthetic" / "_pyoomph_validation.jsonl"
+    path.write_text(json.dumps(rec) + "\n")
+
+
+def test_gauge_free_ignores_a_shifted_level_but_keeps_the_spread(validation):
+    """A pressure with no Dirichlet condition anywhere has a free level.
+
+    Measured on Multiple_Domains/falling_droplet.py: between two runs on one machine every pressure
+    group's min, max AND mean shifted by the same -6.3145163, while each group's max - min was
+    preserved exactly. gauge_free has to pass that and still catch a pressure that changed SHAPE,
+    which is the regression worth catching and which skipping the group outright would miss.
+    """
+    LEVEL, SPREAD, SHIFT = -111.354100688, 8.111, -6.3145163
+
+    ref_run = validation.run("ref")
+    _write_pressure_fingerprint(ref_run, LEVEL, SPREAD)
+    validation.set_checks([Fingerprint()])
+    validation.record(ref_run)
+
+    shifted = validation.run("shifted")
+    _write_pressure_fingerprint(shifted, LEVEL + SHIFT, SPREAD)
+    assert validation.check(shifted).status == "mismatch", \
+        "without gauge_free, a shifted level is a mismatch"
+
+    validation.set_checks([Fingerprint(gauge_free=["*pressure*"])])
+    result = validation.check(shifted)
+    assert (result.status, result.problems) == ("ok", []), result.problems
+
+
+def test_gauge_free_still_catches_a_changed_spread(validation):
+    """Marking a group gauge-free narrows the question; it must not switch the check off."""
+    LEVEL, SPREAD = -111.354100688, 8.111
+    ref_run = validation.run("ref")
+    _write_pressure_fingerprint(ref_run, LEVEL, SPREAD)
+    validation.set_checks([Fingerprint(gauge_free=["*pressure*"])])
+    validation.record(ref_run)
+
+    reshaped = validation.run("reshaped")
+    _write_pressure_fingerprint(reshaped, LEVEL, SPREAD * 1.01)   # same level, 1 % wider
+    assert validation.check(reshaped).status == "mismatch"
+
+
+def test_gauge_free_leaves_other_groups_alone(validation):
+    """Only the named groups lose their level; everything else is compared in full."""
+    LEVEL, SPREAD = -111.354100688, 8.111
+    ref_run = validation.run("ref")
+    _write_pressure_fingerprint(ref_run, LEVEL, SPREAD, vmax=1.0)
+    validation.set_checks([Fingerprint(gauge_free=["*pressure*"])])
+    validation.record(ref_run)
+
+    moved = validation.run("moved")
+    _write_pressure_fingerprint(moved, LEVEL, SPREAD, vmax=1.1)   # the velocity changed
+    assert validation.check(moved).status == "mismatch"

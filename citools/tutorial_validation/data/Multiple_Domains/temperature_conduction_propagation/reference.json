@@ -1,0 +1,128 @@
+{
+ "_about": "Reference numbers for Multiple_Domains/temperature_conduction_propagation.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "finalstate:ice_*.txt": {
+  "columns": [
+   "coordinate_x[m]",
+   "T[K]"
+  ],
+  "file": "temperature_conduction_propagation/ice/ice_000509.txt",
+  "kind": "finalstate",
+  "nrows": 59,
+  "reduce": true,
+  "stats": {
+   "T[K]": {
+    "l2": 2094.2656024742646,
+    "max": 273.15,
+    "mean": 272.65,
+    "min": 272.15,
+    "n": 59,
+    "n_finite": 59
+   },
+   "coordinate_x[m]": {
+    "l2": 0.003555341320705137,
+    "max": 0.0007982740021572163,
+    "mean": 0.00039913700107860816,
+    "min": 0.0,
+    "n": 59,
+    "n_finite": 59
+   }
+  }
+ },
+ "finalstate:liquid_*.txt": {
+  "columns": [
+   "coordinate_x[m]",
+   "T[K]"
+  ],
+  "file": "temperature_conduction_propagation/liquid/liquid_000509.txt",
+  "kind": "finalstate",
+  "nrows": 139,
+  "reduce": true,
+  "stats": {
+   "T[K]": {
+    "l2": 3226.2877396022386,
+    "max": 274.15,
+    "mean": 273.64999999999986,
+    "min": 273.15,
+    "n": 139,
+    "n_finite": 139
+   },
+   "coordinate_x[m]": {
+    "l2": 0.010623199966724183,
+    "max": 0.001,
+    "mean": 0.0008991370010786085,
+    "min": 0.0007982740021572163,
+    "n": 139,
+    "n_finite": 139
+   }
+  }
+ },
+ "fingerprint::0": {
+  "kind": "fingerprint",
+  "record": {
+   "distributed": false,
+   "dofs": {
+    "ice/T": {
+     "l2": 2058.4634727647936,
+     "max": 273.13275862068963,
+     "mean": 272.6499999999999,
+     "min": 272.16724137931027,
+     "n": 57
+    },
+    "ice/interface/_lagr_conn_mesh_x": {
+     "l2": 0.7118200030817383,
+     "max": 0.7118200030817383,
+     "mean": 0.7118200030817383,
+     "min": 0.7118200030817383,
+     "n": 1
+    },
+    "ice/interface/_lagr_interf_speed": {
+     "l2": 2.3727333436057925,
+     "max": -2.3727333436057925,
+     "mean": -2.3727333436057925,
+     "min": -2.3727333436057925,
+     "n": 1
+    },
+    "ice/interface/mesh_x": {
+     "l2": 0.7982740021572163,
+     "max": 0.7982740021572163,
+     "mean": 0.7982740021572163,
+     "min": 0.7982740021572163,
+     "n": 1
+    },
+    "ice/mesh_x": {
+     "l2": 3.4645649833988172,
+     "max": 0.7845106572924367,
+     "mean": 0.39913700107860806,
+     "min": 0.013763344864779595,
+     "n": 57
+    },
+    "liquid/T": {
+     "l2": 3202.9928869274313,
+     "max": 274.1427536231884,
+     "mean": 273.64999999999986,
+     "min": 273.1572463768116,
+     "n": 137
+    },
+    "liquid/interface/mesh_x": {
+     "l2": 0.7982740021572163,
+     "max": 0.7982740021572163,
+     "mean": 0.7982740021572163,
+     "min": 0.7982740021572163,
+     "n": 1
+    },
+    "liquid/mesh_x": {
+     "l2": 10.545858720392978,
+     "max": 0.9985382174069364,
+     "mean": 0.8991370010786084,
+     "min": 0.79973578475028,
+     "n": 137
+    }
+   },
+   "eigenvalues": [],
+   "mpi_size": 1,
+   "ndof": 392,
+   "params": {},
+   "time": 10.000000112619
+  }
+ }
+}

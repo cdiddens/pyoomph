@@ -1,0 +1,17 @@
+{
+ "_about": "Reference numbers for Multicomponent_Flow/materials_gas_mixture.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "stdout:'massfrac_water': ([-\\d.eE+]+), 'massfrac_air': ([-\\d.eE+]+)": {
+  "kind": "stdout",
+  "matches": [
+   [0.02, 0.98]
+  ],
+  "pattern": "'massfrac_water': ([-\\d.eE+]+), 'massfrac_air': ([-\\d.eE+]+)"
+ },
+ "stdout:(?m)^\\(([-\\d.eE+]+)\\)\\*meter\\*\\*\\(-3\\)\\*kilogram": {
+  "kind": "stdout",
+  "matches": [
+   [1.1896288300208944]
+  ],
+  "pattern": "(?m)^\\(([-\\d.eE+]+)\\)\\*meter\\*\\*\\(-3\\)\\*kilogram"
+ }
+}

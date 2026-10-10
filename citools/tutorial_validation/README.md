@@ -187,6 +187,21 @@ Two causes of rank-dependence showed up, and they want different entries:
   `match="interp"`: that would weaken the serial comparison, which is the strong one, to buy a
   weaker MPI one.
 
+  The mechanism, measured on `Multicomponent_Flow/nacl_capillary_evaporation.py`: **adaptive time
+  stepping is not rank-invariant, because the temporal error norm is a parallel reduction.** Its
+  summation order differs with the rank count, so the estimate differs in its last bits, and that
+  can tip a step-size decision. There it ends the run 4.0e-08 (relative) later at four ranks, which
+  is enough to move the evaporative flux at that instant by 0.43 % - an amplification of about 1e5,
+  because the capillary is drying out and the rate is changing steeply exactly where the run stops.
+  Its other problem, in the same script and the same pass, ends at a bit-identical instant; this is
+  one decision tipping, not a systematic offset, which is why it cannot be predicted from the
+  script and has to be measured.
+
+  Two consequences for writing an entry. A quantity sampled at the END of an adaptive run is worth
+  less than it looks, and the steeper the quantity is there, the less it is worth. And a reduced
+  series survives where that final state does not - the same script's three reduced series,
+  `N_salt` conservation included, came through the same pass untouched.
+
 A reduced series often survives where a final state does not, and that is the argument for
 preferring one. `rayleigh_plateau_pinchoff.py` is the clean demonstration: 76 fingerprint entries
 move over four ranks (up to 0.44 % on `mesh_x`'s l2, because the state follows a topological

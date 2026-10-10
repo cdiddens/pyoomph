@@ -1,0 +1,10 @@
+{
+ "_about": "Reference numbers for Multicomponent_Flow/soluble_surfactants.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "stdout:(?m)^\\(([-\\d.eE+]+)\\)\\*second\\*\\*\\(-2\\)\\*kilogram$": {
+  "kind": "stdout",
+  "matches": [
+   [0.06971774159219309]
+  ],
+  "pattern": "(?m)^\\(([-\\d.eE+]+)\\)\\*second\\*\\*\\(-2\\)\\*kilogram$"
+ }
+}

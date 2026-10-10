@@ -1,0 +1,28 @@
+{
+ "_about": "Reference numbers for Multicomponent_Flow/temperature_and_pressure_dependency.py, regenerated with citools/test_all_tutorial_scripts.py --update-validation. What is checked, and why each tolerance is what it is, lives in citools/tutorial_validation/specs.py.",
+ "stdout:DENSITY AT T\\[C\\]= (\\d+) is ([-\\d.eE+]+) kg/m\\^3": {
+  "kind": "stdout",
+  "matches": [
+   [10.0, 1.2466137054392383],
+   [15.0, 1.224982372705606],
+   [20.0, 1.204088932952824],
+   [25.0, 1.1838962626031204],
+   [30.0, 1.1643696872674265]
+  ],
+  "pattern": "DENSITY AT T\\[C\\]= (\\d+) is ([-\\d.eE+]+) kg/m\\^3"
+ },
+ "stdout:EVALUATED DENSITY in \\(kg/m\\*\\*3\\) ([-\\d.eE+]+)": {
+  "kind": "stdout",
+  "matches": [
+   [1.2123601947282168]
+  ],
+  "pattern": "EVALUATED DENSITY in \\(kg/m\\*\\*3\\) ([-\\d.eE+]+)"
+ },
+ "stdout:VARIABLE DENSITY \\(([-\\d.eE+]+)\\)": {
+  "kind": "stdout",
+  "matches": [
+   [0.003483628627635039]
+  ],
+  "pattern": "VARIABLE DENSITY \\(([-\\d.eE+]+)\\)"
+ }
+}
