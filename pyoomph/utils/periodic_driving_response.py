@@ -174,22 +174,18 @@ class PeriodicDrivingResponse():
         """
         drivedofind,dtdrivedofind=self._find_driving_dofs()
         eigensolver=self.problem.get_eigen_solver()
-        ntstep=self.problem.ntime_stepper()
-        was_steady=[False]*ntstep
-        self.hopf_param.value=0.0
+        # Both parameters are restored, not just omega: hopf_param was set here and left at 0, which
+        # clobbers it for a caller that is Hopf-tracking on it (see activate_bifurcation_tracking below).
+        oldhopf=self.hopf_param.value
         oldomega=self.omega_param.value
+        self.hopf_param.value=0.0
         self.omega_param.value=1.0
-        for i in range(ntstep):
-            ts=self.problem.time_stepper_pt(i)
-            was_steady[i]=ts.is_steady()
-            ts.make_steady()
         try:
-            n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = self.problem.assemble_eigenproblem_matrices(0) #type:ignore
+            with self.problem.steady_time_steppers():
+                n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = self.problem.assemble_eigenproblem_matrices(0) #type:ignore
         finally:
-            for i in range(ntstep):
-                if not was_steady[i]:
-                    self.problem.time_stepper_pt(i).undo_make_steady()
             self.omega_param.value=oldomega
+            self.hopf_param.value=oldhopf
         # shape=(M_nr, n), not (n, n): M_nr is the LOCAL row count, and under --distribute it is smaller
         # than n. Passing (n,n) with a short indptr is what used to make this die inside scipy with
         # "index pointer size (3) should be (5)", three frames from the feature the user asked for.

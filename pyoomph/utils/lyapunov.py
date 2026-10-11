@@ -152,19 +152,14 @@ class LyapunovExponentCalculator(GenericProblemHooks):
                 
 
         # --- Matrices ---
-        was_steady=[problem.time_stepper_pt(i).is_steady() for i in range(problem.ntime_stepper())]
-        for i in range(problem.ntime_stepper()):
-            problem.time_stepper_pt(i).make_steady()
-        n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = problem.assemble_eigenproblem_matrices(0.0) #type:ignore # Mass and zero Jacobian
-        # shape=(M_nr, n), not (n, n): M_nr is this rank's LOCAL row count and the column indices are
-        # global, so under --distribute the block is rectangular. Passing (n,n) with a short indptr is
-        # the same mistake as B2 in dev_docs/mpi_augmented_systems.md and dies inside scipy with an
-        # "index pointer size" complaint several frames from anything the user wrote.
-        matJ=csr_matrix((J_val, J_ci, J_rs), shape=(J_nr, n)).copy()	#type:ignore        
-        matM=csr_matrix((M_val, M_ci, M_rs), shape=(M_nr, n)).copy()	#type:ignore        
-        for i,ws in enumerate(was_steady):
-            if not ws:
-                problem.time_stepper_pt(i).undo_make_steady()
+        with problem.steady_time_steppers():
+            n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = problem.assemble_eigenproblem_matrices(0.0) #type:ignore # Mass and zero Jacobian
+            # shape=(M_nr, n), not (n, n): M_nr is this rank's LOCAL row count and the column indices are
+            # global, so under --distribute the block is rectangular. Passing (n,n) with a short indptr is
+            # the same mistake as B2 in dev_docs/mpi_augmented_systems.md and dies inside scipy with an
+            # "index pointer size" complaint several frames from anything the user wrote.
+            matJ=csr_matrix((J_val, J_ci, J_rs), shape=(J_nr, n)).copy()	#type:ignore        
+            matM=csr_matrix((M_val, M_ci, M_rs), shape=(M_nr, n)).copy()	#type:ignore        
         matM.eliminate_zeros() #type:ignore
 
         layout=self._row_layout(problem,int(M_nr),int(n))

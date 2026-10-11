@@ -195,16 +195,8 @@ def _converged_max_residual(p):
     Making the timesteppers steady for the measurement is what makes this number mean what the
     caller's comment says it means.
     """
-    n = p.ntime_stepper()
-    was_steady = [p.time_stepper_pt(i).is_steady() for i in range(n)]
-    for i in range(n):
-        p.time_stepper_pt(i).make_steady()
-    try:
+    with p.steady_time_steppers():
         return float(numpy.amax(numpy.absolute(p.get_residuals())))
-    finally:
-        for i in range(n):
-            if not was_steady[i]:
-                p.time_stepper_pt(i).undo_make_steady()
 
 
 def _sorted_spectrum(evals):

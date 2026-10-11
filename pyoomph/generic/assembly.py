@@ -199,79 +199,71 @@ class FixedMeshMaxQuadraticNonlinearAssembly(CustomAssemblyBase):
         dofs=self.problem.get_history_dofs(0) #store the dofs
         self.problem.set_current_dofs([0.0]*len(dofs)) # zero dofs
 
-        ntstep=self.problem.ntime_stepper()
-        was_steady=[False]*ntstep
-        for i in range(ntstep):
-            ts=self.problem.time_stepper_pt(i)
-            was_steady[i]=ts.is_steady()
-            ts.make_steady()
+        with self.problem.steady_time_steppers():
 
-        pnames=self.problem.get_global_parameter_names()
-        paramvals:dict[str,float]={}
-        self._param_values={}
-        self._param_contribs={}
-        needs_contrib:list[str]=[]
-        for pname in pnames:
-            paramvals[pname]=self.problem.get_global_parameter(pname).value
+            pnames=self.problem.get_global_parameter_names()
+            paramvals:dict[str,float]={}
+            self._param_values={}
+            self._param_contribs={}
+            needs_contrib:list[str]=[]
+            for pname in pnames:
+                paramvals[pname]=self.problem.get_global_parameter(pname).value
         
-        for pname in pnames:
-            param=self.problem.get_global_parameter(pname)
-            if isinstance(self._cache_at_fixed_parameters,set):
-                if pname in self._cache_at_fixed_parameters:
+            for pname in pnames:
+                param=self.problem.get_global_parameter(pname)
+                if isinstance(self._cache_at_fixed_parameters,set):
+                    if pname in self._cache_at_fixed_parameters:
+                        self._param_values[pname]=param.value
+                        continue
+                elif self._cache_at_fixed_parameters:
                     self._param_values[pname]=param.value
                     continue
-            elif self._cache_at_fixed_parameters:
-                self._param_values[pname]=param.value
-                continue
-            param.value=0.0
-            needs_contrib.append(pname)
+                param.value=0.0
+                needs_contrib.append(pname)
             
 
-        t1=time.time()
-        print("UPDATING TENSOR CACHE")
-        self.problem._require_non_distributed("The multi-assembly tensor cache")
-        self._R0=numpy.array(self.problem.get_residuals()) #type:ignore # Initial residual
-        n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = self.problem.assemble_eigenproblem_matrices(0.0) #type:ignore # Mass and zero Jacobian
-        self._M0=csr_matrix((M_val, M_ci, M_rs), shape=(n, n)).copy()	#type:ignore
-        self._J0=csr_matrix((J_val, J_ci, J_rs), shape=(n, n)).copy() #type:ignore                
-        self._J0.eliminate_zeros() #type:ignore
-        self._M0.eliminate_zeros() #type:ignore
-        self._J0.sort_indices() #type:ignore
-        self._M0.sort_indices() #type:ignore
-        self._M0._has_canonical_format=True
-        self._J0._has_canonical_format=True        
-        t2=time.time()
-        print("JACOBIAN AND MASS MATRIX DONE IN "+str(t2-t1)+" s")
-        print("ASSEMBLING HESSIAN TENSOR")
-        self._HTens=self.problem._assemble_hessian_tensor(False)        
-        print("PREPARE FOR HESSIAN VECTOR PRODUCT")
-        colinds,rowstart=self._HTens.finalize_for_vector_product()
-        tempvals=numpy.zeros((rowstart[-1],),dtype=numpy.float64) #type:ignore
-        self._HMat=csr_matrix((tempvals,colinds,rowstart),shape=self._J0.shape) #type:ignore
-        self._HMat._has_canonical_format=True #type:ignore
-        t3=time.time()
-        print("HESSIAN TENSOR DONE in "+str(t3-t2)+" s")
-        for pname in needs_contrib:
-            print("CALCULATING CONTRIBUTION OF PARAMTER "+pname)
-            self.problem._replace_RJM_by_param_deriv(pname,True)
-            dRdp:NPFloatArray=numpy.array(self.problem.get_residuals()) #type:ignore # Initial residual
+            t1=time.time()
+            print("UPDATING TENSOR CACHE")
+            self.problem._require_non_distributed("The multi-assembly tensor cache")
+            self._R0=numpy.array(self.problem.get_residuals()) #type:ignore # Initial residual
             n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = self.problem.assemble_eigenproblem_matrices(0.0) #type:ignore # Mass and zero Jacobian
-            dMdp:csr_matrix=csr_matrix((M_val, M_ci, M_rs), shape=(n, n)).copy()	#type:ignore
-            dJdp:csr_matrix=csr_matrix((J_val, J_ci, J_rs), shape=(n, n)).copy() #type:ignore
-            dMdp.eliminate_zeros()
-            dJdp.eliminate_zeros()
-            dMdp.sort_indices()
-            dJdp.sort_indices()
-            dMdp._has_canonical_format=True
-            dJdp._has_canonical_format=True
-            self._param_contribs[pname]=(dRdp,dJdp,dMdp) #type:ignore
-            self.problem._replace_RJM_by_param_deriv(pname,False)
+            self._M0=csr_matrix((M_val, M_ci, M_rs), shape=(n, n)).copy()	#type:ignore
+            self._J0=csr_matrix((J_val, J_ci, J_rs), shape=(n, n)).copy() #type:ignore                
+            self._J0.eliminate_zeros() #type:ignore
+            self._M0.eliminate_zeros() #type:ignore
+            self._J0.sort_indices() #type:ignore
+            self._M0.sort_indices() #type:ignore
+            self._M0._has_canonical_format=True
+            self._J0._has_canonical_format=True        
+            t2=time.time()
+            print("JACOBIAN AND MASS MATRIX DONE IN "+str(t2-t1)+" s")
+            print("ASSEMBLING HESSIAN TENSOR")
+            self._HTens=self.problem._assemble_hessian_tensor(False)        
+            print("PREPARE FOR HESSIAN VECTOR PRODUCT")
+            colinds,rowstart=self._HTens.finalize_for_vector_product()
+            tempvals=numpy.zeros((rowstart[-1],),dtype=numpy.float64) #type:ignore
+            self._HMat=csr_matrix((tempvals,colinds,rowstart),shape=self._J0.shape) #type:ignore
+            self._HMat._has_canonical_format=True #type:ignore
+            t3=time.time()
+            print("HESSIAN TENSOR DONE in "+str(t3-t2)+" s")
+            for pname in needs_contrib:
+                print("CALCULATING CONTRIBUTION OF PARAMTER "+pname)
+                self.problem._replace_RJM_by_param_deriv(pname,True)
+                dRdp:NPFloatArray=numpy.array(self.problem.get_residuals()) #type:ignore # Initial residual
+                n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = self.problem.assemble_eigenproblem_matrices(0.0) #type:ignore # Mass and zero Jacobian
+                dMdp:csr_matrix=csr_matrix((M_val, M_ci, M_rs), shape=(n, n)).copy()	#type:ignore
+                dJdp:csr_matrix=csr_matrix((J_val, J_ci, J_rs), shape=(n, n)).copy() #type:ignore
+                dMdp.eliminate_zeros()
+                dJdp.eliminate_zeros()
+                dMdp.sort_indices()
+                dJdp.sort_indices()
+                dMdp._has_canonical_format=True
+                dJdp._has_canonical_format=True
+                self._param_contribs[pname]=(dRdp,dJdp,dMdp) #type:ignore
+                self.problem._replace_RJM_by_param_deriv(pname,False)
 
-        self.problem.set_current_dofs(dofs) #type:ignore # restore dofs
+            self.problem.set_current_dofs(dofs) #type:ignore # restore dofs
 
-        for i in range(ntstep):
-            if not was_steady[i]:
-                self.problem.time_stepper_pt(i).undo_make_steady()
         
         for pname in pnames:
             self.problem.get_global_parameter(pname).value=paramvals[pname]

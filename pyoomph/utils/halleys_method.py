@@ -66,69 +66,60 @@ class HalleySolver:
         if accuracy is None:
             accuracy=self.problem.newton_solver_tolerance
                     
-        ntstep=self.problem.ntime_stepper()
-        was_steady=[False]*ntstep
-        for i in range(ntstep):
-            ts=self.problem.time_stepper_pt(i)
-            was_steady[i]=ts.is_steady()
-            ts.make_steady()
-        
-        self.problem.actions_before_stationary_solve()
-        self.problem.actions_before_newton_solve()
-        step=1
-        R=numpy.array(self.problem.get_residuals())        
-        dofs,_=self.problem.get_current_dofs()
-        while True:
-            Rorig=R.copy()
-            J=self.problem.assemble_jacobian(with_residual=False,which_one="")
-            # Tell the solver its factorisation slot is being reused for a system pyoomph built here, not
-            # for the one solve_distributed() gathered. Under mpirun the gathered Newton solve keeps
-            # rank 0's factors in that same slot, and a back-substitution landing on these ones instead
-            # would be silently wrong on every rank at once.
-            self.problem.get_la_solver()._note_external_serial_solve()
-            self.problem.get_la_solver().solve_serial(1,J.shape[0],J.nnz,1,J.data,J.indices,J.indptr,R,0,0) #type:ignore[attr-defined] # scipy.sparse.csr_matrix attrs unresolved without scipy-stubs (blocked on numpy<2 pin)
-            self.problem.get_la_solver().solve_serial(2,J.shape[0],J.nnz,1,J.data,J.indices,J.indptr,R,0,0) #type:ignore[attr-defined]
+        with self.problem.steady_time_steppers():
+            self.problem.actions_before_stationary_solve()
+            self.problem.actions_before_newton_solve()
+            step=1
+            R=numpy.array(self.problem.get_residuals())        
+            dofs,_=self.problem.get_current_dofs()
+            while True:
+                Rorig=R.copy()
+                J=self.problem.assemble_jacobian(with_residual=False,which_one="")
+                # Tell the solver its factorisation slot is being reused for a system pyoomph built here, not
+                # for the one solve_distributed() gathered. Under mpirun the gathered Newton solve keeps
+                # rank 0's factors in that same slot, and a back-substitution landing on these ones instead
+                # would be silently wrong on every rank at once.
+                self.problem.get_la_solver()._note_external_serial_solve()
+                self.problem.get_la_solver().solve_serial(1,J.shape[0],J.nnz,1,J.data,J.indices,J.indptr,R,0,0) #type:ignore[attr-defined] # scipy.sparse.csr_matrix attrs unresolved without scipy-stubs (blocked on numpy<2 pin)
+                self.problem.get_la_solver().solve_serial(2,J.shape[0],J.nnz,1,J.data,J.indices,J.indptr,R,0,0) #type:ignore[attr-defined]
             
-            _augdof_spec=self.problem._create_dof_augmentation()            
-            self.problem._add_augmented_dofs(_augdof_spec)
-            request=MultiAssembleRequest(self.problem)
-            request.dJdU(R)
-            dJdU,=request.assemble()
-            self.problem._reset_augmented_dof_vector_to_nonaugmented()
-            J=J-dJdU/2
-            # J-dJdU/2 is no longer the Jacobian, so the symmetry proof does not cover it: dJdU is the
-            # second derivative contracted with the Newton step, and nothing in the proof says that is
-            # symmetric when J is. The solve above, which does use the plain Jacobian, deliberately
-            # keeps the symmetric factorisation it has earned. See _solving_foreign_matrix() - a
-            # symmetric factorisation of an unsymmetric matrix is a silently wrong answer, while the
-            # general one here only costs pivoting. No case is known in which it currently changes an
-            # answer: a Jacobian that the proof accepts has in practice come from a potential, whose
-            # third derivative is fully symmetric, and the only problem Halley is tested on
-            # (tests/test_halleys_method.py) has one degree of freedom.
-            with self.problem.get_la_solver()._solving_foreign_matrix(): #type:ignore[attr-defined]
-                self.problem.get_la_solver().solve_serial(1,J.shape[0],J.nnz,1,J.data,J.indices,J.indptr,Rorig,0,0) #type:ignore[attr-defined]
-                self.problem.get_la_solver().solve_serial(2,J.shape[0],J.nnz,1,J.data,J.indices,J.indptr,Rorig,0,0) #type:ignore[attr-defined]
+                _augdof_spec=self.problem._create_dof_augmentation()            
+                self.problem._add_augmented_dofs(_augdof_spec)
+                request=MultiAssembleRequest(self.problem)
+                request.dJdU(R)
+                dJdU,=request.assemble()
+                self.problem._reset_augmented_dof_vector_to_nonaugmented()
+                J=J-dJdU/2
+                # J-dJdU/2 is no longer the Jacobian, so the symmetry proof does not cover it: dJdU is the
+                # second derivative contracted with the Newton step, and nothing in the proof says that is
+                # symmetric when J is. The solve above, which does use the plain Jacobian, deliberately
+                # keeps the symmetric factorisation it has earned. See _solving_foreign_matrix() - a
+                # symmetric factorisation of an unsymmetric matrix is a silently wrong answer, while the
+                # general one here only costs pivoting. No case is known in which it currently changes an
+                # answer: a Jacobian that the proof accepts has in practice come from a potential, whose
+                # third derivative is fully symmetric, and the only problem Halley is tested on
+                # (tests/test_halleys_method.py) has one degree of freedom.
+                with self.problem.get_la_solver()._solving_foreign_matrix(): #type:ignore[attr-defined]
+                    self.problem.get_la_solver().solve_serial(1,J.shape[0],J.nnz,1,J.data,J.indices,J.indptr,Rorig,0,0) #type:ignore[attr-defined]
+                    self.problem.get_la_solver().solve_serial(2,J.shape[0],J.nnz,1,J.data,J.indices,J.indptr,Rorig,0,0) #type:ignore[attr-defined]
                         
-            dofs=dofs-Rorig
-            self.problem.set_current_dofs(dofs.tolist())
-            self.problem.invalidate_cached_mesh_data()
-            self.problem.actions_before_newton_convergence_check()
-            R=numpy.array(self.problem.get_residuals())
-            err=numpy.linalg.norm(R, ord=numpy.inf)
-            print("Halley step ",str(step)+":","Residual norm:",err)            
-            if err<accuracy:
-                print("Converged!")
-                break            
-            if step>=max_iterations:
-                raise RuntimeError("Halley solver did not converge within the maximum number of iterations")
-            step+=1
-            self.problem.actions_after_newton_step()
+                dofs=dofs-Rorig
+                self.problem.set_current_dofs(dofs.tolist())
+                self.problem.invalidate_cached_mesh_data()
+                self.problem.actions_before_newton_convergence_check()
+                R=numpy.array(self.problem.get_residuals())
+                err=numpy.linalg.norm(R, ord=numpy.inf)
+                print("Halley step ",str(step)+":","Residual norm:",err)            
+                if err<accuracy:
+                    print("Converged!")
+                    break            
+                if step>=max_iterations:
+                    raise RuntimeError("Halley solver did not converge within the maximum number of iterations")
+                step+=1
+                self.problem.actions_after_newton_step()
             
                                                     
-        self.problem.actions_after_newton_solve()                                                            
-        for i in range(ntstep):
-            if not was_steady[i]:
-                self.problem.time_stepper_pt(i).undo_make_steady()     
+            self.problem.actions_after_newton_solve()                                                            
 
 
 from ..typings import _set_public_api

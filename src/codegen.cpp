@@ -7100,8 +7100,9 @@ namespace pyoomph
 			// separate steady routine, i.e. MPT/TPZ time integration. A mass matrix is requested through
 			// whichever routine tstepper->is_steady() picks (src/elements_assembly.cpp:157,378), and
 			// every consumer that asks for one either makes the timesteppers steady first
-			// (pyoomph/generic/problem.py:5374 and the make_steady/undo pairs in bifurcation_tools,
-			// assembly, periodic_driving_response, lyapunov:109) or is BDF2-only and therefore never
+			// (they all go through Problem.steady_time_steppers(), the context manager in
+			// pyoomph/generic/problem.py that replaced the hand-rolled make_steady/undo pairs in
+			// bifurcation_tools, assembly, periodic_driving_response and lyapunov) or is BDF2-only and therefore never
 			// reaches this branch at all - LyapunovExponentCalculatorBDF2, the one caller that assembles
 			// a mass matrix mid-transient, is BDF2 by construction and BDF2 needs no steady routine.
 			//

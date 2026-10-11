@@ -7035,71 +7035,63 @@ class Problem(_pyoomph.Problem):
             # has already refused anything that would need a renumbering.
             self.reapply_boundary_conditions()
             self.reapply_boundary_conditions() # Must be done twice to correctly setup the equation remapping
-        ntstep=self.ntime_stepper()
-        was_steady=[False]*ntstep
-        for i in range(ntstep):
-            ts=self.time_stepper_pt(i)
-            was_steady[i]=ts.is_steady()
-            ts.make_steady()
-        self.actions_before_eigen_solve(must_not_renumber=tracking)
-        self.invalidate_cached_mesh_data(only_eigens=True)
-        self.setup_forced_zero_dof_list_for_eigenproblems()
-        eigen_solver=self.get_eigen_solver()
-        # On a distributed problem each rank assembles only its own row block, and a backend that
-        # cannot see that would quietly solve the block as if it were the whole eigenproblem and
-        # return plausible, wrong eigenvalues.
-        #
-        # No eigensolver pyoomph ships answers no any more: SLEPc is genuinely distributed, and the
-        # scipy/ARPACK family (including the Pardiso and Accelerate shift-invert variants derived from
-        # it) gathers onto rank 0 instead of refusing. The check stays for a backend defined outside
-        # pyoomph, which is the only thing that can still trip it.
-        if self.is_distributed() and not eigen_solver.distributed_possible():
-            raise RuntimeError("The eigensolver '"+str(getattr(eigen_solver,"idname",type(eigen_solver).__name__))+"' cannot solve an eigenproblem on a distributed (--distribute) problem. Use SLEPc instead, e.g. problem.set_eigensolver('slepc_mumps'), or run without --distribute.")
-        if ncv is not None:
-            eigen_solver.ncv=ncv
-        self._last_eigenvalues,self._last_eigenvectors,J,M=eigen_solver.solve(n,shift=shift,sort=sort,which=which,OPpart=OPpart,v0=v0,target=target)
-        self._last_eigenvalues, self._last_eigenvectors=self._last_eigenvalues.copy(),self._last_eigenvectors.copy()
-        if filter is not None:
-            filtered_indices=numpy.array([filter(ev) for ev in self._last_eigenvalues]).nonzero()
-            self._last_eigenvalues=self._last_eigenvalues[filtered_indices]
-            self._last_eigenvectors=self._last_eigenvectors[filtered_indices]        
+        with self.steady_time_steppers():
+            self.actions_before_eigen_solve(must_not_renumber=tracking)
+            self.invalidate_cached_mesh_data(only_eigens=True)
+            self.setup_forced_zero_dof_list_for_eigenproblems()
+            eigen_solver=self.get_eigen_solver()
+            # On a distributed problem each rank assembles only its own row block, and a backend that
+            # cannot see that would quietly solve the block as if it were the whole eigenproblem and
+            # return plausible, wrong eigenvalues.
+            #
+            # No eigensolver pyoomph ships answers no any more: SLEPc is genuinely distributed, and the
+            # scipy/ARPACK family (including the Pardiso and Accelerate shift-invert variants derived from
+            # it) gathers onto rank 0 instead of refusing. The check stays for a backend defined outside
+            # pyoomph, which is the only thing that can still trip it.
+            if self.is_distributed() and not eigen_solver.distributed_possible():
+                raise RuntimeError("The eigensolver '"+str(getattr(eigen_solver,"idname",type(eigen_solver).__name__))+"' cannot solve an eigenproblem on a distributed (--distribute) problem. Use SLEPc instead, e.g. problem.set_eigensolver('slepc_mumps'), or run without --distribute.")
+            if ncv is not None:
+                eigen_solver.ncv=ncv
+            self._last_eigenvalues,self._last_eigenvectors,J,M=eigen_solver.solve(n,shift=shift,sort=sort,which=which,OPpart=OPpart,v0=v0,target=target)
+            self._last_eigenvalues, self._last_eigenvectors=self._last_eigenvalues.copy(),self._last_eigenvectors.copy()
+            if filter is not None:
+                filtered_indices=numpy.array([filter(ev) for ev in self._last_eigenvalues]).nonzero()
+                self._last_eigenvalues=self._last_eigenvalues[filtered_indices]
+                self._last_eigenvectors=self._last_eigenvectors[filtered_indices]        
 
-        # This is the BASE mode (or, while a normal-mode tracker is installed, the tracked one - see
-        # the docstring), and either way the per-eigenvalue mode arrays of whatever ran before belong
-        # to eigenvalues that are no longer here. They are read POSITIONALLY, so leaving them in place
-        # labelled these ones with somebody else's modes: after solve_eigenproblem(3, azimuthal_m=5),
-        # a plain solve_eigenproblem(3) reported its base-state eigenvalues as m=5 and
-        # _critical_normal_mode() answered ("m", 5) for them; with a matching length (a scan of 2
-        # modes, then a plain solve of twice the count) the bifurcation GUI showed half of a
-        # base-state spectrum under m=5. The mode-scan branch below fills them in again for its own
-        # spectrum, and solve()/arclength_continuation() already clear them for the same reason.
-        self._last_eigenvalues_m=None
-        self._last_eigenvalues_k=None
+            # This is the BASE mode (or, while a normal-mode tracker is installed, the tracked one - see
+            # the docstring), and either way the per-eigenvalue mode arrays of whatever ran before belong
+            # to eigenvalues that are no longer here. They are read POSITIONALLY, so leaving them in place
+            # labelled these ones with somebody else's modes: after solve_eigenproblem(3, azimuthal_m=5),
+            # a plain solve_eigenproblem(3) reported its base-state eigenvalues as m=5 and
+            # _critical_normal_mode() answered ("m", 5) for them; with a matching length (a scan of 2
+            # modes, then a plain solve of twice the count) the bifurcation GUI showed half of a
+            # base-state spectrum under m=5. The mode-scan branch below fills them in again for its own
+            # spectrum, and solve()/arclength_continuation() already clear them for the same reason.
+            self._last_eigenvalues_m=None
+            self._last_eigenvalues_k=None
 
-        #self._last_eigenvectors=numpy.transpose(self._last_eigenvectors)
-        if (not self.is_quiet()) and (not quiet) :
-            if report_accuracy:
-                for i,l in enumerate(self._last_eigenvalues):
-                    v=self._last_eigenvectors[i,:]
-                    # J and M are (nrow_local x n) on a distributed problem while v is replicated at full
-                    # length, so these products give this rank's rows of the residual and the max over
-                    # them is a partial one. norm(v) needs no reduction -- v is already global.
-                    lhs =l*(M@v) #type:ignore
-                    rhs=J@v #type:ignore
-                    diff=lhs-rhs #type:ignore
-                    abs_err=numpy.max(numpy.absolute(diff)) if diff.shape[0]>0 else 0.0 #type:ignore
-                    if get_mpi_nproc()>1:
-                        abs_err=get_mpi_max(abs_err)
-                    rel_err=abs_err/numpy.linalg.norm(v)
-                    print("Eigenvalue",i,":",l,"Error (abs/rel):",abs_err,rel_err) #type:ignore
-                pass
-            else:
-                for i,l in enumerate(self._last_eigenvalues):
-                    print("Eigenvalue",i,":",l)
-        for i in range(ntstep):
-            if not was_steady[i]:
-                self.time_stepper_pt(i).undo_make_steady()
-        return self._last_eigenvalues,self._last_eigenvectors
+            #self._last_eigenvectors=numpy.transpose(self._last_eigenvectors)
+            if (not self.is_quiet()) and (not quiet) :
+                if report_accuracy:
+                    for i,l in enumerate(self._last_eigenvalues):
+                        v=self._last_eigenvectors[i,:]
+                        # J and M are (nrow_local x n) on a distributed problem while v is replicated at full
+                        # length, so these products give this rank's rows of the residual and the max over
+                        # them is a partial one. norm(v) needs no reduction -- v is already global.
+                        lhs =l*(M@v) #type:ignore
+                        rhs=J@v #type:ignore
+                        diff=lhs-rhs #type:ignore
+                        abs_err=numpy.max(numpy.absolute(diff)) if diff.shape[0]>0 else 0.0 #type:ignore
+                        if get_mpi_nproc()>1:
+                            abs_err=get_mpi_max(abs_err)
+                        rel_err=abs_err/numpy.linalg.norm(v)
+                        print("Eigenvalue",i,":",l,"Error (abs/rel):",abs_err,rel_err) #type:ignore
+                    pass
+                else:
+                    for i,l in enumerate(self._last_eigenvalues):
+                        print("Eigenvalue",i,":",l)
+            return self._last_eigenvalues,self._last_eigenvectors
 
 
 
@@ -11835,6 +11827,40 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             for mesh,val in saved:
                 mesh.min_permitted_error=val
             self.desired_ndof=saved_desired_ndof
+
+    @contextlib.contextmanager
+    def steady_time_steppers(self):
+        """Make every time stepper steady for the duration of the block, then restore exactly what
+        was found.
+
+        Use it whenever a stationary residual, Jacobian or mass matrix is wanted out of a problem
+        that may be transient::
+
+            with problem.steady_time_steppers():
+                R,J=problem.assemble_jacobian(with_residual=True)
+
+        Only the steppers that were *not* already steady are undone on the way out, so the blocks
+        nest and a block inside an already-stationary computation does not turn the problem unsteady
+        on its way out. The restore also runs when the block raises, which hand-written
+        ``make_steady()``/``undo_make_steady()`` pairs tend not to.
+
+        Note that a bare ``make_steady()`` or ``undo_make_steady()`` elsewhere in pyoomph is usually
+        a deliberate *state transition* rather than a scope - the problem is meant to come out
+        steady, or unsteady, and stay that way - so not every such pair belongs in a ``with`` block.
+
+        What this cannot protect against: a stationary ``solve()`` makes the time steppers steady and
+        undoes them inside oomph-lib, so a Jacobian assembled *after* such a solve carries the
+        ``w0*M`` term whatever this does. Assemble inside the block, not after the solve.
+        """
+        was_steady=[self.time_stepper_pt(i).is_steady() for i in range(self.ntime_stepper())]
+        for i in range(len(was_steady)):
+            self.time_stepper_pt(i).make_steady()
+        try:
+            yield self
+        finally:
+            for i,was in enumerate(was_steady):
+                if not was:
+                    self.time_stepper_pt(i).undo_make_steady()
 
     @contextlib.contextmanager
     def _temporary_newton_settings(self,**overrides:Any):
