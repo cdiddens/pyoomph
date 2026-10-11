@@ -49,6 +49,7 @@ paths depend on that - ``switch_to_hopf_orbit`` makes the problem steady on purp
 ``tests/hopf_lyapunov_worker.py`` does the same by hand.
 """
 
+import numpy
 import pytest
 
 from pyoomph import *
@@ -255,3 +256,60 @@ def test_the_response_pencil_restores_both_parameters_it_borrows(tmp_path):
         assert pdr.hopf_param.value == 0.25
         assert pdr.omega_param.value == 0.75
         assert _steadiness(problem) == before_steady
+
+
+# --------------------------------------------------------------------------------------------
+# 4. The tensor cache borrows four things, and must put all four back
+# --------------------------------------------------------------------------------------------
+
+class _ParamEqs(ODEEquations):
+    """``dt(u) = -k*u**3`` - nonlinear, and with a global parameter the tensor cache has to sweep."""
+
+    def __init__(self, k):
+        super().__init__()
+        self.k = k
+
+    def define_fields(self):
+        self.define_ode_variable("u")
+
+    def define_residuals(self):
+        u, v = var_and_test("u")
+        self.add_residual(weak(partial_t(u) + self.k * u ** 3, v))
+
+
+class _WithParam(Problem):
+    def define_problem(self):
+        self.k = self.get_global_parameter("k")
+        self.k.value = 1.0
+        self += (_ParamEqs(self.k.get_symbol()) + InitialCondition(u=1)) @ "ode"
+
+
+def test_the_tensor_cache_restores_everything_it_borrowed_when_it_throws(tmp_path):
+    """``update_tensor_cache`` zeroes the dofs, sweeps every global parameter, makes the steppers
+    steady and turns the custom residual off, then does three heavy assemblies and a Hessian build.
+    Without the analytic Hessian the build raises - and before the try/finally that left the problem
+    with zeroed dofs, a swept parameter and the custom residual disabled."""
+    from pyoomph.generic.assembly import FixedMeshMaxQuadraticNonlinearAssembly
+
+    with _WithParam() as problem:
+        problem.set_output_directory(str(tmp_path))
+        problem.quiet()
+        problem.initialise()          # deliberately NO setup_for_stability_analysis
+        # No solve: the initial condition already puts the dof at 1, and the stationary problem here
+        # is u**3 == 0, whose Jacobian is singular at its own solution.
+        problem.k.value = 2.5
+        problem.use_custom_residual_jacobian = True
+        dofs_before = numpy.array(problem.get_current_dofs()[0])
+        steady_before = _steadiness(problem)
+        assert numpy.max(numpy.abs(dofs_before)) > 1e-6    # non-vacuity: there is something to lose
+
+        assembler = FixedMeshMaxQuadraticNonlinearAssembly()
+        assembler._set_problem(problem)
+        with pytest.raises(Exception):
+            assembler.update_tensor_cache()
+
+        assert numpy.allclose(numpy.array(problem.get_current_dofs()[0]), dofs_before)
+        assert problem.k.value == 2.5
+        assert problem.use_custom_residual_jacobian is True
+        assert _steadiness(problem) == steady_before
+        assert not assembler._tensor_cache_valid
