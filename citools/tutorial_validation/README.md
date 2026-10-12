@@ -244,6 +244,50 @@ nothing left inside the window fails as "is gone" rather than passing quietly. K
 a window wide enough to admit the artefacts, or an `only=` that excludes the eigenvalues
 altogether, is how this stops checking anything.
 
+### An adaptive output grid: `time_tol`, not `match="interp"`
+
+`match="exact"` looks a stored instant up and insists it recur to within `1e-9 * span`, i.e.
+bit-for-bit. An adaptive stepper does that on one machine and not on another, and the failure is
+then pure lookup - no value is compared at all, so the check reports nothing about the physics.
+`rayleigh_plateau.py` failed on all four platforms that way, the worst instant 3.58e-06 off.
+
+`time_tol=X` lets the lookup slip by `X` in abscissa units. **Set it from the slope**, since the
+cost is `|dy/dt| * time_tol`:
+
+| | measured on `minimum.txt` |
+| --- | --- |
+| `max |dy/dt|` over the window | 0.3301 |
+| column extent | 0.7337 |
+| cost of a `1e-5` slip | 4.5e-06 of the extent, i.e. inside the `rtol=1e-5` already there |
+| cost of `match="interp"` over one output interval | `h^2 |y''|/8` = 1.0e-03 of the extent |
+
+So the slip is 630 times cheaper than interpolating, which is why this exists rather than switching
+such checks to `interp`. Keep `time_tol` well under half the output spacing (0.0172 there); the
+comparer refuses a larger one, because the "nearest" row could then be the wrong row.
+
+Beware what fixing a lookup exposes. Once `rayleigh_plateau.py` could compare values over four
+ranks, 11 of 128 differed - every one of them `z_min`, the *position* of the neck, which is read at
+a mesh node and so is quantised by the mesh. `r_min`, the radius, agreed throughout. A lookup
+failure can be hiding a column that was never comparable.
+
+### A column whose error is not set by its own range: `column_atol`
+
+The per-check `atol` applies to every column, which is wrong when one column is far less
+reproducible than its neighbours. In `kuramoto_sivanshinsky_arclength_eigen.py`, `Re(lambda)` of a
+7614-dof system at `shift=0` agrees between SLEPc and the built-in eigensolver only to 6.3e-04
+while `h_rms` beside it reproduces bit-for-bit. Raising the check's `atol` would spend 0.29 % of
+`h_rms`'s range and 4.9 % of `Im(lambda)`'s on a column that needs nothing.
+
+`column_atol={"column_2": 2e-3}` confines it. Two things to check before using it:
+
+* that an **absolute** tolerance is the right shape. Here it is, and the obvious guess was wrong:
+  the deviations run 7.0e-06 to 6.3e-04 and are *not* monotonic in `|Re|` - the smallest `|Re|` in
+  the file (5.1e-04) agrees while 1.0e-02 does not. That is solver accuracy on the operator, not a
+  near-zero relative blow-up, so a bigger `rtol` would have been the wrong instrument.
+* that the column still says something afterwards. 4 % of that column's range still separates the
+  two branches the file interleaves (-0.031 against +0.003..+0.012), still catches a sign error and
+  still catches the fold moving.
+
 ### Tolerances
 
 The default is `rtol=1e-5`, `atol=1e-10`. That is deliberately not as tight as one machine can

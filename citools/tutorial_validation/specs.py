@@ -790,15 +790,33 @@ VALIDATION: "dict[str,list]" = {
   ],
   "SpatioTemporal_PDEs/kuramoto_sivanshinsky_arclength_eigen.py": [
       # gamma, h_rms, and the real and imaginary parts of the critical eigenvalue along the branch.
-      # Serially that reproduces exactly; across rank counts the eigenvalue does not. Measured
-      # against four ranks: Re(eigenvalue) came out 0.00370 where the reference holds 0.00428, which
-      # is 1.85 % of that column's whole range (-0.0311..0.0164) - the accuracy of a near-zero
-      # eigenvalue of a 7614-dof system, not a drift. No tolerance should cover that and still be a
-      # check, so the strong serial comparison is kept and the MPI pass leaves this one to the
-      # fingerprint, which does hold there.
-      Evolution("hexdots.txt", match="rows", skip_under=("mpi",),
-                reason="a continuation, so the first column does not grow; and the critical "
-                       "eigenvalue moves by ~2 % of its range across rank counts"),
+      #
+      # Re(eigenvalue) is the one column that does not reproduce, and the cause is the EIGENSOLVER,
+      # not the rank count it was first filed under. Draugr with PYTHONPATH emptied gives the same
+      # numbers as linux-x86_64, macos-intel-x86_64 and windows-msys2-ucrt64 - all of which run
+      # without PETSc - while macos-arm64, which has SLEPc like the machine the reference was made
+      # on, agrees. Four ranks was simply the first configuration that changed the arithmetic.
+      #
+      # column_atol on that column alone, 2e-3, rather than a bigger rtol or a bigger atol:
+      #
+      #   * what it must cover is 6.3e-04 (0.00699469762928 -> 0.00636633702722), the worst of the
+      #     five of 144 values that move; 2e-3 is three times that;
+      #   * it is NOT a near-zero relative blow-up, which was the first guess and is wrong - the
+      #     deviations run from 7.0e-06 to 6.3e-04 and are not monotonic in |Re|, since the
+      #     smallest |Re| in the file (5.1e-04) agrees while 1.0e-02 does not. So it is the
+      #     solver's absolute accuracy on this operator, and an atol is its shape;
+      #   * h_rms in the neighbouring column reproduces bit-for-bit, and it is the physics of the
+      #     branch. Raising the check's own atol to 2e-3 would spend 0.29 % of h_rms's range on a
+      #     column that needs nothing, and 4.9 % of Im(eigenvalue)'s. Per column, it costs neither.
+      #
+      # 4 % of Re(eigenvalue)'s range is still a check: the two branches this file interleaves sit
+      # at -0.031 and at +0.003..+0.012, so it still tells them apart, still catches a sign error
+      # and still catches the fold moving. And because 2e-3 covers the four-rank deviation as well
+      # - the same 5.7e-04 - skip_under is gone and the MPI pass compares this too.
+      Evolution("hexdots.txt", match="rows", column_atol={"column_2": 2e-3},
+                reason="a continuation, so the first column does not grow; and Re(eigenvalue) is "
+                       "only as reproducible as the eigensolver, 6.3e-04 between SLEPc and the "
+                       "built-in fallback"),
       Fingerprint(),
   ],
   "SpatioTemporal_PDEs/viscoelastic_cylinder.py": [
@@ -891,17 +909,36 @@ VALIDATION: "dict[str,list]" = {
       # nor the final fingerprint is reproducible on a single machine, and no tolerance would make
       # them mean anything.
       #
-      # What IS reproducible is everything before the singularity, and exactly - the instants
-      # included, which is why match="exact" works there. That is the whole check. There is
-      # deliberately no Fingerprint: the state it would record is past the singularity.
-      # ...and serially only. Over four ranks the adaptive stepper lands on different instants even
-      # before the singularity - 10 of the 64 stored ones were missing, the worst 5.8e-07 away - so
-      # the lookup match="exact" rests on does not hold there. Excused rather than switched to
-      # match="interp", which would weaken the serial comparison everywhere to buy an MPI one.
-      Evolution("minimum.txt", until_time=8.5, skip_under=("mpi",),
+      # What IS reproducible is everything before the singularity. That is the whole check. There
+      # is deliberately no Fingerprint: the state it would record is past the singularity.
+      #
+      # The VALUES are reproducible there; the INSTANTS are not, and the two were conflated when
+      # this was written ("exactly - the instants included"). They recur bit-for-bit on one
+      # machine, drift by ~5.8e-07 over four ranks, and by up to 3.58e-06 on another platform -
+      # which failed all four of them on 12th October 2026 without ever comparing a value.
+      #
+      # time_tol=1e-5 is set from the slope, not from the observation. Measured on this file:
+      # |dy/dt| <= 0.3301 over the window and r_min's extent is 0.7337, so letting the lookup slip
+      # by 1e-05 moves the compared value by at most 4.5e-06 of the extent - inside the rtol=1e-05
+      # this check already carries, and 70x more headroom than the worst slip seen. It is also
+      # three orders below half the smallest output spacing (0.0172), so the nearest row is still
+      # unambiguously the stored instant.
+      #
+      # That is why this is not match="interp", which the previous comment was right to refuse:
+      # over one output interval of this file the interpolation error is h^2*|y''|/8 = 1.0e-03 of
+      # the extent, 630 times the cost of the slip.
+      #
+      # columns=["r_min"], i.e. z_min is no longer compared, and skip_under is gone. Once the
+      # lookup worked, the values could be compared over four ranks for the first time, and 11 of
+      # the 128 differed - every one of them z_min and not one of them r_min. z_min is the POSITION
+      # of the neck, read off at a mesh node, so its resolution is the local mesh spacing and an
+      # adapting mesh does not reproduce it: at t=7.3 it is 3.99976767527 serially and exactly 4
+      # over four ranks, the profile there being almost flat so that the argmin is degenerate.
+      # r_min, the neck radius itself, is the physical quantity and agrees to rtol=1e-05 on one
+      # rank and on four.
+      Evolution("minimum.txt", columns=["r_min"], until_time=8.5, time_tol=1e-5,
                 reason="past t=8.63 the pinch-off singularity amplifies one ULP to 5 % within 80 "
-                       "rows (measured over four runs), and across rank counts the adaptive "
-                       "instants themselves shift by ~6e-7"),
+                       "rows (measured over four runs), so only the window before it is compared"),
   ],
   "Moving_Mesh/rayleigh_plateau_pinchoff.py": [
       # The two quantities that make this script the topology test it is: max of the fragment count
@@ -1785,18 +1822,16 @@ VALIDATION: "dict[str,list]" = {
   "Plotting_Interface/kuramoto_sivanshinsky_arclength_eigen.py": [
       # gamma, h_rms and the critical eigenvalue along the branch, 36 rows, headerless.
       #
-      # Serially only, and this needs no separate investigation: at four ranks exactly one of the
-      # 144 compared values moves, the critical eigenvalue at column_0=0.2457868, from
-      # 0.00427606969927 to 0.00370144097136 - the same two numbers to eleven digits that the
-      # SpatioTemporal_PDEs twin produced, where it was measured as 1.85 % of that column's whole
-      # range (-0.0311..0.0164). It is the accuracy of a near-zero eigenvalue of a 7614-dof system
-      # across rank counts, not a drift, and no tolerance covers that and still leaves a check. So
-      # the strong serial comparison is kept and the MPI pass leaves this one to the fingerprint,
-      # which does hold there.
-      Evolution("hexdots.txt", match="rows", skip_under=("mpi",),
-                reason="a continuation, so the first column does not grow; and the critical "
-                       "eigenvalue moves by ~2 % of its range across rank counts, identically to "
-                       "the SpatioTemporal_PDEs twin"),
+      # This needs no separate investigation: it is the same script and it moves the same way. At
+      # four ranks exactly one of the 144 values moved, the eigenvalue at column_0=0.2457868, from
+      # 0.00427606969927 to 0.00370144097136 - the same two numbers to eleven digits as the
+      # SpatioTemporal_PDEs twin. Without PETSc five of them move, the worst by 6.3e-04. See that
+      # entry for why the loosening is a column_atol and not an rtol, and why it is the eigensolver
+      # rather than the rank count.
+      Evolution("hexdots.txt", match="rows", column_atol={"column_2": 2e-3},
+                reason="a continuation, so the first column does not grow; and Re(eigenvalue) is "
+                       "only as reproducible as the eigensolver, identically to the "
+                       "SpatioTemporal_PDEs twin"),
       Fingerprint(),
   ],
   "Plotting_Interface/plotting_eigenmodes.py": [

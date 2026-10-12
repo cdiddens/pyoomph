@@ -797,3 +797,80 @@ def test_abs_keys_leaves_unmatched_keys_signed(validation):
     rec["dofs"]["osc/y"]["min"], rec["dofs"]["osc/y"]["max"] = 1.0, -1.0
     path.write_text(json.dumps(rec) + "\n")
     assert validation.check(run).status == "mismatch"
+
+
+# ----------------------------------------------------------------------------------------------
+# A lookup that tolerates a slipped output grid, and a tolerance that is per column
+# ----------------------------------------------------------------------------------------------
+
+def _slipped_times(by):
+    """The fixed grid, displaced - what an adaptive stepper does on another platform."""
+    return [round(i * 0.1 + by, 12) for i in range(101)]
+
+
+def test_time_tol_lets_a_slipped_grid_be_looked_up(validation):
+    """match="exact" must not fail on a grid that moved by less than the slope can matter.
+
+    rayleigh_plateau.py failed on all four platforms of the run of 12th October 2026 with "59 of 64
+    stored instants do not occur in this run, worst 3.58e-06 away" and never compared a value.
+    """
+    validation.set_checks([Evolution("oscillator.txt", time_tol=1e-4)])
+    validation.record(validation.run("ref"))
+    slipped = validation.run("slipped", times=_slipped_times(1e-6))
+    assert validation.check(slipped).status == "ok"
+    # Without it, the same run is a mismatch: that is the behaviour being relaxed, deliberately.
+    validation.set_checks([Evolution("oscillator.txt")])
+    assert validation.check(slipped).status == "mismatch"
+
+
+def test_time_tol_still_reports_a_grid_that_really_changed(validation):
+    validation.set_checks([Evolution("oscillator.txt", time_tol=1e-6)])
+    validation.record(validation.run("ref"))
+    result = validation.check(validation.run("slipped", times=_slipped_times(1e-3)))
+    assert result.status == "mismatch"
+    assert "do not occur in this run" in " ".join(result.problems)
+
+
+def test_time_tol_above_half_the_output_spacing_is_refused(validation):
+    """A slip that big could pick a different row and compare the wrong data silently."""
+    validation.set_checks([Evolution("oscillator.txt", time_tol=0.06)])  # spacing is 0.1
+    validation.record(validation.run("ref"))
+    result = validation.check(validation.run("again"))
+    assert result.status == "mismatch"
+    assert "not below half the smallest output spacing" in " ".join(result.problems)
+
+
+def test_time_tol_is_only_for_exact_matching(validation):
+    with pytest.raises(ValueError):
+        Evolution("oscillator.txt", match="interp", time_tol=1e-5)
+
+
+def test_column_atol_loosens_one_column_and_leaves_the_others(validation):
+    """What kuramoto_sivanshinsky_arclength_eigen.py needs: a loose eigenvalue, a tight h_rms."""
+    validation.set_checks([Evolution("oscillator.txt", column_atol={"ydot": 0.05})])
+    validation.record(validation.run("ref"))
+    run = validation.run("ref")
+    art = validation.artifacts(run)
+    path = Path(art.rundir) / "synthetic" / "oscillator.txt"
+    rows = path.read_text().splitlines()
+    out = [rows[0]]
+    for line in rows[1:]:
+        t, y, yd = (float(v) for v in line.split("\t"))
+        out.append("%r\t%r\t%r" % (t, y, yd + 0.02))      # inside ydot's own atol
+    path.write_text("\n".join(out) + "\n")
+    assert validation.check(run).status == "ok"
+    # The same displacement on the column that was NOT named must still fail.
+    out = [rows[0]]
+    for line in rows[1:]:
+        t, y, yd = (float(v) for v in line.split("\t"))
+        out.append("%r\t%r\t%r" % (t, y + 0.02, yd))
+    path.write_text("\n".join(out) + "\n")
+    assert validation.check(run).status == "mismatch"
+
+
+def test_column_atol_naming_an_absent_column_is_reported(validation):
+    validation.set_checks([Evolution("oscillator.txt", column_atol={"not_a_column": 1.0})])
+    validation.record(validation.run("ref"))
+    result = validation.check(validation.run("again"))
+    assert result.status == "mismatch"
+    assert "column_atol names" in " ".join(result.problems)

@@ -152,6 +152,41 @@ class Evolution(Check):
                 there, a sweep that turns around - and also for one whose abscissa is itself a
                 computed result that moves by round-off (see Advanced_Linear_Dynamics/
                 hanging_droplet.py, where an adaptive continuation writes V into the first column).
+        column_atol: {column name: atol} for columns whose error is set by something other than
+            their own range, overriding the check's atol for those columns only.
+
+            The case it exists for is an eigenvalue computed by two different eigensolvers.
+            SpatioTemporal_PDEs/kuramoto_sivanshinsky_arclength_eigen.py writes Re(lambda) of a
+            7614-dof system solved at shift=0, and SLEPc and the built-in fallback agree on it only
+            to ~6.3e-04 absolute - 1.2 % of that column's range - while h_rms in the neighbouring
+            column reproduces bit-for-bit. Raising the check's own atol to cover the eigenvalue
+            would spend 0.29 % of h_rms's range on a column that needs nothing, so the loosening
+            is confined to the column that earns it.
+
+            Note what it is NOT: the deviations are 7e-06 to 6.3e-04 and are not monotonic in
+            |lambda| (the smallest |Re| in that file, 5.1e-04, agrees, while 1.0e-02 does not), so
+            this is solver accuracy on the operator and not a near-zero relative blow-up. An atol
+            is the right shape for it; a bigger rtol is not.
+        time_tol: how far, in abscissa units, a stored instant may be from the nearest row and
+            still count as that instant, under match="exact". The default is 1e-9 * span, i.e.
+            round-off, which says the output grid must recur bit-for-bit.
+
+            That holds on one machine and not on another, and for a check worth keeping it is the
+            wrong thing to insist on: an adaptive stepper puts its outputs a few parts in 1e6 apart
+            on a different platform while the VALUES at them are still right. Moving_Mesh/
+            rayleigh_plateau.py failed on all four platforms of the run of 12th October 2026 purely
+            on the lookup - "59 of 64 stored instants do not occur in this run, worst 3.58e-06
+            away" - with no value ever compared.
+
+            The cost is |dy/dt| * time_tol, so set it from the slope, not by taste. Measured there:
+            |dy/dt| <= 0.3301 over the window and the column's extent is 0.7337, so a 1e-05 slip
+            moves the compared value by at most 4.5e-06 of the extent, inside the rtol=1e-05 the
+            check already carries. That is why this beats match="interp", whose error over one
+            output interval of that file is h^2*|y''|/8 = 1.0e-03 of the extent - 630 times worse.
+
+            Keep it well below half the output spacing. The comparison takes the NEAREST row, so a
+            time_tol above h/2 could pick a different row than the one meant; the comparer refuses
+            such a value rather than quietly comparing the wrong rows.
         abs_columns: columns compared by magnitude, |value|, on both sides. For a quantity whose
             SIGN is a labelling artefact rather than a result. The case it exists for is a
             complex-conjugate eigenvalue pair: a solver returning (lambda, conj(lambda)) may return
@@ -166,7 +201,9 @@ class Evolution(Check):
 
     def __init__(self, file: str, columns: "list[str] | None" = None, abscissa: "str | None" = None,
                  until_time: "float | None" = None, from_time: "float | None" = None,
-                 match: str = "exact", abs_columns: "tuple[str,...] | None" = None, **kw):
+                 match: str = "exact", time_tol: "float | None" = None,
+                 abs_columns: "tuple[str,...] | None" = None,
+                 column_atol: "dict[str,float] | None" = None, **kw):
         super().__init__(**kw)
         if match not in ("exact", "interp", "rows"):
             raise ValueError("match= is 'exact', 'interp' or 'rows', not %r" % match)
@@ -178,6 +215,10 @@ class Evolution(Check):
         self.until_time, self.from_time = until_time, from_time
         self.match = match
         self.abs_columns = tuple(abs_columns) if abs_columns is not None else ()
+        if time_tol is not None and match != "exact":
+            raise ValueError("time_tol only means anything for match=\"exact\"")
+        self.time_tol = time_tol
+        self.column_atol = dict(column_atol or {})
 
     def window(self, data, xi):
         """*data* restricted to [from_time, until_time] on column *xi*."""
@@ -197,6 +238,10 @@ class Evolution(Check):
             window = " [%s:%s]" % ("" if self.from_time is None else "%g" % self.from_time,
                                    "" if self.until_time is None else "%g" % self.until_time)
         mag = "" if not self.abs_columns else " |%s|" % "/".join(self.abs_columns)
+        if self.time_tol is not None:
+            mag += " [instant +-%g]" % self.time_tol
+        if self.column_atol:
+            mag += " [atol %s]" % ",".join("%s=%g" % kv for kv in sorted(self.column_atol.items()))
         return ("evolution of " + self.file + window
                 + ("" if self.match == "exact" else " (%s)" % self.match) + mag)
 
@@ -722,15 +767,30 @@ def _cmp_evolution(check: Evolution, art: RunArtifacts, ref: dict, out: Outcome)
             take = numpy.where(numpy.abs(x[left] - refrows[:, 0])
                                <= numpy.abs(x[idx] - refrows[:, 0]), left, idx)
             off = numpy.abs(x[take] - refrows[:, 0])
-            bad = numpy.flatnonzero(off > 1e-9 * span)
+            # Round-off by default, or the slip the spec allows; see time_tol.
+            allowed = 1e-9 * span if check.time_tol is None else float(check.time_tol)
+            if check.time_tol is not None and len(x) > 1:
+                # A slip of half an output interval or more would let the "nearest" row be a
+                # different row than the stored instant meant, and the comparison would then be
+                # against the wrong data while reporting nothing. Refused rather than trusted.
+                gap = float(numpy.min(numpy.diff(x))) if len(x) > 1 else 0.0
+                if gap > 0.0 and allowed >= 0.5 * gap:
+                    out.problems.append("%s: time_tol=%g is not below half the smallest output "
+                                        "spacing (%g), so the nearest row is not necessarily the "
+                                        "stored instant - lower it or use match=\"interp\""
+                                        % (check.label(), allowed, gap))
+                    return
+            bad = numpy.flatnonzero(off > allowed)
             if len(bad):
                 out.problems.append(
                     "%s: %d of %d stored instants do not occur in this run (worst: %s=%.12g is "
-                    "%.3g away from the nearest row). The time stepping changed; if the output "
-                    "times of this script are themselves adaptive, the check needs "
-                    "match=\"interp\" and a tolerance that admits the interpolation error"
+                    "%.3g away from the nearest row, allowed %.3g). The time stepping changed; if "
+                    "the output times of this script are themselves adaptive, the check needs a "
+                    "time_tol set from the slope, or match=\"interp\" and a tolerance that admits "
+                    "the interpolation error"
                     % (check.label(), len(bad), len(refrows), ref["abscissa"],
-                       refrows[bad[int(numpy.argmax(off[bad]))], 0], float(numpy.max(off))))
+                       refrows[bad[int(numpy.argmax(off[bad]))], 0], float(numpy.max(off)),
+                       allowed))
                 return
             got = numpy.column_stack([rows_sorted[take, i] for i in cols])
         else:
@@ -755,6 +815,12 @@ def _cmp_evolution(check: Evolution, art: RunArtifacts, ref: dict, out: Outcome)
     # when the reference is written, so that marking a column this way is a spec-side change like
     # skip= and only=: the stored record keeps the signs it was generated with and no reference has
     # to be regenerated to narrow what is being asked of it.
+    unknown_atol = [c for c in check.column_atol if c not in ref["columns"]]
+    if unknown_atol:
+        out.problems.append("%s: column_atol names %s, which this reference does not compare (it "
+                            "has %s)" % (check.label(), ", ".join(sorted(unknown_atol)),
+                                         ", ".join(ref["columns"])))
+        return
     if check.abs_columns:
         unknown = [c for c in check.abs_columns if c not in ref["columns"]]
         if unknown:
@@ -788,14 +854,18 @@ def _cmp_evolution(check: Evolution, art: RunArtifacts, ref: dict, out: Outcome)
 
     extents = [max(abs(float(refvals[:, c].min())), abs(float(refvals[:, c].max())))
                for c in range(len(names))]
-    worst = []
+    ranked: "list[tuple[float,str]]" = []
     for r in range(len(refrows)):
         for c, name in enumerate(names):
-            if not _close(refvals[r, c], gotvals[r, c], check.rtol,
-                          check.atol + check.rtol * extents[c]):
-                worst.append("at %s=%.12g, %s: %s"
-                             % (ref["abscissa"], refrows[r, 0], name,
-                                _deviation(refvals[r, c], gotvals[r, c])))
+            tol = check.column_atol.get(name, check.atol) + check.rtol * extents[c]
+            if not _close(refvals[r, c], gotvals[r, c], check.rtol, tol):
+                # Ranked by excess over tolerance, for the same reason as in _cmp_fingerprint.
+                excess = (abs(refvals[r, c] - gotvals[r, c]) / tol) if tol > 0 else float("inf")
+                ranked.append((excess, "at %s=%.12g, %s: %s"
+                               % (ref["abscissa"], refrows[r, 0], name,
+                                  _deviation(refvals[r, c], gotvals[r, c]))))
+    ranked.sort(key=lambda t: -t[0])
+    worst = [m for _, m in ranked]
     if worst:
         out.problems.append("%s: %d of %d values differ\n        %s"
                             % (check.label(), len(worst), len(refrows) * len(names),
@@ -1044,17 +1114,31 @@ def _cmp_fingerprint(check: Fingerprint, art: RunArtifacts, ref: dict, out: Outc
         return not any(fnmatch.fnmatch(key, p) for p in check.skip)
 
     keys = sorted(set(want) | set(got))
-    problems = []
+    # (severity, message), so that the truncation below keeps the WORST and not merely the
+    # alphabetically first. Severity is how far past its own tolerance the difference is, which is
+    # the only comparable measure here: these keys carry different units and different scales, and
+    # a 2e-5 on a key judged against its group's extent can be a worse failure than a 2e-1 on one
+    # judged against itself. Measured need for this: the cross-platform run of 12th October 2026
+    # truncated five scripts, and rayleigh_plateau_pinchoff.py had 87 differences against a limit
+    # of 40 - so the numbers a tolerance would have been set from were a lower bound of unknown
+    # tightness, which is worse than no numbers at all.
+    ranked: "list[tuple[float,str]]" = []
     for key in keys:
         if not selected(key):
             continue
         if key not in got:
-            problems.append("%s is gone (the reference has %r)" % (key, want[key]))
+            ranked.append((float("inf"), "%s is gone (the reference has %r)" % (key, want[key])))
         elif key not in want:
-            problems.append("%s appeared (%r), which the reference does not have" % (key, got[key]))
-        elif not _close(want[key], got[key], check.rtol,
-                        check.atol + check.rtol * scales.get(key, 0.0)):
-            problems.append("%s: %s" % (key, _deviation(want[key], got[key])))
+            ranked.append((float("inf"),
+                           "%s appeared (%r), which the reference does not have" % (key, got[key])))
+        else:
+            tol = check.atol + check.rtol * (scales.get(key, 0.0) or abs(float(want[key] or 0.0)))
+            if not _close(want[key], got[key], check.rtol,
+                          check.atol + check.rtol * scales.get(key, 0.0)):
+                excess = abs(float(want[key]) - float(got[key])) / tol if tol > 0 else float("inf")
+                ranked.append((excess, "%s: %s" % (key, _deviation(want[key], got[key]))))
+    ranked.sort(key=lambda t: -t[0])
+    problems = [m for _, m in ranked]
     if problems:
         out.problems.append("%s: %d difference(s)\n        %s"
                             % (check.label(), len(problems), "\n        ".join(problems[:MAX_REPORTED_DIFFERENCES])
