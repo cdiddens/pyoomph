@@ -272,6 +272,17 @@ class Fingerprint(Check):
             eigenvalues.0.im = +12.0557990943 on the machine the reference was taken on and
             -12.0557990943 on macos-intel-x86_64, i.e. the same pair listed the other way round,
             which the index comparison called a 200 % error.
+        abs_keys: dotted-key patterns compared by magnitude, |value|, on both sides - the
+            Fingerprint analogue of Evolution's abs_columns, for the same reason and with the same
+            caveat that it halves what the key says.
+
+            Reach for this rather than eigenvalues_by_value when a conjugate pair is NOT both in
+            the record. Temporal_ODEs/bifurcation_hopf_tracking_lorenz.py records the single
+            tracked eigenvalue, [[0.0, 12.055799094324355]], so there is nothing to reorder: the
+            Hopf tracker's augmented system converges with omega or with -omega (and the
+            eigenvector conjugated), and both describe the same Hopf point. macos-intel-x86_64
+            returned -12.0557990943 against the reference's +12.0557990943, agreeing on |omega| to
+            twelve digits.
         eigenvalue_max_abs: drop eigenvalues of larger magnitude from BOTH sides before comparing.
 
             For a differential-algebraic system, whose algebraic constraints appear as "infinite"
@@ -288,11 +299,13 @@ class Fingerprint(Check):
 
     def __init__(self, index: int = 0, outdir: "str | None" = None,
                  only: "list[str] | None" = None, skip: "list[str] | None" = None,
-                 gauge_free: "list[str] | None" = None, eigenvalues_by_value: bool = False,
+                 gauge_free: "list[str] | None" = None, abs_keys: "list[str] | None" = None,
+                 eigenvalues_by_value: bool = False,
                  eigenvalue_max_abs: "float | None" = None, **kw):
         super().__init__(**kw)
         self.index, self.outdir, self.only, self.skip = index, outdir, only, list(skip or [])
         self.gauge_free = list(gauge_free or [])
+        self.abs_keys = list(abs_keys or [])
         self.eigenvalues_by_value = eigenvalues_by_value
         self.eigenvalue_max_abs = eigenvalue_max_abs
 
@@ -309,6 +322,8 @@ class Fingerprint(Check):
             if patterns:
                 shown = ",".join(patterns[:2]) + (",..." if len(patterns) > 2 else "")
                 gauge += " [%s %s]" % (name, shown)
+        if self.abs_keys:
+            gauge += " [|%s|]" % "/".join(self.abs_keys)
         if self.eigenvalue_max_abs is not None:
             gauge += " [|eigenvalue| <= %g]" % self.eigenvalue_max_abs
         if self.eigenvalues_by_value:
@@ -1008,6 +1023,16 @@ def _cmp_fingerprint(check: Fingerprint, art: RunArtifacts, ref: dict, out: Outc
         got_record = _match_eigenvalues_by_value(ref_record, got_record)
     want = _flatten_fingerprint(ref_record)
     got = _flatten_fingerprint(got_record)
+    # Keys named in abs_keys are compared by magnitude on BOTH sides, after flattening so that the
+    # patterns match the same dotted keys only=/skip= use. Like them, this is a spec-side change:
+    # the stored record keeps the sign it was generated with.
+    if check.abs_keys:
+        for flat in (want, got):
+            for key, value in list(flat.items()):
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    continue
+                if any(fnmatch.fnmatch(key, pattern) for pattern in check.abs_keys):
+                    flat[key] = abs(value)
     # Judged against the field's scale rather than the statistic's own magnitude; see there.
     scales = _fingerprint_scales(ref_record)
 

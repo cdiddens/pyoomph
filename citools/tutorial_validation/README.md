@@ -228,8 +228,16 @@ physics.
   where the two groups are orders of magnitude apart (there, `10` against artefacts at 4e5), not
   by tuning until it passes.
 
-Both are applied at comparison time, to the reference and the produced record alike, so adding
-either is a spec-side change like `skip=` and needs no reference regenerated.
+* `abs_keys=["eigenvalues.*.im"]` compares the named dotted keys by magnitude - the `Fingerprint`
+  analogue of `Evolution`'s `abs_columns`. **This, not `eigenvalues_by_value`, is what a lone
+  conjugate needs.** `bifurcation_hopf_tracking_lorenz.py` records the single tracked eigenvalue,
+  so there is no second entry to permute it with and reordering changes nothing; the tracker
+  converges with `omega` or `-omega` and both describe the same Hopf point. Check what the
+  reference actually holds before reaching for one or the other - that mistake cost a CI round
+  here.
+
+All three are applied at comparison time, to the reference and the produced record alike, so adding
+any of them is a spec-side change like `skip=` and needs no reference regenerated.
 
 A warning on the second one: it can only ever remove eigenvalues, so a run whose spectrum has
 nothing left inside the window fails as "is gone" rather than passing quietly. Keep it that way -

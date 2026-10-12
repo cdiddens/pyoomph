@@ -760,3 +760,40 @@ def test_eigenvalue_max_abs_still_needs_the_physical_pair(validation):
     assert validation.check(validation.run("none", eigenvalues=[[-411178.76, 0.0]])).status == "mismatch"
     # And a pair that moved inside the window still fails.
     assert validation.check(validation.run("moved", eigenvalues=[[0.0, -3.0], [0.0, 3.0]])).status == "mismatch"
+
+
+def test_abs_keys_ignores_the_sign_of_a_lone_conjugate(validation):
+    """A tracked eigenvalue recorded on its own, whose omega may come out either way round.
+
+    bifurcation_hopf_tracking_lorenz.py keeps ONE eigenvalue, so eigenvalues_by_value has nothing
+    to permute - that was the first attempt and it changed nothing. The magnitude is the invariant.
+    """
+    validation.set_checks([Fingerprint(only=["eigenvalues.*"], abs_keys=["eigenvalues.*.im"])])
+    validation.record(validation.run("ref", eigenvalues=[[0.0, 12.0557990943]]))
+    flipped = validation.run("flipped", eigenvalues=[[0.0, -12.0557990943]])
+    assert validation.check(flipped).status == "ok"
+    # Reordering is the wrong tool for this record, and the test says so rather than implying it.
+    validation.set_checks([Fingerprint(only=["eigenvalues.*"], eigenvalues_by_value=True)])
+    assert validation.check(flipped).status == "mismatch"
+
+
+def test_abs_keys_still_catches_a_changed_magnitude(validation):
+    validation.set_checks([Fingerprint(only=["eigenvalues.*"], abs_keys=["eigenvalues.*.im"])])
+    validation.record(validation.run("ref", eigenvalues=[[0.0, 12.0557990943]]))
+    for moved in ([[0.0, 13.0]], [[0.0, -13.0]], [[0.5, 12.0557990943]]):
+        assert validation.check(validation.run("moved", eigenvalues=moved)).status == "mismatch", moved
+
+
+def test_abs_keys_leaves_unmatched_keys_signed(validation):
+    """The pattern must not quietly take the magnitude of everything else."""
+    validation.set_checks([Fingerprint(abs_keys=["eigenvalues.*.im"])])
+    validation.record(validation.run("ref"))
+    # osc/y's min is -scale and its max +scale; a run with them swapped is a different state and
+    # must still fail, which it cannot if abs_keys had reached the dof statistics.
+    run = validation.run("ref")
+    art = validation.artifacts(run)
+    path = next(Path(art.rundir).rglob("_pyoomph_validation.jsonl"))
+    rec = json.loads(path.read_text())
+    rec["dofs"]["osc/y"]["min"], rec["dofs"]["osc/y"]["max"] = 1.0, -1.0
+    path.write_text(json.dumps(rec) + "\n")
+    assert validation.check(run).status == "mismatch"

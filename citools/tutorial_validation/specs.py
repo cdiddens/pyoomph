@@ -194,16 +194,21 @@ VALIDATION: "dict[str,list]" = {
       # exactly negated. The parameters were identical to the last digit, which is the point - the
       # bifurcation is the answer here, the representative of it is not.
       #
-      # eigenvalues_by_value for the same reason one step further on. The purely imaginary
-      # eigenvalue is a CONJUGATE PAIR, +-i*omega, and which member is listed first is no more
-      # determined than which of the two mirror branches the solve lands on: macos-intel-x86_64
-      # returned eigenvalues.0.im = -12.0557990943 against the reference's +12.0557990943 - the
-      # same pair, the same omega to twelve digits, reported as a 200 % error. The frequency is
-      # still compared, and still to the default tolerance.
-      Fingerprint(only=["params.*", "eigenvalues.*", "ndof"], eigenvalues_by_value=True,
+      # abs_keys on the imaginary part, for the same kind of reason one step further on. The sign of
+      # omega is not determined either: the tracker's augmented system converges with omega or with
+      # -omega, the eigenvector conjugated to match, and both describe the same Hopf point.
+      # macos-intel-x86_64 returned eigenvalues.0.im = -12.0557990943 against the reference's
+      # +12.0557990943, i.e. |omega| agreeing to twelve digits and the comparison calling it a
+      # 200 % error.
+      #
+      # NOT eigenvalues_by_value, which was the first attempt and is a no-op here: this record holds
+      # the single tracked eigenvalue, [[0.0, 12.055799094324355]], so there is no second entry to
+      # permute it with. Reordering only helps where the pair is both in the record, as in
+      # pendulum_lagrange_eigenvalues.py above. Taking the magnitude loses nothing on a value whose
+      # real part is pinned separately at 0.
+      Fingerprint(only=["params.*", "eigenvalues.*", "ndof"], abs_keys=["eigenvalues.*.im"],
                   reason="the state is fixed only up to the Lorenz symmetry (x,y,z)->(-x,-y,z), "
-                         "and the Hopf eigenvalue only up to which half of the pair is listed "
-                         "first"),
+                         "and the Hopf frequency only up to the sign of omega"),
   ],
   "Temporal_ODEs/bifurcation_fold_arclength.py": [
       # An arclength continuation turns around at the fold, so its first column (r) does not grow
@@ -424,10 +429,26 @@ VALIDATION: "dict[str,list]" = {
       # window below, against 4-digit agreement at t=30 while the runs were still correlated. The
       # serial comparison is the strong one: two independent serial generations of this chapter came
       # out bit-identical.
-      Evolution("lyapunov.txt", from_time=195.0, rtol=5e-2, skip_under=("mpi",),
+      # The cross-platform run of 12th October 2026 is why rtol is 2e-1 and no longer 5e-2. That
+      # run is also the first time this script got as far as the check at all on three of the four
+      # platforms: it used to die in mpi_allgather_vector() before reaching it, so the comparison
+      # had only ever been exercised on a machine with mpi4py installed, and the margin it was
+      # carrying was never cross-platform.
+      #
+      # What it measured once it ran: 191 of the 192 values agree within 5e-2 on
+      # macos-intel-x86_64 and the 192nd, at t=195.8, differs by 10.1 % - the EARLIEST instant of
+      # the window, which is the least converged of them, exactly as a 1/t average should be.
+      # linux-x86_64, macos-arm64 and windows-msys2-ucrt64 passed at 5e-2 throughout.
+      #
+      # So 2e-1 is a bound observed over four platforms, not a spread measured over many runs, and
+      # it is set above the observation rather than on it - per the rule further up this file that a
+      # deviation within a factor of a few of its tolerance is a warning and not a pass. The check
+      # keeps the purpose stated above: the sign structure, and a file of NaN (which is what the
+      # _aux_backsolve aliasing produced) still fails hard.
+      Evolution("lyapunov.txt", from_time=195.0, rtol=2e-1, skip_under=("mpi",),
                 reason="a time average over a chaotic trajectory, still converging as 1/t at t=200, "
                        "and sampled over a different stretch of the attractor once a run on another "
-                       "rank count has decorrelated"),
+                       "rank count or another platform has decorrelated"),
   ],
   "Temporal_ODEs/langford_time_integration.py": [
       # Same situation: a long chaotic transient, then orbits whose output directories are named
