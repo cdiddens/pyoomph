@@ -79,7 +79,7 @@ def _adaptive_times():
     return times
 
 
-def _make_run(root, name, *, scale=1.0, times=None, duplicate_last=0):
+def _make_run(root, name, *, scale=1.0, times=None, duplicate_last=0, eigenvalues=None):
     """A directory shaped like one a tutorial script leaves behind.
 
     The keyfile is what marks it as a pyoomph output directory (Problem.initialise writes it), the
@@ -106,7 +106,8 @@ def _make_run(root, name, *, scale=1.0, times=None, duplicate_last=0):
             f.write("nan\tnan\n")  # the separator the 1d writers put between line segments
     with open(out / "_pyoomph_validation.jsonl", "w") as f:
         f.write(json.dumps({"ndof": 3, "time": ts[-1], "params": {"omega": 1.0 * scale},
-                            "eigenvalues": [[-0.5, 1.0], [-0.5, -1.0]],
+                            "eigenvalues": [[-0.5, 1.0], [-0.5, -1.0]]
+                                           if eigenvalues is None else eigenvalues,
                             "dofs": {"osc/y": {"n": 2, "min": -scale, "max": scale,
                                                "mean": 0.0, "l2": 1.41 * scale}},
                             "mpi_size": 1, "distributed": False}) + "\n")
@@ -689,3 +690,73 @@ def test_gauge_free_leaves_other_groups_alone(validation):
     moved = validation.run("moved")
     _write_pressure_fingerprint(moved, LEVEL, SPREAD, vmax=1.1)   # the velocity changed
     assert validation.check(moved).status == "mismatch"
+
+
+# ----------------------------------------------------------------------------------------------
+# Selecting eigenvalues by value instead of by index
+# ----------------------------------------------------------------------------------------------
+# The index of an eigenvalue is not a property of the problem. Two ways it moved on the
+# cross-platform tutorial run of 12th October 2026, both of which the index comparison reported as
+# a physics change:
+#
+#   * a conjugate pair listed the other way round - bifurcation_hopf_tracking_lorenz.py gave
+#     eigenvalues.0.im = -12.0557990943 against the reference's +12.0557990943, i.e. "-2 relative";
+#   * a different NUMBER of eigenvalues - pendulum_lagrange_eigenvalues.py is a 5-dof DAE where
+#     SLEPc returns all five and the built-in fallback returns only the two finite ones, so the
+#     physical pair sat at indices 1,2 on one platform and 0,1 on another.
+
+
+def test_eigenvalues_by_value_forgives_a_reordered_conjugate_pair(validation):
+    validation.set_checks([Fingerprint(only=["eigenvalues.*"], eigenvalues_by_value=True)])
+    validation.record(validation.run("ref", eigenvalues=[[-0.5, 1.0], [-0.5, -1.0]]))
+    swapped = validation.run("swapped", eigenvalues=[[-0.5, -1.0], [-0.5, 1.0]])
+    assert validation.check(swapped).status == "ok"
+
+
+def test_index_matching_is_still_the_default(validation):
+    """Opt-in, so that no existing reference quietly starts forgiving an order it used to pin."""
+    validation.set_checks([Fingerprint(only=["eigenvalues.*"])])
+    validation.record(validation.run("ref", eigenvalues=[[-0.5, 1.0], [-0.5, -1.0]]))
+    swapped = validation.run("swapped", eigenvalues=[[-0.5, -1.0], [-0.5, 1.0]])
+    assert validation.check(swapped).status == "mismatch"
+
+
+def test_eigenvalues_by_value_still_catches_a_moved_eigenvalue(validation):
+    """Only the order is forgiven. The values still have to agree, or the point is lost."""
+    validation.set_checks([Fingerprint(only=["eigenvalues.*"], eigenvalues_by_value=True)])
+    validation.record(validation.run("ref", eigenvalues=[[-0.5, 1.0], [-0.5, -1.0]]))
+    for moved in ([[-0.5, 2.0], [-0.5, -2.0]],    # the frequency doubled
+                  [[0.5, 1.0], [0.5, -1.0]],      # the pair crossed into the unstable half-plane
+                  [[-0.5, 1.0]]):                 # half the pair disappeared
+        run = validation.run("moved", eigenvalues=moved)
+        assert validation.check(run).status == "mismatch", moved
+
+
+def test_eigenvalue_max_abs_drops_the_artefacts_on_both_sides(validation):
+    """A DAE's "infinite" eigenvalues, which only some eigensolvers return at all.
+
+    The reference is the five SLEPc returns and the run is the two the fallback returns, which is
+    the pendulum_lagrange_eigenvalues.py situation exactly. Without the window there is nothing to
+    compare index 1 against; with it, both sides are the physical pair.
+    """
+    slepc = [[-411178.76, 0.0], [1.4e-17, -1.0], [1.4e-17, 1.0],
+             [205589.68, -356091.43], [205589.68, 356091.43]]
+    fallback = [[0.0, 1.0], [0.0, -1.0]]
+    validation.set_checks([Fingerprint(only=["eigenvalues.*"], eigenvalues_by_value=True,
+                                       eigenvalue_max_abs=10.0)])
+    validation.record(validation.run("ref", eigenvalues=slepc))
+    assert validation.check(validation.run("fallback", eigenvalues=fallback)).status == "ok"
+    # Still the same spectrum when the artefacts move, since they are not being compared.
+    other = [[-9.9e9, 0.0], [1.4e-17, 1.0], [1.4e-17, -1.0]]
+    assert validation.check(validation.run("other", eigenvalues=other)).status == "ok"
+
+
+def test_eigenvalue_max_abs_still_needs_the_physical_pair(validation):
+    """The window must not become a way to compare nothing at all."""
+    validation.set_checks([Fingerprint(only=["eigenvalues.*"], eigenvalues_by_value=True,
+                                       eigenvalue_max_abs=10.0)])
+    validation.record(validation.run("ref", eigenvalues=[[-411178.76, 0.0], [0.0, -1.0], [0.0, 1.0]]))
+    # Nothing left inside the window: the pair has to be reported as missing, not shrugged off.
+    assert validation.check(validation.run("none", eigenvalues=[[-411178.76, 0.0]])).status == "mismatch"
+    # And a pair that moved inside the window still fails.
+    assert validation.check(validation.run("moved", eigenvalues=[[0.0, -3.0], [0.0, 3.0]])).status == "mismatch"

@@ -193,8 +193,17 @@ VALIDATION: "dict[str,list]" = {
       # solve may land on either: over four ranks it converged to the mirror solution, with x and y
       # exactly negated. The parameters were identical to the last digit, which is the point - the
       # bifurcation is the answer here, the representative of it is not.
-      Fingerprint(only=["params.*", "eigenvalues.*", "ndof"],
-                  reason="the state is fixed only up to the Lorenz symmetry (x,y,z)->(-x,-y,z)"),
+      #
+      # eigenvalues_by_value for the same reason one step further on. The purely imaginary
+      # eigenvalue is a CONJUGATE PAIR, +-i*omega, and which member is listed first is no more
+      # determined than which of the two mirror branches the solve lands on: macos-intel-x86_64
+      # returned eigenvalues.0.im = -12.0557990943 against the reference's +12.0557990943 - the
+      # same pair, the same omega to twelve digits, reported as a 200 % error. The frequency is
+      # still compared, and still to the default tolerance.
+      Fingerprint(only=["params.*", "eigenvalues.*", "ndof"], eigenvalues_by_value=True,
+                  reason="the state is fixed only up to the Lorenz symmetry (x,y,z)->(-x,-y,z), "
+                         "and the Hopf eigenvalue only up to which half of the pair is listed "
+                         "first"),
   ],
   "Temporal_ODEs/bifurcation_fold_arclength.py": [
       # An arclength continuation turns around at the fold, so its first column (r) does not grow
@@ -255,18 +264,36 @@ VALIDATION: "dict[str,list]" = {
       Fingerprint(),
   ],
   "Temporal_ODEs/pendulum_lagrange_eigenvalues.py": [
-      # The same spectrum, from the constrained formulation: five dofs, five eigenvalues, and the
-      # physical pair (+-i, indices 1 and 2 of the sorted spectrum) has to come out the same as in
-      # the generalized-coordinate script above.
+      # The same spectrum, from the constrained formulation: five dofs, and the physical pair at
+      # +-i has to come out the same as in the generalized-coordinate script above.
       #
       # The other three are the "infinite" eigenvalues a differential-algebraic system has, which
       # the discretisation renders as about -4.1e5 and +2.1e5 +- 3.6e5i: they are set by the
       # conditioning of the constraint rather than by the pendulum, and they moved by 6.6% between
       # a serial run and the same run over four ranks. Pinning them down would be pinning down an
       # artefact, so they are left out here rather than excused with a loose tolerance.
-      Fingerprint(skip=["eigenvalues.0.*", "eigenvalues.3.*", "eigenvalues.4.*"],
-                  reason="the three remaining eigenvalues are the constraint's 'infinite' ones, "
-                         "whose finite value is a property of the discretisation"),
+      #
+      # Selected by MAGNITUDE, not by index. The index version of this check -
+      # skip=["eigenvalues.0.*", "eigenvalues.3.*", "eigenvalues.4.*"] - failed on all four
+      # platforms of the cross-platform run of 12th October 2026, in two different ways, because
+      # neither the length of the spectrum nor the order within it is a property of the problem:
+      #
+      #   * whether the artefacts are returned at all depends on the eigensolver. SLEPc returns all
+      #     five; the built-in fallback returns only the two finite ones, so the physical pair sits
+      #     at indices 0 and 1 and there is no index 2 for the check to look at. Measured directly:
+      #     the script's second solve_eigenproblem(5) prints [0.+1.j 0.-1.j] without PETSc on the
+      #     PYTHONPATH and all five with it.
+      #   * among the five, the artefacts do not keep their place. On macos-arm64 index 1 was
+      #     -2.3e5 + 4.0e5i, i.e. an artefact, which the index check compared against +i and
+      #     reported as a 1.7e22 relative error.
+      #
+      # |lambda| <= 10 separates the two groups by four orders of magnitude, so the window is not a
+      # tuned number. It keeps the pair and nothing else on every platform, and a run that loses
+      # the pair still fails - the window drops eigenvalues, it does not invent them.
+      Fingerprint(eigenvalues_by_value=True, eigenvalue_max_abs=10.0,
+                  reason="the constraint's 'infinite' eigenvalues are a property of the "
+                         "discretisation, and which of them an eigensolver returns, in what "
+                         "order, is a property of the eigensolver"),
   ],
 
   # ---------------------------------------------------------------------------------------------
@@ -278,13 +305,37 @@ VALIDATION: "dict[str,list]" = {
       # down the orbit, its period and the multiplier extraction at once.
       #
       # Serially. Over four ranks the continuation lands on mu values that differ in the fifth
-      # decimal, and the orbit it ends on is at a different phase (y comes out with the opposite
-      # sign), so neither the table nor the final state lines up. Where it stopped still does, to
-      # within that drift, and keeping that one loose check means the MPI pass is not blind here.
+      # decimal, so the table does not line up. Where it stopped still does, to within that drift,
+      # and keeping that one loose check means the MPI pass is not blind here.
       Evolution("floquet.txt", skip_under=("mpi",),
                 reason="the continuation lands on slightly different mu values over several ranks"),
-      Fingerprint(skip_under=("mpi",),
-                  reason="the run ends at a different phase of the same orbit over several ranks"),
+      # TWO independent excuses, which is the point of this entry - the first version of it had
+      # only the second and so hid the first.
+      #
+      # x and y are the PHASE of the orbit, which nothing in this script fixes. The orbit is a
+      # circle in (x,y) at constant z, so the phase is free and the radius is not; measured on the
+      # cross-platform run of 12th October 2026, where the stopping phase differed everywhere and
+      # sqrt(x^2+y^2) did not:
+      #
+      #   reference (draugr)  x=+0.575215922 y=-0.842128088   r=1.019829924
+      #   linux-x86_64        x=-0.168974121 y=+1.005733971   r=1.019829924
+      #   macos-arm64         x=-0.575215922 y=+0.842128088   r=1.019829924
+      #   draugr, no PETSc    x=-0.293172868 y=+0.976781830   r=1.019829924
+      #
+      # z stays in, which is why this is a skip= and not a dropped check: it is the one coordinate
+      # the phase does not move, and on all four platforms it agreed, as did the Floquet
+      # multipliers and mu. (The radius would be the better quantity, but a fingerprint records
+      # each dof type separately and cannot combine two of them.)
+      #
+      # skip_under=("mpi",) on top of that, and for a DIFFERENT reason: over four ranks it is mu
+      # itself that moves, by 4.34e-05, and everything evaluated at that mu moves with it - z by
+      # 1.53e-04 and the multipliers by 8e-03. That is not a phase, so skipping x and y does not
+      # cover it, and loosening the tolerance to 1e-02 to admit it would throw away the resolution
+      # this check has serially. Where it stopped is still compared over several ranks, by the
+      # params-only check below.
+      Fingerprint(skip=["dofs.langford/x.*", "dofs.langford/y.*"], skip_under=("mpi",),
+                  reason="x and y are the phase of the orbit, which is free on any machine; over "
+                         "several ranks mu itself drifts and takes z and the multipliers with it"),
       Fingerprint(only=["params.*"], rtol=1e-3,
                   reason="the mu the continuation stops at drifts by about 4e-5 between a serial "
                          "run and four ranks; the tight comparison is the Fingerprint above, which "
@@ -292,8 +343,22 @@ VALIDATION: "dict[str,list]" = {
   ],
   "Temporal_ODEs/hopf_switch.py": [
       # The orbit files are named after the rho they were found at, so their names are not a stable
-      # key - the fingerprint's rho and the orbit's dof extent are.
-      Fingerprint(),
+      # key - the fingerprint's rho is.
+      #
+      # NOT the state. The 3 dofs recorded at teardown are one point of the periodic orbit the
+      # script continued down to, and the script does not fix which point: on the run of 12th
+      # October 2026 linux-x86_64 and macos-intel-x86_64 ended with lorenz/x = 0.152698 against the
+      # reference's 6.717950, having continued the same orbit through the same 30 steps (the log's
+      # "Period at rho=" lines agree all the way down).
+      #
+      # rho needs 1e-3 rather than the default. The continuation's own step sequence depends on the
+      # eigenvalue the Hopf switch started from, so it stops one step short or long: 14.669079942
+      # on draugr with PETSc against 14.664616209 without it, i.e. 3.0e-4. That is the resolution of
+      # the last continuation step, not a drift in the physics, and it is reproducible in both
+      # directions on one machine by putting PETSc on the PYTHONPATH or taking it off.
+      Fingerprint(only=["params.*"], rtol=1e-3,
+                  reason="the final state is one point of a periodic orbit, whose phase the script "
+                         "does not fix; rho is the answer, to within one continuation step"),
   ],
   "Temporal_ODEs/manual_orbit.py": [
       # 730 dofs: the orbit is discretized in time, so the fingerprint's per-dof-type extent is the
@@ -303,11 +368,20 @@ VALIDATION: "dict[str,list]" = {
       # over four ranks the script arrived at a 727-dof orbit instead of a 730-dof one, mirrored by
       # the Lorenz symmetry on top. rho - where the orbit was found - agrees, and that is what
       # stays checked everywhere.
-      Evolution("lorenz_smoothed.txt", skip_under=("mpi",),
-                reason="the orbit is found after a chaotic transient, so its discretisation "
-                       "differs over several ranks"),
-      Fingerprint(skip_under=("mpi",),
-                  reason="727 dofs instead of 730, and mirrored by the Lorenz symmetry"),
+      #
+      # Unconditional, not skip_under=("mpi",). A chaotic transient separates under ANY change of
+      # the arithmetic, and MPI was only the first one this set happened to try. On 12th October
+      # 2026 all four CI platforms landed somewhere else along it: lorenz_smoothed.txt was asked for
+      # an instant 33 time units from the nearest row it had, and the orbit's own dofs moved by up
+      # to 93x. Unlike langford_floquet above there is nothing phase-invariant left to keep - the
+      # Lorenz orbit is not a circle at constant z, so z moves with the rest.
+      #
+      # rho is what survives, and it is also the answer: it is where the orbit was found. So this
+      # script is down to that one check, which is a real loss of coverage and the honest reading
+      # of it: lorenz_smoothed.txt and the orbit's 727 dofs are a particular trajectory out of a
+      # chaotic transient, and no tolerance or matching mode recovers a quantity that is simply
+      # somewhere else. match="interp" does not help either - the run is not a differently sampled
+      # version of the same curve, it is a different part of the attractor.
       Fingerprint(only=["params.*"]),
   ],
 
@@ -1125,7 +1199,29 @@ VALIDATION: "dict[str,list]" = {
       Evolution("critical_curve.txt", match="rows",
                 reason="V is produced by adaptive arclength continuation, not prescribed, so the "
                        "stored abscissa drifts by ~4e-09 and cannot be used as a lookup key"),
-      Fingerprint(),
+      # The "(not described)" group is the fold tracker's augmentation: n = 15001 against
+      # ndof = 30001, and its max is EXACTLY the parameter Bo, so it is the null eigenvector plus
+      # the parameter dof in one group. A null eigenvector is defined up to a scalar, and the
+      # normalisation here fixes its magnitude but not its sign - which is what the three no-PETSc
+      # platforms of the run of 12th October 2026 returned. Arithmetically, against the reference's
+      # own numbers:
+      #
+      #   sum(v) = mean*n - Bo = 51.126251
+      #   mean with v negated = (-sum(v) + Bo)/n = -0.003341793588
+      #   CI reported                             -0.003341793586
+      #
+      # and min went to -max(v) = -0.028062433 while max stayed Bo (which is larger than |v| either
+      # way) and l2 was unchanged, both of which the comparison accepted.
+      #
+      # gauge_free is the wrong tool here even though this is a gauge: it keeps n and max - min,
+      # and because the group MIXES the eigenvector with the parameter dof the spread is not
+      # invariant either (1.480595 against 1.024068). l2 and n are the sign-invariant parts, so
+      # those are what is kept. Little is lost: Bo itself is compared as params.Bo, and the whole
+      # critical curve - 14 folds found by the tracker - is compared row by row above.
+      Fingerprint(skip=["dofs.(not described).min", "dofs.(not described).max",
+                        "dofs.(not described).mean"],
+                  reason="the fold tracker's null eigenvector is fixed only up to its sign, and it "
+                         "shares a dof group with the parameter, so only l2 and n are invariant"),
   ],
 
   # ===============================================================================================

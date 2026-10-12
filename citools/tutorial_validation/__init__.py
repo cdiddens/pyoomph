@@ -72,6 +72,14 @@ DEFAULT_ATOL = 1e-10
 #: does not do so between two neighbouring outputs only.
 MAX_REFERENCE_ROWS = 64
 
+# How many individual differences a mismatch spells out before it says "and N more". Enough to
+# classify the failure from the log alone, which is the whole job of these lines: at the previous
+# value of 12 the cross-platform run of 12th October truncated exactly the scripts whose tail
+# mattered - rayleigh_plateau_pinchoff.py had 87 differences and hopf_switch.py hid its params.rho
+# behind "... and 1 more", so the one number that said WHY the run ended elsewhere was the one not
+# printed.
+MAX_REPORTED_DIFFERENCES = 40
+
 _FINGERPRINT_FILE = "_pyoomph_validation.jsonl"  # Problem._write_validation_dump writes this
 _KEYFILE = "_pyoomph_run_.txt"                   # ...and this marks a pyoomph output directory
 
@@ -254,22 +262,57 @@ class Fingerprint(Check):
             this shape had to do: a pressure that drifted in SHAPE rather than in level - the real
             regression one wants to catch - still shows up in the spread. A spread needs no scale
             rule of its own, being its own scale, so it is compared relatively like an l2.
+        eigenvalues_by_value: compare the spectrum as an unordered set rather than index by index.
+            Each produced eigenvalue is moved to the index of the reference eigenvalue it lies
+            nearest to, after which the comparison is the usual one - so a tolerance still has to
+            be met, and only the ORDER is forgiven.
+
+            The order is not a property of the problem. A conjugate pair is the clearest case:
+            Temporal_ODEs/bifurcation_hopf_tracking_lorenz.py reported the Hopf frequency as
+            eigenvalues.0.im = +12.0557990943 on the machine the reference was taken on and
+            -12.0557990943 on macos-intel-x86_64, i.e. the same pair listed the other way round,
+            which the index comparison called a 200 % error.
+        eigenvalue_max_abs: drop eigenvalues of larger magnitude from BOTH sides before comparing.
+
+            For a differential-algebraic system, whose algebraic constraints appear as "infinite"
+            eigenvalues that the discretisation renders as some huge finite number. Those are a
+            property of the conditioning, not of the physics, and - decisively - whether they are
+            returned AT ALL depends on the eigensolver: on
+            Temporal_ODEs/pendulum_lagrange_eigenvalues.py SLEPc returns all five (the physical
+            pair at +-i plus artefacts at -4.1e5 and 2.1e5 +- 3.6e5i) while the built-in fallback
+            returns only the two finite ones. So the index of the physical pair is not even stable
+            in LENGTH, which is why selecting it by index could not work.
     """
 
     kind = "fingerprint"
 
     def __init__(self, index: int = 0, outdir: "str | None" = None,
                  only: "list[str] | None" = None, skip: "list[str] | None" = None,
-                 gauge_free: "list[str] | None" = None, **kw):
+                 gauge_free: "list[str] | None" = None, eigenvalues_by_value: bool = False,
+                 eigenvalue_max_abs: "float | None" = None, **kw):
         super().__init__(**kw)
         self.index, self.outdir, self.only, self.skip = index, outdir, only, list(skip or [])
         self.gauge_free = list(gauge_free or [])
+        self.eigenvalues_by_value = eigenvalues_by_value
+        self.eigenvalue_max_abs = eigenvalue_max_abs
 
     def slug(self) -> str:
         return "fingerprint:%s:%d" % (self.outdir or "", self.index)
 
     def label(self) -> str:
         gauge = "" if not self.gauge_free else " [%s by spread only]" % "/".join(self.gauge_free)
+        # only=/skip= in the label, because a script may carry SEVERAL fingerprint checks of the
+        # same index that differ in nothing else - langford_floquet.py keeps one for the orbit and
+        # one for the parameter it stopped at - and two identically labelled mismatches in a log
+        # cannot be told apart. Abbreviated, since some of these lists are long.
+        for name, patterns in (("only", self.only), ("skip", self.skip)):
+            if patterns:
+                shown = ",".join(patterns[:2]) + (",..." if len(patterns) > 2 else "")
+                gauge += " [%s %s]" % (name, shown)
+        if self.eigenvalue_max_abs is not None:
+            gauge += " [|eigenvalue| <= %g]" % self.eigenvalue_max_abs
+        if self.eigenvalues_by_value:
+            gauge += " [eigenvalues by value]"
         return "state fingerprint" + (" of %s" % self.outdir if self.outdir else "") + \
                ("" if self.index == 0 else " (problem %d)" % self.index) + gauge
 
@@ -741,8 +784,9 @@ def _cmp_evolution(check: Evolution, art: RunArtifacts, ref: dict, out: Outcome)
     if worst:
         out.problems.append("%s: %d of %d values differ\n        %s"
                             % (check.label(), len(worst), len(refrows) * len(names),
-                               "\n        ".join(worst[:8])
-                               + ("\n        ... and %d more" % (len(worst) - 8) if len(worst) > 8 else "")))
+                               "\n        ".join(worst[:MAX_REPORTED_DIFFERENCES])
+                               + ("\n        ... and %d more" % (len(worst) - MAX_REPORTED_DIFFERENCES)
+                                  if len(worst) > MAX_REPORTED_DIFFERENCES else "")))
 
 
 def _gen_finalstate(check: FinalState, art: RunArtifacts) -> dict:
@@ -859,6 +903,49 @@ def _apply_gauge_free(record: dict, patterns: "list[str]") -> dict:
     return out
 
 
+def _drop_large_eigenvalues(record: dict, max_abs: "float | None") -> dict:
+    """*record* without the eigenvalues of magnitude above *max_abs*; see eigenvalue_max_abs."""
+    if max_abs is None:
+        return record
+    kept = [ev for ev in (record.get("eigenvalues") or [])
+            if (float(ev[0]) ** 2 + float(ev[1]) ** 2) <= max_abs * max_abs]
+    out = dict(record)
+    out["eigenvalues"] = kept
+    return out
+
+
+def _match_eigenvalues_by_value(ref_record: dict, got_record: dict) -> dict:
+    """*got_record* with its eigenvalues reordered to line up with the reference's by VALUE.
+
+    Each reference eigenvalue takes the produced one nearest to it in the complex plane, in the
+    reference's own order, and the surplus - a run that returned more eigenvalues than the
+    reference holds - keeps its relative order behind them. Only the order is decided here: the
+    comparison afterwards is the ordinary one, against the check's own tolerance, so this cannot
+    turn a changed spectrum into a passing one. A genuinely moved eigenvalue is still matched to
+    the reference entry it is closest to, and still has to agree with it.
+
+    Greedy rather than a full assignment: the spectra involved are a handful of entries long, and
+    a reference whose eigenvalues sit closely enough together for the greedy choice to differ from
+    the optimal one is a reference that is not pinning them down separately anyway.
+    """
+    want = [(float(a), float(b)) for a, b in (ref_record.get("eigenvalues") or [])]
+    got = list(got_record.get("eigenvalues") or [])
+    if not want or not got:
+        return got_record
+    remaining = list(range(len(got)))
+    order: "list[int]" = []
+    for wr, wi in want:
+        if not remaining:
+            break
+        best = min(remaining, key=lambda k: (float(got[k][0]) - wr) ** 2 + (float(got[k][1]) - wi) ** 2)
+        remaining.remove(best)
+        order.append(best)
+    order.extend(remaining)
+    out = dict(got_record)
+    out["eigenvalues"] = [got[j] for j in order]
+    return out
+
+
 def _fingerprint_scales(record: dict) -> "dict[str,float]":
     """The scale each dof statistic should be judged against, by dotted key.
 
@@ -912,6 +999,13 @@ def _cmp_fingerprint(check: Fingerprint, art: RunArtifacts, ref: dict, out: Outc
     # A group whose level is a free constant keeps only its gauge-invariant part; see gauge_free.
     ref_record = _apply_gauge_free(ref["record"], check.gauge_free)
     got_record = _apply_gauge_free(record, check.gauge_free)
+    # The eigenvalue selection happens on both sides, and the magnitude filter BEFORE the matching:
+    # the artefacts eigenvalue_max_abs removes are exactly the ones that would otherwise be matched
+    # against a physical eigenvalue when the two solvers return different numbers of them.
+    ref_record = _drop_large_eigenvalues(ref_record, check.eigenvalue_max_abs)
+    got_record = _drop_large_eigenvalues(got_record, check.eigenvalue_max_abs)
+    if check.eigenvalues_by_value:
+        got_record = _match_eigenvalues_by_value(ref_record, got_record)
     want = _flatten_fingerprint(ref_record)
     got = _flatten_fingerprint(got_record)
     # Judged against the field's scale rather than the statistic's own magnitude; see there.
@@ -938,8 +1032,9 @@ def _cmp_fingerprint(check: Fingerprint, art: RunArtifacts, ref: dict, out: Outc
             problems.append("%s: %s" % (key, _deviation(want[key], got[key])))
     if problems:
         out.problems.append("%s: %d difference(s)\n        %s"
-                            % (check.label(), len(problems), "\n        ".join(problems[:12])
-                               + ("\n        ... and %d more" % (len(problems) - 12) if len(problems) > 12 else "")))
+                            % (check.label(), len(problems), "\n        ".join(problems[:MAX_REPORTED_DIFFERENCES])
+                               + ("\n        ... and %d more" % (len(problems) - MAX_REPORTED_DIFFERENCES)
+                                  if len(problems) > MAX_REPORTED_DIFFERENCES else "")))
 
 
 def _stdout_matches(check: Stdout, art: RunArtifacts) -> "list[list[float]]":

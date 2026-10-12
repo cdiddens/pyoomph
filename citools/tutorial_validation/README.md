@@ -165,6 +165,77 @@ everything geometric agrees to 1e-10 or better, but every pressure group's min, 
 by an identical -0.414154 between runs, and the volume Lagrange multiplier by -0.414155. The
 pressure level and that multiplier are one free direction, so the entry skips both.
 
+### Scripts that are not reproducible across machines
+
+A separate axis from the one above, and the one this set got wrong first. Several entries were
+written with `skip_under=("mpi",)` and a comment explaining a genuine degeneracy - an orbit's
+phase, the Lorenz symmetry, a continuation's stopping point - as though running over four ranks
+were what caused it. It is not. **MPI is just the first thing that changes the arithmetic**, and
+every other platform changes it too. The first cross-platform run of the tutorial set, on 12th
+October 2026, failed six scripts whose degeneracy was already described in this file under that
+heading.
+
+So when a quantity turns out to be fixed only up to some freedom, say so unconditionally.
+
+But do not then assume the MPI excuse was *wrong* - the two axes can be different sizes, and a
+check may need both. `langford_floquet.py` is the worked example. Cross-platform and serial, `mu`
+agrees and only the orbit's phase moves, so skipping `x` and `y` is enough and `z`, the Floquet
+multipliers and `mu` stay pinned. Over four ranks it is `mu` itself that moves, by 4.34e-05, and
+everything evaluated at that `mu` moves with it - `z` by 1.53e-04 and the multipliers by 8e-03.
+Skipping the phase does not cover that, and a tolerance loose enough to admit it (1e-02) would
+throw away the resolution the check has serially. The entry therefore carries the `skip=` *and*
+`skip_under=("mpi",)`, with a comment for each.
+
+The test for whether `skip_under` is still earning its place: run the script under `--mpirun 4`
+after relaxing it for the cross-platform reason. If it still fails, the two reasons are different
+and both belong in the entry.
+
+What the freedoms look like in practice, and what to keep instead of the quantity itself:
+
+* **A point on a periodic orbit.** The phase is free unless the script pins it. `langford_floquet.py`
+  stopped at four different phases on four platforms while `sqrt(x^2+y^2)` agreed to nine decimals,
+  so the entry skips `x` and `y` and keeps `z`, which the phase does not move. Look for a
+  coordinate like that before dropping the whole check - and if the orbit is chaotic rather than a
+  limit cycle, as in `manual_orbit.py`, there is nothing phase-invariant left and only the
+  parameter survives.
+* **An eigenvector, or a null vector.** Defined up to a scalar; a normalisation usually fixes the
+  magnitude and not the sign. In `hanging_droplet.py` the fold tracker's null vector shares a dof
+  group with the parameter dof, so even `gauge_free`'s `max - min` is not invariant and only `l2`
+  and `n` are.
+* **The order of a spectrum**, and **its length**. See `eigenvalues_by_value` and
+  `eigenvalue_max_abs` below.
+* **Where a continuation stops.** One step more or less, which is a relative difference in the
+  parameter of the order of the last step size - 3.0e-4 for `hopf_switch.py`. Give the parameter a
+  tolerance that admits one step and say which step size it came from.
+
+### Eigenvalues: `eigenvalues_by_value` and `eigenvalue_max_abs`
+
+Neither the order of a spectrum nor its length is a property of the problem, so a `Fingerprint`
+that compares `eigenvalues.N.re` index by index is pinning down the eigensolver as much as the
+physics.
+
+* `eigenvalues_by_value=True` moves each produced eigenvalue to the index of the reference
+  eigenvalue it lies nearest to, then compares as usual. Only the order is forgiven; every value
+  still has to meet the tolerance. Use it on anything with a conjugate pair -
+  `bifurcation_hopf_tracking_lorenz.py` reported `+12.0557990943` on one platform and
+  `-12.0557990943` on another, the same pair the other way round, which index matching called a
+  200 % error.
+* `eigenvalue_max_abs=X` drops `|lambda| > X` from both sides first. For a differential-algebraic
+  system, whose constraints show up as "infinite" eigenvalues rendered as some huge finite number:
+  they are a property of the conditioning, and **whether the solver returns them at all varies**.
+  On `pendulum_lagrange_eigenvalues.py` SLEPc returns all five and the built-in fallback returns
+  only the two finite ones, so the physical pair is not at a stable index in any sense. Choose X
+  where the two groups are orders of magnitude apart (there, `10` against artefacts at 4e5), not
+  by tuning until it passes.
+
+Both are applied at comparison time, to the reference and the produced record alike, so adding
+either is a spec-side change like `skip=` and needs no reference regenerated.
+
+A warning on the second one: it can only ever remove eigenvalues, so a run whose spectrum has
+nothing left inside the window fails as "is gone" rather than passing quietly. Keep it that way -
+a window wide enough to admit the artefacts, or an `only=` that excludes the eigenvalues
+altogether, is how this stops checking anything.
+
 ### Tolerances
 
 The default is `rtol=1e-5`, `atol=1e-10`. That is deliberately not as tight as one machine can
