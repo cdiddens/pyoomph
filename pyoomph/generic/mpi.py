@@ -562,11 +562,22 @@ def mpi_allgather_square_csr(n:int,first_row:int,nrow_local:int,mat,context:str=
 
 
 def mpi_allgather_vector(n:int,first_row:int,nrow_local:int,b,context:str=""):
-	"""The full-length vector on EVERY rank, from each rank's own row block. ``b`` unchanged serially."""
+	"""The full-length vector on EVERY rank, from each rank's own row block. ``b`` unchanged serially.
+
+	The mpi4py import stays BELOW the serial early return, like the one in
+	:py:func:`mpi_allgather_square_csr` above. A wheel installed without MPI has no mpi4py at all,
+	and this is reached serially from the replicating default of
+	:py:meth:`pyoomph.solvers.generic.GenericLinearSystemSolver.solve_python_built_distributed` --
+	so importing it up here raised ModuleNotFoundError on a single process, which took out
+	Temporal_ODEs/lorenz_lyapunov.py (the Lyapunov spectrum, via solve_many) and
+	bifurcation_branch_switching.py (bordered_la_solve inside classify_bifurcation) on every
+	platform of the tutorial CI that runs without PETSc. The nightly never saw it: its build has
+	MPI, hence mpi4py.
+	"""
 	import numpy
-	from mpi4py import MPI #type:ignore
 	if get_mpi_nproc()<=1:
 		return numpy.asarray(b,dtype=numpy.float64)
+	from mpi4py import MPI #type:ignore
 	comm=get_mpi_world_comm()
 	assert comm is not None
 	layout=mpi_row_layout(n,first_row,nrow_local,0)
