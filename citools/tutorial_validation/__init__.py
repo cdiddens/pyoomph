@@ -943,7 +943,16 @@ def _cmp_fingerprint(check: Fingerprint, art: RunArtifacts, ref: dict, out: Outc
 
 
 def _stdout_matches(check: Stdout, art: RunArtifacts) -> "list[list[float]]":
-    text = art.stdout.decode("utf-8", errors="replace")
+    # Newlines normalised, because a Stdout pattern is anchored with (?m)^...$ and the child's
+    # stdout is captured as raw bytes - on Windows that is CRLF, and re's $ matches BEFORE the \n
+    # with the \r still in the way, so an anchored pattern matches nothing at all. Measured on the
+    # tutorial CI run of 12th October 2026: Multicomponent_Flow/insoluble_surfactant_definition.py
+    # and soluble_surfactants.py printed exactly the expected line on windows-msys2-ucrt64 and the
+    # check reported "matched 0 time(s), the reference 1".
+    #
+    # splitlines() rather than a replace(): it also covers a lone \r and the other line separators
+    # a decoded stream can carry, and the reference numbers themselves are unaffected either way.
+    text = "\n".join(art.stdout.decode("utf-8", errors="replace").splitlines())
     found = []
     for m in re.finditer(check.pattern, text):
         groups = m.groups() if m.groups() else (m.group(0),)

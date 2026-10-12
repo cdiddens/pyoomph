@@ -174,6 +174,23 @@ def test_a_drifted_run_fails_every_check(validation, scale):
     assert len({p.split(":")[0] for p in result.problems}) == len(DEFAULT_CHECKS)
 
 
+def test_an_anchored_stdout_pattern_survives_crlf(validation):
+    """Windows line endings must not silence an anchored Stdout pattern.
+
+    re's $ under (?m) matches before the \n with the \r still in front of it, so a pattern written
+    as ^...$ matched nothing at all on windows-msys2-ucrt64 while the script had printed exactly the
+    expected line. The check then said "matched 0 time(s), the reference 1", which reads like the
+    script did something else - the worst shape for a false alarm to take.
+    """
+    validation.set_checks([Stdout(r"(?m)^omega=([0-9.eE+-]+)$")])
+    validation.record(validation.run("ref"), stdout=b"omega=1\n")
+    run = validation.run("again")
+    assert validation.check(run, stdout=b"omega=1\r\n").status == "ok"
+    # Still discriminating once the line endings are out of the way.
+    assert validation.check(run, stdout=b"omega=1.01\r\n").status == "mismatch"
+    assert validation.check(run, stdout=b"nothing printed\r\n").status == "mismatch"
+
+
 def test_duplicated_output_instants_are_not_a_mismatch(validation):
     validation.record(validation.run("ref"))
     assert validation.check(validation.run("dup", duplicate_last=3)).status == "ok"
