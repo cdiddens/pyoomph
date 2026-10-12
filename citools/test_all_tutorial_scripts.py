@@ -156,12 +156,23 @@ _OPTIONAL_MODULES={"precice":"preCICE (pip install pyprecice, plus a libprecice 
 # having a PETSc-free eigensolver in the first place. A ModuleNotFoundError for petsc4py is therefore a
 # real failure again.
 # Scripts that open a window and wait for the user. tkinter's mainloop never returns on its own, so
-# under this harness they would either hang forever or - on a headless nightly - die on "no display
-# name and no $DISPLAY environment variable", neither of which says anything about pyoomph. They are
-# skipped here and listed again at the end, alongside the preCICE reminder, because they still have
-# to be run by hand before a release. The GUI's own logic is covered headlessly by the worker scripts
-# in tests/ (tests/*_worker.py drive the model without ever mapping a window).
+# calling them as they stand would either hang this harness forever or - on a headless nightly - die
+# on "no display name and no $DISPLAY environment variable", neither of which says anything about
+# pyoomph. They used to be skipped outright for that reason; they are now run through the headless
+# mode below, and this dict is what still lists them at the end, alongside the preCICE reminder,
+# because the WINDOW has to be looked at by hand before a release. The GUI's own logic is covered by
+# the worker scripts in tests/ as well (tests/*_worker.py drive the model directly).
 _MANUAL_GUI_SCRIPTS={"thin_film_bifurcation_gui.py":"opens the interactive bifurcation GUI"}
+# ... but the diagram behind the window can be built without one. BifurcationGUI.start() honours
+# PYOOMPH_BIFURCATION_GUI_HEADLESS=<steps>: it drives the controller for that many continuation steps
+# and returns, importing neither tkinter nor an interactive matplotlib backend, so it runs with
+# $DISPLAY unset on a CI runner or under cron. That turns these scripts from "skipped everywhere" into
+# ordinary tested scripts - the computation they do is the same one the window's key binding drives.
+# The number of steps is small on purpose: enough to leave the starting point and take real arclength
+# steps with an eigensolve at each, not enough to double the chapter's runtime.
+# What this does NOT cover is the window itself - the menus, the panes, the key bindings. That still
+# needs a human before a release, which is why these scripts stay listed at the end of the report.
+_GUI_HEADLESS_STEPS={"thin_film_bifurcation_gui.py":4}
 
 _MISSING_MODULE=re.compile(rb"ModuleNotFoundError: No module named '([A-Za-z0-9_.]+)'")
 # pyoomph catches the ImportError of a solver backend and re-raises it as its own RuntimeError
@@ -468,7 +479,8 @@ all_okay=not problems # inconsistent duplicated scripts already count as a failu
 
 skips=args.skips
 skipped_for_missing=[]
-manual_gui=[]      # (folder, script) of the GUI scripts nobody can test unattended
+manual_gui=[]      # (folder, script) of the GUI scripts whose WINDOW nobody can test unattended
+not_applicable=[]  # (folder, script, reason) declared unvalidatable in specs.NOT_APPLICABLE
 timings=[]  # (folder, script, seconds, number of log files, whether the script failed)
 untimed=[]  # ran, but left no "Elapsed time" footer anywhere
 records=[]  # one dict per script, for --report-json
@@ -512,21 +524,29 @@ for d in glob.glob("./*/"):
     if f=="bifurcation_fold_param_change.py":
       # This is meant to crash when the parameter is changed, so it is not a regression test.
       continue
+    headless_gui=_GUI_HEADLESS_STEPS.get(f) if f in _MANUAL_GUI_SCRIPTS else None
     if f in _MANUAL_GUI_SCRIPTS:
-      print("   SKIPPING",f,"--",_MANUAL_GUI_SCRIPTS[f],"and must be checked manually")
       manual_gui.append((folder_label(d),f))
-      records.append({"folder":folder_label(d),"script":f,"status":"skipped","note":_MANUAL_GUI_SCRIPTS[f]+", must be checked manually"})
-      continue
-    if args.mpirun>0 and f=="parallel_running.py":
-      # This one spawns its own mpirun, so launching it under one already gives nested MPI.
-      print("   SKIPPING",f,"-- it is just as spawner of other scripts")
-      records.append({"folder":folder_label(d),"script":f,"status":"skipped","note":"only a spawner of other scripts, and this pass is already under mpirun"})
-      continue
+      if headless_gui is None:
+        print("   SKIPPING",f,"--",_MANUAL_GUI_SCRIPTS[f],"and must be checked manually")
+        records.append({"folder":folder_label(d),"script":f,"status":"skipped","note":_MANUAL_GUI_SCRIPTS[f]+", must be checked manually"})
+        continue
+    # parallel_running.py spawns its own mpirun, so launching it under one gives nested MPI, which
+    # tests this harness rather than the tutorial. It is run WITHOUT the prefix instead of skipped:
+    # the script's own job is to start other scripts in parallel, and it does that identically in
+    # both passes - so skipping it left it untested in the MPI pass for no gain.
+    force_serial=args.mpirun>0 and f=="parallel_running.py"
     env=None if args.no_petsc else (env_complex if needs_complex_petsc(f) else env_real)
     env=with_validation_dump(env)
-    print("   Testing",f,"-- with the complex PETSc" if env is not None and env is env_complex else "")
+    if headless_gui is not None:
+      env=dict(os.environ) if env is None else dict(env)
+      env["PYOOMPH_BIFURCATION_GUI_HEADLESS"]=str(headless_gui)
+    notes="".join([" -- with the complex PETSc" if env is not None and env is env_complex else "",
+                   " -- headless GUI, %d continuation step(s)"%headless_gui if headless_gui is not None else "",
+                   " -- serially, it spawns its own mpirun" if force_serial else ""])
+    print("   Testing",f,notes)
     cmd=[sys.executable, '-u', f]
-    if args.mpirun>0:
+    if args.mpirun>0 and not force_serial:
       cmd=["mpirun","-n",str(args.mpirun)]+cmd
     if args.quick_test:
       cmd.append("--quick-test")
@@ -613,8 +633,15 @@ for d in glob.glob("./*/"):
         print(tutorial_validation.propose(key,art))
         valstatus="proposed"
       elif tutorial_validation.checks_for(key) is None:
-        valstatus="no-spec"
-        unvalidated.append((folder_label(d),f,"no entry in citools/tutorial_validation/specs.py"))
+        # Two different things, and the report keeps them apart: a declared exemption is a finished
+        # answer, no entry at all is a gap somebody still has to close.
+        reason=tutorial_validation.not_applicable_reason(key)
+        if reason is not None:
+          valstatus,valdetail="not-applicable",reason
+          not_applicable.append((folder_label(d),f,reason))
+        else:
+          valstatus="no-spec"
+          unvalidated.append((folder_label(d),f,"no entry in citools/tutorial_validation/specs.py"))
       elif validation_mode=="update":
         outcome,path=tutorial_validation.update(key,art)
         if outcome.problems:
@@ -691,9 +718,14 @@ if skipped_for_missing:
 
 if manual_gui:
   print()
-  print("NOT RUN, CHECK MANUALLY (interactive GUI scripts):")
+  # These ran, headlessly, so their numbers are checked like any other script's. What no unattended
+  # pass can check is the window: the menus, the panes, the key bindings, the plots it draws. That is
+  # what this section still asks for before a release.
+  print("WINDOW NOT CHECKED (the diagram was built headlessly, the user interface was not):")
   for folder,script in manual_gui:
-    print("   %s/%s %s"%(folder,script,_MANUAL_GUI_SCRIPTS[script]))
+    steps=_GUI_HEADLESS_STEPS.get(script)
+    how=("ran %d continuation step(s) without a window"%steps) if steps is not None else "NOT RUN AT ALL"
+    print("   %s/%s %s -- %s"%(folder,script,_MANUAL_GUI_SCRIPTS[script],how))
   print()
 
 # Coverage, in the same style and for the same reason as the two sections above: a green run has
@@ -708,6 +740,10 @@ if validation_mode=="compare":
   if unvalidated:
     print("NOT VALIDATED: %d script(s) ran but were not checked:"%len(unvalidated))
     for folder,script,why in unvalidated:
+      print("   %s/%s -- %s"%(folder,script,why))
+  if not_applicable:
+    print("VALIDATION NOT APPLICABLE: %d script(s), declared in specs.py:"%len(not_applicable))
+    for folder,script,why in not_applicable:
       print("   %s/%s -- %s"%(folder,script,why))
   print()
 elif validation_mode=="update":
@@ -751,7 +787,8 @@ if report_json is not None:
                "python":sys.version.split()[0],
                "validation":{"mode":validation_mode,"off_because":validation_off_because,
                              "pass_labels":list(validation_pass_labels),
-                             "validated":len(validated),"not_validated":len(unvalidated)},
+                             "validated":len(validated),"not_validated":len(unvalidated),
+                             "not_applicable":len(not_applicable)},
                "options":{"quick_test":args.quick_test,"tcc":args.tcc,"no_petsc":args.no_petsc,
                           "mpirun":args.mpirun,"omp":args.omp,"distribute":args.distribute,
                           "extra_arg":args.extra_arg,

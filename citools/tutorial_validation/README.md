@@ -451,3 +451,44 @@ Python's `os.environ` never sees them, but `exec()` hands them to every tested s
 anything - i.e. every single script "failing" with an empty log. That is why `_load_text()` here
 repeats what `pyoomph.utils.num_text_out.LoadedTextDataFile` already does, and it is the same reason
 the harness keeps petsc4py out of its own process.
+
+
+## A script with no number at all: `NOT_APPLICABLE`
+
+A script with no entry in `specs.py` is reported under `NOT VALIDATED`, which is a to-do list. One
+script is not on it and never will be: `Multicomponent_Flow/materials_liquids.py` registers liquid
+materials and does nothing else - no `print`, no `Problem`, no `run()`, no output call - so there is
+no number anywhere to compare, and its exit status already says the only thing there is to say.
+
+Declaring that in `specs.NOT_APPLICABLE`, with the reason, moves it into its own
+`VALIDATION NOT APPLICABLE` section. The point is not tidiness: with one permanent exemption sitting
+in `NOT VALIDATED`, a newly added script that nobody has written a spec for looks exactly the same,
+and the gap cannot be read off a green run. Keep the list short, and do not use it for "writes no
+data file" - `Fingerprint()` reads the dofs, parameters and eigenvalues straight out of the `Problem`
+and covers the 29 scripts that write nothing.
+
+## A script that ends in a window: the headless GUI mode
+
+`Advanced_Linear_Dynamics/thin_film_bifurcation_gui.py` ends in `BifurcationGUI.start()`, which
+enters tkinter's event loop and never returns. Under the harness that is either a hang forever or, on
+a machine with no display, a crash that says nothing about pyoomph - so it used to be skipped on
+every platform, in CI and locally, and was the only tutorial with no test coverage at all.
+
+`BifurcationGUI.start()` now honours `PYOOMPH_BIFURCATION_GUI_HEADLESS=<steps>`: it drives the
+controller for that many continuation steps, stores the diagram and returns, without importing
+tkinter or an interactive matplotlib backend. The harness sets it from `_GUI_HEADLESS_STEPS` in
+`test_all_tutorial_scripts.py`, so the script runs and is validated like any other - the continuation
+and the eigensolve it does are the same ones the window's key binding drives.
+
+Two things to know when touching this:
+
+* The fingerprint is written from inside the headless path, by an explicit
+  `Problem._write_validation_dump()`. A script ending in `start()` never releases its `Problem`, and
+  the `atexit` fallback refuses to collect under MPI because the ranks reach interpreter exit
+  independently - so without that call there is no fingerprint in an MPI pass at all. Inside the
+  headless path every rank is in lockstep, which is what makes the collective safe there.
+* What is NOT covered is the user interface: the menus, the panes, the key bindings, the plots. The
+  harness still lists these scripts at the end, under `WINDOW NOT CHECKED`, and they still have to be
+  looked at by hand before a release. `tests/test_bifurcation_gui.py` drives the window itself (under
+  `xvfb-run` where there is no display) and `tests/headless_gui_worker.py` guards this mode, including
+  a control phase that proves the mode really takes a different route.

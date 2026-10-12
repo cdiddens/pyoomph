@@ -1253,6 +1253,16 @@ def checks_for(key: str) -> "list[Check] | None":
     return specs.VALIDATION.get(key)
 
 
+def not_applicable_reason(key: str) -> "str | None":
+    """Why this script cannot be validated at all, or None.
+
+    A declared exemption (specs.NOT_APPLICABLE) is a finished answer and is reported separately from
+    a script that simply has no entry yet - otherwise the one permanent case hides the growing ones.
+    """
+    from . import specs
+    return getattr(specs, "NOT_APPLICABLE", {}).get(key)
+
+
 def validate(key: str, art: RunArtifacts, pass_labels: "tuple[str,...]" = ()) -> Outcome:
     """Compare one finished run against the committed reference numbers."""
     out = Outcome()

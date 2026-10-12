@@ -1356,6 +1356,28 @@ VALIDATION: "dict[str,list]" = {
       # platform's continuation lands elsewhere.
       Fingerprint(),
   ],
+  "Advanced_Linear_Dynamics/thin_film_bifurcation_gui.py": [
+      # The GUI tutorial, run without its window: the harness sets
+      # PYOOMPH_BIFURCATION_GUI_HEADLESS=4 (see _GUI_HEADLESS_STEPS in test_all_tutorial_scripts.py)
+      # and BifurcationGUI.start() drives four arclength steps through the controller instead of
+      # entering the event loop. So what is checked here is the continuation and the eigensolve that
+      # the window's own key binding would have driven.
+      #
+      # only=["params.*"] - i.e. beta_mu alone - and deliberately nothing else. The step size adapts
+      # to the Newton iteration count, the script asks for 50 eigenvalues with a shift-invert around
+      # 1, and macos-arm64 answers that with SLEPc while the other three platforms use the built-in
+      # spectra backend. The dof fields after four adapted steps are not a quantity to pin across
+      # that; the parameter the continuation has reached is, because every step solves the same
+      # augmented system to the same Newton tolerance.
+      #
+      # Reproducible locally: beta_mu=1.2710727438858342 serially and BIT-IDENTICAL over four ranks,
+      # and the same number to all printed digits in three further runs driven by hand (two through
+      # tests/-style Tk patching with a display, one with $DISPLAY unset entirely). So neither the
+      # rank count nor the presence of a window moves it. rtol=1e-3 is the allowance for the step
+      # sequence differing across the two EIGENSOLVERS, which no local run can measure - if a
+      # platform diverges further than that, the step adaptation is what to look at, not this number.
+      Fingerprint(only=["params.*"], rtol=1e-3),
+  ],
   "Advanced_Linear_Dynamics/hanging_droplet.py": [
       # The critical Bond number against droplet volume: 14 points of the curve at which a hanging
       # droplet becomes unstable. That curve IS the script's result, and each of its points is a
@@ -1709,11 +1731,9 @@ VALIDATION: "dict[str,list]" = {
       Fingerprint(index=6),
       Fingerprint(index=7),
   ],
-  # Multicomponent_Flow/materials_liquids.py has NO entry, and deliberately: it registers liquid
-  # materials and prints nothing, builds no Problem and writes no file, so it exits 0 with no number
-  # anywhere to compare. The harness reports it in the NOT VALIDATED section, which is the honest
-  # outcome - what it tests is that the definitions import and evaluate without raising, and that is
-  # exactly what its exit status already says.
+  # Multicomponent_Flow/materials_liquids.py has no entry, deliberately - see NOT_APPLICABLE at the
+  # bottom of this file, which is where that exemption is declared so the report can distinguish it
+  # from a script nobody has gotten around to yet.
   # ===============================================================================================
   # Multiple_Domains: problems split across several meshes that talk to each other across an
   # interface. What is worth checking here is almost always the COUPLING - a temperature that stays
@@ -2017,4 +2037,21 @@ VALIDATION: "dict[str,list]" = {
       Evolution("m1_instability.txt"),
       Fingerprint(),
   ],
+}
+
+
+# Scripts that CANNOT be validated, with the reason, as opposed to scripts that merely have no entry
+# yet. The distinction matters in the report: "nobody has written a spec for this" is a gap to be
+# closed, while "there is no number in this script to compare" is a finished answer. Without this
+# declaration both looked identical in the NOT VALIDATED section, so the gap could never be read off
+# a green run - and a new script added without a spec would hide among the permanent exemptions.
+#
+# Keep this list short and justify every entry: "writes no data file" is NOT a reason on its own,
+# since Fingerprint() reads the dofs, parameters and eigenvalues straight out of the Problem and
+# covers the 29 scripts that write nothing at all.
+NOT_APPLICABLE = {
+    "Multicomponent_Flow/materials_liquids.py":
+        "registers liquid materials and nothing else: no print, no Problem, no run(), no output call, "
+        "so there is no number anywhere to compare. What it tests is that the definitions import and "
+        "evaluate without raising, which is exactly what its exit status says.",
 }
