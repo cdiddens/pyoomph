@@ -866,6 +866,56 @@ def test_must_init_keeps_the_diagram_and_skips_the_setup(tmp_path):
     assert "LEGACY rejected" in legacy, "must_init(ds) must be rejected:\n" + legacy[-2000:]
 
 
+def test_headless_mode_steps_without_a_window(tmp_path):
+    """PYOOMPH_BIFURCATION_GUI_HEADLESS: continuation steps where there is no display at all.
+
+    The tutorial harness runs the GUI tutorials with this set
+    (_GUI_HEADLESS_STEPS in citools/test_all_tutorial_scripts.py), which is the only reason they are
+    tested at all rather than skipped on every platform. What has to hold for that to be worth
+    anything is that the mode takes a DIFFERENT route, before the window exists: the worker makes
+    _create_app raise, and this runs it with DISPLAY removed from the environment and without the
+    xvfb prefix the other GUI tests need.
+
+    The "window" phase is the control. Without it, a headless branch that had quietly stopped being
+    reached - or one that always skips the window, mode or no mode - would look exactly like a pass.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "headless_gui_worker.py")
+
+    def run(phase, steps, out_sub, expect_rc=0):
+        env = dict(os.environ)
+        env.pop("DISPLAY", None)          # no display, no xvfb: the mode has to need neither
+        if steps is None:
+            env.pop("PYOOMPH_BIFURCATION_GUI_HEADLESS", None)
+        else:
+            env["PYOOMPH_BIFURCATION_GUI_HEADLESS"] = str(steps)
+        proc = subprocess.run([sys.executable, worker, "--phase", phase,
+                               "--outdir", os.path.join(str(tmp_path), out_sub)],
+                              cwd=here, capture_output=True, text=True, timeout=900, env=env)
+        out = (proc.stdout or "") + (proc.stderr or "")
+        assert proc.returncode == expect_rc, "%s: expected rc=%d, got %d:\n%s" % (
+            phase, expect_rc, proc.returncode, out[-3000:])
+        return out
+
+    headless = run("headless", 3, "headless")
+    assert "PYOOMPH_WORKER_DONE" in headless, "the headless run did not finish:\n" + headless[-3000:]
+    assert "HEADLESS_DONE steps=3 points=4" in headless, (
+        "three steps from the starting point make four stored points:\n" + headless[-3000:])
+
+    # The control: the same worker, same absent display, variable unset -> it has to go for the window.
+    window = run("window", None, "window")
+    assert "WINDOW_ATTEMPTED" in window, (
+        "without the variable, start() must still build the window:\n" + window[-3000:])
+
+    # A value that is not a step count is a harness bug, and opening a window there would hang the
+    # pass forever instead of reporting it - so it raises.
+    bad = run("headless", "two", "bad", expect_rc=1)
+    assert "PYOOMPH_BIFURCATION_GUI_HEADLESS" in bad, "the error has to name the variable:\n" + bad[-3000:]
+    assert "non-negative integer" in bad, "the error has to say what is wrong:\n" + bad[-3000:]
+
+
 def test_extremum_observables_become_axis_choices(tmp_path):
     """Each ExtremumObservables entry offers its minimum, its maximum, and where each of them sits.
 

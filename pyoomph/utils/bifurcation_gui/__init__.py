@@ -68,6 +68,35 @@ from .model import BifurcationGUISolutionPoint, BifurcationGUISolutionBranch
 from .controller import BifurcationController
 from .plotter import BifurcationDiagramPlotter
 
+import os as _os
+
+#: Number of continuation steps to take instead of opening the window, from the environment.
+#: Set by the tutorial harness (citools/test_all_tutorial_scripts.py) so that a script ending in
+#: start() can be tested where there is no display at all - a CI runner, or a nightly under cron.
+_HEADLESS_ENV="PYOOMPH_BIFURCATION_GUI_HEADLESS"
+
+
+def _headless_steps() -> int | None:
+    """The number of steps :py:meth:`BifurcationGUI.start` should take headlessly, or ``None``.
+
+    ``None`` - the variable is unset or empty - means the normal interactive behaviour. Anything that
+    is not a non-negative integer raises instead of falling back to the window: the variable is only
+    ever set by a harness, and silently opening a window there would hang the run forever, which is
+    the failure this mode exists to avoid.
+    """
+    raw=_os.environ.get(_HEADLESS_ENV)
+    if raw is None or raw.strip()=="":
+        return None
+    try:
+        steps=int(raw.strip())
+    except ValueError:
+        raise RuntimeError(_HEADLESS_ENV+" must be a non-negative integer (the number of continuation "
+                           "steps to take without a window), not "+repr(raw)) from None
+    if steps<0:
+        raise RuntimeError(_HEADLESS_ENV+" must be a non-negative integer, not "+repr(raw))
+    return steps
+
+
 
 class BifurcationGUI:
     """Builds a bifurcation diagram of ``problem`` in ``parameter``, interactively.
@@ -294,7 +323,10 @@ class BifurcationGUI:
     def start(self,init_ds:float | None=None,initial_max_newton_iterations:int=10):
         """Solve the starting point, open the window and enter the event loop.
 
-        ``init_ds`` is the initial arclength step. Returns when the window is closed. An existing
+        ``init_ds`` is the initial arclength step. Returns when the window is closed - or, when
+        ``PYOOMPH_BIFURCATION_GUI_HEADLESS`` is set to a step count, after taking that many
+        continuation steps without opening anything, so that a script ending in this call can be
+        tested where there is no display (see :py:meth:`_run_headless`). An existing
         diagram in the problem's output directory is reloaded, so a session can be resumed - the same
         diagram whose presence :py:meth:`must_init` reports, and the call belongs *after* the block
         that method guards::
@@ -308,6 +340,10 @@ class BifurcationGUI:
         fresh=self.controller.start(init_ds,initial_max_newton_iterations)
         if fresh:
             self.plotter.initialise_view(self.controller)
+
+        steps=_headless_steps()
+        if steps is not None:
+            return self._run_headless(steps,init_ds,initial_max_newton_iterations,fresh)
 
         app=self._create_app()
         self.app=app
@@ -372,6 +408,40 @@ class BifurcationGUI:
         if not fresh:
             self.controller.log("Found a stored diagram and will load it, so the initialisation is skipped")
         return fresh
+
+    def _run_headless(self,steps:int,init_ds:float,initial_max_newton_iterations:int,fresh:bool):
+        """Take ``steps`` continuation steps and return, without ever creating a window.
+
+        The controller holds no reference to the app, so this drives the real thing: the same
+        :py:meth:`BifurcationController.step` the window's own key binding calls, the same storage.
+        Nothing here imports tkinter or matplotlib's interactive backend, so it runs where there is no
+        display and no window system at all - which is what separates it from withdrawing a window
+        after mapping it (what ``tests/*_worker.py`` do, on a machine that has a display).
+
+        Used by the tutorial harness to run the GUI tutorials it would otherwise have to skip. The
+        interactive window itself is not covered by this and still has to be looked at by hand.
+        """
+        c=self.controller
+        if not fresh:
+            try:
+                c.load_all(apply_view=self.plotter.apply_saved_view)
+            except Exception as e:
+                c.log("Could not reload the stored diagram: "+repr(e))
+                c.start(init_ds,initial_max_newton_iterations,ignore_saved=True)
+                self.plotter.initialise_view(c)
+        for _ in range(steps):
+            c.step()
+        c.save_all()
+        # Every rank is here, in lockstep, which is what makes this call safe. The fingerprint is
+        # collected collectively (Problem._write_validation_dump), and the atexit fallback that
+        # normally provides it refuses to run under MPI for exactly that reason - the ranks reach
+        # interpreter exit at their own pace. A script that ends in start() never releases its
+        # Problem, so without this there is no fingerprint at all in an MPI pass, and the harness
+        # reports the missing record as a mismatch. Does nothing unless PYOOMPH_VALIDATION_DUMP is
+        # set, and writes at most once, so an interactive session is unaffected.
+        c.problem._write_validation_dump()
+        c.log("headless ({:s}={:d}): {:d} point(s) in {:d} branch(es), no window opened".format(
+            _HEADLESS_ENV,steps,sum(len(b) for b in c.branches),len(c.branches)))
 
     def _create_app(self):
         try:
