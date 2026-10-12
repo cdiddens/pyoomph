@@ -8485,10 +8485,21 @@ namespace pyoomph
 	{
 	public:
 		PythonAugmentationSyncHandler(DofAugmentations *aug) : Augmentation(aug) {}
+#ifdef OOMPH_HAS_MPI
+		// Guarded like every other handler's synchronise() (see bifurcation.hpp): the base-class
+		// oomph::AssemblyHandler::synchronise() this overrides is itself inside an OOMPH_HAS_MPI
+		// block (src/thirdparty/oomph-lib/include/assembly_handler.h:165), so without the guard
+		// 'override' does not compile. That is not a corner case - every wheel is built with
+		// PYOOMPH_USE_MPI=OFF, so the unguarded version broke all four platforms in CI while the
+		// MPI-enabled nightly build stayed green.
+		//
+		// Nothing else needs guarding: without MPI there is nothing to broadcast, and the class is
+		// then exactly the no-op handler the installation site below says it is content with.
 		void synchronise() override
 		{
 			if (Augmentation) Augmentation->synchronise_scalars();
 		}
+#endif
 
 	private:
 		DofAugmentations *Augmentation; // not owned; the problem clears this handler first
