@@ -208,6 +208,47 @@ What the freedoms look like in practice, and what to keep instead of the quantit
   parameter of the order of the last step size - 3.0e-4 for `hopf_switch.py`. Give the parameter a
   tolerance that admits one step and say which step size it came from.
 
+### An adaptive mesh: `skip=ADAPTIVE_MESH`
+
+A script whose mesh adapts refines on a **threshold crossing**, and round-off decides which side of
+it the error estimator lands on. So the dof count is not reproducible once the arithmetic changes -
+measured over four platforms, from +0.04 % on `stokes_flow_around_object.py` to -3.5 % on
+`remeshing.py`, where the remesher triggers on geometric quality instead. A tolerance cannot fix a
+count, and widening one until a count passes would wreck every other key in the same check.
+
+`skip=ADAPTIVE_MESH` (defined at the top of `specs.py`) drops the four keys that describe the
+*discretisation* rather than the solution:
+
+| key | why it goes |
+| --- | --- |
+| `ndof`, `*.n` | they **are** the count |
+| `*.l2` | a norm of the dof **vector**, so it scales with the count: `sqrt(2618/2576)` alone is 0.8 % of `rayleigh_plateau_pinchoff.py`'s 3.3 % |
+| `*.mean` | an average over the dof **set**, i.e. weighted by dof density rather than by volume |
+
+`min` and `max` stay. They are the field's extremes, which converge as the mesh refines, so they
+remain a statement about the solution. But note they are sampled **at a node**: two meshes catch a
+sharp peak differently, so they still need a tolerance above round-off - 7.3e-04 to 6.2e-03 on the
+scripts here.
+
+How much this is worth: dropping those four alone was enough for `moffatt_eddies.py` and
+`viscoelastic_cylinder.py`, which then passed at the **default** `rtol=1e-5` on four platforms and
+over four ranks. That is the test of whether this is a structural statement or a tolerance in
+disguise. `moffatt_eddies.py` also shows why `mean` had to go: the script prescribes velocity on
+every boundary and pins the pressure with `AverageConstraint(pressure=0)`, so the *volume* average
+is zero by construction while the mean over dofs is a mesh-weighted number hovering near it - it
+moved "by a factor of four" and was never a physical quantity at all.
+
+This is the same argument the `FinalState` entries already made with `stats=("min","max")`. It had
+simply never been applied to a `Fingerprint`.
+
+**Confine a loose tolerance to the group that earns it.** Twice here one group wanted an order of
+magnitude more than everything else: `rayleigh_plateau_pinchoff.py`'s `_kin_bc` (1.6e-02 against
+4.7e-03 for the rest - it is the kinematic multiplier on the interface the topological surgery
+cuts) and `falling_droplet_with_surfactants.py`'s `droplet_outside` velocities (2.9e-02 against
+6.2e-03 - Marangoni stress concentrates the tangential flow into a thinner layer than in the
+surfactant-free twin, which needs only 4.8e-03 on the same quantity). Adding those to `skip=` kept
+the rest of each check an order of magnitude tighter than a single per-check `rtol` would have.
+
 ### Eigenvalues: `eigenvalues_by_value` and `eigenvalue_max_abs`
 
 Neither the order of a spectrum nor its length is a property of the problem, so a `Fingerprint`

@@ -51,6 +51,30 @@ offer. Keep the quantity that means something, drop the rest, then generate the 
 
 from . import Evolution, FinalState, Fingerprint, Stdout
 
+#: The fingerprint keys that describe the DISCRETISATION rather than the solution, for a script
+#: whose mesh adapts. Pass as ``skip=ADAPTIVE_MESH`` (or ``skip=ADAPTIVE_MESH + [...]``).
+#:
+#: An adaptive run refines on a threshold crossing, and round-off decides which side of it the
+#: estimator lands on, so the dof count is not reproducible once the arithmetic changes: measured
+#: over the four platforms of 12th October 2026, from +0.04 % on stokes_flow_around_object.py to
+#: -3.5 % on remeshing.py. Everything downstream of the count goes with it:
+#:
+#:   * ``ndof`` and ``*.n`` ARE the count;
+#:   * ``*.l2`` is a norm of the dof VECTOR and ``*.mean`` an average over the dof SET, so both
+#:     scale with the count by construction - which the data shows plainly, l2 being the worst
+#:     statistic on 10 of the 13 scripts in that run and reaching 3.3 % on
+#:     rayleigh_plateau_pinchoff.py, where sqrt(2618/2576) alone accounts for 0.8 % of it.
+#:
+#: ``min`` and ``max`` are deliberately NOT in here. They are the field's extremes, which converge
+#: as the mesh refines, so they remain a statement about the solution - but note they are sampled
+#: AT A NODE, so two meshes catch a sharp peak differently and they still need a tolerance above
+#: round-off. Dropping these four alone was enough for moffatt_eddies.py and
+#: viscoelastic_cylinder.py, which then needed no tolerance change at all.
+#:
+#: This is the same argument the FinalState entries in this file already make with
+#: ``stats=("min","max")``; it had simply never been applied to a Fingerprint.
+ADAPTIVE_MESH = ["ndof", "dofs.*.n", "dofs.*.mean", "dofs.*.l2"]
+
 VALIDATION: "dict[str,list]" = {
 
   # ---------------------------------------------------------------------------------------------
@@ -76,15 +100,41 @@ VALIDATION: "dict[str,list]" = {
       Fingerprint(),
   ],
   "Temporal_ODEs/custom_math_dimensional_tennis.py": [
-      # The ball bounces between two moving walls, i.e. the solution is only piecewise smooth, and
-      # the time stepper has to work its way through each bounce. That makes the whole trajectory
-      # depend on the exact arithmetic: over four ranks it took different steps from the first
-      # bounce on and ended 0.4% away. Serially it is reproducible to the last digit, so the check
-      # is kept and excused in the MPI pass rather than loosened everywhere.
-      Evolution("ball.txt", skip_under=("mpi",),
-                reason="the steps through each bounce differ over several ranks"),
-      Fingerprint(skip_under=("mpi",),
-                  reason="the steps through each bounce differ over several ranks"),
+      # The ball bounces between two walls at +-10 m, i.e. the solution is only piecewise smooth,
+      # and the time stepper has to work its way through each of the eight bounces. That makes the
+      # whole trajectory depend on the exact arithmetic - first measured over four ranks, where it
+      # took different steps from the first bounce on and ended 0.4 % away, and then on four
+      # platforms, which is what settles it. ball/x's l2 at t=20 came out
+      #
+      #   linux-x86_64 1.73e-03   macos-intel 3.09e-03   macos-arm64 7.30e-03   windows 1.51e-02
+      #
+      # away from the reference: an order of magnitude apart from each other, so there is no spread
+      # to set a tolerance from - the trajectory simply goes its own way on each machine, and the
+      # row-by-row comparison and the final state are both gone rather than loosened.
+      #
+      # Windowing to before the first bounce (t=1.1624) was the obvious rescue and is not worth
+      # having: xdot is CONSTANT there (extent 5e-14 over the first ten rows), so x = 10t and the
+      # check would verify that an integrator can follow a straight line.
+      #
+      # What is left is the trajectory's EXTREMES, which are physical and wall-bounded rather than
+      # path-dependent: x reaches -10.5455 and +11.0926, i.e. the penetration depth at maximum
+      # compression against walls at -10 and +10; xdot runs from -9.9811 (the slowest rebound after
+      # eight inelastic bounces) to exactly +10 (the launch speed); and the two wall columns are
+      # constant. stats=("min","max") is what selects them - the row COUNT is the adaptive step
+      # count and the mean and l2 are averages over it, so all three would carry the step sequence
+      # straight back in.
+      #
+      # rtol=5e-3 is honestly a guess at this point and the comment should say so: it is set from
+      # one machine, because the cross-platform spread of the penetration depth has not been
+      # measured - nothing has ever compared these extremes. The first CI round after this one is
+      # that measurement, and the number belongs here once it exists.
+      FinalState("ball.txt", stats=("min", "max"), rtol=5e-3,
+                 reason="the per-row trajectory is arithmetic-dependent through eight kinks; the "
+                        "extremes are set by the walls, and their cross-platform spread is not yet "
+                        "measured"),
+      Fingerprint(skip=["dofs.*"],
+                  reason="the state at t=20 is eight bounces of accumulated step-sequence "
+                         "difference - 1.7e-03 to 1.5e-02 across four platforms"),
   ],
   "Temporal_ODEs/van_der_pol_method_1.py": [
       Evolution("vdPol_oscillator.txt"),
@@ -595,7 +645,14 @@ VALIDATION: "dict[str,list]" = {
   ],
   "Spatial_PDEs/stokes_flow_around_object.py": [
       # 25055 dofs, the largest in the chapter.
-      Fingerprint(),
+      # Adaptive, so the dof count moves across platforms - 25064 against 25055, and on one of
+      # them 10863 velocity_x dofs against 10751 - and velocity_x's l2 wanted 1.2e-02.
+      # ADAPTIVE_MESH drops those. The worst survivor is the pressure MINIMUM at 1.4e-03, and that
+      # is a node-sampled extremum rather than a free level: this script pins the pressure itself,
+      # so what moves is which node holds the minimum. rtol=5e-3.
+      Fingerprint(skip=ADAPTIVE_MESH, rtol=5e-3,
+                  reason="adaptive, so the dof count differs across platforms and the field "
+                         "extremes are sampled on a different mesh"),
   ],
 
   # --- the cavity inverse-problem pair ---------------------------------------------------------
@@ -633,8 +690,16 @@ VALIDATION: "dict[str,list]" = {
       # The screen is the physics: I is the intensity, so its extremes and l2 are the interference
       # pattern. A regression in the slit geometry or the wave speed moves the fringes and with them
       # these numbers.
-      FinalState("domain__screen_*.txt"),
-      Fingerprint(),
+      # The screen is where the interference pattern is read off, and it agrees across platforms
+      # to 1.8e-04 - the mesh behind it adapts (28359 u dofs against 28279, +0.28 %), so the
+      # reduced intensity carries that. rtol=1e-3 on the reduction, five times the observation.
+      FinalState("domain__screen_*.txt", rtol=1e-3,
+                 reason="the mesh feeding the screen adapts, so the reduced intensity moves by "
+                        "1.8e-04 across platforms"),
+      # ADAPTIVE_MESH for the count and what scales with it (u's l2 wanted 5.6e-03); the worst
+      # survivor is u's minimum on the left wall at 3.1e-03, so rtol=1e-2.
+      Fingerprint(skip=ADAPTIVE_MESH, rtol=1e-2,
+                  reason="adaptive, so the dof count differs by 0.28 % across platforms"),
   ],
   "SpatioTemporal_PDEs/wave_eq_drums.py": [
       Fingerprint(),
@@ -662,7 +727,12 @@ VALIDATION: "dict[str,list]" = {
       Fingerprint(),
   ],
   "SpatioTemporal_PDEs/lubrication_coalescence.py": [
-      Fingerprint(),
+      # SpatialErrorEstimator with spatial_adapt=1, so refinement is a threshold crossing: 3823
+      # dofs of h against 3891, -1.75 %, and p's l2 followed it to 8.2e-03. ADAPTIVE_MESH drops
+      # those; the worst survivor is p's maximum at 2.5e-03, so rtol=8e-3.
+      Fingerprint(skip=ADAPTIVE_MESH, rtol=8e-3,
+                  reason="the error estimator refines on a threshold, so the dof count differs by "
+                         "1.75 % across platforms"),
   ],
   "SpatioTemporal_PDEs/marangoni_instability.py": [
       Fingerprint(),
@@ -673,8 +743,15 @@ VALIDATION: "dict[str,list]" = {
   "SpatioTemporal_PDEs/navier_stokes_around_object.py": [
       # globals.txt is 11 rows at the ten prescribed output times, so the abscissa is exact. UStokes
       # is the Stokes-drag velocity the object settles at, which is the quantity the script is about.
-      Evolution("globals.txt"),
-      Fingerprint(),
+      # UStokes again, 7.6e-05 across platforms.
+      Evolution("globals.txt", rtol=3e-4,
+                reason="the adapting mesh moves the terminal velocity by 7.6e-05 across platforms"),
+      # ADAPTIVE_MESH for the count and its dependants (velocity_x's l2 wanted 1.0e-02); the worst
+      # survivor is the pressure minimum at 6.2e-03, a node-sampled extremum on a pressure whose
+      # level this script pins, so rtol=2e-2.
+      Fingerprint(skip=ADAPTIVE_MESH, rtol=2e-2,
+                  reason="adaptive, so the dof count differs across platforms and the field "
+                         "extremes are sampled on a different mesh"),
   ],
   "SpatioTemporal_PDEs/rayleigh_taylor_instability.py": [
       Fingerprint(),
@@ -709,11 +786,21 @@ VALIDATION: "dict[str,list]" = {
       # and all came through the four-rank pass untouched, so rank-dependent refinement is not a
       # general property of the adaptation - which is why it is excused on these two rather than
       # the counts being dropped from every adaptive entry.
-      Fingerprint(skip_under=("mpi",),
-                  reason="the adaptation stops at a different mesh over four ranks: 73740 dofs "
-                         "against 73705"),
-      Fingerprint(index=1, skip_under=("mpi",),
-                  reason="the adaptation stops at a different mesh over four ranks"),
+      # ADAPTIVE_MESH and NOTHING ELSE - no loosened tolerance at all. The comment above was
+      # right that "a different mesh is a different discretisation" and wrong that this therefore
+      # needed excusing: of the quantities it listed, the dof count, the pressure l2 and the two
+      # means are exactly the four that scale with the count, and once they are dropped every
+      # surviving key agrees at the DEFAULT 1e-05, on four platforms and over four ranks alike.
+      # Together with viscoelastic_cylinder.py below, this is the pair that shows the drop is a
+      # structural statement about what a dof-set statistic means and not a tolerance in disguise.
+      #
+      # The near-zero pressure mean that moved "by a factor of four" is a case in point: this
+      # script prescribes velocity on every boundary and pins the pressure with
+      # AverageConstraint(pressure=0), so the VOLUME average is zero by construction while the
+      # mean over dofs is a mesh-weighted number hovering near it. It was never a physical
+      # quantity.
+      Fingerprint(skip=ADAPTIVE_MESH),
+      Fingerprint(index=1, skip=ADAPTIVE_MESH),
   ],
   "SpatioTemporal_PDEs/kuramoto_sivanshinsky.py": [
       # This script starts from a DIFFERENT INITIAL CONDITION on every run, and that - not round-off
@@ -830,7 +917,12 @@ VALIDATION: "dict[str,list]" = {
       # stands still and there is no abscissa to look an instant up by.
       Evolution("cylinder_drag.txt", match="rows",
                 reason="three stationary solves at successive Wi, so the time column stands still"),
-      Fingerprint(),
+      # ADAPTIVE_MESH only, and like moffatt_eddies.py no tolerance change: 19102 velocity dofs
+      # against 19106 is a -0.02 % difference whose whole effect was on the count, the means and
+      # the l2 norms. The published-benchmark Evolution above - the drag at three Wi against Claus
+      # & Phillips 2013 - held on every platform at the default tolerance, which is the check that
+      # matters here.
+      Fingerprint(skip=ADAPTIVE_MESH),
   ],
 
   # ===============================================================================================
@@ -866,7 +958,15 @@ VALIDATION: "dict[str,list]" = {
       Fingerprint(),
   ],
   "Moving_Mesh/remeshing.py": [
-      Fingerprint(),
+      # Remeshing fires on geometric thresholds - RemeshingOptions(max_expansion=2,
+      # min_expansion=0.3, min_quality_decrease=0.2) - so round-off decides which side of one the
+      # run lands on and the resulting mesh is genuinely different: 1289 nodes against 1335,
+      # -3.5 %, the largest count difference in the set. ADAPTIVE_MESH drops the count and the two
+      # statistics that scale with it (mesh_x's l2 wanted 1.4e-02); the worst survivor then wants
+      # 7.3e-04, and rtol=3e-3 is four times that.
+      Fingerprint(skip=ADAPTIVE_MESH, rtol=3e-3,
+                  reason="the remesher triggers on a geometric threshold, so the node count "
+                         "differs by 3.5 % across platforms and the node positions with it"),
   ],
   "Moving_Mesh/beads_on_string.py": [
       # The interface shape after the beads have formed, and the minimum radius over the run. The
@@ -958,9 +1058,25 @@ VALIDATION: "dict[str,list]" = {
       # through that pass untouched, which is the whole argument for reducing a series rather than
       # pinning the state it ends in - max(fragments) and the bounds on volume are the same on one
       # rank and on four.
-      Fingerprint(skip_under=("mpi",),
-                  reason="the state after a topological surgery is rank-dependent; 76 entries "
-                         "moved over four ranks, up to 0.44 %"),
+      # The state after a topological surgery is a property of the mesh that surgery produced.
+      # Across the four platforms of 12th October 2026 that mesh differed by up to 42 of 2576
+      # mesh_x dofs (+1.6 %), and the count-dependent statistics followed - mesh_x's l2 by 3.3 %,
+      # of which sqrt(2618/2576) alone is 0.8 %. skip=ADAPTIVE_MESH drops those four; see the
+      # comment on that list at the top of this file.
+      #
+      # _kin_bc is dropped on top of it, because that group alone wants 1.6e-02 while everything
+      # surviving after it wants 4.7e-03 or less. It is the kinematic condition's Lagrange
+      # multiplier on the very interface the surgery cuts, so its extremum is the most
+      # mesh-sensitive number in the record, and confining the looseness to it keeps the rest at
+      # 1.5e-02 rather than spending 1.6e-02 everywhere. The real check on this script is the
+      # FinalState above - the fragment count and the volume bounds - which passed on every
+      # platform.
+      #
+      # skip_under is gone with it: the four-rank difference was 76 entries "up to 0.44 %", inside
+      # 1.5e-02, and the count difference behind it is now skipped rather than excused.
+      Fingerprint(skip=ADAPTIVE_MESH + ["dofs.*_kin_bc*"], rtol=1.5e-2,
+                  reason="the mesh the topological surgery leaves behind differs by ~1.6 % of its "
+                         "dofs across platforms, and the field extremes are sampled on it"),
   ],
   # The droplet-spreading family. Each varies one ingredient - the slip length, free slip, a
   # hyperelastic tangential shift, Marangoni plus gravity - on the same spreading drop, so what
@@ -1070,9 +1186,16 @@ VALIDATION: "dict[str,list]" = {
       # already have finalised MPI). rivulet.py is the first script in the tutorial set to take that
       # path. The three dispersion curves above come from files and are checked under MPI as usual,
       # so what is lost here is only the state dump.
-      Fingerprint(skip_under=("mpi",),
+      # No ADAPTIVE_MESH here: this script's dof counts agreed on every platform, so the count and
+      # the l2 norms stay compared (they wanted 1.0e-04). What needs room is one node-sampled
+      # extremum, liquid/axis/velocity_y's minimum, at 1.9e-03 on a velocity of order 1e-07 - the
+      # axis velocity is zero by symmetry, so that group is numerical noise about zero and the
+      # extent the scale rule divides by is noise too. rtol=6e-3.
+      Fingerprint(skip_under=("mpi",), rtol=6e-3,
                   reason="the problem is never released (no with-block), so the fingerprint can "
-                         "only come from the atexit fallback, which does not collect under MPI"),
+                         "only come from the atexit fallback, which does not collect under MPI; "
+                         "and the axis velocity is zero by symmetry, so its extremes are noise "
+                         "about zero"),
   ],
   "Advanced_Linear_Dynamics/linear_response_drum.py": [
       # The frequency response of a driven axisymmetric drum, projected onto the first ten
@@ -1634,7 +1757,12 @@ VALIDATION: "dict[str,list]" = {
       # falling_droplet_with_surfactants.py below: a clean interface follows Hadamard-Rybczynski,
       # a surfactant-laden one is retarded towards the rigid-sphere Stokes limit, so the two
       # references should differ in a direction the physics dictates.
-      Evolution("globals.txt"),
+      # UStokes, the terminal velocity, is the physical answer and the mesh-independent one. It
+      # moves by 7.0e-05 across platforms (the droplet mesh adapts, 2901 velocity dofs against
+      # 2897), so rtol=3e-4 - four times that, and still far tighter than the fingerprint below.
+      Evolution("globals.txt", rtol=3e-4,
+                reason="the adapting droplet mesh moves the terminal velocity by 7.0e-05 across "
+                       "platforms"),
       # The pressure LEVEL is free here: the droplet and the surrounding fluid are both
       # incompressible and nothing pins a pressure anywhere, so the solve lands wherever it lands.
       # Measured between two runs on this machine: every pressure group's min, max and mean moved
@@ -1645,23 +1773,43 @@ VALIDATION: "dict[str,list]" = {
       # gauge_free rather than skip: the level is not a result, but the pressure's SHAPE is, and
       # that is what a regression in the traction balance would change. Each of these groups is
       # therefore compared by its spread, which is invariant under the gauge.
-      Fingerprint(gauge_free=["*pressure*", "*_kin_bc*"],
+      # gauge_free for the pressure level, as before, PLUS ADAPTIVE_MESH for the count: two
+      # different freedoms, and this entry needs both. The worst survivor is a pressure group's
+      # spread at 4.8e-03 - gauge_free keeps the spread, and a different mesh samples it
+      # differently - so rtol=1.5e-2.
+      Fingerprint(skip=ADAPTIVE_MESH, gauge_free=["*pressure*", "*_kin_bc*"], rtol=1.5e-2,
                   reason="nothing pins the pressure level, so it drifts between runs by a constant "
                          "(-6.3145163, identical on every pressure group and on the kinematic-BC "
-                         "multiplier); the spread of each group is what carries the physics"),
+                         "multiplier); the spread of each group is what carries the physics, and "
+                         "the droplet mesh adapts, so the count is not comparable either"),
   ],
   "Multiple_Domains/falling_droplet_with_surfactants.py": [
       # The same droplet with an insoluble surfactant on its interface. One more dof type than the
       # clean case (29 against 28), which is the surface concentration field, and a terminal
       # velocity that the Marangoni stresses reduce.
-      Evolution("globals.txt"),
+      # As in the surfactant-free twin: UStokes is the physical answer, 7.7e-05 across platforms.
+      Evolution("globals.txt", rtol=3e-4,
+                reason="the adapting droplet mesh moves the terminal velocity by 7.7e-05 across "
+                       "platforms"),
       # Same free pressure level as the clean case, measured the same way: a common shift of
       # -0.3538285 across every pressure group and the kinematic-BC multiplier, with each group's
       # spread unchanged. The constant differs from the clean case because the scales do; the
       # structure is identical.
-      Fingerprint(gauge_free=["*pressure*", "*_kin_bc*"],
+      # This is the loosest fingerprint in the file, and the reason is specific rather than
+      # general. gauge_free and ADAPTIVE_MESH as in the twin, and on top of them the
+      # droplet_outside VELOCITY groups are dropped: their maxima want 2.9e-02 and 1.8e-02 where
+      # the next survivor wants 6.2e-03. Those are the interface velocity extremes, and the
+      # surfactant is what makes them so much sharper than in the twin, which needs 4.8e-03 on the
+      # same quantity - Marangoni stress concentrates the tangential flow into a thinner
+      # interfacial layer, and a 47468-dof two-phase mesh differing by 1.6 % samples it
+      # differently. Dropping those two groups is what keeps the rest at 2e-2 rather than spending
+      # 3e-2 on everything.
+      Fingerprint(skip=ADAPTIVE_MESH + ["dofs.*droplet_outside/velocity_*"],
+                  gauge_free=["*pressure*", "*_kin_bc*"], rtol=2e-2,
                   reason="nothing pins the pressure level, so it drifts between runs by a constant "
-                         "(-0.3538285 here); the spread of each group carries the physics"),
+                         "(-0.3538285 here); the spread of each group carries the physics, and "
+                         "the Marangoni-sharpened interface velocity extremes are not comparable "
+                         "on a mesh that differs by 1.6 %"),
   ],
   "Multiple_Domains/evaporating_water_droplet.py": [
       # An evaporating droplet coupled to the vapour in the surrounding gas, 35 dof types - the most
@@ -1693,7 +1841,13 @@ VALIDATION: "dict[str,list]" = {
   "Multiple_Domains/melting_ice_convection.py": [
       # Ice melting into convecting water: the largest script in the chapter at 60794 dofs, and the
       # one whose answer depends on the latent-heat coupling at the moving phase boundary.
-      Fingerprint(),
+      # Adaptive in time with a melting interface, so the mesh follows the interface and its dof
+      # count is not reproducible: 14497 liquid/T dofs against 14457, +0.28 %. ADAPTIVE_MESH drops
+      # the count and what scales with it; the worst survivor is the interface-speed multiplier's
+      # maximum at 4.9e-03, so rtol=1.5e-2 is three times the observation.
+      Fingerprint(skip=ADAPTIVE_MESH, rtol=1.5e-2,
+                  reason="the mesh follows the melting interface, so its dof count differs by "
+                         "0.28 % across platforms"),
   ],
   "Multiple_Domains/simple_fsi.py": [
       # Fluid-structure interaction: a solid deforming under the flow it is immersed in, 26 dof
