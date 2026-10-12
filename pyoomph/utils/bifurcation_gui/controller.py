@@ -2705,7 +2705,14 @@ class BifurcationController:
         if self.scale_arc_length:
             self.problem.set_arc_length_parameter(scale_arc_length=False)
         try:
-            self.problem._compute_arclength_tangent(self._get_paramname_str())
+            # Stationary steppers for the solve: compute_arclength_tangent solves J dU = -dR/dp, and
+            # on a problem whose steppers are not steady that J carries the w0*M term, so the
+            # direction comes back off the branch - measured as dobs/dparameter = 0.252 on the
+            # transcritical's other branch, where the branch has slope 1. It used to be steady here
+            # by accident: NormalFormCalculator made the steppers steady and never undid it, so a
+            # switch inherited that state from the classification that preceded it.
+            with self.problem.steady_time_steppers():
+                self.problem._compute_arclength_tangent(self._get_paramname_str())
         except Exception as e:
             # A singular or nearly singular Jacobian is the ordinary reason, and an arrow is not worth
             # interrupting anything for - this is exactly the state the code below already handles.

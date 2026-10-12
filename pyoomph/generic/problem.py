@@ -6609,7 +6609,11 @@ class Problem(_pyoomph.Problem):
         # better than nothing.
         if self._last_arclength_parameter is not None:
             try:
-                self._compute_arclength_tangent(self._last_arclength_parameter)
+                # Stationary steppers, for the same reason as the GUI's _compute_continuation_tangent:
+                # the solve behind this wants the stationary Jacobian, and nothing here guarantees the
+                # steppers are steady on arrival.
+                with self.steady_time_steppers():
+                    self._compute_arclength_tangent(self._last_arclength_parameter)
             except Exception as e:
                 if not self.is_quiet():
                     print("Could not recompute the augmented arclength tangent after the adaptation ("
