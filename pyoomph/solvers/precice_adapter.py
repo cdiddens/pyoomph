@@ -27,7 +27,15 @@ from __future__ import annotations
 # ========================================================================
  
 
-import precice
+# preCICE itself is NOT imported here, deliberately. The only thing in this file that needs the
+# package is _PyoomphPreciceAdapater.initialize_problem below, which creates the participant, i.e.
+# a coupled run; everything else - PreciceProvideMesh, PreciceWriteData, PreciceReadData - is an
+# ordinary Equations class that can be built and then discarded. That is exactly what the two
+# PreCICE_Coupling tutorials do when they are started without a participant: they assemble the
+# coupling equations, do not attach them, and solve the monolithic domain instead. A module-level
+# "import precice" made that monolithic branch impossible on a machine without libprecice, so both
+# tutorials were reported as skipped there - on the GitHub runners every single time - although the
+# computation they then do needs nothing but pyoomph.
 
 from ..expressions import *
 from ..typings import *
@@ -65,6 +73,7 @@ class _PyoomphPreciceAdapater:
         self._initialized:bool=False
         
     def initialize_problem(self,problem:Problem):
+        import precice # the one place the package is needed - see the note at the top of this file
         interface=precice.Participant(problem.precice_participant,problem.precice_config_file,0,1)
         problem._precice_interface=interface
         problem._equation_system._before_precice_initialise()

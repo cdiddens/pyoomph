@@ -11,7 +11,7 @@ Via preCICE, the Dirichlet participant (left half) will receive the values of th
 More details can be found in the `preCICE tutorial <https://precice.org/tutorials-partitioned-heat-conduction.html>`__.
 
 
-To use preCICE in pyoomph, you can just import the module :py:mod:`pyoomph.solvers.precice_adapter`. As mentioned on the previous page, you must have installed preCICE and the preCICE python bindings to import it.
+To use preCICE in pyoomph, you can just import the module :py:mod:`pyoomph.solvers.precice_adapter`. The import itself works without preCICE; as mentioned on the previous page, preCICE and its python bindings must be installed as soon as you really run a participant, i.e. for the coupled case. The monolithic run of the script below needs neither.
 
 We want to formulate the problem in a way that it can be either run monolithically in a single simulation, which calculates the full domain. Alternatively, we can run either the Dirichlet or the Neumann participant. If both are running simultaneously, they will interact via preCICE.
 

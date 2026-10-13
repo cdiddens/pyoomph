@@ -142,6 +142,13 @@ def simulation_seconds(started_at):
 # it - and reporting that as a failure every night is how a failure list stops being read. So it is
 # reported as a skip instead, by name, and listed again at the end where the nightly picks it up.
 # Nothing else is forgiven: a ModuleNotFoundError for anything not on this list is a real failure.
+# The preCICE entry only fires for a COUPLED run (-P precice_participant=Dirichlet/Neumann), which
+# nothing in this harness starts: pyoomph.solvers.precice_adapter imports the package lazily, in the
+# one method that creates a participant, so the two PreCICE_Coupling tutorials import the adapter,
+# assemble their coupling equations, discard them and solve the monolithic domain on a machine with
+# no libprecice at all. They are therefore ordinary tested scripts everywhere, the GitHub runners
+# included; what is still untested there is the coupling itself, which is why the closing line of
+# this report keeps pointing at it.
 _OPTIONAL_MODULES={"precice":"preCICE (pip install pyprecice, plus a libprecice built for this "
                              "distribution's release)",
                    "shapely":"shapely (pip install pyoomph[topology]), which plans the axisymmetric "
