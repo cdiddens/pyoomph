@@ -800,6 +800,74 @@ def test_abs_keys_leaves_unmatched_keys_signed(validation):
 
 
 # ----------------------------------------------------------------------------------------------
+# A field that is zero: key_atol
+# ----------------------------------------------------------------------------------------------
+
+def _with_velocity(validation, rundir, l2):
+    """Add a dof group shaped like the velocity of a motionless base state."""
+    art = validation.artifacts(rundir)
+    path = next(Path(art.rundir).rglob("_pyoomph_validation.jsonl"))
+    rec = json.loads(path.read_text())
+    rec["dofs"]["domain/velocity_y"] = {"n": 1521, "min": -l2 / 10.0, "max": l2 / 10.0,
+                                        "mean": 0.0, "l2": l2}
+    path.write_text(json.dumps(rec) + "\n")
+    return rundir
+
+
+def test_key_atol_absorbs_a_field_that_is_zero(validation):
+    """The numbers from run 38325177044: windows-msys2-ucrt64 against the committed reference.
+
+    rayleigh_benard_azimuthal_stability.py's base state is motionless, so its velocity holds nothing
+    but the Newton residual. 2.0e-11 and 2.0e-09 are the same answer - zero - and differ by 100% of
+    themselves, which no relative tolerance can express and which the group's own extent cannot
+    scale away, being just as small.
+    """
+    floor = [Fingerprint(key_atol={"dofs.*velocity*": 1e-6})]
+    validation.set_checks(floor)
+    validation.record(_with_velocity(validation, validation.run("ref"), 1.99949050441e-11))
+    noisy = _with_velocity(validation, validation.run("noisy"), 2.01687119319e-09)
+    assert validation.check(noisy).status == "ok"
+    # Without the floor the same pair is a mismatch - i.e. the test is about key_atol and not about
+    # the comparison having become blind.
+    validation.set_checks([Fingerprint()])
+    assert validation.check(noisy).status == "mismatch"
+
+
+def test_key_atol_still_catches_a_base_state_that_moves(validation):
+    """A floor of 1e-6 is not a skip: a velocity that became physical still fails."""
+    validation.set_checks([Fingerprint(key_atol={"dofs.*velocity*": 1e-6})])
+    validation.record(_with_velocity(validation, validation.run("ref"), 1.99949050441e-11))
+    for moved in (1e-4, 0.5, 12.0):
+        flowing = _with_velocity(validation, validation.run("flowing"), moved)
+        assert validation.check(flowing).status == "mismatch", moved
+
+
+def test_key_atol_leaves_unmatched_keys_at_the_checks_own_atol(validation):
+    """The pattern must not loosen the keys it does not name.
+
+    Stated on a second key of the SAME tiny magnitude - a Lagrange multiplier at 2e-11, which the
+    real fingerprint also carries - because that is the case a global atol=1e-6 would have swept up
+    along with the velocity. The same 2e-9 move that the velocity floor forgives has to fail here.
+    """
+    def with_multiplier(rundir, value):
+        path = next(Path(validation.artifacts(rundir).rundir).rglob("_pyoomph_validation.jsonl"))
+        rec = json.loads(path.read_text())
+        rec["dofs"]["globals/lagr_intconstr_pressure"] = {"n": 1, "min": value, "max": value,
+                                                          "mean": value, "l2": abs(value)}
+        path.write_text(json.dumps(rec) + "\n")
+        return rundir
+
+    validation.set_checks([Fingerprint(key_atol={"dofs.*velocity*": 1e-6})])
+    ref = with_multiplier(_with_velocity(validation, validation.run("ref"), 2.0e-11), 2.0e-11)
+    validation.record(ref)
+    # The velocity moves by 2e-9 and is forgiven; the multiplier moves by the same 2e-9 and is not.
+    moved = with_multiplier(_with_velocity(validation, validation.run("moved"), 2.0e-09), 2.0e-09)
+    assert validation.check(moved).status == "mismatch"
+    only_velocity = with_multiplier(_with_velocity(validation, validation.run("vel"), 2.0e-09), 2.0e-11)
+    assert validation.check(only_velocity).status == "ok"
+
+
+# ----------------------------------------------------------------------------------------------
 # A lookup that tolerates a slipped output grid, and a tolerance that is per column
 # ----------------------------------------------------------------------------------------------
 

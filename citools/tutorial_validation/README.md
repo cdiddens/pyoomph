@@ -453,6 +453,33 @@ repeats what `pyoomph.utils.num_text_out.LoadedTextDataFile` already does, and i
 the harness keeps petsc4py out of its own process.
 
 
+## A field that is zero: `key_atol`
+
+`Evolution` has `column_atol` for a column whose error is not set by its own range. `Fingerprint`
+now has the same thing per key, and the case that forced it is a field that is **zero**.
+
+`Advanced_Linear_Dynamics/rayleigh_benard_azimuthal_stability.py` computes the neutral curve of a
+base state that does not move: its temperature and pressure are O(1), while `velocity_x`/`velocity_y`
+hold 1e-12 and `velocity_phi` 6e-323 - nothing but what the Newton solve left behind. Two platforms
+reporting 2.0e-11 and 2.0e-09 have given the same answer, and differ by 100 % of it. No relative
+tolerance can say so, and the group's own extent is no help as a scale, being just as small - which
+is why this surfaced only on the 13th of October 2026, on Windows alone, on a comparison that same
+platform had passed the run before.
+
+```python
+Fingerprint(key_atol={"dofs.*velocity*": 1e-6}),
+```
+
+The pattern is matched against the dotted key; where several match, the largest tolerance wins, and
+every key the patterns do not name keeps the check's own `atol`. That last part is the reason to
+prefer this over simply raising `atol` for the whole check: the same fingerprint carries a Lagrange
+multiplier at 2e-11 whose move a global floor would have forgiven too.
+
+Choose the floor from the physics on both sides, and write down both numbers: 1e-6 here is some 500x
+above the largest residual noise observed and some four orders of magnitude below any velocity this
+problem would have if the base state actually convected. That is what makes it different from
+`skip`ping the group - a base state that starts moving still fails.
+
 ## A script with no number at all: `NOT_APPLICABLE`
 
 A script with no entry in `specs.py` is reported under `NOT VALIDATED`, which is a to-do list. One

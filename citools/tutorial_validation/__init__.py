@@ -307,6 +307,19 @@ class Fingerprint(Check):
             this shape had to do: a pressure that drifted in SHAPE rather than in level - the real
             regression one wants to catch - still shows up in the spread. A spread needs no scale
             rule of its own, being its own scale, so it is compared relatively like an l2.
+        key_atol: {key pattern: absolute tolerance}, the Fingerprint analogue of Evolution's
+            column_atol and for the same reason: a quantity whose error is not set by its own
+            magnitude. The case it exists for is a field that is ZERO - the velocity of a motionless
+            base state, which holds nothing but the Newton residual, so its stored 2e-11 and another
+            platform's 2e-9 are the same answer and differ by 100% of themselves. A relative
+            comparison cannot express that and the group's own extent does not help, being just as
+            small. The pattern is matched against the dotted key (e.g. "dofs.*velocity*"); where
+            several patterns match, the largest tolerance wins, and keys that match none keep the
+            check's own atol.
+
+            Preferred over skipping those groups, which stops checking them altogether: a velocity
+            that became O(1) - the regression actually worth catching here - still fails against a
+            floor of 1e-6, while it would pass unnoticed under a skip.
         eigenvalues_by_value: compare the spectrum as an unordered set rather than index by index.
             Each produced eigenvalue is moved to the index of the reference eigenvalue it lies
             nearest to, after which the comparison is the usual one - so a tolerance still has to
@@ -346,13 +359,15 @@ class Fingerprint(Check):
                  only: "list[str] | None" = None, skip: "list[str] | None" = None,
                  gauge_free: "list[str] | None" = None, abs_keys: "list[str] | None" = None,
                  eigenvalues_by_value: bool = False,
-                 eigenvalue_max_abs: "float | None" = None, **kw):
+                 eigenvalue_max_abs: "float | None" = None,
+                 key_atol: "dict[str,float] | None" = None, **kw):
         super().__init__(**kw)
         self.index, self.outdir, self.only, self.skip = index, outdir, only, list(skip or [])
         self.gauge_free = list(gauge_free or [])
         self.abs_keys = list(abs_keys or [])
         self.eigenvalues_by_value = eigenvalues_by_value
         self.eigenvalue_max_abs = eigenvalue_max_abs
+        self.key_atol = dict(key_atol or {})
 
     def slug(self) -> str:
         return "fingerprint:%s:%d" % (self.outdir or "", self.index)
@@ -369,6 +384,8 @@ class Fingerprint(Check):
                 gauge += " [%s %s]" % (name, shown)
         if self.abs_keys:
             gauge += " [|%s|]" % "/".join(self.abs_keys)
+        if self.key_atol:
+            gauge += " [atol %s]" % ",".join("%s=%g" % kv for kv in sorted(self.key_atol.items())[:2])
         if self.eigenvalue_max_abs is not None:
             gauge += " [|eigenvalue| <= %g]" % self.eigenvalue_max_abs
         if self.eigenvalues_by_value:
@@ -1075,6 +1092,16 @@ def _gen_fingerprint(check: Fingerprint, art: RunArtifacts) -> dict:
     return {"kind": "fingerprint", "record": _fingerprint_record(check, art)}
 
 
+def _key_atol(check: "Fingerprint", key: str) -> float:
+    """The absolute tolerance for one fingerprint key: check.key_atol if it matches, else atol.
+
+    The largest matching pattern wins rather than the first, so that adding a broader pattern can
+    only ever loosen a key and never silently tighten one that a narrower pattern already covered.
+    """
+    floors = [value for pattern, value in check.key_atol.items() if fnmatch.fnmatch(key, pattern)]
+    return max(floors) if floors else check.atol
+
+
 def _cmp_fingerprint(check: Fingerprint, art: RunArtifacts, ref: dict, out: Outcome) -> None:
     try:
         record = _fingerprint_record(check, art)
@@ -1132,9 +1159,10 @@ def _cmp_fingerprint(check: Fingerprint, art: RunArtifacts, ref: dict, out: Outc
             ranked.append((float("inf"),
                            "%s appeared (%r), which the reference does not have" % (key, got[key])))
         else:
-            tol = check.atol + check.rtol * (scales.get(key, 0.0) or abs(float(want[key] or 0.0)))
+            atol = _key_atol(check, key)
+            tol = atol + check.rtol * (scales.get(key, 0.0) or abs(float(want[key] or 0.0)))
             if not _close(want[key], got[key], check.rtol,
-                          check.atol + check.rtol * scales.get(key, 0.0)):
+                          atol + check.rtol * scales.get(key, 0.0)):
                 excess = abs(float(want[key]) - float(got[key])) / tol if tol > 0 else float("inf")
                 ranked.append((excess, "%s: %s" % (key, _deviation(want[key], got[key]))))
     ranked.sort(key=lambda t: -t[0])

@@ -1354,7 +1354,20 @@ VALIDATION: "dict[str,list]" = {
       # The fingerprint's parameters are m=3's final state, i.e. the first Gamma past 3.0, which the
       # step adaptation picks - so it is pinned here but is the first thing to relax if another
       # platform's continuation lands elsewhere.
-      Fingerprint(),
+      #
+      # key_atol on the velocity: this base state is MOTIONLESS. T and the pressure are O(1), while
+      # velocity_x/y hold 1e-12 and velocity_phi 6e-323, i.e. nothing but what the Newton solve left
+      # behind. Measured: the full cross-platform pass of 13th October 2026 (run 38325177044) failed
+      # on windows-msys2-ucrt64 alone, with velocity_y.l2 2.0e-11 in the reference against 2.0e-09
+      # produced - a 100% relative difference between two numbers that are both zero, on a platform
+      # that had passed the identical comparison the run before. The group's own extent is no help as
+      # a scale, being just as small, so the floor has to be absolute.
+      #
+      # 1e-6 is chosen from the physics on both sides: ~500x above the largest residual noise
+      # observed, and ~4 orders of magnitude below any velocity this problem would have if the base
+      # state actually convected - so a broken base state still fails here, which a skip of these
+      # groups would not catch.
+      Fingerprint(key_atol={"dofs.*velocity*": 1e-6}),
   ],
   "Advanced_Linear_Dynamics/thin_film_bifurcation_gui.py": [
       # The GUI tutorial, run without its window: the harness sets
