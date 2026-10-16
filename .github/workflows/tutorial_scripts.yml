@@ -68,7 +68,7 @@ on:
         type: boolean
         default: true
       omp:
-        description: Assemble the elements on this many threads (0 = serial). Standard runners have 4 vCPU, macos-14 arm64 has 3
+        description: Assemble the elements on this many threads (0 = serial). Standard runners have 4 vCPU, macos-15 arm64 has 3
         required: false
         type: string
         default: "0"
@@ -179,7 +179,7 @@ jobs:
             platform: macos
             prebuild_artifact: static-ginac-cln-macos-intel-x86_64
           - label: macos-arm64
-            runner: macos-14
+            runner: macos-15
             platform: macos
             prebuild_artifact: static-ginac-cln-macos-arm64
             # The one platform that gets PETSc/SLEPc; see the header. The cpXY suffix is appended

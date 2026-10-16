@@ -6,8 +6,8 @@ set -euo pipefail
 #
 # Why this exists rather than `brew install libomp`:
 #
-#   * Homebrew bottles are built per macOS release, so the libomp on the macos-14 runner requires
-#     macOS 14 and the one on macos-15-intel requires 15. delocate checks that when it bundles a
+#   * Homebrew bottles are built per macOS release, so the libomp on a macos-N runner requires
+#     macOS N - 15 on both macos-15 and macos-15-intel. delocate checks that when it bundles a
 #     dylib and refuses, and the only way to satisfy it would be to raise the wheel's
 #     MACOSX_DEPLOYMENT_TARGET to match - i.e. to drop every user on an older mac in exchange for an
 #     opt-in threading flag. Built here, libomp gets the SAME deployment target as the wheel.

@@ -274,7 +274,7 @@ jobs:
             platform: macos
             prebuild_artifact: static-ginac-cln-macos-intel-x86_64
           - label: macos-arm64
-            runner: macos-14
+            runner: macos-15
             platform: macos
             prebuild_artifact: static-ginac-cln-macos-arm64
             # The one platform whose SUITE runs against PETSc/SLEPc: there is no MKL on Apple

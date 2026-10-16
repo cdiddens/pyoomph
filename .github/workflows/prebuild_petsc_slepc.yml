@@ -76,7 +76,7 @@ jobs:
             platform: linux
           # macOS x86_64 is deliberately NOT built here; see the note at the end of this file.
           - label: macos-arm64
-            runner: macos-14
+            runner: macos-15
             platform: macos
 
     steps:

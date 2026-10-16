@@ -112,7 +112,7 @@ permissions:
 jobs:
   debug:
     name: ${{ inputs.platform }}
-    runs-on: ${{ fromJSON('{"linux-x86_64":"ubuntu-latest","macos-intel-x86_64":"macos-15-intel","macos-arm64":"macos-14","windows-msys2-ucrt64":"windows-latest"}')[inputs.platform] }}
+    runs-on: ${{ fromJSON('{"linux-x86_64":"ubuntu-latest","macos-intel-x86_64":"macos-15-intel","macos-arm64":"macos-15","windows-msys2-ucrt64":"windows-latest"}')[inputs.platform] }}
     timeout-minutes: 90
 
     steps:

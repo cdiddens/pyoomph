@@ -34,9 +34,9 @@ permissions:
 
 jobs:
   accelerate-reuse:
-    # macos-14 is the arm64 (Apple silicon) image. Do not switch this to macos-*-intel: the point of
+    # macos-15 is the arm64 (Apple silicon) image. Do not switch this to macos-*-intel: the point of
     # the test is the arm64 path.
-    runs-on: macos-14
+    runs-on: macos-15
     # The build dominates: CMake downloads and builds CLN and then GiNaC from source. That is the
     # documented macOS route (INSTALL.md) and the default of PYOOMPH_DOWNLOAD_CLN/GINAC, so it is the
     # path most likely to just work; Homebrew's ginac was not used because pyoomph expects its own
