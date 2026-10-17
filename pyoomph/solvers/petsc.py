@@ -29,6 +29,7 @@ from __future__ import annotations
 from .generic import GenericLinearSystemSolver, GenericEigenSolver, EigenSolverWhich,DefaultMatrixType, SolverError
 from ..meshes.mesh import AnyMesh
 import atexit
+import contextlib
 import hashlib
 from collections import OrderedDict
 import petsc4py #type:ignore
@@ -928,8 +929,9 @@ class PETSCSolver(GenericLinearSystemSolver):
 
     def solve_python_built_distributed(self,ntot:int,nrow_local:int,first_row:int,mat_local:Any,b_local:NPFloatArray)->NPFloatArray:
         """Factorise a Python-assembled, row-distributed system on COMM_WORLD. See the base class."""
-        self._aux_prepare(ntot,nrow_local,mat_local)
-        return self._aux_backsolve(b_local)
+        with self._recording_a_foreign_matrix_solve():
+            self._aux_prepare(ntot,nrow_local,mat_local)
+            return self._aux_backsolve(b_local)
 
     def solve_python_built_distributed_many(self,ntot:int,nrow_local:int,first_row:int,mat_local:Any,b_locals:"Sequence[NPFloatArray]")->"List[NPFloatArray]":
         """Several right-hand sides against one factorisation. See the base class.
@@ -939,8 +941,32 @@ class PETSCSolver(GenericLinearSystemSolver):
         keep the SYMBOLIC analysis across a loop of single solves but not the numeric factors: every
         single solve re-assembles the Mat, which marks it changed and makes the KSP refactorise.
         """
-        self._aux_prepare(ntot,nrow_local,mat_local)
-        return [self._aux_backsolve(b) for b in b_locals]
+        with self._recording_a_foreign_matrix_solve():
+            self._aux_prepare(ntot,nrow_local,mat_local)
+            return [self._aux_backsolve(b) for b in b_locals]
+
+    @contextlib.contextmanager
+    def _recording_a_foreign_matrix_solve(self)->"Iterator[None]":
+        """_solving_foreign_matrix(), plus the diagnostic the _aux_ path would otherwise never write.
+
+        The auxiliary KSP is a plain LU and never asks _use_symmetric_factorisation_now(), so the
+        ANSWER on this path is right with or without the gate -- that is what the base class's
+        _solving_foreign_matrix() docstring means by "unaffected either way", and it still holds.
+
+        What does not hold is last_symmetry_decision. It is written only inside that predicate, so
+        leaving the predicate uncalled leaves the attribute describing the PREVIOUS Newton solve: on
+        a problem with a symmetric Jacobian it reads "jacobian proven symmetric" immediately after a
+        foreign solve that was nothing of the kind. The attribute is meant to mean the same thing
+        whichever backend is active -- see the same argument in spectra.py's symmetry bookkeeping --
+        so the predicate is called here purely to record the verdict. Inside the gate it can only
+        return False, and nothing on this path acts on the return value.
+
+        Deliberately NOT inside _aux_prepare(): that method must stay clear of the symmetry verdict
+        altogether, which tests/test_foreign_matrix_symmetry.py asserts against its source.
+        """
+        with self._solving_foreign_matrix():
+            self._use_symmetric_factorisation_now()
+            yield
 
     def _aux_prepare(self,ntot:int,nrow_local:int,mat_local:Any)->None:
         """Put the auxiliary Mat/KSP in place for this system, reusing the pattern when it has not moved.

@@ -321,7 +321,10 @@ class GenericLinearSystemSolver:
 		(pardiso mtype -2, mumps sym=2, accelerate ldlt_sbk, petsc MAT_SYMMETRIC) go through that one
 		method, so one gate covers them at once and a fifth backend is covered before it is written.
 		PETSc's own override of the Python-built entry points never consults the decision - it builds a
-		separate _aux_ KSP with a plain LU - so it is unaffected either way.
+		separate _aux_ KSP with a plain LU - so its ANSWER is unaffected either way. It enters the gate
+		all the same, through PETSCSolver._recording_a_foreign_matrix_solve(): last_symmetry_decision is
+		written only by _use_symmetric_factorisation_now(), so a path that never calls the predicate
+		leaves the attribute describing the previous Newton solve instead of the foreign one.
 
 		Re-entrant, and try/finally: solve_serial() raises (a SolverError on a failed factorisation is
 		routine), and leaving the flag set would then silently cost the symmetric factorisation of
