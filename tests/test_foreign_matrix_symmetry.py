@@ -52,7 +52,7 @@
 # half of the contract matters just as much and is checked below: the Jacobian's own symmetric
 # factorisation must survive this, i.e. the fix must not be "stop proving symmetry".
 
-import inspect
+import pathlib
 
 import numpy
 import pytest
@@ -309,12 +309,18 @@ def test_the_periodic_driving_pencil_is_solved_as_a_foreign_matrix():
 
 def test_the_petsc_auxiliary_path_does_not_consult_the_symmetry_verdict():
     """PETSc overrides the Python-built entry points with its own _aux_ Mat/KSP, which is a plain LU
-    and never asks about symmetry -- so that path was already correct and needs no gate. Asserted on
+    and never asks about symmetry, so the verdict must not reach _aux_prepare() itself -- the public
+    overrides take the gate instead, see PETSCSolver._recording_a_foreign_matrix_solve(). Asserted on
     the source, because it is the ABSENCE of a call that is being protected and a behavioural test
-    cannot see an absence. petsc4py is not imported, so this runs everywhere.
+    cannot see an absence.
+
+    Read off disk rather than with inspect.getsource(), which would first have to IMPORT the module:
+    pyoomph/solvers/petsc.py imports petsc4py at the top, so importing it merely to read its text
+    fails wherever PETSc is absent -- three of the four CI platforms, where this test is exactly as
+    meaningful as it is on the fourth. Only pyoomph.solvers is imported, whose __init__ is empty.
     """
-    from pyoomph.solvers import petsc as petsc_module
-    src = inspect.getsource(petsc_module)
+    import pyoomph.solvers
+    src = (pathlib.Path(pyoomph.solvers.__file__).parent / "petsc.py").read_text()
     body = src[src.index("def _aux_prepare"):src.index("def _aux_backsolve")]
     for forbidden in ("_use_symmetric_factorisation_now", "_update_symmetry_engagement",
                       "_symmetric_engaged", "_apply_mat_symmetry_option"):
