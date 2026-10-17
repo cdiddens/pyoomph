@@ -270,6 +270,23 @@ _SYMMETRIC_AUTO_REFINEMENT_STEPS = 2
 # positive costs a full refactorisation.
 _BACKWARD_ERROR_LIMIT = 1e-4
 
+# Backward error above which a REPAIRED solve is refused outright rather than warned about. The limit
+# above separates healthy (1e-6) from broken (1e0) and sits two orders above the healthy side,
+# because a false positive there costs a refactorisation. This one sits two orders below the BROKEN
+# side, because a false positive here ends the run instead. Between them is the band where the answer
+# is wrong but still worth something -- the 4.4e-4 of droplet_spread_marangoni_and_gravity is the
+# measured example, and Newton absorbs it -- and that band is warned about, not refused.
+#
+# Above it there is nothing to absorb. The error is max|Ax-b|/max|b|, so a value near 1 means the
+# residual is the size of the right-hand side itself and the zero vector would score about as well.
+#
+# With repairs ON this case could not arise before MKL 2026: the escalated refactorisation of such a
+# matrix failed in its reordering with -6 and was raised a few lines below. MKL 2026 completes that
+# refactorisation and returns the same meaningless answer (max|x| = 2e8 at err = 1.0 on the 6x6 of
+# tests/test_solver_failure_recovery.py), so a refusal silently became a printed warning on nothing
+# but a runtime upgrade. The second tier is what makes the refusal independent of the MKL in use.
+_BACKWARD_ERROR_FATAL = 1e-2
+
 # What to suggest when a solve comes back wrong: a solver that exchanges a bad pivot instead of
 # perturbing it, which is the property MKL does not have and no amount of iparm tuning gives it.
 #
@@ -658,6 +675,8 @@ class pardisoSolver(object):
                                "refactorising with stronger pivoting then failed outright (%s). The "
                                "matrix is singular or nearly so at this state." % (err, e)) from e
         if not escalated:
+            if err > _BACKWARD_ERROR_FATAL:
+                self._refuse_a_hopeless_solve(err, "There was no stronger pivoting left to escalate to.")
             return x
 
         x2 = self._solve_refined(rhs, max_steps)
@@ -666,6 +685,10 @@ class pardisoSolver(object):
             # No improvement, so the escalation was a false alarm on this matrix -- undo it before it
             # becomes the setting for the whole run, and keep the answer that was less wrong.
             self._deescalate_pivoting()
+            # Ahead of the message below, which would otherwise announce that the original solution
+            # was kept one line before it is refused after all.
+            if err > _BACKWARD_ERROR_FATAL:
+                self._refuse_a_hopeless_solve(err, "Stronger pivoting was tried, made it worse and was withdrawn.")
             if err2 is not None:
                 # Factual rather than alarming: this fires on marginal solves too (4.4e-4 against the
                 # 1e-4 limit on droplet_spread_marangoni_and_gravity), which Newton then absorbs
@@ -675,15 +698,40 @@ class pardisoSolver(object):
                       "If the run does not converge, %s is the alternative."
                       % (err, _BACKWARD_ERROR_LIMIT, err2, _DYNAMIC_PIVOTING_ADVICE))
             return x
+        # Set before either branch below, because x2 is what both of them are about.
+        self.last_backward_error = err2
+        if err2 > _BACKWARD_ERROR_FATAL:
+            self._refuse_a_hopeless_solve(err2, "Stronger pivoting took it from %.3e to that, which is "
+                                                "not something a Newton step can be built on." % err)
         if err2 > _BACKWARD_ERROR_LIMIT:
-            # Better but still bad. Warn rather than raise: before this check existed such a solve was
-            # returned silently, and refusing it outright would turn a badly-converging run into a
-            # crashing one on problems that never reported anything wrong.
+            # Better but still bad, and inside the band that is worth keeping. Warn rather than raise:
+            # before this check existed such a solve was returned silently, and refusing everything
+            # over the limit would turn a badly-converging run into a crashing one on problems that
+            # never reported anything wrong.
             print("PARDISO WARNING: backward error %.3e after escalation (was %.3e); the solution is "
                   "not trustworthy. Consider %s here."
                   % (err2, err, _DYNAMIC_PIVOTING_ADVICE))
-        self.last_backward_error = err2
         return x2
+
+    def _refuse_a_hopeless_solve(self, err:float, detail:str)->None:
+        """Refuse a repaired solve whose answer carries no information. Always raises.
+
+        The band just above _BACKWARD_ERROR_LIMIT is warned about and returned, because a marginally
+        wrong step is still a step and refusing one would crash runs that converge perfectly well.
+        This tier is different in kind rather than in degree: see _BACKWARD_ERROR_FATAL.
+
+        Only on the repair_bad_solves path. Opting out of repairs is an explicit request to be handed
+        whatever MKL produced, and tests/test_solver_failure_recovery.py pins that.
+
+        PardisoError is a SolverError, i.e. retryable, so this reaches the time stepper as an ordinary
+        divergence and the smaller step it takes next is the right response to a matrix in this state.
+        """
+        raise PardisoError("MKL Pardiso returned a solution with a backward error of %.3e, past the "
+                           "%.0e beyond which the residual is the size of the right-hand side itself "
+                           "and the solution carries no information. %s The matrix is singular or "
+                           "nearly so at this state, so the solve is aborted here rather than handed "
+                           "on as an answer. Consider %s."
+                           % (err, _BACKWARD_ERROR_FATAL, detail, _DYNAMIC_PIVOTING_ADVICE))
 
     # MKL's documented meanings for the `error` output. Every value is a hard failure -- Pardiso has no
     # "converged badly but usable" answer to report, so anything nonzero means the contents of x are
