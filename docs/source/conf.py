@@ -135,6 +135,50 @@ class _SuppressSpuriousGuardedImportWarning(_logging.Filter):
 # sphinx.util.logging), so the actual logger name at runtime is not the plain module name.
 _logging.getLogger("sphinx.sphinx_autodoc_typehints").addFilter(_SuppressSpuriousGuardedImportWarning())
 
+# sphinx_autodoc_typehints >= 3.16 crashes on every nanobind property accessor. Its
+# _resolve/generics.py does
+#
+#     getattr(function, "__qualname__", "").split(".")[:-1]
+#
+# and a default passed to getattr() only applies when the attribute is ABSENT. nanobind creates
+# the getter and setter of a def_prop_ro/def_prop_rw as anonymous functions - nb_class.h builds
+# them with cpp_function(..., is_method(), is_getter(), ...) and passes neither nb::name nor a
+# scope - so they carry __qualname__ = None, __name__ = "" and __module__ = None, present and
+# None rather than missing. .split() then raises AttributeError, autodoc turns it into an
+# ExtensionError, and the whole build dies on the first one. There are 177 such accessors across
+# 15 classes of pyoomph._pyoomph_core, the first of them a few percent into "reading sources".
+# Ordinary nanobind methods are unaffected: those do get a proper __qualname__.
+#
+# Neither side is ours to fix here - the getattr is an upstream bug, and naming 177 accessors to
+# work around it would leave the next def_prop_* to reintroduce the crash. So the call is retried
+# with function=None, which that function already accepts and which is what it would have derived
+# from a None __qualname__ anyway. Only that exact case is swallowed; any other AttributeError
+# propagates. Once upstream uses `or ""`, this never fires again and can go.
+try:
+    import sphinx_autodoc_typehints._resolve.generics as _sat_generics
+    import sphinx_autodoc_typehints._documented.hints as _sat_hints
+    import sphinx_autodoc_typehints._documented.overloads as _sat_overloads
+
+    _sat_declared_type_params = _sat_generics.declared_type_params
+
+    def _declared_type_params_tolerating_anonymous(documented, function, documenting):
+        try:
+            return _sat_declared_type_params(documented, function, documenting)
+        except AttributeError:
+            if getattr(function, "__qualname__", "") is not None:
+                raise
+            return _sat_declared_type_params(documented, None, documenting)
+
+    # Rebound in the importing modules as well as at the source: both callers did
+    # "from ..._resolve import declared_type_params", so patching only generics would not be seen.
+    _sat_generics.declared_type_params = _declared_type_params_tolerating_anonymous
+    _sat_hints.declared_type_params = _declared_type_params_tolerating_anonymous
+    _sat_overloads.declared_type_params = _declared_type_params_tolerating_anonymous
+except ImportError:
+    # A version whose internals are laid out differently. If it still has the bug the build fails
+    # with the AttributeError above, which is a better outcome than silently patching nothing.
+    pass
+
 
 
 # -- Options for HTML output -------------------------------------------------
