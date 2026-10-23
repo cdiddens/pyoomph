@@ -410,8 +410,9 @@ def assert_dimensional_value(dim_val:ExpressionOrNum,required_unit:ExpressionOrN
     if isinstance(dim_val,(float,int)):
         return dim_val,1
     if isinstance(dim_val,_pyoomph.GiNaC_GlobalParam):
-        # Not accepted by collect_units itself; wrapped it splits into its current value and unit 1,
-        # which is the same freeze-the-number-now that the plain float branch above does.
+        # Not accepted by collect_units itself. Wrapped, it splits into its current value and the unit
+        # it was declared with (1 if it is dimensionless), which is the same freeze-the-number-now that
+        # the plain float branch above does.
         dim_val=0+dim_val
     factor, unit, rest, success = _pyoomph.GiNaC_collect_units(dim_val)
     if not success:

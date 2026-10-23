@@ -203,7 +203,7 @@ class FixedMeshMaxQuadraticNonlinearAssembly(CustomAssemblyBase):
         oldsetting=self.problem.use_custom_residual_jacobian
         dofs=self.problem.get_history_dofs(0) #store the dofs
         pnames=self.problem.get_global_parameter_names()
-        paramvals:dict[str,float]={pname:self.problem.get_global_parameter(pname).value for pname in pnames}
+        paramvals:dict[str,float]={pname:self.problem.get_global_parameter(pname).nondim_value for pname in pnames}
 
         self.problem.use_custom_residual_jacobian=False # Set it to false to get the right matrices by elemental assembly
         self.problem.set_current_dofs([0.0]*len(dofs)) # zero dofs
@@ -220,12 +220,12 @@ class FixedMeshMaxQuadraticNonlinearAssembly(CustomAssemblyBase):
                     param=self.problem.get_global_parameter(pname)
                     if isinstance(self._cache_at_fixed_parameters,set):
                         if pname in self._cache_at_fixed_parameters:
-                            self._param_values[pname]=param.value
+                            self._param_values[pname]=param.nondim_value
                             continue
                     elif self._cache_at_fixed_parameters:
-                        self._param_values[pname]=param.value
+                        self._param_values[pname]=param.nondim_value
                         continue
-                    param.value=0.0
+                    param.nondim_value=0.0
                     needs_contrib.append(pname)
             
 
@@ -272,7 +272,7 @@ class FixedMeshMaxQuadraticNonlinearAssembly(CustomAssemblyBase):
         finally:
             self.problem.set_current_dofs(dofs) #type:ignore # restore dofs
             for pname in pnames:
-                self.problem.get_global_parameter(pname).value=paramvals[pname]
+                self.problem.get_global_parameter(pname).nondim_value=paramvals[pname]
             self.problem.use_custom_residual_jacobian=oldsetting #reset setting
 
         self._ndof=n
@@ -334,7 +334,7 @@ class FixedMeshMaxQuadraticNonlinearAssembly(CustomAssemblyBase):
 
         for pname,oldval in self._param_values.items():
             param=self.problem.get_global_parameter(pname)
-            if param.value!=oldval:
+            if param.nondim_value!=oldval:
                 self._tensor_cache_valid=False
                 print("Invalidating Tensor cache, since parameter "+pname+" has changed. For often changing parameters, consider using cache_at_fixed_parameters=False or set a set of constant parameters")
                 break
@@ -368,7 +368,7 @@ class FixedMeshMaxQuadraticNonlinearAssembly(CustomAssemblyBase):
 
         for pname,contrib in self._param_contribs.items():
             param=self.problem.get_global_parameter(pname)
-            val=param.value
+            val=param.nondim_value
             vecR+=contrib[0]*val
             matJ+=contrib[1]*val #type:ignore
             matM+=contrib[2]*val #type:ignore

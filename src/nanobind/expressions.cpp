@@ -510,9 +510,24 @@ namespace pyoomph
 	}
 
 	// Wrap a global parameter as a plain GiNaC expression.
-	static GiNaC::ex GiNaCFromGlobalParam(GiNaC::GiNaCGlobalParameterWrapper w)
+	//
+	// THE one place a parameter crosses into an expression, and therefore the one place its physical
+	// unit is multiplied in: a parameter declared with unit=1*pico*liter appears in every expression
+	// built from Python as `1e-15*meter^3 * leaf`, so it rides the ordinary nondimensionalisation of
+	// add_residual and needs no pass of its own. The leaf itself stays bare and dimensionless, which
+	// is what the C printer emits, what the JIT function table points at, and what
+	// dResidual<n>dParameter_<i> differentiates by - so the stored double remains the number
+	// oomph-lib continues on.
+	//
+	// EVERY binding that turns a GiNaCGlobalParameterWrapper into a GiNaC::ex must go through here.
+	// A site that spells `0 + w` itself silently drops the unit, which shows up as a wrong answer and
+	// not as an error. See dev_docs/dimensional_global_parameters.md.
+	//
+	// For a dimensionless parameter the unit is exactly 1 and GiNaC's mul::eval folds the
+	// multiplication away, so nothing about such a parameter changes.
+	GiNaC::ex GiNaCFromGlobalParam(GiNaC::GiNaCGlobalParameterWrapper w)
 	{
-		return 0 + w;
+		return (0 + w) * w.get_struct().cme->get_unit();
 	}
 
 }
@@ -626,21 +641,21 @@ void PyReg_Expressions(nb::module_ &m)
 
 
 		.def("__add__", [](const GiNaC::ex &lh, const GiNaC::GiNaCGlobalParameterWrapper &rh)
-			 { return lh + rh; }, nb::is_operator())
+			 { return lh + pyoomph::GiNaCFromGlobalParam(rh); }, nb::is_operator())
 		.def("__sub__", [](const GiNaC::ex &lh, const GiNaC::GiNaCGlobalParameterWrapper &rh)
-			 { return lh - rh; }, nb::is_operator())
+			 { return lh - pyoomph::GiNaCFromGlobalParam(rh); }, nb::is_operator())
 		.def("__mul__", [](const GiNaC::ex &lh, const GiNaC::GiNaCGlobalParameterWrapper &rh)
-			 { return lh * rh; }, nb::is_operator())
+			 { return lh * pyoomph::GiNaCFromGlobalParam(rh); }, nb::is_operator())
 		.def("__truediv__", [](const GiNaC::ex &lh, const GiNaC::GiNaCGlobalParameterWrapper &rh)
-			 { return lh / rh; }, nb::is_operator())
+			 { return lh / pyoomph::GiNaCFromGlobalParam(rh); }, nb::is_operator())
 		.def("__imul__", [](const GiNaC::ex &lh, const GiNaC::GiNaCGlobalParameterWrapper &rh)
-			 { return lh * rh; }, nb::is_operator())
+			 { return lh * pyoomph::GiNaCFromGlobalParam(rh); }, nb::is_operator())
 		.def("__itruediv__", [](const GiNaC::ex &lh, const GiNaC::GiNaCGlobalParameterWrapper &rh)
-			 { return lh / rh; }, nb::is_operator())
+			 { return lh / pyoomph::GiNaCFromGlobalParam(rh); }, nb::is_operator())
 		.def("__iadd__", [](const GiNaC::ex &lh, const GiNaC::GiNaCGlobalParameterWrapper &rh)
-			 { return lh + rh; }, nb::is_operator())
+			 { return lh + pyoomph::GiNaCFromGlobalParam(rh); }, nb::is_operator())
 		.def("__isub__", [](const GiNaC::ex &lh, const GiNaC::GiNaCGlobalParameterWrapper &rh)
-			 { return lh - rh; }, nb::is_operator())
+			 { return lh - pyoomph::GiNaCFromGlobalParam(rh); }, nb::is_operator())
 		// Comparisons build a held RelationalExpression instead of a bool, so that a condition can stay symbolic until it is
 		// either substituted (expr(t=4*second)) or compiled into the generated code via conditional(cond,iftrue,iffalse).
 		// A relation that *is* numerically decidable still converts to a bool implicitly (RelationalExpression.__bool__),
@@ -654,13 +669,13 @@ void PyReg_Expressions(nb::module_ &m)
 		.def("__ge__", [](const GiNaC::ex &lh, const GiNaC::ex &rh)
 			 { return pyoomph::expressions::SymbolicCondition(lh, rh, pyoomph::expressions::SymbolicCondition::rel_ge); }, nb::is_operator())
 		.def("__lt__", [](const GiNaC::ex &lh, const GiNaC::GiNaCGlobalParameterWrapper &rh)
-			 { return pyoomph::expressions::SymbolicCondition(lh, 0 + rh, pyoomph::expressions::SymbolicCondition::rel_lt); }, nb::is_operator())
+			 { return pyoomph::expressions::SymbolicCondition(lh, pyoomph::GiNaCFromGlobalParam(rh), pyoomph::expressions::SymbolicCondition::rel_lt); }, nb::is_operator())
 		.def("__gt__", [](const GiNaC::ex &lh, const GiNaC::GiNaCGlobalParameterWrapper &rh)
-			 { return pyoomph::expressions::SymbolicCondition(lh, 0 + rh, pyoomph::expressions::SymbolicCondition::rel_gt); }, nb::is_operator())
+			 { return pyoomph::expressions::SymbolicCondition(lh, pyoomph::GiNaCFromGlobalParam(rh), pyoomph::expressions::SymbolicCondition::rel_gt); }, nb::is_operator())
 		.def("__le__", [](const GiNaC::ex &lh, const GiNaC::GiNaCGlobalParameterWrapper &rh)
-			 { return pyoomph::expressions::SymbolicCondition(lh, 0 + rh, pyoomph::expressions::SymbolicCondition::rel_le); }, nb::is_operator())
+			 { return pyoomph::expressions::SymbolicCondition(lh, pyoomph::GiNaCFromGlobalParam(rh), pyoomph::expressions::SymbolicCondition::rel_le); }, nb::is_operator())
 		.def("__ge__", [](const GiNaC::ex &lh, const GiNaC::GiNaCGlobalParameterWrapper &rh)
-			 { return pyoomph::expressions::SymbolicCondition(lh, 0 + rh, pyoomph::expressions::SymbolicCondition::rel_ge); }, nb::is_operator())
+			 { return pyoomph::expressions::SymbolicCondition(lh, pyoomph::GiNaCFromGlobalParam(rh), pyoomph::expressions::SymbolicCondition::rel_ge); }, nb::is_operator())
 		.def("__lt__", [](const GiNaC::ex &lh, const int &rh)
 			 { return pyoomph::expressions::SymbolicCondition(lh, GiNaC::ex(rh), pyoomph::expressions::SymbolicCondition::rel_lt); }, nb::is_operator())
 		.def("__gt__", [](const GiNaC::ex &lh, const int &rh)
@@ -722,7 +737,7 @@ void PyReg_Expressions(nb::module_ &m)
 		.def("__pow__", [](const GiNaC::ex &lh, const double &rh)
 			 { return GiNaC::pow(lh, rh); }, nb::is_operator())
 		.def("__pow__", [](const GiNaC::ex &lh, const GiNaC::GiNaCGlobalParameterWrapper &rh)
-			 { return GiNaC::pow(lh, rh); }, nb::is_operator())
+			 { return GiNaC::pow(lh, pyoomph::GiNaCFromGlobalParam(rh)); }, nb::is_operator())
 
 		.def("__rpow__", [](const GiNaC::ex &rh, const int &lh)
 			 { return GiNaC::pow(lh, rh); }, nb::is_operator())
@@ -842,7 +857,7 @@ void PyReg_Expressions(nb::module_ &m)
 				if (nb::isinstance<GiNaC::ex>(item.second))				  rhs = nb::cast<GiNaC::ex>(item.second);
 				else if (PyFloat_Check(item.second.ptr()))				  rhs = nb::cast<double>(item.second);
 				else if (PyLong_Check(item.second.ptr()))				  rhs = nb::cast<long int>(item.second);
-				else if (nb::isinstance<GiNaC::GiNaCGlobalParameterWrapper>(item.second))				  rhs = nb::cast<GiNaC::GiNaCGlobalParameterWrapper>(item.second);
+				else if (nb::isinstance<GiNaC::GiNaCGlobalParameterWrapper>(item.second))				  rhs = pyoomph::GiNaCFromGlobalParam(nb::cast<GiNaC::GiNaCGlobalParameterWrapper>(item.second));
 				else if (PyComplex_Check(item.second.ptr()))				  { auto cplx = nb::cast<std::complex<double>>(item.second); rhs = cplx.real()+GiNaC::I*cplx.imag(); }
 				else throw_runtime_error("Unsupported argument type for calling a GiNaC expression: only int, double, complex and Expressions are supported, but got "+std::string(nb::str(item.first).c_str()) + "="+std::string(nb::repr(item.second).c_str())+" of type "+std::string(nb::str(item.second.type()).c_str()));
 				fields.insert({std::string(nb::str(item.first).c_str()), rhs});

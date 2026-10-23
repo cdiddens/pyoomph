@@ -4792,7 +4792,7 @@ class Problem(_pyoomph.Problem):
         params:dict[str,float]={}
         for pname in sorted(self.get_global_parameter_names()):
             try:
-                params[pname]=float(self.get_global_parameter(pname).value)
+                params[pname]=float(self.get_global_parameter(pname).nondim_value)
             except Exception:
                 pass # a parameter carrying something that is not a plain float says nothing here
         # Sorted, so that an eigensolver returning the same spectrum in another order - which SLEPc
@@ -6745,15 +6745,34 @@ class Problem(_pyoomph.Problem):
             tp.set_time(t)
     
 
-    def define_global_parameter(self, **params: float) -> _pyoomph.GiNaC_GlobalParam:
+    def define_global_parameter(self, unit:ExpressionOrNum=1, **params: ExpressionOrNum) -> _pyoomph.GiNaC_GlobalParam:
         r"""
         Define a single global parameter for the problem.
 
         Args:
+            unit: The physical unit of the parameter, e.g. ``unit=pascal``. It also fixes the scale the
+                parameter is expanded with in the generated code: with ``unit=1*pico*liter`` the
+                parameter enters an expression as its stored number times 1e-15*meter^3, not as a
+                litre with a 1e12-larger number. Defaults to 1, i.e. a dimensionless parameter.
+                Since this is a keyword of this method, a parameter cannot itself be named ``unit``.
             **params: Exactly one keyword argument giving the parameter name and its initial value.
+                With a ``unit``, the value may be dimensional (``volume=1.53*pico*liter``); a plain
+                number is read as being in units of ``unit``.
 
         Returns:
             _pyoomph.GiNaC_GlobalParam: The defined global parameter, which can be used in expressions.
+
+        A parameter's unit cannot be changed afterwards, and cannot be set at all once the problem has
+        been initialised, because the generated code has baked its numerical factor in. Note that a
+        dimensional initial value alone is not enough to declare one: ``0*liter`` is exactly ``0`` in
+        GiNaC and carries no unit, so the ``unit`` keyword is required whenever the parameter is meant
+        to be dimensional.
+
+        The current value is read and written through
+        :py:attr:`~pyoomph.GiNaC_GlobalParam.value`, which is dimensional for a parameter with a unit.
+        :py:attr:`~pyoomph.GiNaC_GlobalParam.nondim_value` is the stored number, i.e. the value in
+        units of ``unit`` - that is what state files, arclength step sizes and parameter derivatives
+        are in terms of.
 
         .. deprecated::
             Passing more than one keyword argument at once (to define several parameters in a
@@ -6763,7 +6782,23 @@ class Problem(_pyoomph.Problem):
             declared return type here only reflects the single-parameter form; the multi-parameter
             form's actual tuple return is not statically visible.
         """
+        # "no unit given" means numerically 1, however it was spelled - a plain 1 or Expression(1).
+        if isinstance(unit, (int, float)):
+            has_unit = (unit != 1)
+        elif isinstance(unit, _pyoomph.Expression):
+            has_unit = not unit.is_equal(_pyoomph.Expression(1))
+        else:
+            has_unit = True
+        if len(params) == 0:
+            raise RuntimeError(
+                "define_global_parameter(...) needs exactly one <name>=<value> keyword argument. Note "
+                "that 'unit' is this method's own keyword, for the parameter's physical unit, so a "
+                "global parameter cannot be named 'unit'.")
         if len(params) > 1:
+            if has_unit:
+                raise RuntimeError(
+                    "define_global_parameter(..., unit=...) cannot define several parameters at once, "
+                    "since one unit cannot serve all of them. Call it once per parameter.")
             warnings.warn(
                 "define_global_parameter(...) called with more than one keyword argument at once - "
                 "this legacy form (returning a tuple of parameters) is deprecated. Call "
@@ -6772,10 +6807,29 @@ class Problem(_pyoomph.Problem):
                 DeprecationWarning,
                 stacklevel=2,
             )
+        if has_unit and self.is_initialised():
+            raise RuntimeError(
+                "Cannot give the global parameter " + ", ".join(params.keys()) + " a unit after the "
+                "problem has been initialised: the generated code has already baked the unit's "
+                "numerical factor in. Declare it with its unit in define_problem().")
         res = []
         for p, v in params.items():
-            res.append(self.get_global_parameter(p))
-            res[-1].value = v
+            param = self.get_global_parameter(p)
+            if has_unit:
+                param._set_unit(unit)
+            elif isinstance(v, _pyoomph.Expression):
+                # A dimensional value with no unit given. Inferring the unit from it was deliberately
+                # not done: the unit also fixes the scale the parameter is expanded with, and that must
+                # not silently depend on whatever the initial value happened to be.
+                _factor, vunit, _rest, success = _pyoomph.GiNaC_collect_units(v)
+                if not success or not vunit.is_equal(_pyoomph.Expression(1)):
+                    raise RuntimeError(
+                        "The global parameter '" + p + "' was given the dimensional value " + str(v) +
+                        ", but no unit. Pass the unit explicitly, e.g. define_global_parameter(" + p +
+                        "=" + str(v) + ", unit=" + str(vunit) + "), which also fixes the scale the "
+                        "parameter is expanded with in the generated code.")
+            param.value = v
+            res.append(param)
         if len(res) == 1:
             return res[0]
         else:
@@ -7405,30 +7459,34 @@ class Problem(_pyoomph.Problem):
         self._set_arc_length_theta_sqr(float(theta_new))
         return abs(dp0)/abs(dp_new)
 
-    def arclength_continuation(self, parameter: str | _pyoomph.GiNaC_GlobalParam, step: float, *,
-                              spatial_adapt: int = 0, max_ds: float | None = None,
+    def arclength_continuation(self, parameter: str | _pyoomph.GiNaC_GlobalParam, step: ExpressionOrNum, *,
+                              spatial_adapt: int = 0, max_ds: ExpressionOrNum | None = None,
                               max_newton_iterations: int | None = None,
                               newton_relaxation_factor: float | None = None,
                               newton_solver_tolerance: float | None = None,
-                              min_ds: float | None = None, dof_direction: list[float] | None = None,
+                              min_ds: ExpressionOrNum | None = None, dof_direction: list[float] | None = None,
                               globally_convergent_newton: bool | None = False) -> float:
         """
         Perform arclength continuation on the basis of a given parameter.
 
         Args:
             parameter (Union[str, _pyoomph.GiNaC_GlobalParam]): The parameter to perform arclength continuation on.
-            step (float): The step for the continuation.
+            step: The step for the continuation. For a parameter declared with a unit this may be given
+                dimensionally, e.g. ``ds=1*pico*liter``; a plain number is taken to be in units of that
+                parameter's ``unit``.
             spatial_adapt (int, optional): The level of spatial adaptation. Defaults to 0.
-            max_ds (float, optional): The maximum step size. Defaults to None.
+            max_ds (optional): The maximum step size, dimensional or not, as ``step``. Defaults to None.
             max_newton_iterations (int, optional): The maximum number of Newton iterations. Defaults to None.
             newton_relaxation_factor (float, optional): The relaxation factor for the Newton solver. Defaults to None.
             newton_solver_tolerance (float, optional): The tolerance for the Newton solver. Defaults to None.
-            min_ds (float, optional): The minimum step size. Defaults to None.
+            min_ds (optional): The minimum step size, dimensional or not, as ``step``. Defaults to None.
             dof_direction (List[float], optional): The direction of degrees of freedom. Defaults to None.
             globally_convergent_newton (bool, optional): Whether to use globally convergent Newton solver. Defaults to False.
 
         Returns:
-            float: The new step size for the continuation.
+            float: The new step size for the continuation, always as a plain number in units of the
+            parameter's ``unit`` - so that the usual ``ds=problem.arclength_continuation(p,ds,...)``
+            loop keeps working, and keeps doing arithmetic on a number rather than on an expression.
         """
         if spatial_adapt>0 and self.get_bifurcation_tracking_mode()!="":
             # Kept, and measured rather than assumed: adapting INSIDE an arclength step changes ndof
@@ -7444,23 +7502,27 @@ class Problem(_pyoomph.Problem):
             self.initialise()
             self._activate_solver_callback()
 
-        step = float(step)
+        if isinstance(parameter, _pyoomph.GiNaC_GlobalParam):
+            parameter = parameter.get_name()
+
+        if parameter not in self.get_global_parameter_names():
+            raise RuntimeError("Cannot perform arclength continuation in parameter '" + parameter + "' since it is not part of the problem")
+
+        # The step sizes are nondimensionalised only here, once the parameter is known: oomph-lib steps
+        # the parameter's stored number, so a step is in units of that parameter's unit. A plain number
+        # passes through unchanged, which is what every existing script hands in.
+        param_for_step = self.get_global_parameter(parameter)
+        step = param_for_step.nondimensionalise(step)
         # Re-derive theta^2 from the configured inner product BEFORE the step, so the constraint this
         # step imposes and the tangent it predicts along are consistent with each other. ds is rescaled
         # by the same call, since a changed metric buys a different step for the same number.
         step *= self._retune_arclength_theta()
         if max_ds is not None:
-            max_ds = float(max_ds)
+            max_ds = param_for_step.nondimensionalise(max_ds)
 
         if min_ds is not None:
             old_min_ds = self.minimum_arclength_ds
-            self.minimum_arclength_ds = min_ds
-
-        if isinstance(parameter, _pyoomph.GiNaC_GlobalParam):
-            parameter = parameter.get_name()
-            
-        if parameter not in self.get_global_parameter_names():
-            raise RuntimeError("Cannot perform arclength continuation in parameter '" + parameter + "' since it is not part of the problem")
+            self.minimum_arclength_ds = param_for_step.nondimensionalise(min_ds)
         
         if self.warn_about_unused_global_parameters and not self._is_global_parameter_used(parameter):
             if self.warn_about_unused_global_parameters=="error":
@@ -7528,19 +7590,22 @@ class Problem(_pyoomph.Problem):
             self.minimum_arclength_ds = old_min_ds  # type:ignore
         return newds
 
-    def go_to_param(self, _param:"dict[str,float] | None"=None, *, reset_pars:bool=True, startstep:float | None=None, call_after_step:Callable[[float], None] | None=None,final_adaptive_solve:bool | int=False,max_newton_iterations:int | None=None, epsilon:float=1e-6, max_step:float | None=None,**kwargs:float)->None:
+    def go_to_param(self, _param:"dict[str,ExpressionOrNum] | None"=None, *, reset_pars:bool=True, startstep:ExpressionOrNum | None=None, call_after_step:Callable[[float], None] | None=None,final_adaptive_solve:bool | int=False,max_newton_iterations:int | None=None, epsilon:ExpressionOrNum=1e-6, max_step:ExpressionOrNum | None=None,**kwargs:ExpressionOrNum)->None:
         """
         Perform arclength continuation in a parameter until we reach the desired value.
 
         Args:
             reset_pars (bool, optional): Whether to reset arc length parameters. Defaults to True.
-            startstep (float, optional): The initial step size for the parameter continuation. Defaults to None.
+            startstep (optional): The initial step size for the parameter continuation. Defaults to None.
             call_after_step (Callable[[float],None], optional): A function to call after each step. If it returns "stop", we stop any further continuation. Defaults to None.
             final_adaptive_solve (Union[bool,int], optional): Whether to perform a final adaptive solve. Defaults to False.
             max_newton_iterations (int, optional): The maximum number of Newton iterations. Defaults to None.
             epsilon: The tolerance for considering as converged to the parameter
             max_step: The maximum step size for the continuation. Defaults to None.
-            **kwargs (float): The parameter name and desired value.
+            **kwargs: The parameter name and desired value. For a parameter declared with a unit the
+                value may be dimensional, e.g. ``go_to_param(volume=10*pico*liter)``; so may
+                ``startstep``, ``max_step`` and ``epsilon``. A plain number is taken to be in units of
+                that parameter's ``unit``.
 
         Raises:
             RuntimeError: If more than one parameter is provided.
@@ -7555,12 +7620,22 @@ class Problem(_pyoomph.Problem):
         if len(kwargs) != 1:
             raise RuntimeError("Please only give one parameter as keyword argument (you might have misspelled an optional keyword argument)!")
         pname:str=""
-        desired_val:float=0.0
+        desired_val_in:ExpressionOrNum=0.0
         for a, b in kwargs.items():
             pname = a
-            desired_val = float(b)
+            desired_val_in = b
         if pname not in self.get_global_parameter_names():
-            raise RuntimeError("Cannot go to parameter "+str(pname)+"="+str(desired_val)+", since the parameter '"+str(pname)+"' is not part of the problem. Available parameters are: "+str(self.get_global_parameter_names()))
+            raise RuntimeError("Cannot go to parameter "+str(pname)+"="+str(desired_val_in)+", since the parameter '"+str(pname)+"' is not part of the problem. Available parameters are: "+str(self.get_global_parameter_names()))
+        # The target and the step bounds are converted only once the parameter is known, since for a
+        # parameter with a unit they may be dimensional. Everything below this point is the stored
+        # number, which is what arclength continuation steps.
+        param_to_go = self.get_global_parameter(pname)
+        desired_val:float = param_to_go.nondimensionalise(desired_val_in)
+        if startstep is not None:
+            startstep = param_to_go.nondimensionalise(startstep)
+        if max_step is not None:
+            max_step = param_to_go.nondimensionalise(max_step)
+        epsilon = param_to_go.nondimensionalise(epsilon)
         if not self.is_initialised():
             self.initialise()
 
@@ -7570,7 +7645,7 @@ class Problem(_pyoomph.Problem):
             self.reapply_boundary_conditions() # Must be done twice to correctly setup the eqn_remapping
 
 
-        ds = desired_val - self.get_global_parameter(pname).value
+        ds = desired_val - self.get_global_parameter(pname).nondim_value
         if max_step is not None:
             if abs(ds) > abs(max_step):
                 ds = abs(max_step) * (1 if ds > 0 else -1)
@@ -7581,12 +7656,12 @@ class Problem(_pyoomph.Problem):
                 ds=-ds
             if abs(dsold)<abs(ds):
                 ds=abs(dsold)*(-1 if ds<0 else 1)
-        while abs(desired_val - self.get_global_parameter(pname).value) > epsilon:
-            ds = self.arclength_continuation(pname, ds, max_ds=desired_val - self.get_global_parameter(pname).value,max_newton_iterations=max_newton_iterations)
+        while abs(desired_val - self.get_global_parameter(pname).nondim_value) > epsilon:
+            ds = self.arclength_continuation(pname, ds, max_ds=desired_val - self.get_global_parameter(pname).nondim_value,max_newton_iterations=max_newton_iterations)
             #print("AFTER DS WE HAVE NEW DS",ds,"param deriv",self.get_arc_length_parameter_derivative())
             if reset_pars:
                 self.reset_arc_length_parameters()
-                if ds * (desired_val - self.get_global_parameter(pname).value) < 0:
+                if ds * (desired_val - self.get_global_parameter(pname).nondim_value) < 0:
                     ds *= -1  # Always move towards the parameter
             if call_after_step is not None:
                 if call_after_step(ds)=="stop":
@@ -7594,7 +7669,7 @@ class Problem(_pyoomph.Problem):
             if max_step is not None:
                 if abs(ds) > abs(max_step):
                     ds = abs(max_step) * (1 if ds > 0 else -1)
-        self.get_global_parameter(pname).value = desired_val
+        self.get_global_parameter(pname).nondim_value = desired_val
         if self.max_refinement_level > 0 and final_adaptive_solve:
             if isinstance(final_adaptive_solve,bool) and final_adaptive_solve:
                 self.solve(spatial_adapt=self.max_refinement_level,max_newton_iterations=max_newton_iterations)
@@ -7795,7 +7870,7 @@ class Problem(_pyoomph.Problem):
             else:
                 evals0, _ = self._solve_normal_mode_eigenproblem(neigen, azimuthal_m, shift=shift)
         self.invalidate_cached_mesh_data()
-        param0 = parameter.value
+        param0 = parameter.nondim_value
         # The index of the mode being followed, in the set that produced evals0. Constant when
         # track_eigenvector is off, re-matched every step when it is on.
         idx0 = eigenindex
@@ -7847,7 +7922,7 @@ class Problem(_pyoomph.Problem):
                 # not halve the parameter step, and the sign of ds does not by itself decide which
                 # way along the branch the step goes (Continuation_direction does).
                 target = self._bifurcation_bracket_target(bracket,retained)
-                dp = target - parameter.value
+                dp = target - parameter.nondim_value
                 if do_solve:
                     dpds = self.get_arc_length_parameter_derivative()
                     if abs(dpds) > 1e-12 and numpy.isfinite(dpds):
@@ -7865,7 +7940,7 @@ class Problem(_pyoomph.Problem):
                     # call's result, and the two blocks cannot be hoisted into one because they
                     # evaluate max_ds_func at DIFFERENT parameter values -- before the arclength
                     # step here, after the parameter has already moved in the branch below.
-                    max_ds=abs(float(max_ds_func(parameter.value)))
+                    max_ds=abs(float(max_ds_func(parameter.nondim_value)))
                     print("MAX DS SET TO",max_ds)
                 assert not callable(max_ds)
                 # max_ds must not clip a bracketed step: it is there to stop the MARCH overshooting,
@@ -7874,14 +7949,14 @@ class Problem(_pyoomph.Problem):
                                                  max_ds=None if bracket is not None else max_ds)
                 self.invalidate_cached_mesh_data()
             else:
-                parameter.value=parameter.value+ds
+                parameter.nondim_value=parameter.nondim_value+ds
                 if callable(max_ds_func):
                     # float() is not cosmetic: callable() narrowing over a
                     # float | Callable | None union leaves pyright with "object | float" for the
                     # call's result, and the two blocks cannot be hoisted into one because they
                     # evaluate max_ds_func at DIFFERENT parameter values -- before the arclength
                     # step here, after the parameter has already moved in the branch below.
-                    max_ds=abs(float(max_ds_func(parameter.value)))
+                    max_ds=abs(float(max_ds_func(parameter.nondim_value)))
                     print("MAX DS SET TO",max_ds)
                 assert not callable(max_ds)
                 # Enlarge the step while marching towards the first sign change. This used to be
@@ -7914,7 +7989,7 @@ class Problem(_pyoomph.Problem):
                 else:
                     evals1,_=self._solve_normal_mode_eigenproblem(neigen, azimuthal_m, shift=shift)
             self.invalidate_cached_mesh_data()
-            param1 = parameter.value
+            param1 = parameter.nondim_value
             idx1 = eigenindex
             if track_eigenvector:
                 assert tracked_eigenvector is not None
@@ -8372,7 +8447,7 @@ class Problem(_pyoomph.Problem):
             raise RuntimeError("The normal form of this "+str(kind)+" bifurcation carries no branch "
                                "predictor, so there is no prediction for where the other branch goes")
 
-        p0=float(param.value)
+        p0=float(param.nondim_value)
         self.deactivate_bifurcation_tracking()
         self.reset_arc_length_parameters()
         # AFTER deactivating: while tracking is active the dof vector is the augmented one and could not
@@ -8412,7 +8487,7 @@ class Problem(_pyoomph.Problem):
                 if du.size!=base.size:
                     raise RuntimeError("The branch predictor returned {:d} values for {:d} degrees of "
                                        "freedom".format(du.size,base.size))
-                param.value=p0+dp
+                param.nondim_value=p0+dp
                 self.set_current_dofs(base+du)
                 failed=False
                 try:
@@ -8427,7 +8502,7 @@ class Problem(_pyoomph.Problem):
                 # hook - and a rank that took `continue` while the others carried on deadlocks at the
                 # next collective instead of failing, which is how B6 of
                 # dev_docs/mpi_augmented_systems.md cost a 600 s hang. Every other break and continue
-                # in this ladder is driven by rank-identical data: param.value is Python-side, the
+                # in this ladder is driven by rank-identical data: param.nondim_value is Python-side, the
                 # dof accessors gather and scatter by global equation number, and the dot product
                 # below runs on vectors that are identical on every rank.
                 from .mpi import get_mpi_nproc,get_mpi_any
@@ -8466,7 +8541,7 @@ class Problem(_pyoomph.Problem):
                 break
 
         if landed is None:
-            param.value=p0
+            param.nondim_value=p0
             self.set_current_dofs(base)
             if not quiet:
                 print("Could not step onto the other branch: {:d} predicted points tried, from an "
@@ -9040,14 +9115,14 @@ class Problem(_pyoomph.Problem):
         
         param=self._bifurcation_tracking_parameter_name
         parameter=self.get_global_parameter(param)
-        pvalue=self.get_global_parameter(param).value
+        pvalue=self.get_global_parameter(param).nondim_value
         # Deactivate the bifurcation tracking
         self.deactivate_bifurcation_tracking()
         self.timestepper.make_steady()
         #self.solve()
         # Get the Lyapunov coefficient
         if dparam is not None and orbit_amplitude is not None:
-            parameter.value+=dparam
+            parameter.nondim_value+=dparam
             # +-1, like the dlam the Lyapunov coefficient returns in the other branch. It is only
             # consumed by the parameter step below, which this branch has already taken, but a 0 here
             # meant the two branches disagreed about what `sign` is.
@@ -9071,7 +9146,7 @@ class Problem(_pyoomph.Problem):
             print("AL",al,"QR MAGNITUDE",numpy.linalg.norm(qR+1j*qI))
             if dparam:
                 eps=numpy.sqrt(abs(dparam))
-            parameter.value+=-eps**2*sign
+            parameter.nondim_value+=-eps**2*sign
             amplitude=2*eps*al*amplitude_factor
             param_step=-eps**2*sign
         u0=self.get_current_dofs()[0]
@@ -9094,7 +9169,7 @@ class Problem(_pyoomph.Problem):
         self.set_current_dofs(history_dofs[0])
         self.activate_periodic_orbit_handler(T,history_dofs[1:],mode,order=order,GL_order=GL_order,T_constraint=T_constraint)
         history_dofs.append(history_dofs[0])
-        res=PeriodicOrbit(self,mode,lyap_coeff,param,omega,pvalue,parameter.value,al,order,GL_order,T_constraint)
+        res=PeriodicOrbit(self,mode,lyap_coeff,param,omega,pvalue,parameter.nondim_value,al,order,GL_order,T_constraint)
         ncnt:int | None=None
         avg_dists0:float | None=None
         if check_collapse_to_stationary:
@@ -9556,11 +9631,11 @@ class Problem(_pyoomph.Problem):
         # azimuthal/normal-mode tracker reads the very same global parameter when it assembles its
         # eigen rows, so hard-coding 0 here would silently retune the tracked bifurcation to m=0.
         # Restore what was set on entry instead (which is 0 in the untracked case, as before).
-        mode_value_on_entry=param.value
+        mode_value_on_entry=param.nondim_value
         try:
             return self._solve_normal_mode_eigenproblem_impl(n,param,vlist,azimuthal_m,shift,quiet,filter,report_accuracy,target,v0,sort,ncv,tracking)
         finally:
-            param.value=mode_value_on_entry
+            param.nondim_value=mode_value_on_entry
 
     def _solve_normal_mode_eigenproblem_impl(self,n:int,param:"_pyoomph.GiNaC_GlobalParam",vlist:"list[int] | tuple[int] | int | list[float] | tuple[float] | float",azimuthal_m:list[int] | tuple[int] | int | None,shift:float | complex | None,quiet:bool,filter:Callable[[complex], bool] | None,report_accuracy:bool,target:complex | None,v0:NPFloatArray | NPComplexArray | None,sort:bool,ncv:int | None,tracking:bool)->tuple[NPComplexArray,NPComplexArray]:
         if isinstance(vlist,(list,tuple)):
@@ -9580,10 +9655,10 @@ class Problem(_pyoomph.Problem):
             # tests/test_azimuthal_mode_list.py.
             nonzero=[ms for ms in vlist if ms!=0]
             if nonzero:
-                param.value=nonzero[0]
+                param.nondim_value=nonzero[0]
                 self.actions_before_eigen_solve(must_not_renumber=tracking)
             for ms in vlist:
-                param.value = ms
+                param.nondim_value = ms
                 self.actions_before_eigen_solve(must_not_renumber=tracking)
                 self._solve_eigenproblem_helper(n, shift,quiet=True,filter=filter,report_accuracy=report_accuracy,target=target,v0=v0,sort=sort,ncv=ncv)
                 if len(alleigenvals)==0:
@@ -9627,7 +9702,7 @@ class Problem(_pyoomph.Problem):
                     m=minfo[i]
                     print("Eigenvalue [m="+str(m)+"]", i, ":", l)
         else:
-            param.value = vlist
+            param.nondim_value = vlist
             self.actions_before_eigen_solve(must_not_renumber=tracking)
             self._solve_eigenproblem_helper(n, shift,filter=filter,report_accuracy=report_accuracy,target=target,v0=v0,sort=sort,ncv=ncv)
             if azimuthal_m is not None:
@@ -11400,7 +11475,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         for ngpar in range(numgpars):
             gparname = state.string_data(lambda: gpars[ngpar], lambda s: state.assert_equal(s, gpars[ngpar]))
             gp = self.get_global_parameter(gparname)
-            gp.value = state.float_data(lambda: gp.value, lambda v: v)
+            gp.nondim_value = state.float_data(lambda: gp.nondim_value, lambda v: v)
 
 
 

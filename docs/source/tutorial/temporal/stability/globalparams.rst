@@ -52,6 +52,54 @@ After setting :math:`r=-1`, the dynamics of the system entirely changes. In part
 	
 	Temporal integration of the transcritical normal form with a switch of the parameter :math:`r` at :math:`t=20`. Depending on :math:`r`, the stationary solution at :math:`x=0` is either unstable or stable.
 
+Parameters with a physical unit
+'''''''''''''''''''''''''''''''
+
+By default, a global parameter is a plain dimensionless number. For a physical problem, you usually want
+an actual quantity instead -- an inlet pressure, a droplet volume, a driving frequency. Pass the
+``unit`` keyword to declare one:
+
+.. code:: python
+
+	self.p_in = self.define_global_parameter(p_in=0*pascal, unit=1*kilo*pascal)
+
+The value can then be read and written dimensionally, and it does not matter which prefix you write it
+in:
+
+.. code:: python
+
+	self.p_in.value = 1.53*bar           # an Expression with the dimension of a pressure
+	print(float(self.p_in.value/pascal)) # 153000.0
+
+``unit`` also fixes the *scale* the parameter is expanded with when the C code is generated. With
+``unit=1*kilo*pascal`` the parameter enters an expression as its stored number times
+:math:`10^{3}\,\mathrm{kg}\,\mathrm{m}^{-1}\mathrm{s}^{-2}`, not as a pascal with a thousand times
+larger number. Choose a unit of the same order as the problem's own scaling, as you would choose a
+scale with :py:meth:`~pyoomph.generic.problem.Problem.set_scaling`; a unit far away from it leaves a
+large numerical factor in the residual, which ``warn_on_large_numerical_factor`` will point out.
+
+Because the generated code has that factor baked in, a parameter's unit cannot be changed afterwards,
+and cannot be set at all once the problem has been initialised. Note also that a dimensional initial
+value is *not* enough to declare a dimensional parameter: ``0*liter`` is exactly ``0`` and carries no
+unit at all, so the ``unit`` keyword is always required.
+
+That number the parameter actually stores -- its value in units of ``unit`` -- is available as
+``nondim_value``. It is what the generated code reads, what the arclength continuation steps, and what
+is written to state files, so it is the one to use when you need a plain float:
+
+.. code:: python
+
+	self.p_in.nondim_value   # 1.53, since the unit is a kilopascal
+
+Continuation accepts dimensional values throughout, while the step size it hands back is a plain number
+in units of ``unit``, so that the usual loop keeps working:
+
+.. code:: python
+
+	problem.go_to_param(p_in=2*bar)
+	ds = problem.arclength_continuation("p_in", 0.1*bar, max_ds=0.5*bar)
+	ds = problem.arclength_continuation("p_in", ds)   # a plain number is in units of `unit`
+
 .. only:: html
 
 	.. container:: downloadbutton

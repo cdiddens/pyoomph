@@ -310,7 +310,7 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
             # can target a complex eigenvalue (the route above, which installs no tracker) and was red on
             # a plain wheel, where this one is taken. Commit 9df3a002 made these tests run there on
             # purpose; this is the defect that exposed.
-            param_at_hopf=param.value
+            param_at_hopf=param.nondim_value
             problem.deactivate_bifurcation_tracking()        
             problem.set_custom_assembler(HopfTracker(problem,param.get_name(),numpy.conjugate(q_resolved),omega=-omega0,left_eigenvector=True,eigenscale=1))
             problem.solve()
@@ -323,7 +323,7 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
                 evectT=numpy.conjugate(evectT)        
             problem.set_custom_assembler(None)
             # ...and put it back, before anything reads it as "the Hopf parameter".
-            param.value=param_at_hopf
+            param.nondim_value=param_at_hopf
         
             #raise RuntimeError("Eigenvalue solver does not support target. Please use a different eigenvalue solver.")
         #print("GOT",evalT,evectT)
@@ -557,11 +557,11 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
         # d(Re lambda)/d(parameter), by continuing the eigenbranch rather than re-solving the
         # eigenproblem at a shifted parameter: q_resolved, not q -- q is still None whenever the caller
         # supplied neither omega nor an eigenvector and the auto-solve above produced them.
-        old=param.value
+        old=param.nondim_value
         problem.activate_eigenbranch_tracking("complex",eigenvector=q_resolved,eigenvalue=1j*omega0)
         problem.solve()
         mu1=numpy.real(problem.get_last_eigenvalues()[0])
-        problem.go_to_param({param.get_name():param.value+FD_param_delta})
+        problem.go_to_param({param.get_name():param.nondim_value+FD_param_delta})
         mu2=numpy.real(problem.get_last_eigenvalues()[0])
         mup=-(mu2-mu1)/FD_param_delta
         if abs(mup)>1e12*abs(c1):
@@ -569,7 +569,7 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
         problem.deactivate_bifurcation_tracking()
         problem.set_current_dofs(u)                            
 
-        param.value=old
+        param.nondim_value=old
     
         if ((c1>0 and mup>0) or (c1<0 and mup<0)):
             dlam=-1
@@ -1690,16 +1690,16 @@ class CriticalWavenumberTracker(_NormalModeBifurcationTrackerBase):
             assert problem._azimuthal_stability is not None and problem._azimuthal_mode_param_m is not None
             self.mode_parameter=problem._azimuthal_stability.azimuthal_param_m_name
             self._mode_param=problem._azimuthal_mode_param_m
-            if abs(float(self._mode_param.value))<=1+1e-10:
+            if abs(float(self._mode_param.nondim_value))<=1+1e-10:
                 # The axis conditions differ between m==0, |m|==1 and |m|>1, and the mask is frozen at
                 # the |m|>1 one when the tracker is created (see get_forced_to_zero_dofs), so the low
                 # modes cannot be represented at all.
-                raise RuntimeError("Cannot track a critical azimuthal mode at |m|<=1: this tracker treats m as real and assumes the |m|>1 axis regime throughout, which the low modes do not fall into. Got m="+str(float(self._mode_param.value))+".")
+                raise RuntimeError("Cannot track a critical azimuthal mode at |m|<=1: this tracker treats m as real and assumes the |m|>1 axis regime throughout, which the low modes do not fall into. Got m="+str(float(self._mode_param.nondim_value))+".")
         else:
             assert problem._cartesian_normal_mode_stability is not None and problem._normal_mode_param_k is not None
             self.mode_parameter=problem._cartesian_normal_mode_stability.normal_mode_param_k_name
             self._mode_param=problem._normal_mode_param_k
-            if abs(float(self._mode_param.value))<1e-10:
+            if abs(float(self._mode_param.nondim_value))<1e-10:
                 # The forced-zero dof masks are taken once, from _get_forced_zero_dofs_for_eigenproblem,
                 # which returns a DIFFERENT set for k==0 than for k!=0. Starting there (or passing through
                 # zero) would silently keep the wrong mask.
@@ -1715,7 +1715,7 @@ class CriticalWavenumberTracker(_NormalModeBifurcationTrackerBase):
         problem._set_solved_residual("",False,False)
         self.dVdk,dlambda_dk=self._guess_k_derivative()
         self.mu=float(numpy.imag(dlambda_dk))
-        print("Starting critical wavenumber tracking at",self.mode_parameter,"=",float(self._mode_param.value),
+        print("Starting critical wavenumber tracking at",self.mode_parameter,"=",float(self._mode_param.nondim_value),
               "with dlambda/d("+self.mode_parameter+") =",dlambda_dk,"(its real part is the tangency residual to be driven to zero)")
 
     def get_forced_to_zero_dofs(self):
@@ -1926,7 +1926,7 @@ class CriticalWavenumberTracker(_NormalModeBifurcationTrackerBase):
         self.V0_replicated=self.replicated(self.V0)
 
     def _kfd_delta(self)->float:
-        return self.k_fd_step*max(abs(float(self._mode_param.value)),1.0)
+        return self.k_fd_step*max(abs(float(self._mode_param.nondim_value)),1.0)
 
     def _at_k_offset(self,offset:float,build:Callable[[],Any])->Any:
         """Run build() with the mode parameter shifted. It is one of the augmented dofs, i.e. a raw

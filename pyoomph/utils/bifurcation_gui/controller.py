@@ -193,6 +193,10 @@ class BifurcationController:
     settings.
     """
 
+    #: Class-level default, because the tests build a controller with __new__ and set only the
+    #: attributes they exercise. None means "not resolved yet"; see :py:meth:`_resolve_parameter_units`.
+    _parameter_units:"dict[str,str] | None"=None
+
     def __init__(self,problem:Problem,parameter:"str | _pyoomph.GiNaC_GlobalParam | None"=None) -> None:
         self.problem=problem
         self.problem._runmode="overwrite"
@@ -239,6 +243,9 @@ class BifurcationController:
         self._observable_mults:dict[str,float]={}
         #: Callables returning one DIMENSIONAL value per observable, used only to read off the unit.
         self._observable_unit_probes:dict[str,Callable[[],Any]]={}
+        #: Unit of each global parameter, or None while still unresolved. Resolved once and cached for
+        #: the same reason the observables are, see :py:meth:`_resolve_parameter_units`.
+        self._parameter_units:dict[str,str] | None=None
         #: Eigenvalues are stored as physical rates; see :py:meth:`_resolve_eigen_unit`.
         self._eigen_mult=1.0
         self._eigen_unit=""
@@ -677,11 +684,12 @@ class BifurcationController:
         """Label for the figure: the name, plus the unit when the quantity has one.
 
         The parameter/observable distinction only has to be spelled out where a choice is being made
-        (the menus and combos), not on the plot. Global parameters are plain numbers in pyoomph, so only
-        observables can carry a unit.
+        (the menus and combos), not on the plot. A global parameter can carry a unit too, since
+        Problem.define_global_parameter() takes one; a dimensionless parameter is still a plain number
+        and gets a bare name, which is the only case there used to be.
         """
         kind,name=as_axis(spec)
-        unit=self.observable_unit(name) if kind==AXIS_OBSERVABLE else ""
+        unit=self.observable_unit(name) if kind==AXIS_OBSERVABLE else self.parameter_unit(name)
         return name+" ["+unit+"]" if unit else name
 
     def branch_can_be_plotted(self,branch:"BifurcationGUISolutionBranch")->bool:
@@ -978,6 +986,45 @@ class BifurcationController:
         """Unit string of an observable, e.g. "mm"; empty when it is dimensionless or unknown."""
         return self._observable_units.get(name,"")
 
+    def parameter_unit(self,name:str)->str:
+        """Unit string of a global parameter; empty when it is dimensionless or unknown."""
+        if self._parameter_units is None:
+            self._resolve_parameter_units()
+        return (self._parameter_units or {}).get(name,"")
+
+    def _resolve_parameter_units(self):
+        """Fix each global parameter's unit ONCE, as :py:meth:`_resolve_observable_units` does.
+
+        A recorded point stores a parameter's nondim_value, i.e. its value in units of the unit it was
+        declared with, so that unit - numerical factor and all - is what labels the axis. The factor
+        cannot always be folded into an SI prefix: 1e-15 m^3, a picolitre, is not a prefixed cubic
+        metre, so it is written out in front of the base units rather than forced into one.
+
+        Cached rather than read per call, because this is also reached from the export paths, where
+        `self.problem` may have been replaced by something that only has to answer for the output
+        directory. An unresolvable problem leaves the cache unset so that a later call can retry.
+        """
+        try:
+            names=list(self.problem.get_global_parameter_names())
+        except Exception as e:
+            # Cached as empty rather than left unresolved, so this is said once and not per axis label.
+            self._parameter_units={}
+            self.log("Could not determine the units of the global parameters:",repr(e))
+            return
+        units:dict[str,str]={}
+        for name in names:
+            unit=self.problem.get_global_parameter(name).unit
+            if not isinstance(unit,_pyoomph.Expression) or unit.is_equal(_pyoomph.Expression(1)):
+                continue
+            factor,baseunit,rest,success=_pyoomph.GiNaC_collect_units(unit)
+            if not success:
+                self.log("Could not separate the unit of the global parameter",name)
+                continue
+            ustr=str(unit_to_string(baseunit,estimate_prefix=False))
+            f=float(factor*rest)
+            units[name]=ustr if f==1.0 else "{:g} {}".format(f,ustr)
+        self._parameter_units=units
+
     # ------------------------------------------------------------------ diagram bookkeeping
 
     def all_parameter_names(self)->list[str]:
@@ -989,7 +1036,7 @@ class BifurcationController:
         return sorted(self.problem.get_global_parameter_names())
 
     def current_parameter_values(self)->dict[str,float]:
-        return {n:float(self.problem.get_global_parameter(n).value) for n in self.all_parameter_names()}
+        return {n:float(self.problem.get_global_parameter(n).nondim_value) for n in self.all_parameter_names()}
 
     def describe_current_slice(self)->str:
         """What the current branch holds fixed, e.g. "b = 0.3" - for the status bar and the plot."""
@@ -1377,7 +1424,7 @@ class BifurcationController:
         self.problem.deactivate_bifurcation_tracking()
         self.problem.reset_arc_length_parameters()
         param=self.problem.get_global_parameter(target)
-        at_bif=float(param.value)
+        at_bif=float(param.nondim_value)
         dofs_at_bif=numpy.array(self.problem.get_current_dofs()[0]).copy()
 
         base=offset if offset is not None else self.leave_locus_offset*max(abs(at_bif),1.0)
@@ -1385,7 +1432,7 @@ class BifurcationController:
         for delta in (base,base/10,base*10):
             for sign in (1.0,-1.0):
                 for hsign in ((1.0,-1.0) if zeta is not None else (0.0,)):
-                    param.value=at_bif+sign*delta
+                    param.nondim_value=at_bif+sign*delta
                     guess=dofs_at_bif.copy()
                     if zeta is not None and hsign!=0.0:
                         guess=guess+hsign*numpy.sqrt(abs(delta))*zeta
@@ -1400,7 +1447,7 @@ class BifurcationController:
                 if landed: break
             if landed: break
         if landed is None:
-            param.value=at_bif
+            param.nondim_value=at_bif
             self.problem.set_current_dofs(dofs_at_bif)
             self._sync_tracking_to(branch)
             raise RuntimeError("Could not step off the bifurcation. Try a different offset "

@@ -188,6 +188,47 @@ namespace pyoomph
 
 }
 
+namespace pyoomph
+{
+	// Defined in nanobind/expressions.cpp. The ONLY sanctioned way to turn a global parameter into a
+	// GiNaC expression: it multiplies the parameter's physical unit in. Writing `0 + w` here instead
+	// silently drops that unit, which surfaces as a wrong answer rather than an error.
+	GiNaC::ex GiNaCFromGlobalParam(GiNaC::GiNaCGlobalParameterWrapper w);
+}
+
+// value/nondim_value share the positivity check, which is on the STORED number: base units are
+// positive GiNaC symbols, so the sign of a dimensional value is entirely in that number.
+static void pyoomph_set_global_parameter_raw_value(pyoomph::GlobalParameterDescriptor *d, const double &v)
+{
+	if (v < 0 && d->is_restricted_to_positive_values())
+		throw_runtime_error("Cannot set the parameter " + d->get_name() + " to a negative value of " + std::to_string(v) + " since it is restricted to positive values.");
+	d->value() = v;
+}
+
+// `value`, which may be a plain number or an Expression, as the stored number. A plain number is
+// always read as being already in units of the parameter's unit, so a dimensionless parameter and
+// every existing script behave exactly as before.
+static double pyoomph_global_parameter_to_raw(pyoomph::GlobalParameterDescriptor *d, nb::handle value)
+{
+	if (nb::isinstance<GiNaC::ex>(value))
+		return d->nondimensionalise(nb::cast<GiNaC::ex>(value));
+	if (nb::isinstance<GiNaC::GiNaCGlobalParameterWrapper>(value))
+		return d->nondimensionalise(pyoomph::GiNaCFromGlobalParam(nb::cast<GiNaC::GiNaCGlobalParameterWrapper>(value)));
+	try
+	{
+		return nb::cast<double>(value);
+	}
+	catch (...)
+	{
+		throw_runtime_error("Cannot interpret " + nb::cast<std::string>(nb::repr(value)) + " as a value of the global parameter '" + d->get_name() + "': expected a number or a pyoomph Expression.");
+	}
+}
+
+static void pyoomph_set_global_parameter_value(pyoomph::GlobalParameterDescriptor *d, nb::handle value)
+{
+	pyoomph_set_global_parameter_raw_value(d, pyoomph_global_parameter_to_raw(d, value));
+}
+
 static nb::class_<GiNaC::GiNaCGlobalParameterWrapper> *py_decl_GlobalParam = NULL;
 // static nb::class_<pyoomph::DofAugmentations> *py_decl_DofAugmentations=NULL;
 void PyDecl_Problem(nb::module_ &m)
@@ -319,15 +360,67 @@ void PyReg_Problem(nb::module_ &m)
 	py_decl_GlobalParam
 		->def_prop_rw(
 			"value",
+			[](GiNaC::GiNaCGlobalParameterWrapper *self) -> nb::object
+			{
+				pyoomph::GlobalParameterDescriptor *d = self->get_struct().cme;
+				// A dimensionless parameter hands back a plain Python float, exactly as it always has.
+				if (!d->has_unit())
+					return nb::cast(d->value());
+				return nb::cast(d->dimensionalise(d->value()));
+			},
+			[](GiNaC::GiNaCGlobalParameterWrapper *self, nb::handle v)
+			{ pyoomph_set_global_parameter_value(self->get_struct().cme, v); },
+			"The current value of this global parameter. For a parameter declared with a unit (see "
+			"Problem.define_global_parameter) this is a dimensional Expression and may be assigned one, "
+			"e.g. ``p.value = 1.53*pascal``; a plain number is then taken to be in units of ``p.unit``. "
+			"For a dimensionless parameter it is a plain float. See also ``nondim_value``.")
+		.def_prop_rw(
+			"nondim_value",
 			[](GiNaC::GiNaCGlobalParameterWrapper *self)
 			{ return self->get_struct().cme->value(); },
 			[](GiNaC::GiNaCGlobalParameterWrapper *self, const double &v)
+			{ pyoomph_set_global_parameter_raw_value(self->get_struct().cme, v); },
+			"The stored number of this global parameter, i.e. its value expressed in units of ``unit``. "
+			"This is the raw double the generated code reads and that oomph-lib's continuation steps, so "
+			"it is what state files, arclength step sizes and parameter derivatives are in terms of. "
+			"Identical to ``value`` for a dimensionless parameter.")
+		.def_prop_ro(
+			"unit",
+			[](GiNaC::GiNaCGlobalParameterWrapper *self)
+			{ return self->get_struct().cme->get_unit(); },
+			"The physical unit this parameter was declared with (1 if it is dimensionless). It also fixes "
+			"the scale the parameter is expanded with in the generated code: declared with "
+			"``unit=1*pico*liter``, the parameter enters an expression as the stored number times "
+			"1e-15*meter^3. A parameter's unit cannot be changed once set.")
+		.def(
+			"nondimensionalise",
+			[](GiNaC::GiNaCGlobalParameterWrapper *self, nb::handle v)
+			{ return pyoomph_global_parameter_to_raw(self->get_struct().cme, v); },
+			nb::arg("value"),
+			"``value``, which may be dimensional, expressed in units of this parameter's ``unit``, as a "
+			"plain float. A plain number is passed through unchanged. Raises if ``value`` does not have "
+			"this parameter's dimension.")
+		.def(
+			"_set_unit",
+			[](GiNaC::GiNaCGlobalParameterWrapper *self, nb::handle u)
 			{
-				if (v < 0 && self->get_struct().cme->is_restricted_to_positive_values())
-					throw_runtime_error("Cannot set the parameter " + self->get_struct().cme->get_name() + " to a negative value of " + std::to_string(v) + " since it is restricted to positive values.");
-				self->get_struct().cme->value() = v;
+				pyoomph::GlobalParameterDescriptor *d = self->get_struct().cme;
+				if (nb::isinstance<GiNaC::ex>(u))
+					d->set_unit(nb::cast<GiNaC::ex>(u));
+				else
+					d->set_unit(GiNaC::ex(nb::cast<double>(u)));
 			},
-			"The current numerical value of this global parameter.")
+			nb::arg("unit"),
+			"Fix this parameter's physical unit. Internal: use the ``unit`` keyword of "
+			"Problem.define_global_parameter(), which also guards against setting a unit after the "
+			"problem has been initialised. Raises if a different unit is already set.")
+		.def(
+			"dimensionalise",
+			[](GiNaC::GiNaCGlobalParameterWrapper *self, const double &raw)
+			{ return self->get_struct().cme->dimensionalise(raw); },
+			nb::arg("nondim_value"),
+			"The inverse of nondimensionalise(): a number in units of this parameter's ``unit``, turned "
+			"back into a dimensional Expression.")
 		.def_prop_rw(
 			"analytical_derivative",
 			[](GiNaC::GiNaCGlobalParameterWrapper *self)
@@ -337,8 +430,17 @@ void PyReg_Problem(nb::module_ &m)
 			"Whether derivatives of the residuals with respect to this parameter are computed analytically via generated code (True) or by finite differences (False).")
 		.def(
 			"get_symbol", [](GiNaC::GiNaCGlobalParameterWrapper *self) -> GiNaC::ex
+			{ return pyoomph::GiNaCFromGlobalParam(*self); },
+			"Return this parameter as a plain GiNaC symbolic expression, detached from the wrapper. For a "
+			"parameter declared with a unit this carries that unit, i.e. it is the parameter's stored "
+			"number times its ``unit``.")
+		.def(
+			"_get_symbol_without_unit", [](GiNaC::GiNaCGlobalParameterWrapper *self) -> GiNaC::ex
 			{ return 0 + (*self); },
-			"Return this parameter as a plain GiNaC symbolic expression, detached from the wrapper.")
+			"The bare, dimensionless parameter leaf, without its unit. Internal: only for code that has to "
+			"address the leaf itself, e.g. to differentiate with respect to it (see symbolic_diff). Use "
+			"get_symbol() in a model.")
+
 		.def(
 			"get_name", [](GiNaC::GiNaCGlobalParameterWrapper *self)
 			{ return self->get_struct().cme->get_name(); },
@@ -348,71 +450,152 @@ void PyReg_Problem(nb::module_ &m)
 			{ self->get_struct().cme->restrict_to_positive_values(); },
 			"Mark this parameter as restricted to non-negative values; assigning it a negative value afterwards raises a RuntimeError.")
 
-		.def(-nb::self, "Symbolic negation, returns a GiNaC expression.")
+		// Every operator below goes through GiNaCFromGlobalParam so that a dimensional parameter carries
+		// its unit into the expression. They are spelled out rather than written as nb::self op nb::self
+		// for exactly that reason: the nb::self forms would convert the wrapper with GiNaC's own
+		// operators, which know nothing about the unit.
+		.def(
+			"__neg__", [](const GiNaC::GiNaCGlobalParameterWrapper &self)
+			{ return -pyoomph::GiNaCFromGlobalParam(self); },
+			nb::is_operator(), "Symbolic negation, returns a GiNaC expression.")
 
-		.def(nb::self + nb::self, "Symbolic addition of two global parameters, returns a GiNaC expression.")
-		.def(nb::self + GiNaC::ex(), "Symbolic addition with a GiNaC expression, returns a GiNaC expression.")
-		.def(int() + nb::self, "Symbolic addition with an int, returns a GiNaC expression.")
-		.def(nb::self + int(), "Symbolic addition with an int, returns a GiNaC expression.")
-		.def(float() + nb::self, "Symbolic addition with a float, returns a GiNaC expression.")
-		.def(nb::self + float(), "Symbolic addition with a float, returns a GiNaC expression.")
+		.def(
+			"__add__", [](const GiNaC::GiNaCGlobalParameterWrapper &lh, const GiNaC::GiNaCGlobalParameterWrapper &rh)
+			{ return pyoomph::GiNaCFromGlobalParam(lh) + pyoomph::GiNaCFromGlobalParam(rh); },
+			nb::is_operator(), "Symbolic addition of two global parameters, returns a GiNaC expression.")
+		.def(
+			"__add__", [](const GiNaC::GiNaCGlobalParameterWrapper &lh, const GiNaC::ex &rh)
+			{ return pyoomph::GiNaCFromGlobalParam(lh) + rh; },
+			nb::is_operator(), "Symbolic addition with a GiNaC expression, returns a GiNaC expression.")
+		.def(
+			"__add__", [](const GiNaC::GiNaCGlobalParameterWrapper &lh, const int &rh)
+			{ return pyoomph::GiNaCFromGlobalParam(lh) + GiNaC::ex(rh); },
+			nb::is_operator(), "Symbolic addition with an int, returns a GiNaC expression.")
+		.def(
+			"__add__", [](const GiNaC::GiNaCGlobalParameterWrapper &lh, const double &rh)
+			{ return pyoomph::GiNaCFromGlobalParam(lh) + GiNaC::ex(rh); },
+			nb::is_operator(), "Symbolic addition with a float, returns a GiNaC expression.")
+		.def(
+			"__radd__", [](const GiNaC::GiNaCGlobalParameterWrapper &rh, const int &lh)
+			{ return GiNaC::ex(lh) + pyoomph::GiNaCFromGlobalParam(rh); },
+			nb::is_operator(), "Symbolic addition with an int on the left, returns a GiNaC expression.")
+		.def(
+			"__radd__", [](const GiNaC::GiNaCGlobalParameterWrapper &rh, const double &lh)
+			{ return GiNaC::ex(lh) + pyoomph::GiNaCFromGlobalParam(rh); },
+			nb::is_operator(), "Symbolic addition with a float on the left, returns a GiNaC expression.")
 
-		.def(nb::self - nb::self, "Symbolic subtraction of two global parameters, returns a GiNaC expression.")
-		.def(nb::self - GiNaC::ex(), "Symbolic subtraction with a GiNaC expression, returns a GiNaC expression.")
-		.def(int() - nb::self, "Symbolic subtraction with an int, returns a GiNaC expression.")
-		.def(nb::self - int(), "Symbolic subtraction with an int, returns a GiNaC expression.")
-		.def(float() - nb::self, "Symbolic subtraction with a float, returns a GiNaC expression.")
-		.def(nb::self - float(), "Symbolic subtraction with a float, returns a GiNaC expression.")
+		.def(
+			"__sub__", [](const GiNaC::GiNaCGlobalParameterWrapper &lh, const GiNaC::GiNaCGlobalParameterWrapper &rh)
+			{ return pyoomph::GiNaCFromGlobalParam(lh) - pyoomph::GiNaCFromGlobalParam(rh); },
+			nb::is_operator(), "Symbolic subtraction of two global parameters, returns a GiNaC expression.")
+		.def(
+			"__sub__", [](const GiNaC::GiNaCGlobalParameterWrapper &lh, const GiNaC::ex &rh)
+			{ return pyoomph::GiNaCFromGlobalParam(lh) - rh; },
+			nb::is_operator(), "Symbolic subtraction with a GiNaC expression, returns a GiNaC expression.")
+		.def(
+			"__sub__", [](const GiNaC::GiNaCGlobalParameterWrapper &lh, const int &rh)
+			{ return pyoomph::GiNaCFromGlobalParam(lh) - GiNaC::ex(rh); },
+			nb::is_operator(), "Symbolic subtraction with an int, returns a GiNaC expression.")
+		.def(
+			"__sub__", [](const GiNaC::GiNaCGlobalParameterWrapper &lh, const double &rh)
+			{ return pyoomph::GiNaCFromGlobalParam(lh) - GiNaC::ex(rh); },
+			nb::is_operator(), "Symbolic subtraction with a float, returns a GiNaC expression.")
+		.def(
+			"__rsub__", [](const GiNaC::GiNaCGlobalParameterWrapper &rh, const int &lh)
+			{ return GiNaC::ex(lh) - pyoomph::GiNaCFromGlobalParam(rh); },
+			nb::is_operator(), "Symbolic subtraction with an int on the left, returns a GiNaC expression.")
+		.def(
+			"__rsub__", [](const GiNaC::GiNaCGlobalParameterWrapper &rh, const double &lh)
+			{ return GiNaC::ex(lh) - pyoomph::GiNaCFromGlobalParam(rh); },
+			nb::is_operator(), "Symbolic subtraction with a float on the left, returns a GiNaC expression.")
 
-		.def(nb::self * nb::self, "Symbolic multiplication of two global parameters, returns a GiNaC expression.")
-		.def(nb::self * GiNaC::ex(), "Symbolic multiplication with a GiNaC expression, returns a GiNaC expression.")
-		.def(int() * nb::self, "Symbolic multiplication with an int, returns a GiNaC expression.")
-		.def(nb::self * int(), "Symbolic multiplication with an int, returns a GiNaC expression.")
-		.def(float() * nb::self, "Symbolic multiplication with a float, returns a GiNaC expression.")
-		.def(nb::self * float(), "Symbolic multiplication with a float, returns a GiNaC expression.")
+		.def(
+			"__mul__", [](const GiNaC::GiNaCGlobalParameterWrapper &lh, const GiNaC::GiNaCGlobalParameterWrapper &rh)
+			{ return pyoomph::GiNaCFromGlobalParam(lh) * pyoomph::GiNaCFromGlobalParam(rh); },
+			nb::is_operator(), "Symbolic multiplication of two global parameters, returns a GiNaC expression.")
+		.def(
+			"__mul__", [](const GiNaC::GiNaCGlobalParameterWrapper &lh, const GiNaC::ex &rh)
+			{ return pyoomph::GiNaCFromGlobalParam(lh) * rh; },
+			nb::is_operator(), "Symbolic multiplication with a GiNaC expression, returns a GiNaC expression.")
+		.def(
+			"__mul__", [](const GiNaC::GiNaCGlobalParameterWrapper &lh, const int &rh)
+			{ return pyoomph::GiNaCFromGlobalParam(lh) * GiNaC::ex(rh); },
+			nb::is_operator(), "Symbolic multiplication with an int, returns a GiNaC expression.")
+		.def(
+			"__mul__", [](const GiNaC::GiNaCGlobalParameterWrapper &lh, const double &rh)
+			{ return pyoomph::GiNaCFromGlobalParam(lh) * GiNaC::ex(rh); },
+			nb::is_operator(), "Symbolic multiplication with a float, returns a GiNaC expression.")
+		.def(
+			"__rmul__", [](const GiNaC::GiNaCGlobalParameterWrapper &rh, const int &lh)
+			{ return GiNaC::ex(lh) * pyoomph::GiNaCFromGlobalParam(rh); },
+			nb::is_operator(), "Symbolic multiplication with an int on the left, returns a GiNaC expression.")
+		.def(
+			"__rmul__", [](const GiNaC::GiNaCGlobalParameterWrapper &rh, const double &lh)
+			{ return GiNaC::ex(lh) * pyoomph::GiNaCFromGlobalParam(rh); },
+			nb::is_operator(), "Symbolic multiplication with a float on the left, returns a GiNaC expression.")
 
-		.def(nb::self / nb::self, "Symbolic division of two global parameters, returns a GiNaC expression.")
-		.def(nb::self / GiNaC::ex(), "Symbolic division with a GiNaC expression, returns a GiNaC expression.")
-		.def(int() / nb::self, "Symbolic division with an int, returns a GiNaC expression.")
-		.def(nb::self / int(), "Symbolic division with an int, returns a GiNaC expression.")
-		.def(float() / nb::self, "Symbolic division with a float, returns a GiNaC expression.")
-		.def(nb::self / float(), "Symbolic division with a float, returns a GiNaC expression.")
+		.def(
+			"__truediv__", [](const GiNaC::GiNaCGlobalParameterWrapper &lh, const GiNaC::GiNaCGlobalParameterWrapper &rh)
+			{ return pyoomph::GiNaCFromGlobalParam(lh) / pyoomph::GiNaCFromGlobalParam(rh); },
+			nb::is_operator(), "Symbolic division of two global parameters, returns a GiNaC expression.")
+		.def(
+			"__truediv__", [](const GiNaC::GiNaCGlobalParameterWrapper &lh, const GiNaC::ex &rh)
+			{ return pyoomph::GiNaCFromGlobalParam(lh) / rh; },
+			nb::is_operator(), "Symbolic division with a GiNaC expression, returns a GiNaC expression.")
+		.def(
+			"__truediv__", [](const GiNaC::GiNaCGlobalParameterWrapper &lh, const int &rh)
+			{ return pyoomph::GiNaCFromGlobalParam(lh) / GiNaC::ex(rh); },
+			nb::is_operator(), "Symbolic division with an int, returns a GiNaC expression.")
+		.def(
+			"__truediv__", [](const GiNaC::GiNaCGlobalParameterWrapper &lh, const double &rh)
+			{ return pyoomph::GiNaCFromGlobalParam(lh) / GiNaC::ex(rh); },
+			nb::is_operator(), "Symbolic division with a float, returns a GiNaC expression.")
+		.def(
+			"__rtruediv__", [](const GiNaC::GiNaCGlobalParameterWrapper &rh, const int &lh)
+			{ return GiNaC::ex(lh) / pyoomph::GiNaCFromGlobalParam(rh); },
+			nb::is_operator(), "Symbolic division with an int on the left, returns a GiNaC expression.")
+		.def(
+			"__rtruediv__", [](const GiNaC::GiNaCGlobalParameterWrapper &rh, const double &lh)
+			{ return GiNaC::ex(lh) / pyoomph::GiNaCFromGlobalParam(rh); },
+			nb::is_operator(), "Symbolic division with a float on the left, returns a GiNaC expression.")
+
+		.def(
+			"__pow__", [](const GiNaC::GiNaCGlobalParameterWrapper &lh, const GiNaC::ex &rh)
+			{ return GiNaC::pow(pyoomph::GiNaCFromGlobalParam(lh), rh); },
+			nb::is_operator(), "Symbolic exponentiation with a GiNaC expression exponent, returns a GiNaC expression.")
+		.def(
+			"__pow__", [](const GiNaC::GiNaCGlobalParameterWrapper &lh, const int &rh)
+			{ return GiNaC::pow(pyoomph::GiNaCFromGlobalParam(lh), GiNaC::ex(rh)); },
+			nb::is_operator(), "Symbolic exponentiation with an int exponent, returns a GiNaC expression.")
+		.def(
+			"__pow__", [](const GiNaC::GiNaCGlobalParameterWrapper &lh, const double &rh)
+			{ return GiNaC::pow(pyoomph::GiNaCFromGlobalParam(lh), GiNaC::ex(rh)); },
+			nb::is_operator(), "Symbolic exponentiation with a float exponent, returns a GiNaC expression.")
+		.def(
+			"__rpow__", [](const GiNaC::GiNaCGlobalParameterWrapper &rh, const int &lh)
+			{ return GiNaC::pow(GiNaC::ex(lh), pyoomph::GiNaCFromGlobalParam(rh)); },
+			nb::is_operator(), "Symbolic exponentiation with an int base and this parameter as exponent, returns a GiNaC expression.")
+		.def(
+			"__rpow__", [](const GiNaC::GiNaCGlobalParameterWrapper &rh, const double &lh)
+			{ return GiNaC::pow(GiNaC::ex(lh), pyoomph::GiNaCFromGlobalParam(rh)); },
+			nb::is_operator(), "Symbolic exponentiation with a float base and this parameter as exponent, returns a GiNaC expression.")
 
 		.def(
 			"__repr__", [](const GiNaC::GiNaCGlobalParameterWrapper &self)
 			{
 				std::ostringstream oss;
 				GiNaC::print_python pypc(oss);
-				(self + 0).print(pypc);
+				pyoomph::GiNaCFromGlobalParam(self).print(pypc);
 				return oss.str();
 			},
-			"Return the Python-style string representation of the parameter's symbol.")
+			"Return the Python-style string representation of the parameter's symbol, including its unit "
+			"if it has one.")
 
-		.def(
-			"__pow__", [](const GiNaC::GiNaCGlobalParameterWrapper &lh, const GiNaC::ex &rh)
-			{ return GiNaC::pow(lh, rh); },
-			nb::is_operator(), "Symbolic exponentiation with a GiNaC expression exponent, returns a GiNaC expression.")
-		.def(
-			"__pow__", [](const GiNaC::GiNaCGlobalParameterWrapper &lh, const int &rh)
-			{ return GiNaC::pow(lh, rh); },
-			nb::is_operator(), "Symbolic exponentiation with an int exponent, returns a GiNaC expression.")
-		.def(
-			"__pow__", [](const GiNaC::GiNaCGlobalParameterWrapper &lh, const double &rh)
-			{ return GiNaC::pow(lh, rh); },
-			nb::is_operator(), "Symbolic exponentiation with a float exponent, returns a GiNaC expression.")
-
-		.def(
-			"__rpow__", [](const GiNaC::GiNaCGlobalParameterWrapper &rh, const int &lh)
-			{ return GiNaC::pow(lh, rh); },
-			nb::is_operator(), "Symbolic exponentiation with an int base and this parameter as exponent, returns a GiNaC expression.")
-		.def(
-			"__rpow__", [](const GiNaC::GiNaCGlobalParameterWrapper &rh, const double &lh)
-			{ return GiNaC::pow(lh, rh); },
-			nb::is_operator(), "Symbolic exponentiation with a float base and this parameter as exponent, returns a GiNaC expression.")
 		.def(
 			"__float__", [](const GiNaC::GiNaCGlobalParameterWrapper &self)
 			{ return self.get_struct().cme->value(); },
-			"Return the current numerical value of this parameter as a Python float (same as the ``value`` property).")
+			"Return this parameter's stored number as a Python float, i.e. its value in units of ``unit`` "
+			"(same as the ``nondim_value`` property, and as ``value`` for a dimensionless parameter).")
 
 		;
 

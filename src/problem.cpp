@@ -9315,6 +9315,75 @@ namespace pyoomph
 
 
 
+	// Printed form of a unit, for the error messages below.
+	static std::string unit_to_str(const GiNaC::ex &u)
+	{
+		std::ostringstream oss;
+		oss << u;
+		return oss.str();
+	}
+
+	void GlobalParameterDescriptor::set_unit(const GiNaC::ex &u)
+	{
+		// Canonicalise exactly as Problem.set_scaling does: collect the base units once, then once more
+		// out of the collected unit, so that e.g. 1*pico*liter becomes a single 1e-15*meter^3 factor.
+		GiNaC::ex factor, unit, rest;
+		if (!expressions::collect_base_units(u, factor, unit, rest))
+		{
+			throw_runtime_error("The unit " + unit_to_str(u) + " given for the global parameter '" + name + "' is not a simple dimensional value, i.e. a number times a product of base units.");
+		}
+		GiNaC::ex factor2, unit2, rest2;
+		if (!expressions::collect_base_units(unit, factor2, unit2, rest2))
+		{
+			throw_runtime_error("The unit " + unit_to_str(u) + " given for the global parameter '" + name + "' is not a simple dimensional value, i.e. a number times a product of base units.");
+		}
+		// The numerical part must be a plain number: a unit containing a field, a scale(...) placeholder
+		// or another parameter cannot be divided out of a value on the Python side, which is where
+		// .value converts. Checked numerically, but the unit is STORED symbolically, so that an exact
+		// rational prefactor (every SI prefix is one - see pyoomph/expressions/units.py) stays exact.
+		// An inexact factor would make collect_base_units' analysis of it inexact too; see
+		// dev_docs/subexpression_unit_analysis_stall.md section 5.4 for what that costs.
+		GiNaC::ex numpart = factor * rest * factor2 * rest2;
+		double numval;
+		try
+		{
+			numval = expressions::eval_to_double(numpart);
+		}
+		catch (...)
+		{
+			throw_runtime_error("The unit " + unit_to_str(u) + " given for the global parameter '" + name + "' is not a plain number times base units. A scale(...) placeholder, a field or another parameter cannot be used as a unit.");
+		}
+		if (numval == 0.0)
+		{
+			throw_runtime_error("The unit given for the global parameter '" + name + "' evaluates to zero.");
+		}
+		GiNaC::ex canonical = numpart * unit2;
+		if (this->has_unit() && !Unit.is_equal(canonical))
+		{
+			throw_runtime_error("The global parameter '" + name + "' already has the unit " + unit_to_str(Unit) + " and a parameter's unit cannot be changed (the generated code has baked its numerical factor in). Got " + unit_to_str(canonical) + ".");
+		}
+		Unit = canonical;
+	}
+
+	double GlobalParameterDescriptor::nondimensionalise(const GiNaC::ex &v) const
+	{
+		try
+		{
+			return expressions::eval_to_double(v / Unit);
+		}
+		catch (...)
+		{
+			if (this->has_unit())
+			{
+				throw_runtime_error("Cannot interpret " + unit_to_str(v) + " as a value of the global parameter '" + name + "', whose unit is " + unit_to_str(Unit) + ".");
+			}
+			else
+			{
+				throw_runtime_error("Cannot interpret " + unit_to_str(v) + " as a value of the global parameter '" + name + "', which is dimensionless. Declare it with a unit, e.g. define_global_parameter(" + name + "=..., unit=...), to give it a dimension.");
+			}
+		}
+	}
+
 	void GlobalParameterDescriptor::set_analytic_derivative(bool active)
 	{
 		if (active)

@@ -99,7 +99,7 @@ class PeriodicDrivingResponse():
             self._omega_val_before_init=omega
         else:
             self._omega_val_before_init=None
-            self.omega_param.value=float(omega*self.problem.get_scaling("temporal"))
+            self.omega_param.nondim_value=float(omega*self.problem.get_scaling("temporal"))
 
     def get_driving_omega(self):
         """
@@ -108,7 +108,7 @@ class PeriodicDrivingResponse():
         if self._omega_val_before_init is not None:
             return self._omega_val_before_init
         else:
-            return self.omega_param.value/self.problem.get_scaling("temporal")
+            return self.omega_param.nondim_value/self.problem.get_scaling("temporal")
         
     def get_driving_frequency(self):
         """
@@ -176,16 +176,16 @@ class PeriodicDrivingResponse():
         eigensolver=self.problem.get_eigen_solver()
         # Both parameters are restored, not just omega: hopf_param was set here and left at 0, which
         # clobbers it for a caller that is Hopf-tracking on it (see activate_bifurcation_tracking below).
-        oldhopf=self.hopf_param.value
-        oldomega=self.omega_param.value
-        self.hopf_param.value=0.0
-        self.omega_param.value=1.0
+        oldhopf=self.hopf_param.nondim_value
+        oldomega=self.omega_param.nondim_value
+        self.hopf_param.nondim_value=0.0
+        self.omega_param.nondim_value=1.0
         try:
             with self.problem.steady_time_steppers():
                 n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = self.problem.assemble_eigenproblem_matrices(0) #type:ignore
         finally:
-            self.omega_param.value=oldomega
-            self.hopf_param.value=oldhopf
+            self.omega_param.nondim_value=oldomega
+            self.hopf_param.nondim_value=oldhopf
         # shape=(M_nr, n), not (n, n): M_nr is the LOCAL row count, and under --distribute it is smaller
         # than n. Passing (n,n) with a short indptr is what used to make this die inside scipy with
         # "index pointer size (3) should be (5)", three frames from the feature the user asked for.
@@ -221,7 +221,7 @@ class PeriodicDrivingResponse():
         """
         from ..generic.mpi import get_mpi_nproc,get_mpi_rank,mpi_allgather_vector
         n,nrow_local,first_row,parallel,matJ,matM,drivedofind,dtdrivedofind=pencil
-        omega=self.omega_param.value
+        omega=self.omega_param.nondim_value
         ntot=2*n+2
         last_rank=parallel and (get_mpi_rank()==get_mpi_nproc()-1)
 
@@ -393,17 +393,17 @@ class PeriodicDrivingResponse():
         else:
             v0=None
     
-        eigenfilter=lambda l : abs(numpy.real(l))<eigen_thresh and abs(numpy.imag(l)-self.omega_param.value)<eigen_thresh
+        eigenfilter=lambda l : abs(numpy.real(l))<eigen_thresh and abs(numpy.imag(l)-self.omega_param.nondim_value)<eigen_thresh
         if by_hopf_tracking: 
             if istracking:
                 # Solve at the new omega
                 self.problem.solve(max_newton_iterations=20)
             else:                       
-                self.problem.activate_bifurcation_tracking(self.hopf_param,"hopf",eigenvector=v0,omega=self.omega_param.value)
+                self.problem.activate_bifurcation_tracking(self.hopf_param,"hopf",eigenvector=v0,omega=self.omega_param.nondim_value)
                 self.problem.solve(max_newton_iterations=20)
         else:
             if self.problem.get_eigen_solver().idname=="slepc" and use_target:
-                self.problem.solve_eigenproblem(numeigen,v0=v0,filter=eigenfilter,target=complex(0,self.omega_param.value))
+                self.problem.solve_eigenproblem(numeigen,v0=v0,filter=eigenfilter,target=complex(0,self.omega_param.nondim_value))
             else:
                 self.problem.solve_eigenproblem(numeigen,v0=v0,filter=eigenfilter)
         foundeigen=len(self.problem.get_last_eigenvectors())
@@ -416,7 +416,7 @@ class PeriodicDrivingResponse():
         print("DTDRIVE",vfound[dtdrivedofind])
         eigenvects/=vfound[drivedofind]
         self.problem._last_eigenvectors=eigenvects
-        print("INFO",self.omega_param.value,eigenvects[0,drivedofind],eigenvects[0,dtdrivedofind])        
+        print("INFO",self.omega_param.nondim_value,eigenvects[0,drivedofind],eigenvects[0,dtdrivedofind])        
 
         return self.problem.get_last_eigenvectors()[0]       
         

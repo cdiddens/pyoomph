@@ -425,7 +425,9 @@ def is_zero(arg:ExpressionOrNum,parameters_to_float:bool=False,tensors:bool=Fals
 		return arg.is_zero(tensors=tensors)
 	elif isinstance(arg,_pyoomph.GiNaC_GlobalParam):
 		if parameters_to_float:
-			return arg.value==0
+			# nondim_value, not value: the latter is a dimensional Expression for a parameter declared
+			# with a unit, and == on one builds a held relational rather than answering the question.
+			return arg.nondim_value==0
 		else:
 			return False
 	else:
@@ -931,7 +933,6 @@ def symbolic_diff(expr:ExpressionOrNum,x:Expression | str,hold_until_codegen:boo
 	nondims={}
 	params:dict[str,Expression]={}
 	iplace_subs={}
-	   
 	if not isinstance(expr,Expression):
 		return 0
 	
@@ -942,10 +943,19 @@ def symbolic_diff(expr:ExpressionOrNum,x:Expression | str,hold_until_codegen:boo
 		iplace_subs[nondim(x)]=dummy/scale_factor(x)
 		revsubs=var(x)
 	elif isinstance(x,_pyoomph.GiNaC_GlobalParam):
+		# The dummy stands for the parameter as a dimensional quantity, so that the result is d/dP and
+		# carries 1/unit as it must. The two routes reach that differently, because only one of them
+		# goes through the by-name substitution that divides a replacement by the unit for us
+		# (ReplaceFieldsAndSubfields in src/expressions.cpp):
+		#   * held: hand it `dummy`, which it turns into dummy/unit, cancelling the unit*leaf in place.
+		#   * in place: GiNaC_subs is raw, so divide by the unit here, on the bare leaf itself - the
+		#     unit*leaf product is not a pattern GiNaC matches reliably.
+		# Either way what is left where the parameter stood is exactly `dummy`, and substituting
+		# get_symbol() back for it restores the dimensional parameter.
 		xn=x.get_name()
 		params[xn]=dummy
-		iplace_subs[0+x]=dummy
-		revsubs=0+x
+		iplace_subs[x._get_symbol_without_unit()]=dummy/x.unit
+		revsubs=x.get_symbol()
 	else:
 		ti=x.get_type_information()
 		if ti.get("class_name")=="function" and ti.get("function_name")=="field":

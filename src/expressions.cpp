@@ -4508,7 +4508,16 @@ namespace pyoomph
 					const GiNaCGlobalParameterWrapper &gp = ex_to<GiNaCGlobalParameterWrapper>(inp);
 					std::string fname = gp.get_struct().cme->get_name();
 					if (globalparams.count(fname))
-						return globalparams.at(fname);
+					{
+						// The leaf we are replacing is only part of the parameter: an expression built
+						// from Python holds `unit*leaf` (see GiNaCFromGlobalParam). Dividing the
+						// replacement by that same unit makes the surrounding factor cancel, so
+						// substituting a parameter by name means "this parameter takes that value",
+						// with the value dimensional - the same reading a field substitution has, and
+						// the one that makes expr(p=2*bar) come out as 2*bar. The unit is exactly 1 for
+						// a dimensionless parameter, so nothing about those changes.
+						return globalparams.at(fname) / gp.get_struct().cme->get_unit();
+					}
 					else
 						return inp.map(*this);
 				}

@@ -173,6 +173,15 @@ namespace pyoomph
   // and exposed to Python via GiNaC_GlobalParam). Holds the actual double value and its global index
   // within the Problem's parameter list; the value itself is what oomph-lib's continuation/parameter
   // machinery takes a pointer to (via value()).
+  //
+  // A parameter may carry a physical Unit (default 1, i.e. dimensionless). The stored double is then
+  // the value expressed IN THAT UNIT, and it is still the raw number the generated code reads and
+  // oomph-lib continues on - the unit is multiplied in on the Python side, where a wrapper becomes an
+  // Expression (GiNaCFromGlobalParam, src/nanobind/expressions.cpp), so that a dimensional parameter
+  // appears in a residual as `unit*leaf` and rides the ordinary nondimensionalisation. The unit
+  // therefore also fixes the SCALE the parameter is expanded with: unit=1*pico*liter expands to
+  // 1e-15*meter^3 times the leaf, not to a litre with a 1e12-larger number. See
+  // dev_docs/dimensional_global_parameters.md.
   class GlobalParameterDescriptor
   {
   protected:
@@ -181,6 +190,7 @@ namespace pyoomph
     Problem *problem;
     double Value;
     bool positive=false; // If true, the parameter is restricted to non-negative values (enforced on write, e.g. from Python)
+    GiNaC::ex Unit=GiNaC::ex(1); // The physical unit of this parameter; 1 means dimensionless
   public:
     GlobalParameterDescriptor(Problem *p, const std::string &n, const unsigned int &gi) : name(n), global_index(gi), problem(p), Value(0.0) {}
     const std::string &get_name() const { return name; }
@@ -192,6 +202,17 @@ namespace pyoomph
     void set_analytic_derivative(bool active); // Toggle whether derivatives w.r.t. this parameter are obtained analytically (from the generated code) or by finite differences
     bool get_analytic_derivative();
     Problem *get_problem() { return problem; }
+    const GiNaC::ex &get_unit() const { return Unit; }
+    bool has_unit() const { return !Unit.is_equal(GiNaC::ex(1)); }
+    // Canonicalises u (merging the base units into a single factor, as Problem.set_scaling does) and
+    // stores it. Throws if u is not a plain number times base units, or if a different unit is already
+    // set - a parameter's unit cannot change, since the generated code has baked its numeric factor in.
+    void set_unit(const GiNaC::ex &u);
+    // v, which may be dimensional, expressed in units of this parameter's unit. Throws if v does not
+    // have this parameter's dimension.
+    double nondimensionalise(const GiNaC::ex &v) const;
+    // The inverse: a raw number turned back into a dimensional expression.
+    GiNaC::ex dimensionalise(const double &raw) const { return raw * Unit; }
   };
 
   // Buffer used to pass a custom (user/Python-supplied) residual vector and Jacobian matrix (CSR) into

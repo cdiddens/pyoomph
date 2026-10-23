@@ -436,7 +436,8 @@ class _TextOutput(_BaseNumpyOutput):
 
         params:dict[str,float] = {}
         for n in self.mesh.get_problem().get_global_parameter_names():
-            params[n] =self.mesh.get_problem().get_global_parameter(n).value
+            _gp=self.mesh.get_problem().get_global_parameter(n)
+            params[n] =_gp.nondim_value*global_parameter_column(_gp)[1]
         if self.eigenvector is not None:
             eigeninfostr="OUTPUT_IS_"+str(self.eigenvector_mode)+"_OF_EIGENVALUE_"+str(self.eigenvector)
             if self.mesh.get_problem()._last_eigenvalues_m is not None and self.eigenvector<len(self.mesh.get_problem()._last_eigenvalues_m): #type:ignore
@@ -455,6 +456,30 @@ class _TextOutput(_BaseNumpyOutput):
 
 
 ####################
+
+def global_parameter_column(param:"GlobalParameter")->"tuple[str,float]":
+    """``(header suffix, SI factor)`` for a global parameter written as a first column.
+
+    A parameter declared with a unit stores its value in units of that unit (see
+    GiNaC_GlobalParam.nondim_value), so neither the stored number nor the declared unit alone
+    describes the column. This follows the convention the field columns already use
+    (_setup_output_scales and the ODE scales below): the number written out is in SI base units, and
+    the header names those base units. A dimensionless parameter gets factor 1 and no suffix, so its
+    column and header are byte-identical to what they always were.
+
+    The factor is applied to the `@name=value` parameter annotations of the other text outputs too,
+    even though those have nowhere to put the unit: a file must not carry the same parameter in two
+    different units depending on which of its two routes wrote it.
+    """
+    unit = param.unit
+    if not isinstance(unit,Expression) or unit.is_equal(Expression(1)):
+        return "", 1.0
+    factor, baseunit, rest, success = _pyoomph.GiNaC_collect_units(unit)
+    if not success:
+        raise RuntimeError("Cannot separate the unit "+str(unit)+" of the global parameter '"+param.get_name()+"' for output")
+    return ("[" + unit_to_string(baseunit,estimate_prefix=False,separator=UNIT_SEPARATOR_IN_FILES) + "]",
+            float(factor*rest))
+
 
 def save_by_extension(fname:str,data:NPFloatArray,header:list[str],timeinfo:float,params:dict[str,float],discontinuous_elem_indices:NPAnyIntArray | None=None):
     _,ext=os.path.splitext(fname)
@@ -637,7 +662,8 @@ class _OutputTxtAlongLine(_BaseOutputter):
         fname=self.get_filename(step)
         params = {}
         for n in self.mesh.get_problem().get_global_parameter_names():
-            params[n] = self.mesh.get_problem().get_global_parameter(n).value
+            _gp=self.mesh.get_problem().get_global_parameter(n)
+            params[n] = _gp.nondim_value*global_parameter_column(_gp)[1]
         if isinstance(fname,list):
             for fn in fname:
                 save_by_extension(fn, data, header=header,timeinfo=mesh.get_problem().get_current_time(dimensional=True,as_float=True),params=params)
@@ -779,7 +805,8 @@ class _GridFileOutput(_BaseOutputter):
         fname=self.get_filename(step)
         params = {}
         for n in self.mesh.get_problem().get_global_parameter_names():
-            params[n] = self.mesh.get_problem().get_global_parameter(n).value
+            _gp=self.mesh.get_problem().get_global_parameter(n)
+            params[n] = _gp.nondim_value*global_parameter_column(_gp)[1]
         if isinstance(fname,list):
             for fn in fname:
                 save_by_extension(fn, data, header=header,timeinfo=mesh.get_problem().get_current_time(dimensional=True,as_float=True),params=params)
@@ -960,7 +987,7 @@ class _ODEFileOutput(_BaseODEOutput):
                     tunit= "[" + unit_to_string(unit,estimate_prefix=False,separator=UNIT_SEPARATOR_IN_FILES) + "]"
                 firstcols.append("time"+tunit)
             elif isinstance(fc,GlobalParameter):
-                firstcols.append(fc.get_name())
+                firstcols.append(fc.get_name()+global_parameter_column(fc)[0])
             else:
                 raise RuntimeError(repr(fc))
 
@@ -1009,7 +1036,7 @@ class _ODEFileOutput(_BaseODEOutput):
             if fc=="time":
                 firstcols.append(str(self.get_time()))
             elif isinstance(fc,GlobalParameter):
-                firstcols.append(str(fc.value))
+                firstcols.append(str(fc.nondim_value*global_parameter_column(fc)[1]))
             else:
                 raise RuntimeError(repr(fc))
         
@@ -1516,9 +1543,9 @@ class _IntegralObservableOutput(_BaseOutputter):
                         tunit = "[" + unit_to_string(unit, estimate_prefix=False, separator=UNIT_SEPARATOR_IN_FILES) + "]"
                     firstcols.append("time" + tunit)
                 elif isinstance(fc, _pyoomph.GiNaC_GlobalParam):
-                    firstcols.append(fc.get_name())
+                    firstcols.append(fc.get_name()+global_parameter_column(fc)[0])
                 elif isinstance(fc,str) and (fc in self._mesh.get_problem().get_global_parameter_names()): #type:ignore
-                    firstcols.append(fc)
+                    firstcols.append(fc+global_parameter_column(self._mesh.get_problem().get_global_parameter(fc))[0]) #type:ignore
                 else:
                     raise RuntimeError(repr(fc))
 
@@ -1541,9 +1568,10 @@ class _IntegralObservableOutput(_BaseOutputter):
             if fc=="time":
                 line.append(str(self.get_time()))
             elif isinstance(fc,_pyoomph.GiNaC_GlobalParam):
-                line.append(str(fc.value))
+                line.append(str(fc.nondim_value*global_parameter_column(fc)[1]))
             elif isinstance(fc, str) and (fc in self._mesh.get_problem().get_global_parameter_names()): #type:ignore
-                line.append(str(self._mesh.get_problem().get_global_parameter(fc).value))
+                _gp=self._mesh.get_problem().get_global_parameter(fc) #type:ignore
+                line.append(str(_gp.nondim_value*global_parameter_column(_gp)[1]))
             else:
                 raise RuntimeError(repr(fc))
 

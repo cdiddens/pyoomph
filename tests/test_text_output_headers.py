@@ -156,3 +156,45 @@ def test_pyoomphs_own_reader_still_finds_the_columns(written_headers):
     data = LoadedTextDataFile(glob.glob(os.path.join(outdir, "**", "ode.txt"), recursive=True)[0])
     assert data.columns == ["time[s]", "w[kg*m/(K*s^2)]"]
     assert data["w"].shape[0] == data.data.shape[0]
+
+
+# ----------------------------------------------------------------------------------------------
+# a global parameter written as a first column
+# ----------------------------------------------------------------------------------------------
+
+class _ParameterColumn(Problem):
+    """A dimensional and a dimensionless parameter, both as first columns of the same file.
+
+    The dimensional one is declared in picolitres, so its stored number (3) and its value in SI base
+    units (3e-15 m^3) differ by twelve orders of magnitude - which is what makes this able to tell
+    which of the two is written out.
+    """
+
+    def define_problem(self):
+        from pyoomph.expressions.units import liter, pico
+        self.set_scaling(spatial=1 * milli * meter, temporal=1 * second)
+        self.volume = self.define_global_parameter(volume=3 * pico * liter, unit=1 * pico * liter)
+        self.plain = self.define_global_parameter(plain=2.5)
+        self += (_Ode() + InitialCondition(w=W_SCALE)
+                 + ODEFileOutput(first_column=["time", self.volume, self.plain])) @ "ode"
+
+
+def test_a_dimensional_parameter_column_states_its_unit_and_is_written_in_si(tmp_path):
+    outdir = str(tmp_path / "out")
+    with _ParameterColumn() as problem:
+        problem.set_output_directory(outdir)
+        problem.quiet()
+        problem.run(1 * second, numouts=1, startstep=1 * second)
+    headers = _headers(outdir)
+    assert len(headers) == 1, repr(sorted(headers))
+    header = next(iter(headers.values()))
+    names = header.lstrip("#").split("\t")
+    assert names[1] == "volume[m^3]", header
+    assert names[2] == "plain", "a dimensionless parameter keeps its bare name: " + header
+    assert " " not in header, header
+
+    path = os.path.join(outdir, "ode.txt")
+    row = numpy.loadtxt(path)
+    row = row if row.ndim == 1 else row[0]
+    assert row[1] == pytest.approx(3e-15, rel=1e-9), "3 pL in SI base units"
+    assert row[2] == pytest.approx(2.5)
