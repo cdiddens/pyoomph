@@ -444,7 +444,17 @@ class TracerParticles(Equations):
         return coll
 
     def before_assigning_equations_preorder(self, mesh: "AnyMesh"):
-        if self._mesh is None:
+        # "is not mesh" rather than "is None": both remeshing and a state file that brings its own
+        # mesh template (Problem._define_state_file) replace this domain's mesh object, and the
+        # superseded one is torn down at once by _destroy_superseded_mesh, after which its mesh() is
+        # a nullptr for good. after_remeshing() does re-bind, but only at the very end of the
+        # rebuild, whereas TracerTransferToInterface and TracerTransferAtInterface read this
+        # equation's _mesh from the reapply_boundary_conditions() that runs first. Binding only once
+        # therefore handed them the replaced mesh, which since that teardown exists means a
+        # destroyed one, and get_boundary_index() then segfaults on a null this - the mesh_method
+        # bindings do not check the handle. Re-binding is free when the mesh has not changed, and
+        # _bind_mesh keeps the existing collection and its particles.
+        if self._mesh is not mesh:
             self._bind_mesh(assert_spatial_mesh(mesh))
 
     # ----------------------------------------------------------------------------- lifecycle
