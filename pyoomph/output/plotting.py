@@ -1541,6 +1541,13 @@ class MatplotLibPersistentRange(MatplotLibBaseRange):
         self.vmin=vmin
         self.vmax=vmax
         self.mode=mode
+        # A pinned (lo,hi) applies from the start. reset_range() does this before every output
+        # step, but a range object is created lazily, inside the first pre_process - i.e. AFTER the
+        # first step's reset - and consider_range() deliberately ignores a pinned mode. So without
+        # this the very first output step had vmin=vmax=None and every part that reads the range
+        # (a filled contour, a colorbar, the interface arrows) drew nothing at all: frame 0 of a
+        # movie came out empty while every later frame was right.
+        self.reset_range()
 
     def reset_range(self):
         if self.mode=="current":
@@ -2354,6 +2361,14 @@ class MatplotLibTracers(MatplotLibPart):
     trail_width:float=0.8
     #: Opacity of the oldest trail segment; the newest is always drawn at full opacity.
     trail_min_alpha:float=0.05
+    #: Drop the parts of a trail that are no longer inside the domain. A history sample is stored
+    #: in the lab frame, so on a moving mesh - an evaporating droplet, a receding contact line - a
+    #: particle leaves its trail hanging in space the domain has since vacated, and that reads as a
+    #: particle that has left the drop rather than as where it has been. With this set, a sample
+    #: that is not inside the current mesh is dropped and the trail is broken there. The test is a
+    #: point location in the triangulated domain, so it costs one trifinder per frame; for tracers
+    #: confined to an interface the domain tested is the bulk mesh the interface belongs to.
+    trail_clip_to_domain:bool=False
     #: Colour particles by their integer tag, using this colormap. ``None`` uses ``color``.
     tag_colormap:str | None=None
 
@@ -2388,10 +2403,32 @@ class MatplotLibTracers(MatplotLibPart):
         norm=(tags-lo)/(hi-lo) if hi>lo else numpy.zeros_like(tags)
         return plt.get_cmap(self.tag_colormap)(norm) #type:ignore
 
+    def _domain_clip_finder(self)->"Any | None":
+        """A trifinder over the domain a trail may leave, or None when there is nothing to test
+        against. Built from the same cache the field plots use, hence in output units and already
+        tessellated into triangles, and asked for WITHOUT a mirror, because a history sample is
+        stored in the untransformed frame."""
+        assert self.mesh is not None
+        msh:Any=self.mesh
+        if msh.get_dimension()!=2:
+            # Tracers confined to an interface are carried on a line mesh, which no point is ever
+            # strictly inside. What such a particle can fall out of is the bulk domain.
+            getbulk=getattr(msh,"get_bulk_mesh",None)
+            msh=getbulk() if getbulk is not None else None
+            if msh is None or msh.get_dimension()!=2:
+                return None
+        cached=self.plotter._get_mesh_data(msh,problem_name=self.problem_name,ignore_eigenfactors=True) #type:ignore
+        coords=cached.get_coordinates()
+        if coords.shape[0]!=2 or len(cached.elem_indices)==0:
+            return None
+        from matplotlib import tri
+        return tri.Triangulation(coords[0],coords[1],cached.elem_indices).get_trifinder() #type:ignore
+
     def _add_trails(self,col:Any,scale:float):
         from matplotlib.collections import LineCollection
         segments:list[Any]=[]
         alphas:list[float]=[]
+        finder=self._domain_clip_finder() if self.trail_clip_to_domain else None
         # A particle on a periodic domain is re-injected at its image, so two consecutive history
         # samples can sit at opposite ends of the mesh. Joining those draws a line straight across
         # the picture - and on a domain with a mean flow, where every particle wraps, the frame
@@ -2415,7 +2452,14 @@ class MatplotLibTracers(MatplotLibPart):
             if pts.shape[1]!=2:
                 return  # a trail is only meaningful in the plane we are drawing
             n=len(pts)-1
+            # Which samples still sit in the domain. Both ends of a segment have to, so that a
+            # trail is cut at the boundary rather than drawn across the outside of a concave shape.
+            inside=None
+            if finder is not None:
+                inside=numpy.asarray(finder(raw[:,0]*scale,raw[:,1]*scale))>=0 #type:ignore
             for k in range(n):
+                if inside is not None and not (inside[k] and inside[k+1]):
+                    continue
                 if wraps:
                     step=raw[k+1]-raw[k]
                     if any(numpy.linalg.norm(step+w)<wrap_tol or

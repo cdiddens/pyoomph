@@ -3770,7 +3770,7 @@ class Problem(_pyoomph.Problem):
         # is shown, by name -- a second short flag added here has to be added there as well.
         self.cmdlineparser.add_argument('-P','--parameter', help="Override some problem parameters",nargs='+', type=str)
         self.cmdlineparser.add_argument("--runmode",help="Selects the runmode ([d]elete and run, [o]verride and run, [c]ontinue, [p]lot again",type=str)
-        self.cmdlineparser.add_argument("--recompile_on_continue",help="When using --runmode c, compilation and code writing is usually suppressed. You can recompile the code anyhow with this flag",action="store_true")
+        self.cmdlineparser.add_argument("--recompile_on_continue",help="With --runmode c or --runmode p, compilation and code writing are usually suppressed. You can recompile the code anyhow with this flag - necessary for a replot that changes a plotted LocalExpression or ProjectExpression, since those live in the generated code",action="store_true")
         self.cmdlineparser.add_argument("--verbose",help="Gives a lot of output",action='store_true')
         self.cmdlineparser.add_argument("--where",help="Which state file(s) to use. Only used in runmodes c and p: --runmode p replots every match, --runmode c resumes from the last one. Accepts the name of a .dump state file (also one outside the output directory), 'i=N' for the Nth state file sorted by name (negative counts from the end, so i=-1 is the last one and the default behaviour), 't=X' or 'time=X' for the last state at or before the dimensional time X (seconds, or an expression with units such as 2.5*milli*second), or a Python bool expression over the variables 'step' and 'time' (the latter again dimensional, in seconds), e.g. 'step==10'. A bare number is refused as ambiguous between i= and t=. Default 'True', i.e. every state.",type=str,default="True")
         self.cmdlineparser.add_argument("--largest_residuals",help="Debug the largest residuals",type=int,default=self._debug_largest_residual)
@@ -3867,8 +3867,14 @@ class Problem(_pyoomph.Problem):
                 "Unknown runmode " + self._runmode + ". Possible are " + ", ".join(possible_runmodes))
 
         if self._runmode=="continue" or self._runmode=="replot":
-            self._suppress_code_writing=(not self.cmdlineargs.recompile_on_continue) or self._runmode=="replot"
-            self._suppress_compilation=(not self.cmdlineargs.recompile_on_continue) or self._runmode=="replot"
+            # --recompile_on_continue counts for a replot as well. Replotting is how a finished run
+            # is visualised differently, and that regularly means changing the expression a plot is
+            # drawn from - a LocalExpressions or a ProjectExpression feeding an interface arrow or a
+            # colour plot. Those live in the generated code, so without a rewrite the new expression
+            # silently plots the old one. A replot still defaults to no compilation, which is what
+            # makes it fast.
+            self._suppress_code_writing=not self.cmdlineargs.recompile_on_continue
+            self._suppress_compilation=not self.cmdlineargs.recompile_on_continue
 
         self._where_expression=self.cmdlineargs.where
 
