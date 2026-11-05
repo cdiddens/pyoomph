@@ -390,6 +390,13 @@ typedef void (*JITFuncSpec_GetZ2Fluxes_FiniteElement)(const JITElementInfo_t *, 
 
 typedef double (*JITFuncSpec_InitialCondition_FiniteElement)(const JITElementInfo_t *, int, double *, double *, double *,double, int, double);
 typedef double (*JITFuncSpec_DirichletCondition_FiniteElement)(const JITElementInfo_t *, int, double *, double *, double *,double, double);
+/* d(Dirichlet value)/d(global parameter): (eleminfo, Dirichlet field index, code-local parameter index,
+   x, xlagr, normal, t). Returns 0 for a field whose condition does not contain the parameter, and for a
+   pin-only condition, whose value is whatever the dof already holds. */
+#define JIT_DIRICHLET_DPARAM_NONE 0
+#define JIT_DIRICHLET_DPARAM_AVAILABLE 1
+#define JIT_DIRICHLET_DPARAM_UNAVAILABLE 2
+typedef double (*JITFuncSpec_DirichletConditionDParameter_FiniteElement)(const JITElementInfo_t *, int, unsigned, double *, double *, double *,double);
 typedef double (*JITFuncSpec_EvalIntegralExpr_FiniteElement)(const JITElementInfo_t *, const JITShapeInfo_t *, unsigned);
 /* Tracer advection: (eleminfo, shapeinfo, index, result). One registered entry per tracer name AND
    per nodal time-history level - the caller blends the levels itself, since the blending weights
@@ -635,6 +642,13 @@ typedef struct JITFuncSpec_Table_FiniteElement
   bool *Dirichlet_set;
   unsigned Dirichlet_set_size;
   char **Dirichlet_names;
+  /* The parameter derivative of the Dirichlet values, and, per code-local global parameter (numglobal_params
+     entries, NULL if there are none), whether any Dirichlet condition of this code depends on it:
+     JIT_DIRICHLET_DPARAM_NONE, _AVAILABLE, or _UNAVAILABLE when it does but the derivative could not be
+     generated (a multi-return callback in the condition). See Problem::get_Dirichlet_parameter_derivative
+     and dev_docs/dirichlet_parameter_derivative.md. */
+  JITFuncSpec_DirichletConditionDParameter_FiniteElement DirichletConditionDParameterFunc;
+  unsigned char *Dirichlet_dparameter_status;
   // Python callbacks. First arg is the functable ptr, func id, then list of doubles, finally num of args
   double (*invoke_callback)(void *, int, double *, int);
   void (*invoke_multi_ret)(void *, int,int, double *,double *,double *, int, int);   //Index, flag,args,returns,derivative matrix, nargs,nret

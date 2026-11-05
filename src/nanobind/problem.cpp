@@ -934,6 +934,19 @@ void PyReg_Problem(nb::module_ &m)
 			"If True (default), Dirichlet conditions are enforced the oomph-lib way, by removing the corresponding entries from the degree-of-freedom vector. "
 			"If False, all Dirichlet dofs are kept as regular degrees of freedom and the assembled system is manipulated afterwards instead.")
 		.def_prop_rw(
+			"keep_Dirichlet_columns",
+			[](pyoomph::Problem &p)
+			{ return p.get_keep_Dirichlet_columns(); },
+			[](pyoomph::Problem &p, const bool &r)
+			{ p.set_keep_Dirichlet_columns(r); },
+			"Only with ``apply_Dirichlet_BCs_by_dof_removing = False``. By default (False) the matrix manipulation replaces each Dirichlet row by the "
+			"identity AND zeroes that dof's column in every other row. If True, the columns are left in place, so the assembled Jacobian keeps the "
+			"coupling J_fd of the free equations to the prescribed values. The Newton step is identical either way (the identity rows force the "
+			"update of a prescribed dof to zero, so its column multiplies zero), but the matrix is no longer symmetric, so a symmetric factorisation "
+			"is not used. What it buys is sensitivities: solving J^T lambda = dF/dU with this Jacobian, the entries of lambda at the Dirichlet dofs "
+			"are exactly dF/d(prescribed value) - the gradient for free-node shape control, with no parametrisation of the boundary. "
+			"dR/dp for a parameter appearing in a DirichletBC is exact in both settings.")
+		.def_prop_rw(
 			"_dof_ordering_mode",
 			[](pyoomph::Problem &p)
 			{ return p.get_dof_ordering_mode(); },

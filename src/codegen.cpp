@@ -8705,6 +8705,7 @@ namespace pyoomph
 		GiNaC::print_FEM_options csrc_opts;
 		csrc_opts.for_code = this;
 		RemoveSubexpressionsByIndentity sub_to_id(this);
+		std::vector<std::pair<FiniteElementField *, GiNaC::ex>> substituted_dcs; // input of the parameter derivative below
 		for (auto *f : myfields)
 		{
 			if (f->Dirichlet_condition_set)
@@ -8713,6 +8714,8 @@ namespace pyoomph
 				// Replace all stuff in the initial condition
 				multi_return_calls.clear();
 				dc = sub_to_id(dc.subs(sublist));
+				if (!f->Dirichlet_condition_pin_only)
+					substituted_dcs.push_back(std::make_pair(f, dc));
 				int myindex = f->index;
 				std::string nam = f->get_name();
 				if (nam == "mesh_x")
@@ -8772,6 +8775,95 @@ namespace pyoomph
 		}
 
 		os << "  return default_val;" << std::endl;
+		os << "}" << std::endl;
+		os << std::endl;
+		write_code_Dirichlet_condition_parameter_derivative(os, substituted_dcs);
+	}
+
+	// Emits ElementalDirichletConditionsDParameter: d(Dirichlet value)/d(global parameter), one branch per
+	// (field, parameter) pair whose condition contains the parameter. A DirichletBC is emitted into
+	// ElementalDirichletConditions only, never into the residual, so the residual's dR/dp cannot see a
+	// parameter that sits in it; Problem::get_Dirichlet_parameter_derivative uses this to supply that part.
+	// The derivative is taken exactly as for dRdp, by swapping the parameter for a plain symbol. Pin-only
+	// conditions are skipped, their value is whatever the dof holds. A condition that calls a multi-return
+	// callback is not differentiated - its derivative would need the callback's derivative matrix, which
+	// this function does not evaluate - and is flagged JIT_DIRICHLET_DPARAM_UNAVAILABLE instead, so that the
+	// runtime refuses to use it rather than return a silent zero.
+	void FiniteElementCode::write_code_Dirichlet_condition_parameter_derivative(std::ostream &os, const std::vector<std::pair<FiniteElementField *, GiNaC::ex>> &dcs)
+	{
+		dirichlet_dparameter_status.clear();
+		GiNaC::potential_real_symbol gp_dummy("_global_param_");
+		struct Branch
+		{
+			int field_index;
+			std::string field_name;
+			unsigned param_index;
+			GiNaC::ex deriv;
+		};
+		std::vector<Branch> branches;
+		std::vector<GiNaC::ex> all_derivs;
+		for (auto &fdc : dcs)
+		{
+			FiniteElementField *f = fdc.first;
+			const GiNaC::ex &dc = fdc.second;
+			std::set<unsigned> used;
+			register_global_parameters_in(dc, used);
+			if (used.empty())
+				continue;
+			bool has_multi_ret = false;
+			for (GiNaC::const_preorder_iterator it = dc.preorder_begin(); it != dc.preorder_end(); ++it)
+				if (GiNaC::is_a<GiNaC::GiNaCMultiRetCallback>(*it))
+				{
+					has_multi_ret = true;
+					break;
+				}
+			std::string nam = f->get_name();
+			int myindex = f->index;
+			if (nam == "mesh_x" || nam == "coordinate_x")
+				myindex = -1;
+			else if (nam == "mesh_y" || nam == "coordinate_y")
+				myindex = -2;
+			else if (nam == "mesh_z" || nam == "coordinate_z")
+				myindex = -3;
+			for (unsigned i : used)
+			{
+				if (has_multi_ret)
+				{
+					dirichlet_dparameter_status[i] = JIT_DIRICHLET_DPARAM_UNAVAILABLE;
+					continue;
+				}
+				const GiNaC::ex &p = local_parameter_symbols[i];
+				MemoisedSubs to_dummy(p, gp_dummy);
+				GiNaC::ex d = to_dummy(dc).diff(gp_dummy);
+				MemoisedSubs back_to_param(gp_dummy, p);
+				d = back_to_param(d);
+				// Present but not a dependence after all (e.g. p-p), so nothing for the runtime to do.
+				if (d.is_zero())
+					continue;
+				if (!dirichlet_dparameter_status.count(i))
+					dirichlet_dparameter_status[i] = JIT_DIRICHLET_DPARAM_AVAILABLE;
+				branches.push_back(Branch{myindex, nam, i, d});
+				all_derivs.push_back(d);
+			}
+		}
+
+		os << "static double ElementalDirichletConditionsDParameter(const JITElementInfo_t * eleminfo, int field_index, unsigned param_index, double *_x, double *_xlagr, double *_normal, double t)" << std::endl;
+		os << "{" << std::endl;
+		os << "  const unsigned flag=0;" << std::endl;
+		GlobalParameterFunctionScope gp_scope(this, all_derivs);
+		gp_scope.write_declarations(os, "  ");
+		GiNaC::print_FEM_options csrc_opts;
+		csrc_opts.for_code = this;
+		for (auto &b : branches)
+		{
+			os << "  if (field_index==" << b.field_index << " && param_index==" << b.param_index << ") // d(DC of field " << b.field_name << ")/d(" << local_parameter_symbols[b.param_index] << ")" << std::endl;
+			os << "  {" << std::endl;
+			os << "    return ";
+			print_simplest_form(b.deriv, os, csrc_opts);
+			os << ";" << std::endl;
+			os << "  }" << std::endl;
+		}
+		os << "  return 0.0;" << std::endl;
 		os << "}" << std::endl;
 	}
 
@@ -10830,6 +10922,11 @@ namespace pyoomph
 			}
 			
 			cleanup << " pyoomph_tested_free(functable->ParameterDerivative); functable->ParameterDerivative=PYOOMPH_NULL; " << std::endl;	
+
+			init << " functable->Dirichlet_dparameter_status=(unsigned char *)calloc(functable->numglobal_params,sizeof(unsigned char));" << std::endl;
+			for (auto &st : dirichlet_dparameter_status)
+				init << " functable->Dirichlet_dparameter_status[" << st.first << "]=" << (unsigned)st.second << "; // " << local_parameter_symbols[st.first] << std::endl;
+			cleanup << " pyoomph_tested_free(functable->Dirichlet_dparameter_status); functable->Dirichlet_dparameter_status=PYOOMPH_NULL; " << std::endl;
 		}
 
 		init << " functable->ResidualAndJacobian_NoHang=(JITFuncSpec_ResidualAndJacobian_FiniteElement *)calloc(functable->num_res_jacs,sizeof(JITFuncSpec_ResidualAndJacobian_FiniteElement));" << std::endl;
@@ -10980,6 +11077,7 @@ namespace pyoomph
          cleanup << " pyoomph_tested_free(functable->IC_names[" << i << "]); functable->IC_names[" << i << "]=PYOOMPH_NULL; " << std::endl;
 		}
 		init << " functable->DirichletConditionFunc=&ElementalDirichletConditions;" << std::endl;
+		init << " functable->DirichletConditionDParameterFunc=&ElementalDirichletConditionsDParameter;" << std::endl;
       cleanup << " pyoomph_tested_free(functable->IC_names); functable->IC_names=PYOOMPH_NULL; " << std::endl;			         					
       cleanup << " pyoomph_tested_free(functable->InitialConditionFunc); functable->InitialConditionFunc=PYOOMPH_NULL; " << std::endl;			         			
 

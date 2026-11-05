@@ -42,6 +42,21 @@ namespace pyoomph
 
 	class Mesh;
 
+	// What Mesh::collect_Dirichlet_parameter_derivatives reports: d(Dirichlet value)/d(global parameter)
+	// for every dof an active Dirichlet condition of the mesh prescribes, keyed by (Data, value index) as
+	// in Generic_SetDirichletCondition. A dof whose condition does not contain the parameter is recorded
+	// with 0, so that collecting over several meshes in setup order ends with the derivative of the value
+	// the dof was actually given - the last condition written wins, exactly as for the value itself.
+	// See Problem::get_Dirichlet_parameter_derivative.
+	struct DirichletParameterDerivativeCollector
+	{
+		unsigned global_param_index;
+		std::map<std::pair<oomph::Data *, unsigned>, double> entries;
+		// Set when a condition depends on the parameter but its derivative could not be generated
+		// (JIT_DIRICHLET_DPARAM_UNAVAILABLE). The caller must refuse, not use the zeros.
+		bool unavailable = false;
+	};
+
 
 	// Cross-check that all processes agree about the elements they share, and report or throw if they do
 	// not. For every pair of processes, each haloed element is compared against the halo copy the other
@@ -90,6 +105,9 @@ namespace pyoomph
 		std::map<pyoomph::Node *, pyoomph::Node *> copied_masters; // Maps a copied node to its master node (see resolve_copy_master)
 		unsigned long topology_generation = 0; // Bumped whenever cached element pointers/coordinates go stale, see bump_topology_generation()
 		DynamicJITCode *jitcode = NULL; // JIT-compiled element code backing the elements of this mesh
+		// Non-NULL only inside collect_Dirichlet_parameter_derivatives: setup_Dirichlet_conditions then
+		// reports parameter derivatives instead of setting and pinning values.
+		DirichletParameterDerivativeCollector *dirichlet_dparam_collector = NULL;
 
 	public:
 		bool interpolated_lagrangian_coordinates_at_remeshing=false;
@@ -402,6 +420,9 @@ namespace pyoomph
 		// Evaluate and (re-)apply all Dirichlet conditions on this mesh. If only_update_vals is set, only the pinned
 		// values are refreshed (e.g. for time-dependent BCs), without changing which dofs are pinned.
 		virtual void setup_Dirichlet_conditions(bool only_update_vals);
+		// The parameter derivative of what setup_Dirichlet_conditions(true) would write, reported into c
+		// instead of written. Same sweep, so it reaches exactly the dofs a Dirichlet condition sets.
+		void collect_Dirichlet_parameter_derivatives(DirichletParameterDerivativeCollector &c);
 		virtual void set_dirichlet_active(std::string name, bool active);
 		virtual bool get_dirichlet_active(std::string name);
 		// Whole-vector snapshot/restore of the activation flags, see mesh.cpp for why it exists.

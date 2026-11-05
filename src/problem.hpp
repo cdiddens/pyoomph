@@ -769,6 +769,15 @@ namespace pyoomph
     // If true, we do it the oomph-lib way (remove dofs of Dirichlet). If false, all Dirichlets are kept as dofs and the system is manipulated afterwards
     // (note: completely pinned fields without any weak formulation (usually helper field, e.g. references for normalized arclength etc) are always removed from the dofs, independent of this setting)
     bool dirichlets_by_removing_from_dof_vector=true;
+    // Only with !dirichlets_by_removing_from_dof_vector: whether remove_dirichlets_by_matrix_manipulation
+    // leaves the Dirichlet dofs' COLUMNS in place, i.e. the coupling block J_fd of the free equations to the
+    // prescribed values. The Newton step is the same either way - the constrained rows force dU_d = 0, so
+    // the column multiplies zero - but the matrix is no longer symmetric, and J_fd is exactly what a
+    // boundary-value sensitivity needs: with it, the adjoint's Dirichlet entries ARE the gradient with
+    // respect to the prescribed values. See dev_docs/dirichlet_parameter_derivative.md.
+    bool keep_dirichlet_columns=false;
+    // Global parameter indices already warned about by add_Dirichlet_parameter_derivative.
+    std::set<unsigned> dirichlet_dparameter_warned;
 
     // ON by default. It was opt-in while the pattern was the full element-connectivity one (which cost
     // up to +35% nonzeros on weakly coupled multi-physics); pruning it by the code generator's field
@@ -1164,6 +1173,20 @@ namespace pyoomph
     // numbering has been assigned and before anything reads it.
     void reorder_global_eqn_numbers(oomph::Vector<double *> &dof_pt) override;
 
+    bool get_keep_Dirichlet_columns() const { return keep_dirichlet_columns; }
+    void set_keep_Dirichlet_columns(bool v) { keep_dirichlet_columns = v; }
+    // d(Dirichlet value)/d(parameter) of every dof a Dirichlet condition prescribes, by global equation
+    // number (this rank's dofs and halos alike). The three flags are agreed across ranks: whether the
+    // dependence exists at all, whether some of it lands on a PINNED dof - which is where the default
+    // dof-removal strategy loses it - and whether a condition depends on the parameter in a way the code
+    // generator could not differentiate. Collective.
+    void get_Dirichlet_parameter_derivative(double *parameter_pt, std::map<unsigned long, double> &by_eqn, bool &any, bool &on_pinned_dofs, bool &unavailable);
+    // Adds the part of dR/dp that the Dirichlet conditions carry to an already assembled (and, in the
+    // matrix-manipulation strategy, already manipulated) dR/dp. Exact with dof removal off; with dof
+    // removal on - the default - the part cannot be represented and this warns instead. Collective.
+    void add_Dirichlet_parameter_derivative(double *parameter_pt, oomph::DoubleVector &result);
+    // The warning half of the above alone, for paths that assemble dR/dp without going through it.
+    void warn_if_Dirichlet_parameter_derivative_is_lost(double *parameter_pt);
     bool are_Dirichlets_by_removing_from_dof_vector() const { return dirichlets_by_removing_from_dof_vector; }
     // Switches between the two Dirichlet-enforcement strategies (see dirichlets_by_removing_from_dof_vector); no-op if unchanged
     void set_Dirichlets_by_removing_from_dof_vector(bool v) {

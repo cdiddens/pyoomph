@@ -1123,6 +1123,7 @@ namespace pyoomph
       // (invoked in sequence from write_code()); they operate on the already-built symbolic residual(s).
       virtual void write_code_initial_condition(std::ostream &os, unsigned int index, std::string name);
       virtual void write_code_Dirichlet_condition(std::ostream &os);
+      void write_code_Dirichlet_condition_parameter_derivative(std::ostream &os, const std::vector<std::pair<FiniteElementField *, GiNaC::ex>> &dcs);
       virtual void write_code_integral_or_local_expressions(std::ostream &os, std::map<std::string, GiNaC::ex> &exprs, std::map<std::string, GiNaC::ex> &units, std::string funcname, std::string reqname, bool integrate); // Shared implementation behind write_code_integral/local/extremum_expressions()
       virtual void write_code_integral_expressions(std::ostream &os);
       virtual void write_code_tracer_advection(std::ostream &os);
@@ -1197,6 +1198,9 @@ namespace pyoomph
       std::map<unsigned, unsigned> global_parameter_to_local_indices; // Maps global parameter IDs to their local index within this code's parameter list
       std::vector<std::vector<bool>> local_parameter_has_deriv; // Per residual, per local parameter: whether a derivative w.r.t. that parameter is required
       std::vector<GiNaC::ex> local_parameter_symbols;
+      // Per local parameter index: JIT_DIRICHLET_DPARAM_* (jitbridge.h), filled by write_code_Dirichlet_condition and
+      // emitted into functable->Dirichlet_dparameter_status by write_code_info. Absent means NONE.
+      std::map<unsigned, unsigned char> dirichlet_dparameter_status;
       std::set<unsigned> params_declared_in_current_function; // Local parameter indices hoisted into const double locals of the generated function currently being written (managed by GlobalParameterFunctionScope, read by GiNaCGlobalParameterWrapper::print)
       // What the Hessian pass currently being written has encountered so far: the shape expansions and
       // test functions its body dereferences, and the fields that need a Hessian index. Cleared at the

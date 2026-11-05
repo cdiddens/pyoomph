@@ -5856,8 +5856,47 @@ namespace pyoomph
     }
   }
 
-  void Generic_SetDirichletCondition(BulkElementBase *elempt, oomph::Data *data, DynamicJITCode *ci, int fieldindex, unsigned valindex, double *x_buffer, double *x_lagr, double *normal, bool only_update_vals)
+  // d(Dirichlet value)/d(the collector's parameter) of one dof at the current time, or NaN for a pin-only
+  // condition, whose value - and hence its derivative - is whatever the dof already holds.
+  static double Generic_DirichletConditionDParameter(BulkElementBase *elempt, oomph::Data *data, DynamicJITCode *ci, int fieldindex, double *x_buffer, double *x_lagr, double *normal, DirichletParameterDerivativeCollector *collect)
   {
+    auto *ft = ci->get_func_table();
+    const double time_local = data->time_stepper_pt()->time_pt()->time(0);
+    // A pin-only condition returns default_val untouched, and that is the only way to tell it apart from
+    // here without a second table in the generated code. A genuine condition that evaluates to NaN
+    // would already have put a NaN into the dof.
+    const double probe = ft->DirichletConditionFunc(elempt->get_eleminfo(), fieldindex, x_buffer, x_lagr, normal, time_local, std::numeric_limits<double>::quiet_NaN());
+    if (std::isnan(probe))
+      return probe;
+    if (!ft->Dirichlet_dparameter_status)
+      return 0.0;
+    for (unsigned int i = 0; i < ft->numglobal_params; i++)
+    {
+      if (ft->global_paramindices[i] != collect->global_param_index)
+        continue;
+      if (ft->Dirichlet_dparameter_status[i] == JIT_DIRICHLET_DPARAM_UNAVAILABLE)
+      {
+        collect->unavailable = true;
+        return 0.0;
+      }
+      if (ft->Dirichlet_dparameter_status[i] != JIT_DIRICHLET_DPARAM_AVAILABLE || !ft->DirichletConditionDParameterFunc)
+        return 0.0;
+      return ft->DirichletConditionDParameterFunc(elempt->get_eleminfo(), fieldindex, i, x_buffer, x_lagr, normal, time_local);
+    }
+    return 0.0;
+  }
+
+  void Generic_SetDirichletCondition(BulkElementBase *elempt, oomph::Data *data, DynamicJITCode *ci, int fieldindex, unsigned valindex, double *x_buffer, double *x_lagr, double *normal, bool only_update_vals, DirichletParameterDerivativeCollector *collect = NULL)
+  {
+    if (collect)
+    {
+      // Only the current time level: a parameter derivative holds the history fixed, as it does for the
+      // residual's own dR/dp.
+      const double d = Generic_DirichletConditionDParameter(elempt, data, ci, fieldindex, x_buffer, x_lagr, normal, collect);
+      if (!std::isnan(d))
+        collect->entries[std::make_pair(data, valindex)] = d;
+      return;
+    }
     auto *ts = data->time_stepper_pt();
     auto *Time_pt = ts->time_pt();
     for (unsigned t = 0; t < Time_pt->ndt(); t++)
@@ -5870,6 +5909,17 @@ namespace pyoomph
       if (!only_update_vals)
         data->pin(valindex);
     }
+  }
+
+  void Mesh::collect_Dirichlet_parameter_derivatives(DirichletParameterDerivativeCollector &c)
+  {
+    struct Reset
+    {
+      Mesh *m;
+      ~Reset() { m->dirichlet_dparam_collector = NULL; }
+    } reset{this};
+    dirichlet_dparam_collector = &c;
+    this->setup_Dirichlet_conditions(true);
   }
 
   // Toggle whether the named Dirichlet condition is currently enforced. "mesh_x"/"y"/"z" are aliased
@@ -6214,7 +6264,7 @@ namespace pyoomph
         int valindex = -1 - d;
         if (dirichlet_active[valindex + Doffset])
         {
-          Generic_SetDirichletCondition(el, nodept->variable_position_pt(), el->get_jit_code(), valindex, d, x_buffer, x_lagr, normal, only_update_vals);
+          Generic_SetDirichletCondition(el, nodept->variable_position_pt(), el->get_jit_code(), valindex, d, x_buffer, x_lagr, normal, only_update_vals, dirichlet_dparam_collector);
         }
       }
     }
@@ -6236,7 +6286,7 @@ namespace pyoomph
         {
           if (dirichlet_active[fieldindex + offset + Doffset])
           {
-            Generic_SetDirichletCondition(el, nodept, el->get_jit_code(), fieldindex + offset, fieldindex + offset, x_buffer, x_lagr, normal, only_update_vals);
+            Generic_SetDirichletCondition(el, nodept, el->get_jit_code(), fieldindex + offset, fieldindex + offset, x_buffer, x_lagr, normal, only_update_vals, dirichlet_dparam_collector);
           }
         }
         offset += space_info->numfields_basebulk;
@@ -6269,7 +6319,7 @@ namespace pyoomph
               unsigned bindex = el->get_DG_buffer_index(space_info->space_index, fieldindex);
               if (dirichlet_active[bindex + Doffset])
               {
-                Generic_SetDirichletCondition(el, el->get_DG_nodal_data(space_info->space_index, fieldindex), el->get_jit_code(), bindex, el->get_DG_node_index(space_info->space_index, fieldindex, ni), x_buffer, x_lagr, normal, only_update_vals);
+                Generic_SetDirichletCondition(el, el->get_DG_nodal_data(space_info->space_index, fieldindex), el->get_jit_code(), bindex, el->get_DG_node_index(space_info->space_index, fieldindex, ni), x_buffer, x_lagr, normal, only_update_vals, dirichlet_dparam_collector);
               }
             }
         }
@@ -6312,7 +6362,7 @@ namespace pyoomph
             int valindex = -1 - d;
             if (dirichlet_active[valindex + Doffset])
             {
-              Generic_SetDirichletCondition(el, nodept->variable_position_pt(), el->get_jit_code(), valindex, d, x_buffer, x_lagr, normal, only_update_vals);
+              Generic_SetDirichletCondition(el, nodept->variable_position_pt(), el->get_jit_code(), valindex, d, x_buffer, x_lagr, normal, only_update_vals, dirichlet_dparam_collector);
             }
           }
 
@@ -6323,7 +6373,7 @@ namespace pyoomph
             {
               if (dirichlet_active[fieldindex + space_info->buffer_offset_basebulk + Doffset])
               {
-                Generic_SetDirichletCondition(el, nodept, el->get_jit_code(), fieldindex + space_info->buffer_offset_basebulk, fieldindex + space_info->buffer_offset_basebulk, x_buffer, x_lagr, normal, only_update_vals);
+                Generic_SetDirichletCondition(el, nodept, el->get_jit_code(), fieldindex + space_info->buffer_offset_basebulk, fieldindex + space_info->buffer_offset_basebulk, x_buffer, x_lagr, normal, only_update_vals, dirichlet_dparam_collector);
               }
             }
           }
@@ -6340,7 +6390,7 @@ namespace pyoomph
               unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(space_info->interface_dof_indices[fieldindex]);
               if (dirichlet_active[fieldindex + space_info->buffer_offset_interf + Doffset])
               {
-                Generic_SetDirichletCondition(el, nodept, el->get_jit_code(), fieldindex + space_info->buffer_offset_interf, valindex, x_buffer, x_lagr, normal, only_update_vals);
+                Generic_SetDirichletCondition(el, nodept, el->get_jit_code(), fieldindex + space_info->buffer_offset_interf, valindex, x_buffer, x_lagr, normal, only_update_vals, dirichlet_dparam_collector);
               }
             }
           }
@@ -6369,6 +6419,43 @@ namespace pyoomph
         oomph::Vector<double> np(el->nodal_dimension(), 0.0);
         oomph::Vector<double> np_lagr(el->nodal_dimension(), 0.0);
         oomph::Vector<double> s(el->dim(), 0.5 * (el->s_min() + el->s_max()));
+        // The value branch below reads the slopes back out of the dof after writing the two end values
+        // into it, which a collector does not do - it would write a zero slope. So the same fit is
+        // done on the derivatives directly: the mean's at the midpoint, each slope's as the difference
+        // quotient of the end-point derivatives.
+        if (dirichlet_dparam_collector && dirichlet_active[fieldindex + ft->info_DL.buffer_offset_basebulk + Doffset])
+        {
+          oomph::Data *dl = this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex);
+          const int dfield = fieldindex + ft->info_DL.buffer_offset_basebulk;
+          for (unsigned int i = 0; i < xcenter.size(); i++)
+            x_buffer[i] = xcenter[i];
+          for (unsigned int i = 0; i < xlagr.size(); i++)
+            x_lagr[i] = xlagr[i];
+          const double dmid = Generic_DirichletConditionDParameter(el, dl, el->get_jit_code(), dfield, x_buffer, x_lagr, normal, dirichlet_dparam_collector);
+          if (std::isnan(dmid))
+            continue; // pin-only: mean and slopes all stay as they are
+          dirichlet_dparam_collector->entries[std::make_pair(dl, 0u)] = dmid;
+          const double denom = el->s_max() - el->s_min();
+          for (unsigned int j = 0; j < s.size(); j++)
+          {
+            double ends[2];
+            const double old = s[j];
+            for (unsigned k = 0; k < 2; k++)
+            {
+              s[j] = (k == 0 ? el->s_min() : el->s_max());
+              el->interpolated_x(s, np);
+              el->interpolated_xi(s, np_lagr);
+              for (unsigned int i = 0; i < xcenter.size(); i++)
+                x_buffer[i] = np[i];
+              for (unsigned int i = 0; i < xlagr.size(); i++)
+                x_lagr[i] = np_lagr[i];
+              ends[k] = Generic_DirichletConditionDParameter(el, dl, el->get_jit_code(), dfield, x_buffer, x_lagr, normal, dirichlet_dparam_collector);
+            }
+            s[j] = old;
+            dirichlet_dparam_collector->entries[std::make_pair(dl, j + 1)] = (ends[1] - ends[0]) / denom;
+          }
+          continue;
+        }
         for (unsigned int j = 0; j < s.size(); j++)
         {
           double old = s[j];
@@ -6381,7 +6468,7 @@ namespace pyoomph
             x_lagr[i] = np_lagr[i];
           if (dirichlet_active[fieldindex + ft->info_DL.buffer_offset_basebulk + Doffset])
           {
-            Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex), el->get_jit_code(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals);
+            Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex), el->get_jit_code(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals, dirichlet_dparam_collector);
 
             auto *ts = this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex)->time_stepper_pt();
             oomph::Vector<double> vmin(ts->ntstorage());
@@ -6397,7 +6484,7 @@ namespace pyoomph
               x_lagr[i] = np_lagr[i];
             if (dirichlet_active[fieldindex + ft->info_DL.buffer_offset_basebulk + Doffset])
             {
-              Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex), el->get_jit_code(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals);
+              Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex), el->get_jit_code(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals, dirichlet_dparam_collector);
             }
             oomph::Vector<double> vmax(ts->ntstorage());
             for (unsigned t = 0; t < vmax.size(); t++)
@@ -6415,10 +6502,18 @@ namespace pyoomph
           }
           s[j] = old;
         }
-        // Finally reapply the Dirichlet condition at the midpoint itself (value slot 0)
+        // Finally reapply the Dirichlet condition at the midpoint itself (value slot 0). The buffers have
+        // to be put back first: the slope loop leaves them at the s_max end of the LAST local direction,
+        // and this used to evaluate the mean there, i.e. one half-range slope off the centre - found
+        // because the parameter derivative of this value (which does use the centre) disagreed with
+        // a difference quotient of it by exactly that slope.
+        for (unsigned int i = 0; i < xcenter.size(); i++)
+          x_buffer[i] = xcenter[i];
+        for (unsigned int i = 0; i < xlagr.size(); i++)
+          x_lagr[i] = xlagr[i];
         if (dirichlet_active[fieldindex + ft->info_DL.buffer_offset_basebulk + Doffset])
         {
-          Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex), el->get_jit_code(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals);
+          Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex), el->get_jit_code(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals, dirichlet_dparam_collector);
         }
       }
 
@@ -6431,7 +6526,7 @@ namespace pyoomph
       {
         if (dirichlet_active[fieldindex + ft->info_D0.buffer_offset_basebulk + Doffset])
         {
-          Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_D0.internal_offset_new + fieldindex), el->get_jit_code(), fieldindex + ft->info_D0.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals);
+          Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_D0.internal_offset_new + fieldindex), el->get_jit_code(), fieldindex + ft->info_D0.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals, dirichlet_dparam_collector);
         }
       }
     }
@@ -6508,7 +6603,7 @@ namespace pyoomph
       {
         if (dirichlet_active[fieldindex + Doffset])
         {
-          Generic_SetDirichletCondition(ode, ode->internal_data_pt(fieldindex), ode->get_jit_code(), fieldindex, 0, x_buffer, x_buffer, normal, only_update_vals);
+          Generic_SetDirichletCondition(ode, ode->internal_data_pt(fieldindex), ode->get_jit_code(), fieldindex, 0, x_buffer, x_buffer, normal, only_update_vals, dirichlet_dparam_collector);
         }
         else if (!only_update_vals)
         {

@@ -2153,13 +2153,247 @@ namespace pyoomph
 						if (is_constrained_row)
 						{
 							values[i] = (col == row+first_row) ? 1.0 : 0.0;
-						} else if (dof_set.count(col))
+						} else if (!keep_dirichlet_columns && dof_set.count(col))
 						{
 							values[i] = 0.0;
 						}
 					}
 				}
 			}
+		}
+	}
+
+	static inline void sync_hanging_values_if_parallel(pyoomph::Problem *prob); // defined below, with its reasoning
+
+	// Every rank's (global equation, value) pairs, merged on every rank. For the Dirichlet parameter
+	// derivative, whose pairs are boundary-sized, so the replication costs nothing worth avoiding. A
+	// pair seen by several ranks carries the same value on each (it is a function of the node), so the
+	// merge keeps any one of them.
+	static void allgather_eqn_value_pairs(pyoomph::Problem *prob, std::map<unsigned long, double> &pairs)
+	{
+#ifdef OOMPH_HAS_MPI
+		if (!prob->communicator_pt() || prob->communicator_pt()->nproc() < 2)
+			return;
+		MPI_Comm comm = prob->communicator_pt()->mpi_comm();
+		const int nproc = prob->communicator_pt()->nproc();
+		std::vector<unsigned long> eqns;
+		std::vector<double> vals;
+		for (auto &e : pairs)
+		{
+			eqns.push_back(e.first);
+			vals.push_back(e.second);
+		}
+		int n = (int)eqns.size();
+		std::vector<int> counts(nproc), displs(nproc, 0);
+		MPI_Allgather(&n, 1, MPI_INT, counts.data(), 1, MPI_INT, comm);
+		for (int i = 1; i < nproc; i++)
+			displs[i] = displs[i - 1] + counts[i - 1];
+		const int total = displs[nproc - 1] + counts[nproc - 1];
+		std::vector<unsigned long> all_eqns(total);
+		std::vector<double> all_vals(total);
+		MPI_Allgatherv(eqns.data(), n, MPI_UNSIGNED_LONG, all_eqns.data(), counts.data(), displs.data(), MPI_UNSIGNED_LONG, comm);
+		MPI_Allgatherv(vals.data(), n, MPI_DOUBLE, all_vals.data(), counts.data(), displs.data(), MPI_DOUBLE, comm);
+		pairs.clear();
+		for (int i = 0; i < total; i++)
+			pairs[all_eqns[i]] = all_vals[i];
+#else
+		(void)prob;
+		(void)pairs;
+#endif
+	}
+
+	// A DirichletBC is emitted into ElementalDirichletConditions and never into the residual, so the
+	// residual's own dR/dp is blind to a parameter that sits in one: for a parameter that appears ONLY
+	// there it is an exact zero, with no warning (dev_docs/shape_optimization.md 3.1). The missing part is
+	// the chain rule through the prescribed values U_d = g(p),
+	//
+	//     dR_f/dp = dR_f/dp|_U + J_fd dg/dp ,
+	//
+	// and this collects its second factor from the generated ElementalDirichletConditionsDParameter, by
+	// running each mesh's Dirichlet sweep in collect mode - the same sweep that sets the values, so it
+	// reaches exactly the dofs a condition sets, and the last condition written to a dof wins for the
+	// derivative as it does for the value. Meshes are visited in Problem.setup_pinning's order for that
+	// reason. See dev_docs/dirichlet_parameter_derivative.md.
+	void Problem::get_Dirichlet_parameter_derivative(double *parameter_pt, std::map<unsigned long, double> &by_eqn, bool &any, bool &on_pinned_dofs, bool &unavailable)
+	{
+		by_eqn.clear();
+		DirichletParameterDerivativeCollector c;
+		c.global_param_index = this->resolve_parameter_value_ptr(parameter_pt);
+		for (unsigned nmi = 0; nmi < this->nsub_mesh(); nmi++)
+		{
+			auto *m = dynamic_cast<pyoomph::Mesh *>(this->mesh_pt(nmi));
+			if (!m || !m->nelement())
+				continue;
+			// Mesh::setup_Dirichlet_conditions reads its code from element 0 without a check.
+			if (!dynamic_cast<ODEStorageMesh *>(m) && !dynamic_cast<BulkElementBase *>(m->element_pt(0)))
+				continue;
+			m->collect_Dirichlet_parameter_derivatives(c);
+		}
+		int flags[3] = {0, 0, c.unavailable ? 1 : 0};
+		for (auto &e : c.entries)
+		{
+			if (e.second == 0.0)
+				continue;
+			oomph::Data *d = e.first.first;
+			const unsigned vi = e.first.second;
+			const long eqn = d->eqn_number(vi);
+			if (eqn >= 0)
+			{
+				by_eqn[(unsigned long)eqn] = e.second;
+				flags[0] = 1;
+			}
+			else if (d->is_pinned(vi))
+			{
+				flags[0] = 1;
+				flags[1] = 1;
+			}
+			// Otherwise the value is constrained (hanging, or copied periodic): it follows its masters,
+			// which carry a condition of their own.
+		}
+#ifdef OOMPH_HAS_MPI
+		// These decide whether a Jacobian is assembled and whether to throw, and a rank holding no
+		// prescribed dof of the parameter would otherwise skip a collective its peers enter.
+		if (this->communicator_pt() && this->communicator_pt()->nproc() > 1)
+		{
+			int global_flags[3];
+			MPI_Allreduce(flags, global_flags, 3, MPI_INT, MPI_MAX, this->communicator_pt()->mpi_comm());
+			for (unsigned i = 0; i < 3; i++)
+				flags[i] = global_flags[i];
+		}
+#endif
+		any = flags[0];
+		on_pinned_dofs = flags[1];
+		unavailable = flags[2];
+		// Under --distribute a rank does not necessarily see the condition of every dof it owns: a
+		// boundary condition is swept over the rank's own interface elements, and the bulk element under
+		// an owned boundary node can belong to the neighbour. Measured: two of eleven bottom-boundary
+		// rows of a 2-rank Poisson came out zero. So the map is merged across ranks, which also hands
+		// every rank the columns it needs for J_fd dg/dp.
+		if (any && this->distributed())
+			allgather_eqn_value_pairs(this, by_eqn);
+	}
+
+	void Problem::warn_if_Dirichlet_parameter_derivative_is_lost(double *parameter_pt)
+	{
+		const unsigned pindex = this->resolve_parameter_value_ptr(parameter_pt);
+		// Safe to return before the collective below: the set is only ever filled from agreed flags, so
+		// it is the same on every rank. Saves the sweep on every later dR/dp of a tracker or continuation.
+		if (dirichlet_dparameter_warned.count(pindex))
+			return;
+		std::map<unsigned long, double> by_eqn;
+		bool any, on_pinned, unavailable;
+		this->get_Dirichlet_parameter_derivative(parameter_pt, by_eqn, any, on_pinned, unavailable);
+		if (!on_pinned && !unavailable)
+			return;
+		dirichlet_dparameter_warned.insert(pindex);
+		const std::string name = global_params_by_index[pindex]->get_name();
+		std::ostringstream oss;
+		oss << "pyoomph WARNING: the global parameter '" << name << "' appears in a DirichletBC, and dR/d(" << name
+			<< ") does not contain that dependence. ";
+		if (unavailable)
+			oss << "The condition calls a multi-return callback, which the code generator does not differentiate. ";
+		else if (this->dirichlets_by_removing_from_dof_vector)
+			oss << "The prescribed dofs are removed from the dof vector (apply_Dirichlet_BCs_by_dof_removing=True, the default), "
+				<< "so the coupling of the remaining equations to them is never assembled. ";
+		else
+			oss << "Some of the prescribed dofs are pinned for another reason (e.g. a field without equations), so they "
+				<< "are not unknowns and their coupling is never assembled. ";
+		oss << "For a parameter that appears in nothing but DirichletBCs the derivative is exactly zero. Newton solves and "
+			<< "arclength continuation still converge (the corrector does the work), but tangents, sensitivities, adjoint "
+			<< "gradients and bifurcation tracking in '" << name << "' are wrong. To get the exact derivative, set "
+			<< "apply_Dirichlet_BCs_by_dof_removing=False, or impose the condition weakly with EnforcedDirichlet. "
+			<< "See dev_docs/dirichlet_parameter_derivative.md. (Shown once per parameter.)" << std::endl;
+		// The flags are agreed across ranks, so every rank gets here; one of them is enough to tell.
+		if (!this->communicator_pt() || this->communicator_pt()->my_rank() == 0)
+			std::cout << oss.str() << std::flush;
+	}
+
+	// With dof removal off, the system remove_dirichlets_by_matrix_manipulation produces is the one for
+	//
+	//     R_f(U_f, U_d, p) = 0 ,   R_d = U_d - g(p) = 0 ,
+	//
+	// whose Dirichlet rows are the identity (the residual is zeroed because the values were set before the
+	// solve). Its dR/dp therefore has -dg/dp in the Dirichlet rows, and the free rows need J_fd dg/dp only
+	// if J_fd is not in the matrix the caller solves with: keep_dirichlet_columns leaves it there, so then
+	// J dU/dp = -dR/dp carries it by itself; the default zeroes those columns, so the product has to be
+	// added here, from a raw Jacobian. Exact either way, and matched to whichever matrix get_jacobian hands
+	// out. With dof removal on the prescribed dofs are not unknowns, J_fd is never assembled, and the
+	// most that can be done is to say so.
+	void Problem::add_Dirichlet_parameter_derivative(double *parameter_pt, oomph::DoubleVector &result)
+	{
+		if (this->dirichlets_by_removing_from_dof_vector)
+		{
+			this->warn_if_Dirichlet_parameter_derivative_is_lost(parameter_pt);
+			return;
+		}
+		std::map<unsigned long, double> by_eqn;
+		bool any, on_pinned, unavailable;
+		this->get_Dirichlet_parameter_derivative(parameter_pt, by_eqn, any, on_pinned, unavailable);
+		if (unavailable || on_pinned)
+		{
+			// on_pinned: a prescribed dof that is pinned for another reason, e.g. a field without equations.
+			this->warn_if_Dirichlet_parameter_derivative_is_lost(parameter_pt);
+		}
+		if (!any)
+			return;
+		const std::unordered_set<unsigned long> &dof_set = dirichlet_info.get_global_pinned_equation_set();
+		const long first_row = result.first_row();
+		const long nrow_local = result.nrow_local();
+		for (auto &e : by_eqn)
+		{
+			if (!dof_set.count(e.first))
+				continue;
+			const long local = (long)e.first - first_row;
+			if (local >= 0 && local < nrow_local)
+				result[local] = -e.second;
+		}
+		if (keep_dirichlet_columns)
+			return;
+
+		// J_fd dg/dp from the raw elemental Jacobian. It has to be the residual's Jacobian, not whatever
+		// replace_RJM_by_param_deriv would turn it into, hence the restore guard.
+		struct RestoreReplace
+		{
+			Problem *p;
+			double *v;
+			~RestoreReplace() { p->replace_RJM_by_param_deriv = v; }
+		} restore{this, replace_RJM_by_param_deriv};
+		replace_RJM_by_param_deriv = NULL;
+		sync_hanging_values_if_parallel(this);
+		oomph::DoubleVector raw_residuals;
+		oomph::CRDoubleMatrix J(this->dof_distribution_pt());
+		this->get_jacobian_by_elemental_assembly(raw_residuals, J);
+		// The Jacobian's rows and dR/dp's need not be split the same way under MPI - a replicated run
+		// row-splits the matrix but may hand dR/dp over whole - so the product is formed on J's rows,
+		// keyed by global row, merged, and added to whichever rows result holds here. Only rows that
+		// couple to a prescribed dof are nonzero, so this is boundary-sized as well.
+		const long J_first_row = J.first_row();
+		const double *values = J.value();
+		const int *col_index = J.column_index();
+		const int *row_start = J.row_start();
+		std::map<unsigned long, double> coupling;
+		for (long row = 0; row < (long)J.nrow_local(); row++)
+		{
+			const unsigned long grow = (unsigned long)(row + J_first_row);
+			if (dof_set.count(grow))
+				continue;
+			double sum = 0.0;
+			for (int i = row_start[row]; i < row_start[row + 1]; i++)
+			{
+				auto it = by_eqn.find((unsigned long)col_index[i]);
+				if (it != by_eqn.end() && dof_set.count(it->first))
+					sum += values[i] * it->second;
+			}
+			if (sum != 0.0)
+				coupling[grow] = sum;
+		}
+		if (J.distributed())
+			allgather_eqn_value_pairs(this, coupling);
+		for (auto &c : coupling)
+		{
+			const long local = (long)c.first - first_row;
+			if (local >= 0 && local < nrow_local)
+				result[local] += c.second;
 		}
 	}
 
@@ -2368,6 +2602,11 @@ namespace pyoomph
 				if (this->bifurcation_tracking_mode!="") throw_runtime_error("TODO: Cannot remove dirichlet dofs from the residual vector by matrix manipulation when bifurcation tracking is active, since the user-provided residual vector would still contain contributions from the dirichlet dofs, which would be wrong");
 				this->remove_dirichlets_by_matrix_manipulation(residuals);
 			}
+			// In this mode the "residual" is dR/dp (see _replace_RJM_by_param_deriv), and it is the route
+			// MultiAssembleRequest's tensor cache and user-side adjoint code take, so it needs the same
+			// Dirichlet part as get_derivative_wrt_global_parameter.
+			if (replace_RJM_by_param_deriv)
+				this->add_Dirichlet_parameter_derivative(replace_RJM_by_param_deriv, residuals);
 	apply_residual_scale_factor(residuals);
 		}
 		else
@@ -2392,12 +2631,11 @@ namespace pyoomph
 			get_derivative_wrt_global_parameter_elemental_assembly(parameter_pt,result);
 			if (!this->dirichlets_by_removing_from_dof_vector)
 			{
-				 //throw_runtime_error("TODO: Cannot remove dirichlet dofs from the derivative by a global parameter by matrix manipulation yet.");
-
-				 //This is of course problematic if the DirichletBC depends on the parameter, but it is also problematic in the case of removing Dirichlets from the dofs
-				 //TODO: However, here, it could be patched by providing a corresponding function to calculate dDirichlet/dparam 
 				 this->remove_dirichlets_by_matrix_manipulation(result);
 			}
+			// The parameter's dependence through the prescribed Dirichlet values, which the elemental
+			// assembly cannot see: exact with dof removal off, a warning with it on.
+			this->add_Dirichlet_parameter_derivative(parameter_pt, result);
 		}
 		else
 		{
@@ -3464,6 +3702,9 @@ namespace pyoomph
 				throw_runtime_error("Cannot track a bifuraciton in the global parameter " + param + ", since it is not present in the problem");
 			auto *p = global_params_by_name[param];
 			valptr = &(p->value());
+			// The handlers assemble dR/dp element by element, past get_derivative_wrt_global_parameter,
+			// and would also need dJ/dp through the prescribed values. Neither is there.
+			this->warn_if_Dirichlet_parameter_derivative_is_lost(valptr);
 		}
 		else
 		{
@@ -8616,6 +8857,19 @@ namespace pyoomph
 				break;
 			}
 		}
+		// Every parameter derivative assembled here is the elemental one: with dof removal on, the part
+		// that runs through the prescribed Dirichlet values is lost (see add_Dirichlet_parameter_derivative).
+		if (this->dirichlets_by_removing_from_dof_vector)
+		{
+			std::set<std::string> warned_here;
+			for (const auto &pn : params)
+			{
+				if (pn == "" || warned_here.count(pn) || !global_params_by_name.count(pn))
+					continue;
+				warned_here.insert(pn);
+				this->warn_if_Dirichlet_parameter_derivative_is_lost(&(global_params_by_name[pn]->value()));
+			}
+		}
 		oomph::AssemblyHandler * old_handler=this->assembly_handler_pt();
 		pyoomph::CustomMultiAssembleHandler * new_handler=new pyoomph::CustomMultiAssembleHandler(this,what,contributions,params,hessian_vectors,hessian_vector_indices,return_indices);
 	    ndof = this->get_n_unaugmented_dofs();
@@ -9291,6 +9545,8 @@ namespace pyoomph
 		if (!ah || typeid(*ah) != typeid(oomph::AssemblyHandler)) return std::make_tuple(false, false);
 		if (use_custom_residual_jacobian) return std::make_tuple(false, false);
 		if (replace_RJM_by_param_deriv) return std::make_tuple(false, false);
+		// The identity rows stay symmetric only together with the zeroed columns.
+		if (!dirichlets_by_removing_from_dof_vector && keep_dirichlet_columns) return std::make_tuple(false, false);
 		int ri = -1;
 		for (unsigned i = 0; i < residual_names.size(); i++)
 			if (residual_names[i] == residual_name) { ri = i; break; }
