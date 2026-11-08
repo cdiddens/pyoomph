@@ -5614,6 +5614,8 @@ namespace pyoomph
   // Defined further down, next to the ElementModeFit/sample_local_coordinates it reuses.
   static void set_DL_initial_condition(BulkElementBase *el, DynamicJITCode *ci, const JITFuncSpec_Table_FiniteElement_t *ft,
                                        double *normal, unsigned icindex);
+  static void set_DL_Dirichlet_condition(BulkElementBase *el, const JITFuncSpec_Table_FiniteElement_t *ft, unsigned fieldindex,
+                                         double *normal, bool only_update_vals, DirichletParameterDerivativeCollector *collect);
 
   // Evaluate and assign the named initial-condition set ic_name to every dof of every element in this
   // mesh, at every stored time-history level. If this mesh has a well-defined normal (codim-1, i.e.
@@ -6398,10 +6400,7 @@ namespace pyoomph
       }
     }
 
-    // Elemental (DL and D0) dofs, evaluated at the element midpoint. DL fields also
-    // carry a linear slope in each local direction j (stored at internal value index
-    // j+1), obtained here by finite-differencing the field value at s_min and s_max
-    // of that direction and dividing by the local coordinate range.
+    // Elemental dofs: D0 evaluated at the element midpoint, DL fitted onto its basis.
     // The two midpoint evaluations are unconditional within the loop body, so without the guard a
     // mesh with no DL/D0 fields at all still evaluated them once per element.
     for (unsigned int ei = 0; any_elemental_active && ei < this->nelement(); ei++)
@@ -6414,107 +6413,12 @@ namespace pyoomph
       for (unsigned int i = 0; i < xlagr.size(); i++)
         x_lagr[i] = xlagr[i];
 
+      // DL: least-squares fitted onto the DL basis, exactly as the initial condition is - see
+      // set_DL_Dirichlet_condition for what the midpoint-plus-slopes scheme it replaced got wrong.
       for (unsigned int fieldindex = 0; fieldindex < ft->info_DL.numfields; fieldindex++)
       {
-        oomph::Vector<double> np(el->nodal_dimension(), 0.0);
-        oomph::Vector<double> np_lagr(el->nodal_dimension(), 0.0);
-        oomph::Vector<double> s(el->dim(), 0.5 * (el->s_min() + el->s_max()));
-        // The value branch below reads the slopes back out of the dof after writing the two end values
-        // into it, which a collector does not do - it would write a zero slope. So the same fit is
-        // done on the derivatives directly: the mean's at the midpoint, each slope's as the difference
-        // quotient of the end-point derivatives.
-        if (dirichlet_dparam_collector && dirichlet_active[fieldindex + ft->info_DL.buffer_offset_basebulk + Doffset])
-        {
-          oomph::Data *dl = this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex);
-          const int dfield = fieldindex + ft->info_DL.buffer_offset_basebulk;
-          for (unsigned int i = 0; i < xcenter.size(); i++)
-            x_buffer[i] = xcenter[i];
-          for (unsigned int i = 0; i < xlagr.size(); i++)
-            x_lagr[i] = xlagr[i];
-          const double dmid = Generic_DirichletConditionDParameter(el, dl, el->get_jit_code(), dfield, x_buffer, x_lagr, normal, dirichlet_dparam_collector);
-          if (std::isnan(dmid))
-            continue; // pin-only: mean and slopes all stay as they are
-          dirichlet_dparam_collector->entries[std::make_pair(dl, 0u)] = dmid;
-          const double denom = el->s_max() - el->s_min();
-          for (unsigned int j = 0; j < s.size(); j++)
-          {
-            double ends[2];
-            const double old = s[j];
-            for (unsigned k = 0; k < 2; k++)
-            {
-              s[j] = (k == 0 ? el->s_min() : el->s_max());
-              el->interpolated_x(s, np);
-              el->interpolated_xi(s, np_lagr);
-              for (unsigned int i = 0; i < xcenter.size(); i++)
-                x_buffer[i] = np[i];
-              for (unsigned int i = 0; i < xlagr.size(); i++)
-                x_lagr[i] = np_lagr[i];
-              ends[k] = Generic_DirichletConditionDParameter(el, dl, el->get_jit_code(), dfield, x_buffer, x_lagr, normal, dirichlet_dparam_collector);
-            }
-            s[j] = old;
-            dirichlet_dparam_collector->entries[std::make_pair(dl, j + 1)] = (ends[1] - ends[0]) / denom;
-          }
-          continue;
-        }
-        for (unsigned int j = 0; j < s.size(); j++)
-        {
-          double old = s[j];
-          s[j] = el->s_min();
-          el->interpolated_x(s, np);
-          el->interpolated_xi(s, np_lagr);
-          for (unsigned int i = 0; i < xcenter.size(); i++)
-            x_buffer[i] = np[i];
-          for (unsigned int i = 0; i < xlagr.size(); i++)
-            x_lagr[i] = np_lagr[i];
-          if (dirichlet_active[fieldindex + ft->info_DL.buffer_offset_basebulk + Doffset])
-          {
-            Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex), el->get_jit_code(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals, dirichlet_dparam_collector);
-
-            auto *ts = this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex)->time_stepper_pt();
-            oomph::Vector<double> vmin(ts->ntstorage());
-            for (unsigned t = 0; t < vmin.size(); t++)
-              vmin[t] = this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex)->value(t, 0);
-
-            s[j] = el->s_max();
-            el->interpolated_x(s, np);
-            el->interpolated_xi(s, np_lagr);
-            for (unsigned int i = 0; i < xcenter.size(); i++)
-              x_buffer[i] = np[i];
-            for (unsigned int i = 0; i < xlagr.size(); i++)
-              x_lagr[i] = np_lagr[i];
-            if (dirichlet_active[fieldindex + ft->info_DL.buffer_offset_basebulk + Doffset])
-            {
-              Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex), el->get_jit_code(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals, dirichlet_dparam_collector);
-            }
-            oomph::Vector<double> vmax(ts->ntstorage());
-            for (unsigned t = 0; t < vmax.size(); t++)
-              vmax[t] = this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex)->value(t, 0);
-
-            // Slope in direction j = (value at s_max - value at s_min) / range
-            double denom = el->s_max() - el->s_min();
-            for (unsigned t = 0; t < vmax.size(); t++)
-              this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex)->set_value(t, j + 1, (vmax[t] - vmin[t]) / denom);
-            // Generic_SetDirichletCondition only ever pins value slot 0, so the slopes used to be
-            // written and then left free: a DirichletBC on a DL field constrained its mean but let the
-            // residual pick the slope, i.e. it did not impose the prescribed value at all.
-            if (!only_update_vals)
-              this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex)->pin(j + 1);
-          }
-          s[j] = old;
-        }
-        // Finally reapply the Dirichlet condition at the midpoint itself (value slot 0). The buffers have
-        // to be put back first: the slope loop leaves them at the s_max end of the LAST local direction,
-        // and this used to evaluate the mean there, i.e. one half-range slope off the centre - found
-        // because the parameter derivative of this value (which does use the centre) disagreed with
-        // a difference quotient of it by exactly that slope.
-        for (unsigned int i = 0; i < xcenter.size(); i++)
-          x_buffer[i] = xcenter[i];
-        for (unsigned int i = 0; i < xlagr.size(); i++)
-          x_lagr[i] = xlagr[i];
         if (dirichlet_active[fieldindex + ft->info_DL.buffer_offset_basebulk + Doffset])
-        {
-          Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex), el->get_jit_code(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals, dirichlet_dparam_collector);
-        }
+          set_DL_Dirichlet_condition(el, ft, fieldindex, normal, only_update_vals, dirichlet_dparam_collector);
       }
 
       for (unsigned int i = 0; i < xcenter.size(); i++)
@@ -7393,6 +7297,57 @@ namespace pyoomph
     }
   };
 
+  // The sample lattice, its physical and Lagrangian positions and the DL fit operator of one element,
+  // shared by the initial and the Dirichlet condition so that the two cannot fit differently.
+  struct DLSampleFit
+  {
+    std::vector<std::vector<double>> slocs;
+    std::vector<std::array<double, 3>> xs, xis;
+    ElementModeFit dlfit;
+
+    bool build(BulkElementBase *el)
+    {
+      std::vector<oomph::Vector<double>> lattice;
+      sample_local_coordinates(el, lattice, 2); // DL is two modes per direction
+      slocs.assign(lattice.size(), std::vector<double>());
+      for (unsigned p = 0; p < lattice.size(); p++)
+        slocs[p].assign(lattice[p].begin(), lattice[p].end());
+
+      dlfit.build(el, slocs, -1, true);
+      if (!dlfit.nmode)
+        return false;
+
+      // The physical and Lagrangian position of every sample point. nlagrangian is taken from the node,
+      // not from the element - see set_DL_initial_condition.
+      const unsigned ndim = el->nodal_dimension();
+      const unsigned nlagr = static_cast<pyoomph::Node *>(el->node_pt(0))->nlagrangian();
+      xs.assign(slocs.size(), {0.0, 0.0, 0.0});
+      xis.assign(slocs.size(), {0.0, 0.0, 0.0});
+      for (unsigned p = 0; p < slocs.size(); p++)
+      {
+        oomph::Vector<double> sv(lattice[p]);
+        oomph::Vector<double> np(ndim, 0.0);
+        el->interpolated_x(sv, np);
+        for (unsigned i = 0; i < ndim && i < 3; i++)
+          xs[p][i] = np[i];
+        // Interpolated from the NODES, not with interpolated_xi: that one loops over the element's
+        // nlagrangian(), which is what was zero here in the first place.
+        if (nlagr)
+        {
+          oomph::Shape psi(el->nnode());
+          el->shape(sv, psi);
+          for (unsigned n = 0; n < el->nnode(); n++)
+          {
+            auto *nod = static_cast<pyoomph::Node *>(el->node_pt(n));
+            for (unsigned i = 0; i < nlagr && i < 3; i++)
+              xis[p][i] += psi[n] * nod->xi(i);
+          }
+        }
+      }
+      return true;
+    }
+  };
+
   // Fills the DL coefficients of one element from an initial condition, by evaluating the IC on a
   // lattice of local sample points and least-squares fitting it onto the DL basis.
   //
@@ -7412,43 +7367,13 @@ namespace pyoomph
     if (!nDL || !el->nnode())
       return;
 
-    std::vector<oomph::Vector<double>> lattice;
-    sample_local_coordinates(el, lattice, 2); // DL is two modes per direction
-    std::vector<std::vector<double>> slocs(lattice.size());
-    for (unsigned p = 0; p < lattice.size(); p++)
-      slocs[p].assign(lattice[p].begin(), lattice[p].end());
-
-    ElementModeFit dlfit;
-    dlfit.build(el, slocs, -1, true);
-    if (!dlfit.nmode)
+    DLSampleFit sf;
+    if (!sf.build(el))
       return;
-
-    // The physical and Lagrangian position of every sample point. nlagrangian is taken from the node,
-    // not from the element - see above.
-    const unsigned ndim = el->nodal_dimension();
-    const unsigned nlagr = static_cast<pyoomph::Node *>(el->node_pt(0))->nlagrangian();
-    std::vector<std::array<double, 3>> xs(slocs.size(), {0.0, 0.0, 0.0}), xis(slocs.size(), {0.0, 0.0, 0.0});
-    for (unsigned p = 0; p < slocs.size(); p++)
-    {
-      oomph::Vector<double> sv(lattice[p]);
-      oomph::Vector<double> np(ndim, 0.0);
-      el->interpolated_x(sv, np);
-      for (unsigned i = 0; i < ndim && i < 3; i++)
-        xs[p][i] = np[i];
-      // Interpolated from the NODES, not with interpolated_xi: that one loops over the element's
-      // nlagrangian(), which is what was zero here in the first place.
-      if (nlagr)
-      {
-        oomph::Shape psi(el->nnode());
-        el->shape(sv, psi);
-        for (unsigned n = 0; n < el->nnode(); n++)
-        {
-          auto *nod = static_cast<pyoomph::Node *>(el->node_pt(n));
-          for (unsigned i = 0; i < nlagr && i < 3; i++)
-            xis[p][i] += psi[n] * nod->xi(i);
-        }
-      }
-    }
+    const auto &slocs = sf.slocs;
+    const auto &xs = sf.xs;
+    const auto &xis = sf.xis;
+    ElementModeFit &dlfit = sf.dlfit;
 
     std::vector<double> vals(slocs.size()), coeffs;
     for (unsigned fieldindex = 0; fieldindex < nDL; fieldindex++)
@@ -7471,6 +7396,79 @@ namespace pyoomph
           d->set_value(t, l, coeffs[l]);
       }
     }
+  }
+
+  // A DirichletBC on a DL field, fitted onto the DL basis like the initial condition above (same lattice,
+  // same operator, through DLSampleFit), and every coefficient pinned.
+  //
+  // This replaced a midpoint value plus one difference quotient per local direction, which assumed a
+  // basis of "value at the centre of [s_min,s_max]^dim, d/ds per direction". That is the DL basis only
+  // on quads and bricks. Every shape_at_s_DL is [1, s_0, s_1, ...], so the constant is the value at s=0:
+  // on a triangle or tet that is a VERTEX, and the scheme put g at s=(0.5,0.5) there - a point on the
+  // hypotenuse - and sampled its slopes at points outside the element. Measured with a linear g, which
+  // DL represents exactly: relative L2 errors of 0.27 on triangles and 0.85 on tets, while quads, bricks
+  // and lines came out exact to roundoff. The initial condition had been moved to the fit for the same
+  // reason; this path had been left on the old scheme.
+  //
+  // The fit is linear in the samples, so the parameter derivative is the fit of the sampled dg/dp, and
+  // it agrees with the value by construction.
+  static void set_DL_Dirichlet_condition(BulkElementBase *el, const JITFuncSpec_Table_FiniteElement_t *ft, unsigned fieldindex,
+                                         double *normal, bool only_update_vals, DirichletParameterDerivativeCollector *collect)
+  {
+    if (!el->nnode())
+      return;
+    DLSampleFit sf;
+    if (!sf.build(el))
+      return;
+    oomph::Data *d = el->internal_data_pt(fieldindex + ft->info_DL.internal_offset_new);
+    const int dfield = fieldindex + ft->info_DL.buffer_offset_basebulk;
+    const unsigned npts = sf.slocs.size();
+    std::vector<double> vals(npts), coeffs;
+    auto *Time_pt = d->time_stepper_pt()->time_pt();
+
+    // Pin-only: the coefficients stay what they are. Detected as in Generic_DirichletConditionDParameter.
+    {
+      double xb[3] = {sf.xs[0][0], sf.xs[0][1], sf.xs[0][2]};
+      double xl[3] = {sf.xis[0][0], sf.xis[0][1], sf.xis[0][2]};
+      if (std::isnan(ft->DirichletConditionFunc(el->get_eleminfo(), dfield, xb, xl, normal, Time_pt->time(0), std::numeric_limits<double>::quiet_NaN())))
+      {
+        if (!collect && !only_update_vals)
+          for (unsigned l = 0; l < sf.dlfit.nmode; l++)
+            d->pin(l);
+        return;
+      }
+    }
+
+    if (collect)
+    {
+      for (unsigned p = 0; p < npts; p++)
+      {
+        double xb[3] = {sf.xs[p][0], sf.xs[p][1], sf.xs[p][2]};
+        double xl[3] = {sf.xis[p][0], sf.xis[p][1], sf.xis[p][2]};
+        vals[p] = Generic_DirichletConditionDParameter(el, d, el->get_jit_code(), dfield, xb, xl, normal, collect);
+      }
+      sf.dlfit.fit(vals, coeffs);
+      for (unsigned l = 0; l < sf.dlfit.nmode; l++)
+        collect->entries[std::make_pair(d, l)] = coeffs[l];
+      return;
+    }
+
+    for (unsigned t = 0; t < Time_pt->ndt(); t++)
+    {
+      const double time_local = Time_pt->time(t);
+      for (unsigned p = 0; p < npts; p++)
+      {
+        double xb[3] = {sf.xs[p][0], sf.xs[p][1], sf.xs[p][2]};
+        double xl[3] = {sf.xis[p][0], sf.xis[p][1], sf.xis[p][2]};
+        vals[p] = ft->DirichletConditionFunc(el->get_eleminfo(), dfield, xb, xl, normal, time_local, 0.0);
+      }
+      sf.dlfit.fit(vals, coeffs);
+      for (unsigned l = 0; l < sf.dlfit.nmode; l++)
+        d->set_value(t, l, coeffs[l]);
+    }
+    if (!only_update_vals)
+      for (unsigned l = 0; l < sf.dlfit.nmode; l++)
+        d->pin(l);
   }
 
   // Local expressions can only be evaluated once the element's (and, for anything reading bulk or

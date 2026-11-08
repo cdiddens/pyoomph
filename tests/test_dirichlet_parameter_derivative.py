@@ -127,15 +127,16 @@ class _ElementalFieldPoisson(Problem):
     The DL case is the one with its own code path: the condition is fitted as a midpoint value plus one
     slope per local direction, so the derivative has to be fitted the same way."""
 
-    def __init__(self, space, N=4):
+    def __init__(self, space, N=4, tris=False):
         super().__init__()
         self.space = space
         self.N = N
+        self.tris = tris
         self.p = self.get_global_parameter("p")
         self.p.value = P0
 
     def define_problem(self):
-        self.add_mesh(RectangularQuadMesh(N=self.N))
+        self.add_mesh(RectangularQuadMesh(N=self.N, split_in_tris=("alternate_left" if self.tris else False)))
         x, y = var("coordinate_x"), var("coordinate_y")
         eqs = PoissonEquation(source=var("c"), space="C2")
         eqs += _PrescribedSource(self.space)
@@ -228,10 +229,12 @@ def test_position_dirichlet_tangent_is_exact(tmp_path, keep_columns):
     _assert_tangent_matches(tangent, fd)
 
 
+@pytest.mark.parametrize("tris", [False, True])
 @pytest.mark.parametrize("space", ["DL", "D0"])
-def test_elemental_field_tangent_is_exact(tmp_path, space):
-    """Elemental fields: D0 takes the generic per-dof path, DL its own slope fit."""
-    p = _build(_ElementalFieldPoisson(space), False, tmp_path)
+def test_elemental_field_tangent_is_exact(tmp_path, space, tris):
+    """Elemental fields: D0 takes the generic per-dof path, DL the least-squares fit of the value,
+    applied to the sampled dg/dp. Triangles too, where the DL basis is not centred on the element."""
+    p = _build(_ElementalFieldPoisson(space, tris=tris), False, tmp_path)
     tangent, fd, _, _ = _tangent_and_fd(p)
     _assert_tangent_matches(tangent, fd)
 

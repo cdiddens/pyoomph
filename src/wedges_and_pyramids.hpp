@@ -23,6 +23,7 @@ The main author may be contacted at c.diddens@utwente.nl
 
 #include "oomph_lib.hpp"
 #include "exception.hpp"
+#include "refdomain.hpp"
 // Wedges and pyramids are not supported by oomph-lib, but the basic Element classes are defined in the oomph namespace here,
 // they are adjusted for pyoomph in the elements.{cpp,hpp} files.
 namespace pyoomph
@@ -979,6 +980,18 @@ class WedgeElementBase :  public virtual FiniteElement
     int face_outer_unit_normal_sign(const int&) const override;
     double s_min() const override    { return 0.0; }
     double s_max() const override    { return 1.0; }
+    // oomph's base versions throw, and anything that samples or searches the reference element needs
+    // them - the DL fit's sample lattice (mesh.cpp, sample_local_coordinates), locate_zeta, the
+    // extremum search. Exact containment (no tolerance), as in QElement/TElement; the domain itself is
+    // the one refdomain.cpp states for the point locator, so the two cannot disagree.
+    bool local_coord_is_valid(const Vector<double>& s) override
+    {
+      return pyoomph::inside_reference_domain(pyoomph::RefDomain::Prism, this, 3, &s[0], 0.0);
+    }
+    void move_local_coord_back_into_element(Vector<double>& s) const override
+    {
+      pyoomph::clamp_to_reference_domain(pyoomph::RefDomain::Prism, this, 3, &s[0]);
+    }
     unsigned nvertex_node() const override { return 6; }
     Node* vertex_node_pt(const unsigned& j) const override
     {
@@ -1119,6 +1132,15 @@ class PyramidElementBase :  public virtual FiniteElement
     int face_outer_unit_normal_sign(const int&) const override;
     double s_min() const override    { return 0.0; }
     double s_max() const override    { return 1.0; }
+    // See WedgeElementBase.
+    bool local_coord_is_valid(const Vector<double>& s) override
+    {
+      return pyoomph::inside_reference_domain(pyoomph::RefDomain::Pyramid, this, 3, &s[0], 0.0);
+    }
+    void move_local_coord_back_into_element(Vector<double>& s) const override
+    {
+      pyoomph::clamp_to_reference_domain(pyoomph::RefDomain::Pyramid, this, 3, &s[0]);
+    }
     unsigned nvertex_node() const override   { return 5; }
     Node* vertex_node_pt(const unsigned& j) const override
     {

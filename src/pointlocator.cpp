@@ -1053,8 +1053,8 @@ namespace pyoomph
     }
 
     // Wedges and pyramids cannot go through oomph's locate_zeta at all: it needs both
-    // nplot_points() and local_coord_is_valid(), and neither is implemented for those elements
-    // (they throw). This is why oomph::MeshAsGeomObject could not interpolate on a wedge or pyramid
+    // nplot_points() and local_coord_is_valid(). The second exists now (wedges_and_pyramids.hpp,
+    // from the same reference domains as refdomain.cpp), but nplot_points() still throws. This is why oomph::MeshAsGeomObject could not interpolate on a wedge or pyramid
     // mesh - the old path threw rather than returning a wrong answer. Both pieces exist here
     // already, so those families get their own Newton instead: seed, polish to machine precision,
     // then test containment against the reference domain documented on the element class.
