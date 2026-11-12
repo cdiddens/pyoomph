@@ -610,12 +610,18 @@ def test_the_refactor_generates_the_same_code_when_gcl_is_off():
     expected = {False: "8086c09b7b2d5919e7c23817f927d90e",
                 True: "23d23029c5c77112a0af2bc6b639fbd4",
                 "skew": "33801fb787dad330235c7c7423552eb6"}
-    expected_structure = {False: "3e3d3f2a93ed3c28e9a18a974fe7877e",
-                          True: "019fe472baad87d904c75319ae5eb1da",
-                          "skew": "11793398bc6b362339d3216fdfa2b3de"}
-    expected_numbers = {False: "50c1e894df31cec9c82fe20772d27ac3",
-                        True: "0e151f5ac962f4520492e98bb3dbd5d9",
-                        "skew": "6b6ddc7e35a47d2af9b9b0d2ec2fc3da"}
+    # The three asserted hash sets below were renewed when 72f0e7a0 added
+    # ElementalDirichletConditionsDParameter (and its functable line) to EVERY generated file: seven
+    # lines here, none of them from the advection-diffusion residual. Verified before renewing, not
+    # assumed: the new files with exactly those lines stripped reproduce the previous structure,
+    # numbers and canonical hashes for all three settings. `expected` is left at the pre-refactor
+    # bytes it was taken from.
+    expected_structure = {False: "f9a213ae19a6ef1095ccc086244b23a7",
+                          True: "412671c280e8ef82299d27beb29deeea",
+                          "skew": "8a2b2c49ea19b64266bafeaa6c27abe0"}
+    expected_numbers = {False: "0e151f5ac962f4520492e98bb3dbd5d9",
+                        True: "fb1e5ba0969a330d1332f820de42a4b2",
+                        "skew": "ce1caf4ffd02f24c80d501571c144ca1"}
     # The whole file with every float literal reprinted at twelve significant digits and the struct
     # sizes blanked, everything else - integers included - left alone. This is the check that
     # actually decides; the two above only sharpen the message when it fails. It is needed because
@@ -629,9 +635,9 @@ def test_the_refactor_generates_the_same_code_when_gcl_is_off():
     # LP64, as textbook as it gets. Blanking only the sizeof(struct ...) forms, as a first attempt
     # did, left exactly that one behind and the test went on failing; the token dump below is what
     # found it, one character in a 24499-byte file.
-    expected_canonical = {False: "9781e8dff3f001b014867867dc787ef5",
-                          True: "ab1840bab94b88507541e616f1eed1e0",
-                          "skew": "13284cf4adaf3785f2f85244a52fa7d2"}
+    expected_canonical = {False: "4ec51b242d14e22e4b174d09627f4a67",
+                          True: "76c84157038fac6169253954ace5a4fd",
+                          "skew": "ff200a5e427ab630a83c94259cecc75c"}
     _FLOAT = re.compile(rb"[-+]?\d+\.\d*(?:[eE][-+]?\d+)?|[-+]?\d+[eE][-+]?\d+")
     _ABI_SIZE = re.compile(rb"(check_compiler_size\(sizeof\([^)]*\),)\d+")
 
