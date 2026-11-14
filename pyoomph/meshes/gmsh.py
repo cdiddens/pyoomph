@@ -2134,7 +2134,7 @@ class GmshTemplate(MeshedMeshTemplate):
 
         newdim+=1 # The new dimension
         self._maxdim=max(self._maxdim,newdim)
-        res=self._geom.env.extrude(dimtags,shift[0],shift[1],shift[2],recombine=recombine,numElements=([layers]*len(dimtags) if layers is not None else None))
+        res=self._geom.env.extrude(dimtags,shift[0],shift[1],shift[2],recombine=recombine,numElements=([layers]*len(dimtags) if layers is not None else []))
         
         
         
@@ -2258,7 +2258,7 @@ class GmshTemplate(MeshedMeshTemplate):
         newdim+=1 # The new dimension
         self._maxdim=max(self._maxdim,newdim)
         
-        res=self._geom.env.revolve(dimtags,center[0],center[1],center[2],axis[0],axis[1],axis[2],angle,recombine=recombine,numElements=([layers]*len(dimtags) if layers is not None else None))
+        res=self._geom.env.revolve(dimtags,center[0],center[1],center[2],axis[0],axis[1],axis[2],angle,recombine=recombine,numElements=([layers]*len(dimtags) if layers is not None else []))
         
         self._geom.env.synchronize()
         
