@@ -28,6 +28,7 @@ from __future__ import annotations
 from .. import *
 from ..expressions import *
 from ..typings import *
+from .. import _pyoomph_core as _pyoomph
 from .ALE import BaseMovingMeshEquations
 
 class BaseSolidConstitutiveLaw:
@@ -66,7 +67,7 @@ class BaseSolidConstitutiveLaw:
     def get_G_up_ij(self,dim):
         # G^ij=(G^(-1))_ij
         Gij=self.get_Gij(dim)        
-        if self.use_inverse_routine:
+        if self.use_inverse_routine and dim>1: # InvertMatrix requires n=2 or n=3, the 1x1 case is trivial anyways
             from ..expressions.tensor_funcs import InvertMatrix
             #inv=InvertSymmetricMatrix(n=dim)        
             inv=InvertMatrix(n=dim,matrix_type="symmetric")            
@@ -91,6 +92,24 @@ class BaseSolidConstitutiveLaw:
         return self._subexpression(g)
         
     
+    def get_g_up_ij(self,dim:int,isotropic_growth_factor:ExpressionOrNum=1):
+        """
+        Returns the contravariant metric tensor g^ij of the undeformed configuration, i.e. the inverse of :py:meth:`get_gij` on the actual dimensions.
+        """
+        gij=self.get_gij(dim,isotropic_growth_factor)
+        if self.active_deformation is None:
+            # Here, g_ij=grf*P with P=grad(X)^T*grad(X), where grad(X) (including the metric entries of the coordinate system, e.g. R/R in the
+            # hoop direction) is the projector onto the actual dimensions. Hence, P*P=P and g^ij=P/grf=g_ij/grf**2. This holds in any
+            # coordinate system, without needing to know which rows/columns of the 3x3 tensors are actually used.
+            grf=pow(isotropic_growth_factor,rational_num(2,dim))
+            return self._subexpression(gij/grf**2)
+        if self.use_inverse_routine and dim>1:
+            from ..expressions.tensor_funcs import InvertMatrix
+            inv=InvertMatrix(n=dim,matrix_type="symmetric")
+            return self._subexpression(inv(gij))
+        else:
+            return self._subexpression(inverse_matrix(gij,fill_to_vector_dim_3=True,skip_empty_rows_and_cols=True))
+
     def get_gammaij(self,dim:int,isotropic_growth_factor:ExpressionOrNum=1):
         """
         Returns the Green strain tensor 
@@ -198,24 +217,6 @@ class StVenantKirchhoffSolidConstitutiveLaw(BaseSolidConstitutiveLaw):
         self.E=E
         self.nu=nu
 
-    def get_g_up_ij(self,dim:int,isotropic_growth_factor:ExpressionOrNum=1):
-        """
-        Returns the contravariant metric tensor g^ij of the undeformed configuration, i.e. the inverse of :py:meth:`get_gij` on the actual dimensions.
-        """
-        gij=self.get_gij(dim,isotropic_growth_factor)
-        if self.active_deformation is None:
-            # Here, g_ij=grf*P with P=grad(X)^T*grad(X), where grad(X) (including the metric entries of the coordinate system, e.g. R/R in the
-            # hoop direction) is the projector onto the actual dimensions. Hence, P*P=P and g^ij=P/grf=g_ij/grf**2. This holds in any
-            # coordinate system, without needing to know which rows/columns of the 3x3 tensors are actually used.
-            grf=pow(isotropic_growth_factor,rational_num(2,dim))
-            return self._subexpression(gij/grf**2)
-        if self.use_inverse_routine:
-            from ..expressions.tensor_funcs import InvertMatrix
-            inv=InvertMatrix(n=dim,matrix_type="symmetric")
-            return self._subexpression(inv(gij))
-        else:
-            return self._subexpression(inverse_matrix(gij,fill_to_vector_dim_3=True,skip_empty_rows_and_cols=True))
-
     def get_sigma(self,dim:int,isotropic_growth_factor:ExpressionNumOrNone=1,pressure_var:Expression | None=None):
         if dim is None:
             raise RuntimeError("dim must be specified")
@@ -228,6 +229,263 @@ class StVenantKirchhoffSolidConstitutiveLaw(BaseSolidConstitutiveLaw):
         gup_gamma=matproduct(gup,gamma)
         # S = lambda*tr(g^-1 gamma)*g^-1 + 2*mu*g^-1 gamma g^-1 (gamma is symmetric)
         return se(lam*trace(gup_gamma)*gup+2*mu*matproduct(gup_gamma,gup))
+
+
+class HyperelasticSolidConstitutiveLaw(BaseSolidConstitutiveLaw):
+    """
+        Generic isotropic hyperelastic solid, defined by a strain energy density :math:`W(I_1,I_2,J)` per undeformed volume. Pass the strain energy
+        as a callable ``strain_energy(I1,I2,J)`` or override :py:meth:`get_strain_energy` in a subclass. The second Piola-Kirchhoff stress is obtained
+        by symbolic differentiation,
+
+        .. math:: S=2\\frac{\\partial W}{\\partial C}=2W_{,I_1}g^{-1}+2W_{,I_2}\\left(I_1g^{-1}-g^{-1}Gg^{-1}\\right)+W_{,J}JG^{-1}
+
+        with the deformed and undeformed metric tensors :math:`G` and :math:`g` (i.e. :math:`C=g^{-1}G`), :math:`I_1=\\operatorname{tr}C`,
+        :math:`I_2=\\frac{1}{2}\\left(I_1^2-\\operatorname{tr}C^2\\right)` and :math:`J=\\sqrt{\\det G/\\det g}`. The invariants are always the ones
+        of the full three-dimensional deformation: in a plane-strain (2d Cartesian) or 1d setting, the missing directions have a unit stretch.
+        Hence, a strain energy written for 3d (e.g. with :math:`I_1-3`) is correct in all dimensions and coordinate systems.
+
+        For ``incompressible=True``, the strain energy is evaluated at :math:`J=1` (it may only depend on :math:`I_1` and :math:`I_2`), a pressure field
+        is added to enforce :math:`J=1` and the stress reads :math:`S=2W_{,I_1}g^{-1}+2W_{,I_2}(I_1g^{-1}-g^{-1}Gg^{-1})-pG^{-1}`.
+        In a dimensional problem, the scale of this pressure field must be set, e.g. ``problem.set_scaling(pressure=E)``.
+
+        Args:
+            strain_energy: Callable ``(I1,I2,J)->W``, returning the strain energy density (i.e. with the units of a stress). Can be None, if :py:meth:`get_strain_energy` is overridden.
+            incompressible: Enforce incompressibility by a pressure field. Defaults to False.
+            use_subexpressions (bool, optional): Use subexpressions for the tensor entries. Defaults to True.
+            use_inverse_routine (bool, optional): Use a specific routine for the inversion of the metric tensors. It cannot be used when requiring Hessians, e.g. for bifurcation tracking. Defaults to True.
+            active_deformation (Optional[Expression], optional): Active deformation gradient F_a, see BaseSolidConstitutiveLaw. Defaults to None.
+    """
+    _symbol_counter=0
+
+    def __init__(self,strain_energy:Callable[[Expression,Expression,ExpressionOrNum],ExpressionOrNum] | None=None,*,incompressible:bool=False,use_subexpressions=True,use_inverse_routine:bool=True,active_deformation:Expression | None=None):
+        super().__init__(use_subexpressions=use_subexpressions,use_inverse_routine=use_inverse_routine,active_deformation=active_deformation)
+        self.strain_energy=strain_energy
+        self.incompressible=incompressible
+
+    def is_incompressible(self)->bool:
+        return self.incompressible
+
+    def get_strain_energy(self,I1:Expression,I2:Expression,J:ExpressionOrNum)->ExpressionOrNum:
+        """
+        Returns the strain energy density as function of the invariants. ``J`` is ``1`` for an incompressible law.
+        """
+        if self.strain_energy is None:
+            raise RuntimeError("Either pass strain_energy to HyperelasticSolidConstitutiveLaw or override get_strain_energy")
+        return self.strain_energy(I1,I2,J)
+
+    def get_invariants(self,dim:int,isotropic_growth_factor:ExpressionOrNum=1)->Tuple[Expression,Expression,Expression]:
+        """
+        Returns the invariants I1, I2 and J of the full three-dimensional deformation, i.e. unit stretches are assumed in directions which are not resolved.
+        """
+        gup=self.get_g_up_ij(dim,isotropic_growth_factor)
+        C=matproduct(gup,self.get_Gij(dim))
+        I1d=self._subexpression(trace(C))
+        I2d=self._subexpression((I1d**2-trace(matproduct(C,C)))/2)
+        nmiss=3-dim # directions with unit stretch
+        I1=I1d+nmiss
+        I2=I2d+nmiss*I1d+rational_num(nmiss*(nmiss-1),2)
+        detG=determinant(self.get_Gij(dim))
+        detg=determinant(self.get_gij(dim,isotropic_growth_factor))
+        J=self._subexpression(square_root(detG/detg))
+        return I1,I2,J
+
+    @classmethod
+    def _new_symbol(cls,name:str)->Expression:
+        cls._symbol_counter+=1
+        return _pyoomph.GiNaC_new_symbol("__hyperelastic_"+name+"_"+str(cls._symbol_counter))
+
+    def get_sigma(self,dim:int,isotropic_growth_factor:ExpressionNumOrNone=1,pressure_var:Expression | None=None):
+        if dim is None:
+            raise RuntimeError("dim must be specified")
+        se=lambda x : self._subexpression(x)
+        igf=isotropic_growth_factor if isotropic_growth_factor is not None else 1
+        I1,I2,J=self.get_invariants(dim,igf)
+        sI1,sI2,sJ=self._new_symbol("I1"),self._new_symbol("I2"),self._new_symbol("J")
+        W=Expression(self.get_strain_energy(sI1,sI2,1 if self.incompressible else sJ))
+
+        def dW(sym:Expression)->Expression:
+            # derivative with respect to an invariant, then substitute the actual invariants
+            res=diff(W,sym)
+            for s,v in ((sI1,I1),(sI2,I2),(sJ,J)):
+                res=_pyoomph.GiNaC_subs(res,s,v)
+            return res
+
+        gup=self.get_g_up_ij(dim,igf)
+        Gup=self.get_G_up_ij(dim)
+        S:ExpressionOrNum=0
+        W1,W2=dW(sI1),dW(sI2)
+        if not is_zero(W1):
+            S+=2*se(W1)*gup
+        if not is_zero(W2):
+            gGg=matproduct(gup,matproduct(self.get_Gij(dim),gup))
+            S+=2*se(W2)*(I1*gup-gGg)
+        if self.incompressible:
+            if pressure_var is None:
+                raise RuntimeError("pressure_var must be specified for an incompressible law")
+            S+=-pressure_var*Gup
+        else:
+            WJ=dW(sJ)
+            if not is_zero(WJ):
+                S+=se(WJ)*J*Gup
+        return se(S)
+
+
+class NeoHookeanSolidConstitutiveLaw(HyperelasticSolidConstitutiveLaw):
+    """
+        Compressible neo-Hookean solid with the strain energy (Ciarlet / Simo-Pister form)
+
+        .. math:: W=\\frac{\\mu}{2}\\left(I_1-3\\right)-\\mu\\ln J+\\frac{\\lambda}{2}\\left(\\ln J\\right)^2
+
+        with the Lame parameters :math:`\\lambda=E\\nu/((1+\\nu)(1-2\\nu))` and :math:`\\mu=E/(2(1+\\nu))`, i.e. it agrees with linear elasticity
+        for small strains. Contrary to :py:class:`StVenantKirchhoffSolidConstitutiveLaw`, it is suitable for large strains: the stress diverges
+        for :math:`J\\to 0`. See :py:class:`HyperelasticSolidConstitutiveLaw` for the general framework.
+
+        Args:
+            E: Young's modulus
+            nu: Poisson's ratio, must be below 1/2. Use :py:class:`IncompressibleNeoHookeanSolidConstitutiveLaw` for the incompressible limit.
+            Further args: see :py:class:`HyperelasticSolidConstitutiveLaw`.
+    """
+    def __init__(self,E:ExpressionOrNum=1,nu:ExpressionOrNum=0.4,*,use_subexpressions=True,use_inverse_routine:bool=True,active_deformation:Expression | None=None):
+        super().__init__(None,incompressible=False,use_subexpressions=use_subexpressions,use_inverse_routine=use_inverse_routine,active_deformation=active_deformation)
+        if is_zero(nu-rational_num(1,2)):
+            raise ValueError("NeoHookeanSolidConstitutiveLaw requires nu<1/2. Use IncompressibleNeoHookeanSolidConstitutiveLaw instead.")
+        self.E=E
+        self.nu=nu
+
+    def get_strain_energy(self,I1,I2,J):
+        lam=self.E*self.nu/((1+self.nu)*(1-2*self.nu))
+        mu=self.E/(2*(1+self.nu))
+        return mu/2*(I1-3)-mu*log(J)+lam/2*log(J)**2
+
+
+class IncompressibleNeoHookeanSolidConstitutiveLaw(HyperelasticSolidConstitutiveLaw):
+    """
+        Incompressible neo-Hookean solid, :math:`W=\\frac{\\mu}{2}(I_1-3)` with :math:`J=1` enforced by a pressure field.
+        Either the Young's modulus ``E`` (then :math:`\\mu=E/3`) or the shear modulus ``mu`` must be given.
+
+        Args:
+            E: Young's modulus.
+            mu: Shear modulus, alternatively to E.
+            Further args: see :py:class:`HyperelasticSolidConstitutiveLaw`.
+    """
+    def __init__(self,E:ExpressionNumOrNone=None,*,mu:ExpressionNumOrNone=None,use_subexpressions=True,use_inverse_routine:bool=True,active_deformation:Expression | None=None):
+        super().__init__(None,incompressible=True,use_subexpressions=use_subexpressions,use_inverse_routine=use_inverse_routine,active_deformation=active_deformation)
+        if (E is None)==(mu is None):
+            raise ValueError("Specify exactly one of E and mu")
+        self.mu=mu if mu is not None else E/3
+
+    def get_strain_energy(self,I1,I2,J):
+        return self.mu/2*(I1-3)
+
+
+class _IsochoricHyperelasticLaw(HyperelasticSolidConstitutiveLaw):
+    """
+        Common base of rubber-like laws with a strain energy :math:`W_\\text{iso}(\\bar I_1,\\bar I_2)`. Without bulk modulus, the law is
+        incompressible and :math:`\\bar I_k=I_k` (since :math:`J=1`). With a bulk modulus :math:`\\kappa`, it is nearly incompressible, using the
+        isochoric invariants :math:`\\bar I_1=J^{-2/3}I_1`, :math:`\\bar I_2=J^{-4/3}I_2` and the volumetric energy :math:`\\frac{\\kappa}{2}(J-1)^2`.
+    """
+    def __init__(self,kappa:ExpressionNumOrNone,use_subexpressions=True,use_inverse_routine:bool=True,active_deformation:Expression | None=None):
+        super().__init__(None,incompressible=kappa is None,use_subexpressions=use_subexpressions,use_inverse_routine=use_inverse_routine,active_deformation=active_deformation)
+        self.kappa=kappa
+
+    def get_isochoric_strain_energy(self,I1bar:Expression,I2bar:Expression)->ExpressionOrNum:
+        raise RuntimeError("Implement get_isochoric_strain_energy")
+
+    def get_strain_energy(self,I1,I2,J):
+        if self.kappa is None:
+            return self.get_isochoric_strain_energy(I1,I2)
+        return self.get_isochoric_strain_energy(I1*pow(J,rational_num(-2,3)),I2*pow(J,rational_num(-4,3)))+self.kappa/2*(J-1)**2
+
+
+class MooneyRivlinSolidConstitutiveLaw(_IsochoricHyperelasticLaw):
+    """
+        Mooney-Rivlin solid, :math:`W=C_1(\\bar I_1-3)+C_2(\\bar I_2-3)` (shear modulus :math:`\\mu=2(C_1+C_2)`), incompressible if ``kappa`` is None,
+        otherwise nearly incompressible with the volumetric energy :math:`\\frac{\\kappa}{2}(J-1)^2`. :math:`C_2=0` gives the neo-Hookean solid.
+
+        Args:
+            C1, C2: Material parameters (units of a stress).
+            kappa: Bulk modulus. None (default) for an incompressible solid.
+            Further args: see :py:class:`HyperelasticSolidConstitutiveLaw`.
+    """
+    def __init__(self,C1:ExpressionOrNum,C2:ExpressionOrNum=0,kappa:ExpressionNumOrNone=None,*,use_subexpressions=True,use_inverse_routine:bool=True,active_deformation:Expression | None=None):
+        super().__init__(kappa,use_subexpressions=use_subexpressions,use_inverse_routine=use_inverse_routine,active_deformation=active_deformation)
+        self.C1,self.C2=C1,C2
+
+    def get_isochoric_strain_energy(self,I1bar,I2bar):
+        return self.C1*(I1bar-3)+self.C2*(I2bar-3)
+
+
+class YeohSolidConstitutiveLaw(_IsochoricHyperelasticLaw):
+    """
+        Yeoh solid, :math:`W=C_1(\\bar I_1-3)+C_2(\\bar I_1-3)^2+C_3(\\bar I_1-3)^3` (shear modulus :math:`\\mu=2C_1`), e.g. for filled rubbers.
+        Incompressible if ``kappa`` is None, otherwise nearly incompressible with the volumetric energy :math:`\\frac{\\kappa}{2}(J-1)^2`.
+
+        Args:
+            C1, C2, C3: Material parameters (units of a stress).
+            kappa: Bulk modulus. None (default) for an incompressible solid.
+            Further args: see :py:class:`HyperelasticSolidConstitutiveLaw`.
+    """
+    def __init__(self,C1:ExpressionOrNum,C2:ExpressionOrNum=0,C3:ExpressionOrNum=0,kappa:ExpressionNumOrNone=None,*,use_subexpressions=True,use_inverse_routine:bool=True,active_deformation:Expression | None=None):
+        super().__init__(kappa,use_subexpressions=use_subexpressions,use_inverse_routine=use_inverse_routine,active_deformation=active_deformation)
+        self.C1,self.C2,self.C3=C1,C2,C3
+
+    def get_isochoric_strain_energy(self,I1bar,I2bar):
+        return self.C1*(I1bar-3)+self.C2*(I1bar-3)**2+self.C3*(I1bar-3)**3
+
+
+class GentSolidConstitutiveLaw(_IsochoricHyperelasticLaw):
+    """
+        Gent solid, :math:`W=-\\frac{\\mu J_m}{2}\\ln\\left(1-\\frac{\\bar I_1-3}{J_m}\\right)`, which stiffens strongly when :math:`\\bar I_1-3`
+        approaches the locking parameter :math:`J_m` (limited chain extensibility). For :math:`J_m\\to\\infty`, it is the neo-Hookean solid.
+        Incompressible if ``kappa`` is None, otherwise nearly incompressible with the volumetric energy :math:`\\frac{\\kappa}{2}(J-1)^2`.
+
+        Args:
+            mu: Shear modulus.
+            Jm: Locking parameter (dimensionless).
+            kappa: Bulk modulus. None (default) for an incompressible solid.
+            Further args: see :py:class:`HyperelasticSolidConstitutiveLaw`.
+    """
+    def __init__(self,mu:ExpressionOrNum,Jm:ExpressionOrNum,kappa:ExpressionNumOrNone=None,*,use_subexpressions=True,use_inverse_routine:bool=True,active_deformation:Expression | None=None):
+        super().__init__(kappa,use_subexpressions=use_subexpressions,use_inverse_routine=use_inverse_routine,active_deformation=active_deformation)
+        self.mu,self.Jm=mu,Jm
+
+    def get_isochoric_strain_energy(self,I1bar,I2bar):
+        return -self.mu*self.Jm/2*log(1-(I1bar-3)/self.Jm)
+
+
+class KelvinVoigtSolidConstitutiveLaw(BaseSolidConstitutiveLaw):
+    """
+        Adds a Kelvin-Voigt viscous stress to an arbitrary (elastic) constitutive law:
+
+        .. math:: S=S_\\text{elastic}+2\\eta\\,g^{-1}\\dot{E}g^{-1}+\\zeta\\operatorname{tr}\\left(g^{-1}\\dot{E}\\right)g^{-1}
+
+        with the Green-Lagrange strain rate :math:`\\dot{E}=\\frac{1}{2}\\partial_t G` (Lagrangian time derivative, independent of growth or active
+        deformation rates). It is frame-indifferent and gives a physical damping of the solid dynamics. In stationary solves, it does not contribute.
+
+        Args:
+            elastic_law: The underlying constitutive law. Its incompressibility, growth and active deformation settings are taken over.
+            viscosity: Shear-like viscosity :math:`\\eta`.
+            bulk_viscosity: Additional volumetric viscosity :math:`\\zeta`. Defaults to 0.
+    """
+    def __init__(self,elastic_law:BaseSolidConstitutiveLaw,viscosity:ExpressionOrNum,bulk_viscosity:ExpressionOrNum=0):
+        super().__init__(use_subexpressions=elastic_law.use_subexpressions,use_inverse_routine=elastic_law.use_inverse_routine,active_deformation=elastic_law.active_deformation)
+        self.elastic_law=elastic_law
+        self.viscosity=viscosity
+        self.bulk_viscosity=bulk_viscosity
+
+    def is_incompressible(self)->bool:
+        return self.elastic_law.is_incompressible()
+
+    def get_sigma(self,dim:int,isotropic_growth_factor:ExpressionNumOrNone=1,pressure_var:Expression | None=None):
+        igf=isotropic_growth_factor if isotropic_growth_factor is not None else 1
+        S=self.elastic_law.get_sigma(dim,isotropic_growth_factor,pressure_var)
+        gup=self.get_g_up_ij(dim,igf)
+        Edot=partial_t(self.get_Gij(dim),ALE=False)/2
+        gEdot=matproduct(gup,Edot)
+        Sv=2*self.viscosity*matproduct(gEdot,gup)
+        if not is_zero(self.bulk_viscosity):
+            Sv+=self.bulk_viscosity*trace(gEdot)*gup
+        return self._subexpression(S+Sv)
 
 
 class IncompressibleHookeanSolidConstitutiveLaw(IncompressibleSolidConstitutiveLaw):

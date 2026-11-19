@@ -44,8 +44,17 @@ the class itself is short and readable — grep it before guessing a keyword.
   `GeneralizedHookeanSolidConstitutiveLaw(E=, nu=)` (oomph-lib's law: indices raised with the
   *deformed* metric), `StVenantKirchhoffSolidConstitutiveLaw(E=, nu=)` (S = lambda tr(E) I + 2 mu E with
   the Green-Lagrange strain E, hyperelastic, e.g. the Turek-Hron FSI benchmark),
-  `IncompressibleHookeanSolidConstitutiveLaw(E=)`. All three work in any coordinate system
-  (Cartesian, `axisymmetric`, `radialsymmetric`) and on 1D/2D/3D meshes.
+  `IncompressibleHookeanSolidConstitutiveLaw(E=)`. For large strains use the hyperelastic laws:
+  `NeoHookeanSolidConstitutiveLaw(E=, nu=)` (compressible), `IncompressibleNeoHookeanSolidConstitutiveLaw(E= or mu=)`,
+  and the rubber laws `MooneyRivlinSolidConstitutiveLaw(C1, C2, kappa=None)`,
+  `YeohSolidConstitutiveLaw(C1, C2, C3, kappa=None)`, `GentSolidConstitutiveLaw(mu, Jm, kappa=None)` -
+  incompressible for `kappa=None`, nearly incompressible (isochoric invariants + `kappa/2*(J-1)**2`)
+  otherwise. Any other isotropic law is `HyperelasticSolidConstitutiveLaw(lambda I1, I2, J: W)` with the
+  strain energy W in terms of the 3D invariants; the stress is obtained by symbolic differentiation.
+  `KelvinVoigtSolidConstitutiveLaw(law, viscosity, bulk_viscosity=0)` adds a viscous (damping) stress
+  to any of them. All of these work in any coordinate system (Cartesian, `axisymmetric`,
+  `radialsymmetric`) and on 1D/2D/3D meshes. Incompressible laws add a `pressure` field, so a
+  dimensional problem needs `set_scaling(pressure=...)`.
   `LinearElasticitySolidEquations(E, nu, mass_density=0, bulkforce=0, ...)` is the
   small-strain version (E and nu are positional). Loads:
   `SolidTraction(T)` (a traction vector) and `SolidNormalTraction(P)` (a pressure), both
