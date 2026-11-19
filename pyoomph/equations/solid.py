@@ -171,6 +171,65 @@ class GeneralizedHookeanSolidConstitutiveLaw(BaseSolidConstitutiveLaw):
         sigma=matrix([[sigma_up_ij(i,j) for j in range(3)] for i in range(3)])
         return se(sigma)
         
+class StVenantKirchhoffSolidConstitutiveLaw(BaseSolidConstitutiveLaw):
+    """
+        St. Venant-Kirchhoff solid: the second Piola-Kirchhoff stress is linear in the Green-Lagrange strain,
+
+        .. math:: S^{ij} = \\lambda\\,g^{ij}g^{kl}\\gamma_{kl} + \\mu\\left(g^{ik}g^{jl}+g^{il}g^{jk}\\right)\\gamma_{kl}
+
+        i.e. :math:`S=\\lambda\\operatorname{tr}(\\gamma)I+2\\mu\\gamma` in Cartesian reference coordinates, with the Lame parameters
+        :math:`\\lambda=E\\nu/((1+\\nu)(1-2\\nu))` and :math:`\\mu=E/(2(1+\\nu))`. Contrary to :py:class:`GeneralizedHookeanSolidConstitutiveLaw`,
+        the indices are raised with the metric :math:`g^{ij}` of the *undeformed* (reference) configuration, not with the deformed one.
+        It is hyperelastic, with the strain energy :math:`W=\\lambda/2\\operatorname{tr}(\\gamma)^2+\\mu\\,\\gamma:\\gamma`, and is e.g. the material
+        model of the Turek-Hron FSI benchmark. It is only suitable for moderate strains: under strong compression, the stress response softens
+        and eventually vanishes.
+
+        Args:
+            E: Young's modulus
+            nu: Poisson's ratio, must be below 1/2
+            use_subexpressions (bool, optional): Use subexpressions for the tensor entries. Defaults to True.
+            use_inverse_routine (bool, optional): Use a specific routine for the inversion of the reference metric tensor (only needed with an active deformation). It cannot be used when requiring Hessians, e.g. for bifurcation tracking. Defaults to True.
+            active_deformation (Optional[Expression], optional): Active deformation gradient F_a, see BaseSolidConstitutiveLaw. Defaults to None.
+    """
+    def __init__(self, E:ExpressionOrNum=1, nu:ExpressionOrNum=0.4,use_subexpressions=True,use_inverse_routine:bool=True,active_deformation:Expression | None=None):
+        super().__init__(use_subexpressions=use_subexpressions,use_inverse_routine=use_inverse_routine,active_deformation=active_deformation)
+        if is_zero(nu-rational_num(1,2)):
+            raise ValueError("StVenantKirchhoffSolidConstitutiveLaw requires nu<1/2. It has no incompressible limit.")
+        self.E=E
+        self.nu=nu
+
+    def get_g_up_ij(self,dim:int,isotropic_growth_factor:ExpressionOrNum=1):
+        """
+        Returns the contravariant metric tensor g^ij of the undeformed configuration, i.e. the inverse of :py:meth:`get_gij` on the actual dimensions.
+        """
+        gij=self.get_gij(dim,isotropic_growth_factor)
+        if self.active_deformation is None:
+            # Here, g_ij=grf*P with P=grad(X)^T*grad(X), where grad(X) (including the metric entries of the coordinate system, e.g. R/R in the
+            # hoop direction) is the projector onto the actual dimensions. Hence, P*P=P and g^ij=P/grf=g_ij/grf**2. This holds in any
+            # coordinate system, without needing to know which rows/columns of the 3x3 tensors are actually used.
+            grf=pow(isotropic_growth_factor,rational_num(2,dim))
+            return self._subexpression(gij/grf**2)
+        if self.use_inverse_routine:
+            from ..expressions.tensor_funcs import InvertMatrix
+            inv=InvertMatrix(n=dim,matrix_type="symmetric")
+            return self._subexpression(inv(gij))
+        else:
+            return self._subexpression(inverse_matrix(gij,fill_to_vector_dim_3=True,skip_empty_rows_and_cols=True))
+
+    def get_sigma(self,dim:int,isotropic_growth_factor:ExpressionNumOrNone=1,pressure_var:Expression | None=None):
+        if dim is None:
+            raise RuntimeError("dim must be specified")
+        se=lambda x : self._subexpression(x)
+        igf=isotropic_growth_factor if isotropic_growth_factor is not None else 1
+        gup=self.get_g_up_ij(dim,igf)
+        gamma=self.get_gammaij(dim,igf)
+        lam=self.E*self.nu/((1+self.nu)*(1-2*self.nu))
+        mu=self.E/(2*(1+self.nu))
+        gup_gamma=matproduct(gup,gamma)
+        # S = lambda*tr(g^-1 gamma)*g^-1 + 2*mu*g^-1 gamma g^-1 (gamma is symmetric)
+        return se(lam*trace(gup_gamma)*gup+2*mu*matproduct(gup_gamma,gup))
+
+
 class IncompressibleHookeanSolidConstitutiveLaw(IncompressibleSolidConstitutiveLaw):
     """
         Incompressible Hookean solid constitutive law.

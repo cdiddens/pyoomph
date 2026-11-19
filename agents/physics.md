@@ -41,8 +41,11 @@ the class itself is short and readable — grep it before guessing a keyword.
   mass_density=..., bulkforce=..., isotropic_growth_factor=...)` — finite-strain solid;
   the nodal positions become the unknowns (field `"mesh"`, reference `var("lagrangian")`),
   so the VTU output already shows the deformed shape. Constitutive laws:
-  `GeneralizedHookeanSolidConstitutiveLaw(E=, nu=)`,
-  `IncompressibleHookeanSolidConstitutiveLaw(E=)`.
+  `GeneralizedHookeanSolidConstitutiveLaw(E=, nu=)` (oomph-lib's law: indices raised with the
+  *deformed* metric), `StVenantKirchhoffSolidConstitutiveLaw(E=, nu=)` (S = lambda tr(E) I + 2 mu E with
+  the Green-Lagrange strain E, hyperelastic, e.g. the Turek-Hron FSI benchmark),
+  `IncompressibleHookeanSolidConstitutiveLaw(E=)`. All three work in any coordinate system
+  (Cartesian, `axisymmetric`, `radialsymmetric`) and on 1D/2D/3D meshes.
   `LinearElasticitySolidEquations(E, nu, mass_density=0, bulkforce=0, ...)` is the
   small-strain version (E and nu are positional). Loads:
   `SolidTraction(T)` (a traction vector) and `SolidNormalTraction(P)` (a pressure), both
