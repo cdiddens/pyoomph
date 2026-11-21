@@ -459,6 +459,9 @@ namespace pyoomph
     // which shapes (psi, dpsi, hang info, ...) the generated code actually requires, before the
     // integration loop starts.
     virtual void prepare_shape_buffer_for_integration(const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag);
+    // Invalidates the per-element nodal position cache of fill_shape_info_at_s (elements_shapeinfo.cpp)
+    // and makes this element its owner. Called by prepare_shape_buffer_for_integration.
+    void __reset_position_cache() const;
     // Fills in element-size-related entries (e.g. element diameter) of the shape buffer that are
     // needed by the generated code but do not depend on the integration point.
     virtual void fill_shape_info_element_sizes(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, unsigned flag, unsigned history_index = 0) const;

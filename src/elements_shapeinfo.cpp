@@ -40,9 +40,204 @@ The main author may be contacted at c.diddens@utwente.nl
 #include <sstream>
 #include <iostream>
 #include <map>
+#include <memory>
+#include <typeindex>
+#include <unordered_map>
+#include <vector>
 
 namespace pyoomph
 {
+
+	// ------------------------------------------------------------------------------------------------
+	// Fast paths of fill_shape_info_at_s (prototype, see Scratchpad/fem_bench/README.md)
+	//
+	// 1. Reference-shape cache. psi(s), dpsi/ds and d2psi/ds2 of the geometry and of every continuous
+	//    space only depend on the element CLASS and on s, but used to be re-evaluated (and re-allocated)
+	//    for every element at every integration point. They are now kept per (C++ type, slot, ipt).
+	//    An entry is only ever used if its stored s is bit-identical to the requested one, so a face
+	//    element evaluating its bulk at another face, an output call at arbitrary s, or a changed
+	//    integration scheme simply fall back to the direct evaluation. Only active inside
+	//    fill_shape_buffer_for_integration_point, i.e. for real integration points.
+	// 2. Position cache. The nodal (Eulerian, per history level) and Lagrangian positions of the
+	//    element currently being integrated are gathered once per element evaluation instead of
+	//    el_dim times per integration point through the virtual, hanging-aware Node::position.
+	//    Reset in prepare_shape_buffer_for_integration, which every element evaluation calls first
+	//    (FD position Jacobians re-enter through it after each perturbation).
+	// 3. Scratch storage for the small dense temporaries, so no heap traffic per integration point.
+	//
+	// PYOOMPH_NO_REFSHAPE_CACHE / PYOOMPH_NO_POSITION_CACHE switch 1 / 2 off (for A/B timing),
+	// PYOOMPH_CHECK_SHAPE_CACHES re-evaluates everything and aborts on the first mismatch.
+	// ------------------------------------------------------------------------------------------------
+	static const bool __refshape_cache_on = getenv("PYOOMPH_NO_REFSHAPE_CACHE") == NULL;
+	static const bool __position_cache_on = getenv("PYOOMPH_NO_POSITION_CACHE") == NULL;
+	static const bool __check_shape_caches = getenv("PYOOMPH_CHECK_SHAPE_CACHES") != NULL;
+	// 4. Closed-form nodal-coordinate sensitivity of the Eulerian shape gradients on bulk elements,
+	//    d(D_i psi_l)/dX^q_j = -(D_j psi_l)(D_i Psi_q) (see PYOOMPH_PARANOID_ALE_IDENTITY above), instead
+	//    of building the rank-4 DXdshape tensor and contracting it. PYOOMPH_NO_CLOSED_FORM_DX switches
+	//    back. Not used for Hessians or interface elements, which still need the general tensor.
+	static const bool __closed_form_dX_on = getenv("PYOOMPH_NO_CLOSED_FORM_DX") == NULL;
+
+	namespace
+	{
+		struct RefShapeEntry
+		{
+			std::vector<double> s;
+			oomph::Shape psi;
+			oomph::DShape dpsi, d2psi;
+			unsigned nshape = 0;
+			bool has_d2 = false;
+		};
+		// All entries of one (element class, slot), indexed by integration point. Element classes are
+		// compared by their type_info address: std::type_index::hash_code hashes the mangled name and
+		// was 15% of a Poisson residual assembly on its own.
+		struct RefShapeFamily
+		{
+			const std::type_info *type;
+			int slot; // -1: geometry, >=0: continuous space
+			// Per integration point a few variants for different s: an interface element evaluates its
+			// bulk parent at face coordinates under the same (class, slot, index), and that must neither
+			// evict the bulk element's own entry nor be refused forever. unique_ptr: entries never move.
+			std::vector<std::vector<std::unique_ptr<RefShapeEntry>>> by_ipt;
+		};
+		thread_local std::vector<std::unique_ptr<RefShapeFamily>> __refshape_families;
+		thread_local RefShapeFamily *__refshape_hint[1 + NUM_CONTINUOUS_SPACES] = {};
+		thread_local unsigned __in_intpt_fill = 0;
+
+		struct IntPtFillScope
+		{
+			IntPtFillScope() { __in_intpt_fill++; }
+			~IntPtFillScope() { __in_intpt_fill--; }
+		};
+
+		struct PositionCache
+		{
+			const void *element = nullptr;
+			unsigned n_node = 0, n_dim = 0, n_lagr = 0;
+			bool valid[4] = {false, false, false, false}; // history levels 0..2, [3]: Lagrangian
+			std::vector<double> x[3], X;
+		};
+		thread_local PositionCache __position_cache;
+
+		// Pool of scratch temporaries, one slot per nesting depth (an interface fill calls the bulk
+		// fill of its parent from inside its own).
+		struct ShapeInfoScratch
+		{
+			oomph::DenseMatrix<double> t, T, aup, aup_Euler;
+			oomph::RankFourTensor<double> DX;
+			std::vector<double> xs, Xs;
+		};
+		thread_local std::vector<std::unique_ptr<ShapeInfoScratch>> __scratch_pool;
+		thread_local unsigned __scratch_depth = 0;
+		struct ScratchScope
+		{
+			ShapeInfoScratch *s;
+			ScratchScope()
+			{
+				if (__scratch_pool.size() <= __scratch_depth)
+					__scratch_pool.emplace_back(new ShapeInfoScratch());
+				s = __scratch_pool[__scratch_depth++].get();
+			}
+			~ScratchScope() { __scratch_depth--; }
+		};
+
+		inline void __set_dense(oomph::DenseMatrix<double> &M, unsigned n, unsigned m)
+		{
+			M.resize(n, m); // no-op if the size is unchanged
+			M.initialise(0.0);
+		}
+
+		[[noreturn]] void __cache_mismatch(const std::string &what, double a, double b)
+		{
+			std::ostringstream oss;
+			oss.precision(17);
+			oss << "PYOOMPH_CHECK_SHAPE_CACHES: cached " << what << " differs from the direct evaluation: " << a << " vs " << b;
+			throw_runtime_error(oss.str());
+		}
+
+		// Returns the cached reference shapes for (type, slot, ipt) at s, filling the entry on first
+		// use, or nullptr if the cache must not be used (off, not at an integration point, or the entry
+		// belongs to a different s). compute(psi, dpsi, d2psi_or_null) does the direct evaluation.
+		template <class F>
+		RefShapeEntry *__lookup_refshape(const std::type_info &type, int slot, unsigned ipt, const oomph::Vector<double> &s,
+										 unsigned nshape, unsigned el_dim, bool need_d2, F compute)
+		{
+			if (!__refshape_cache_on || !__in_intpt_fill)
+				return nullptr;
+			const unsigned ncol = std::max(1u, el_dim);
+			RefShapeFamily *&hint = __refshape_hint[slot + 1];
+			if (!hint || hint->type != &type)
+			{
+				hint = nullptr;
+				for (auto &f : __refshape_families)
+					if (f->type == &type && f->slot == slot)
+					{
+						hint = f.get();
+						break;
+					}
+				if (!hint)
+				{
+					__refshape_families.emplace_back(new RefShapeFamily{&type, slot, {}});
+					hint = __refshape_families.back().get();
+				}
+			}
+			if (hint->by_ipt.size() <= ipt)
+				hint->by_ipt.resize(ipt + 1);
+			std::vector<std::unique_ptr<RefShapeEntry>> &variants = hint->by_ipt[ipt];
+			RefShapeEntry *e = nullptr;
+			for (auto &v : variants)
+				if (v->nshape == nshape && v->s.size() == s.size() && (!s.size() || !std::memcmp(v->s.data(), s.data(), s.size() * sizeof(double))))
+				{
+					e = v.get();
+					break;
+				}
+			if (!e)
+			{
+				const unsigned MAX_VARIANTS = 8; // more than the faces of any element
+				if (variants.size() >= MAX_VARIANTS)
+					return nullptr;
+				variants.emplace_back(new RefShapeEntry());
+				e = variants.back().get();
+				e->s.assign(s.begin(), s.end());
+				e->nshape = nshape;
+				e->psi.resize(std::max(1u, nshape));
+				e->dpsi.resize(std::max(1u, nshape), ncol);
+				e->d2psi.resize(std::max(1u, nshape), MAX_N2DERIV);
+				compute(e->psi, e->dpsi, need_d2 ? &e->d2psi : nullptr);
+				e->has_d2 = need_d2;
+			}
+			else if (need_d2 && !e->has_d2)
+			{
+				compute(e->psi, e->dpsi, &e->d2psi); // same s: psi and dpsi are rewritten with identical values
+				e->has_d2 = true;
+			}
+			if (__check_shape_caches)
+			{
+				oomph::Shape p(std::max(1u, nshape));
+				oomph::DShape d(std::max(1u, nshape), ncol), d2(std::max(1u, nshape), MAX_N2DERIV);
+				compute(p, d, need_d2 ? &d2 : nullptr);
+				for (unsigned l = 0; l < nshape; l++)
+				{
+					if (p[l] != e->psi[l])
+						__cache_mismatch("psi", e->psi[l], p[l]);
+					for (unsigned j = 0; j < el_dim; j++)
+						if (d(l, j) != e->dpsi(l, j))
+							__cache_mismatch("dpsi", e->dpsi(l, j), d(l, j));
+					if (need_d2)
+						for (unsigned k = 0; k < MAX_N2DERIV; k++)
+							if (d2(l, k) != e->d2psi(l, k))
+								__cache_mismatch("d2psi", e->d2psi(l, k), d2(l, k));
+				}
+			}
+			return e;
+		}
+	} // namespace
+
+	void BulkElementBase::__reset_position_cache() const
+	{
+		__position_cache.element = this;
+		for (bool &v : __position_cache.valid)
+			v = false;
+	}
 
 	// PYOOMPH_PARANOID_ALE_IDENTITY: re-derive the moving-mesh shape sensitivities from closed form and
 	// compare against what was actually filled. The mapping x_i = sum_q X^q_i Psi_q(s) makes them pure
@@ -1232,23 +1427,96 @@ namespace pyoomph
 		// only the geometry gate below - never `space_d2x`.
 		const bool require_geom_d2 = require_d2x || required.normal_deriv;
 
-		oomph::DenseMatrix<double> interpolated_t(el_dim, n_dim, 0.0); // Tangents
-		oomph::DenseMatrix<double> interpolated_T(el_dim, n_lagr, 0.0);
-		oomph::Shape psi_Element(n_node);
-		oomph::DShape dpsids_Element(n_node, std::max((unsigned int)1, el_dim));
-		this->dshape_local(s, psi_Element, dpsids_Element);
+		ScratchScope __scratch;
+		oomph::DenseMatrix<double> &interpolated_t = __scratch.s->t; // Tangents
+		__set_dense(interpolated_t, el_dim, n_dim);
+		oomph::DenseMatrix<double> &interpolated_T = __scratch.s->T;
+		__set_dense(interpolated_T, el_dim, n_lagr);
 
 		// Second local derivatives of the GEOMETRY shape functions and the resulting
 		// X_{k,ab} = d^2 x_k / (ds_a ds_b) = sum_l X^l_k Psi_{l,ab}. Needed by every second-derivative
 		// formula below, so it is built once here rather than per space.
-		oomph::DShape d2psids_Element(std::max((unsigned int)1, n_node), MAX_N2DERIV);
-		double Xkab[3][MAX_N2DERIV];
-		if (require_geom_d2 && el_dim)
+		const bool want_geom_d2 = require_geom_d2 && el_dim;
+		if (want_geom_d2)
 		{
 			std::string why;
 			if (!this->supports_second_spatial_derivatives(why))
 				throw_runtime_error("Second spatial derivatives of the shape functions were requested, but " + why);
-			this->d2shape_local_pyoomph(s, psi_Element, dpsids_Element, d2psids_Element);
+		}
+		const std::type_info &__my_type = typeid(*this);
+		oomph::Shape psi_direct;
+		oomph::DShape dpsids_direct, d2psids_direct;
+		RefShapeEntry *__geo = __lookup_refshape(__my_type, -1, index, s, n_node, el_dim, want_geom_d2,
+												 [&](oomph::Shape &p, oomph::DShape &d, oomph::DShape *d2)
+												 {
+													 if (d2) this->d2shape_local_pyoomph(s, p, d, *d2);
+													 else this->dshape_local(s, p, d);
+												 });
+		if (!__geo)
+		{
+			psi_direct.resize(n_node);
+			dpsids_direct.resize(n_node, std::max((unsigned int)1, el_dim));
+			d2psids_direct.resize(std::max((unsigned int)1, n_node), MAX_N2DERIV);
+			if (want_geom_d2)
+				this->d2shape_local_pyoomph(s, psi_direct, dpsids_direct, d2psids_direct);
+			else
+				this->dshape_local(s, psi_direct, dpsids_direct);
+		}
+		oomph::Shape &psi_Element = __geo ? __geo->psi : psi_direct;
+		oomph::DShape &dpsids_Element = __geo ? __geo->dpsi : dpsids_direct;
+		oomph::DShape &d2psids_Element = __geo ? __geo->d2psi : d2psids_direct;
+		(void)psi_Element;
+
+		// Nodal positions at this history level and Lagrangian positions, as flat [l*dim+i] arrays:
+		// from the per-element cache when this element is the one being integrated, else gathered here.
+		const double *Xpos, *Xlag;
+		{
+			PositionCache &pc = __position_cache;
+			const bool use_pc = __position_cache_on && __in_intpt_fill && pc.element == this && history_index < 3;
+			if (use_pc && (pc.n_node != n_node || pc.n_dim != n_dim || pc.n_lagr != n_lagr))
+			{
+				pc.n_node = n_node; pc.n_dim = n_dim; pc.n_lagr = n_lagr;
+				for (bool &v : pc.valid) v = false;
+			}
+			std::vector<double> &xs = use_pc ? pc.x[history_index] : __scratch.s->xs;
+			std::vector<double> &Xs = use_pc ? pc.X : __scratch.s->Xs;
+			if (!use_pc || !pc.valid[history_index])
+			{
+				xs.resize(n_node * n_dim);
+				for (unsigned l = 0; l < n_node; l++)
+					for (unsigned i = 0; i < n_dim; i++)
+						xs[l * n_dim + i] = this->nodal_position(history_index, l, i);
+				if (use_pc) pc.valid[history_index] = true;
+			}
+			else if (__check_shape_caches)
+			{
+				for (unsigned l = 0; l < n_node; l++)
+					for (unsigned i = 0; i < n_dim; i++)
+						if (xs[l * n_dim + i] != this->nodal_position(history_index, l, i))
+							__cache_mismatch("nodal position", xs[l * n_dim + i], this->nodal_position(history_index, l, i));
+			}
+			if (!use_pc || !pc.valid[3])
+			{
+				Xs.resize(n_node * n_lagr);
+				for (unsigned l = 0; l < n_node; l++)
+					for (unsigned i = 0; i < n_lagr; i++)
+						Xs[l * n_lagr + i] = this->raw_lagrangian_position_gen(l, 0, i);
+				if (use_pc) pc.valid[3] = true;
+			}
+			else if (__check_shape_caches)
+			{
+				for (unsigned l = 0; l < n_node; l++)
+					for (unsigned i = 0; i < n_lagr; i++)
+						if (Xs[l * n_lagr + i] != this->raw_lagrangian_position_gen(l, 0, i))
+							__cache_mismatch("Lagrangian position", Xs[l * n_lagr + i], this->raw_lagrangian_position_gen(l, 0, i));
+			}
+			Xpos = xs.data();
+			Xlag = Xs.data();
+		}
+
+		double Xkab[3][MAX_N2DERIV];
+		if (want_geom_d2)
+		{
 			for (unsigned int k = 0; k < n_dim; k++)
 			{
 				for (unsigned a = 0; a < el_dim; a++)
@@ -1257,7 +1525,7 @@ namespace pyoomph
 					{
 						double sum = 0.0;
 						for (unsigned l = 0; l < n_node; l++)
-							sum += this->nodal_position(history_index, l, k) * d2psids_Element(l, PYOOMPH_D2_SLOT(a, b));
+							sum += Xpos[l * n_dim + k] * d2psids_Element(l, PYOOMPH_D2_SLOT(a, b));
 						Xkab[k][PYOOMPH_D2_SLOT(a, b)] = sum;
 					}
 				}
@@ -1268,16 +1536,18 @@ namespace pyoomph
 		{
 			for (unsigned i = 0; i < n_dim; i++)
 			{
+				const double xli = Xpos[l * n_dim + i];
 				for (unsigned j = 0; j < el_dim; j++)
 				{
-					interpolated_t(j, i) += this->nodal_position(history_index, l, i) * dpsids_Element(l, j);
+					interpolated_t(j, i) += xli * dpsids_Element(l, j);
 				}
 			}
 			for (unsigned i = 0; i < n_lagr; i++)
 			{
+				const double Xli = Xlag[l * n_lagr + i];
 				for (unsigned j = 0; j < el_dim; j++)
-				{					
-					interpolated_T(j, i) += this->raw_lagrangian_position_gen(l, 0, i) * dpsids_Element(l, j);
+				{
+					interpolated_T(j, i) += Xli * dpsids_Element(l, j);
 				}
 			}
 		}
@@ -1298,9 +1568,10 @@ namespace pyoomph
 		// The Eulerian inverse metric g^{ab}. The 2d/3d branches below reuse their local `aup` for the
 		// Lagrangian metric afterwards, so the Eulerian one is kept separately for the second-derivative
 		// blocks, which need it after the branches.
-		oomph::DenseMatrix<double> aup_Euler(std::max((unsigned int)1, el_dim), std::max((unsigned int)1, el_dim), 0.0);
+		oomph::DenseMatrix<double> &aup_Euler = __scratch.s->aup_Euler;
+		__set_dense(aup_Euler, std::max((unsigned int)1, el_dim), std::max((unsigned int)1, el_dim));
 
-		oomph::RankFourTensor<double> DXdshape_il_jb; //[n_dim][n_node][n_dim][el_dim]; //this is d(g^{ab}g_{a,j})/d(x_i^l) //TODO: This could lead to stack problems due to size
+		oomph::RankFourTensor<double> &DXdshape_il_jb = __scratch.s->DX; //[n_dim][n_node][n_dim][el_dim]; //this is d(g^{ab}g_{a,j})/d(x_i^l)
       RankSixTensor * D2X2_dshape=NULL;
       // On a bulk element the second nodal-coordinate derivative of a shape gradient is a sum of two
       // triple products of FIRST derivatives (see the fill sites below), so neither this rank-6 scratch
@@ -1315,6 +1586,7 @@ namespace pyoomph
       // validated all the same - the check below covers el_dim < n_dim - so the path that ships there is
       // now checked, which it was not before.
       const bool closed_form_d2 = (el_dim == n_dim) && !__paranoid_ale_identity;
+      const bool __closed_dX = require_dxdshape && !require_hessian && el_dim == n_dim && el_dim > 0 && !__paranoid_ale_identity && __closed_form_dX_on;
       if (require_hessian && require_dxdshape && !closed_form_d2)
       {
         D2X2_dshape=new RankSixTensor(n_dim,el_dim,n_node,n_node,n_dim,n_dim);
@@ -1330,10 +1602,12 @@ namespace pyoomph
 			aup_Euler(0, 0) = 1.0 / a11;
 
 			// TODO: Only calc d(dx)/dcoords if necessary
-			if (require_dxdshape)
+			if (require_dxdshape && !__closed_dX)
 			{
-				DXdshape_il_jb.resize(n_dim, n_node, n_dim, el_dim, 0.0); // this is d(g^{ab}g_{a,j})/d(x_i^l)
-				oomph::DenseMatrix<double> aup(1, 1, 1.0 / a11);
+				DXdshape_il_jb.resize(n_dim, n_node, n_dim, el_dim, 0.0); DXdshape_il_jb.initialise(0.0); // this is d(g^{ab}g_{a,j})/d(x_i^l)
+				oomph::DenseMatrix<double> &aup = __scratch.s->aup;
+				__set_dense(aup, 1, 1);
+				aup(0, 0) = 1.0 / a11;
 				this->fill_shape_info_at_s_dNodalPos_helper(shape_info, index, interpolated_t, dpsids_Element, det_Eulerian, aup, require_hessian, DXdshape_il_jb,D2X2_dshape);
 			}
 
@@ -1359,7 +1633,8 @@ namespace pyoomph
 				}
 			}
 			double det_a = amet[0][0] * amet[1][1] - amet[0][1] * amet[1][0];
-			oomph::DenseMatrix<double> aup(2, 2);
+			oomph::DenseMatrix<double> &aup = __scratch.s->aup;
+			__set_dense(aup, 2, 2);
 			aup(0, 0) = amet[1][1] / det_a;
 			aup(0, 1) = -amet[0][1] / det_a;
 			aup(1, 0) = -amet[1][0] / det_a;
@@ -1376,9 +1651,9 @@ namespace pyoomph
 			aup_Euler = aup;
 
 			// TODO: Only calc d(dx)/dcoords if necessary
-			if (require_dxdshape)
+			if (require_dxdshape && !__closed_dX)
 			{
-				DXdshape_il_jb.resize(n_dim, n_node, n_dim, el_dim, 0.0); // this is d(g^{ab}g_{a,j})/d(x_i^l)
+				DXdshape_il_jb.resize(n_dim, n_node, n_dim, el_dim, 0.0); DXdshape_il_jb.initialise(0.0); // this is d(g^{ab}g_{a,j})/d(x_i^l)
 				this->fill_shape_info_at_s_dNodalPos_helper(shape_info, index, interpolated_t, dpsids_Element, det_Eulerian, aup, require_hessian, DXdshape_il_jb,D2X2_dshape);
 			}
 
@@ -1474,7 +1749,8 @@ namespace pyoomph
 			}
 			double det_a = amet[0][0] * amet[1][1] * amet[2][2] + amet[0][1] * amet[1][2] * amet[2][0] + amet[0][2] * amet[1][0] * amet[2][1] - amet[0][0] * amet[1][2] * amet[2][1] - amet[0][1] * amet[1][0] * amet[2][2] - amet[0][2] * amet[1][1] * amet[2][0];
 
-			oomph::DenseMatrix<double> aup(3, 3);
+			oomph::DenseMatrix<double> &aup = __scratch.s->aup;
+			__set_dense(aup, 3, 3);
 			aup(0, 0) = (amet[1][1] * amet[2][2] - amet[1][2] * amet[2][1]) / det_a;
 			aup(0, 1) = -(amet[0][1] * amet[2][2] - amet[0][2] * amet[2][1]) / det_a;
 			aup(0, 2) = (amet[0][1] * amet[1][2] - amet[0][2] * amet[1][1]) / det_a;
@@ -1496,9 +1772,9 @@ namespace pyoomph
 			aup_Euler = aup;
 
 			// TODO: Only calc d(dx)/dcoords if necessary
-			if (require_dxdshape)
+			if (require_dxdshape && !__closed_dX)
 			{
-				DXdshape_il_jb.resize(n_dim, n_node, n_dim, el_dim, 0.0); // this is d(g^{ab}g_{a,j})/d(x_i^l)
+				DXdshape_il_jb.resize(n_dim, n_node, n_dim, el_dim, 0.0); DXdshape_il_jb.initialise(0.0); // this is d(g^{ab}g_{a,j})/d(x_i^l)
 				this->fill_shape_info_at_s_dNodalPos_helper(shape_info, index, interpolated_t, dpsids_Element, det_Eulerian, aup, require_hessian, DXdshape_il_jb,D2X2_dshape);
 			}
 
@@ -1537,6 +1813,22 @@ namespace pyoomph
 		else
 		{
 			throw_runtime_error("Implement for this dimension");
+		}
+
+		// Eulerian gradients of the geometry shapes, D_i Psi_q, for the closed-form sensitivities.
+		double DPsi_geo[std::max(1u, n_node)][3];
+		if (__closed_dX)
+		{
+			const double w_ipt = integral_pt()->weight(index);
+			for (unsigned l = 0; l < n_node; l++)
+				for (unsigned i = 0; i < n_dim; i++)
+				{
+					double sum = 0.0;
+					for (unsigned b = 0; b < el_dim; b++)
+						sum += gab_gai[b][i] * dpsids_Element(l, b);
+					DPsi_geo[l][i] = sum;
+					shape_info->int_pt_weights_d_coords[i][l] = sum * det_Eulerian * w_ipt;
+				}
 		}
 
 		// ------------------------------------------------------------------------------------------
@@ -1612,17 +1904,32 @@ namespace pyoomph
 
 			if (fam.any())
 			{
-				oomph::Shape psi(eleminfo.nnode_of_space[ispace]);
-				oomph::DShape dpsids(eleminfo.nnode_of_space[ispace], std::max((unsigned int)1, el_dim));
 				// Per-space, not the global require_d2x: a C1 pressure next to a C2 field that wants
 				// second derivatives must not pay for them. Everything the geometry side of the
 				// second-derivative formulas needs is guarded by require_geom_d2, which is wider.
 				const bool space_d2x = (__disable_shape_family_split ? require_d2x : fam.d2x) && el_dim && eleminfo.nnode_of_space[ispace];
-				oomph::DShape d2psids(std::max((unsigned int)1, eleminfo.nnode_of_space[ispace]), MAX_N2DERIV);
-				if (space_d2x)
-					this->d2shape_local_of_space(ispace, s, psi, dpsids, d2psids);
-				else
-					this->dshape_local_of_space(ispace, s, psi, dpsids);
+				const unsigned nsp = eleminfo.nnode_of_space[ispace];
+				oomph::Shape psi_sp_direct;
+				oomph::DShape dpsids_sp_direct, d2psids_sp_direct;
+				RefShapeEntry *__sp = __lookup_refshape(__my_type, (int)ispace, index, s, nsp, el_dim, space_d2x,
+														[&](oomph::Shape &p, oomph::DShape &d, oomph::DShape *d2)
+														{
+															if (d2) this->d2shape_local_of_space(ispace, s, p, d, *d2);
+															else this->dshape_local_of_space(ispace, s, p, d);
+														});
+				if (!__sp)
+				{
+					psi_sp_direct.resize(std::max(1u, nsp));
+					dpsids_sp_direct.resize(std::max(1u, nsp), std::max((unsigned int)1, el_dim));
+					d2psids_sp_direct.resize(std::max((unsigned int)1, nsp), MAX_N2DERIV);
+					if (space_d2x)
+						this->d2shape_local_of_space(ispace, s, psi_sp_direct, dpsids_sp_direct, d2psids_sp_direct);
+					else
+						this->dshape_local_of_space(ispace, s, psi_sp_direct, dpsids_sp_direct);
+				}
+				oomph::Shape &psi = __sp ? __sp->psi : psi_sp_direct;
+				oomph::DShape &dpsids = __sp ? __sp->dpsi : dpsids_sp_direct;
+				oomph::DShape &d2psids = __sp ? __sp->d2psi : d2psids_sp_direct;
 				for (unsigned l = 0; l < eleminfo.nnode_of_space[ispace]; l++)
 				{
 					// One family at a time. psi-only is by far the most common request, and it used to
@@ -1750,7 +2057,22 @@ namespace pyoomph
 					// differentiates by the nodal positions - fam.dcoord is marked from the same set of
 					// shape expansions that emits those reads. This used to run for EVERY required
 					// space and is the most expensive family of a moving-mesh fill.
-					if (require_dxdshape && fam.dcoord)
+					if (require_dxdshape && fam.dcoord && __closed_dX)
+					{
+						double Dpsi_l[3];
+						for (unsigned int j = 0; j < n_dim; j++)
+						{
+							double sum = 0.0;
+							for (unsigned b = 0; b < el_dim; b++)
+								sum += gab_gai[b][j] * dpsids(l, b);
+							Dpsi_l[j] = sum;
+						}
+						for (unsigned int i = 0; i < n_dim; i++)
+							for (unsigned l2 = 0; l2 < eleminfo.nnode; l2++)
+								for (unsigned int i2 = 0; i2 < n_dim; i2++)
+									shape_info->d_dx_shape_dcoord[ispace][l][i][l2][i2] = -Dpsi_l[i2] * DPsi_geo[l2][i];
+					}
+					else if (require_dxdshape && fam.dcoord)
 					{
 						for (unsigned int i = 0; i < n_dim; i++)
 						{
@@ -2055,7 +2377,22 @@ namespace pyoomph
 							}
 						}
 					}
-				if (require_dxdshape && fam_DL.dcoord)
+				if (require_dxdshape && fam_DL.dcoord && __closed_dX)
+				{
+					double Dpsi_l[3];
+					for (unsigned int j = 0; j < n_dim; j++)
+					{
+						double sum = 0.0;
+						for (unsigned b = 0; b < el_dim; b++)
+							sum += gab_gai[b][j] * dpsids(l, b);
+						Dpsi_l[j] = sum;
+					}
+					for (unsigned int i = 0; i < n_dim; i++)
+						for (unsigned l2 = 0; l2 < eleminfo.nnode; l2++)
+							for (unsigned int i2 = 0; i2 < n_dim; i2++)
+								shape_info->d_dx_shape_dcoord_DL[l][i][l2][i2] = -Dpsi_l[i2] * DPsi_geo[l2][i];
+				}
+				else if (require_dxdshape && fam_DL.dcoord)
 				{
 					for (unsigned int i = 0; i < n_dim; i++)
 					{
@@ -2468,6 +2805,7 @@ namespace pyoomph
 	void BulkElementBase::fill_shape_buffer_for_integration_point(unsigned ipt, const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag)
 	{
 		JITShapeInfo_t *const shape_info = this->get_shape_info();
+		IntPtFillScope __intpt_scope; // enables the reference-shape and position caches of fill_shape_info_at_s
 		oomph::Vector<double> s(this->dim());
 		for (unsigned int i = 0; i < this->dim(); i++)
 			s[i] = integral_pt()->knot(ipt, i);
@@ -2695,6 +3033,7 @@ namespace pyoomph
 	void BulkElementBase::prepare_shape_buffer_for_integration(const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag)
 	{
 		JITShapeInfo_t *const shape_info = this->get_shape_info();
+		this->__reset_position_cache(); // positions may have changed since this element was last integrated
 		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		if (__poison_unrequired)
 			this->poison_unrequired_shapes(required_shapes, shape_info, true);
